@@ -1,0 +1,24 @@
+[package]
+name = "basal-cli"
+description = "basal command line: decide, prompt, parity and bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "basal"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+tokio.workspace = true
+axum.workspace = true
+basal-core = { path = "../basal-core" }
+basal-gpu = { path = "../basal-gpu" }
+
+[features]
+cuda = ["basal-gpu/cuda"]
