@@ -1,0 +1,11 @@
+.baseline/
+.models/
+.venv*/
+__pycache__/
+.DS_Store
+target/
+.cache/
+target-clippy/
+*.nsys-rep
+*.sqlite
+tools/bench/mixed.jsonl
