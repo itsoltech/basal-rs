@@ -1,0 +1,698 @@
+//! `x @ w^T` (f16 / bf16, f32 accumulation) through cuBLASLt with a measured algorithm choice (CUDA only).
+//!
+//! cuBLAS (candle's matmul) picks one kernel per shape by heuristic; for the small-M shapes of a decision forward
+//! (M = a few hundred tokens, weights 2048 x 2560 ... 22016) that choice is not the fastest. The algorithm of a shape
+//! class (N, K, dtype, M rounded up by `m_class`) comes from, in order: a table produced offline by an exhaustive
+//! search of cuBLASLt configurations (`search`: algorithm, tile, stages, split-K with f32 reduction, CTA swizzle;
+//! `basal gemm-search`), or a timing of up to `CANDIDATES` heuristic algorithms on the first call of the class. A
+//! later M of the class reuses the algorithm after `cublasLtMatmulAlgoCheck` accepts it (otherwise the heuristic's first
+//! choice is used). Every configuration accumulates in f32 (split-K partial sums are reduced in f32, never in the
+//! output type); results may differ from cuBLAS in the last bits (summation order).
+
+use std::collections::HashMap;
+use std::ffi::c_void;
+use std::sync::Mutex;
+use std::time::Instant;
+
+use candle_core::backend::BackendStorage;
+use candle_core::cuda_backend::cudarc::cublaslt::sys;
+use candle_core::cuda_backend::cudarc::driver::{CudaSlice, DevicePtr, DevicePtrMut};
+use candle_core::cuda_backend::{CudaStorageSlice as Cs, WrapErr};
+use candle_core::{CpuStorage, CudaStorage, CustomOp2, DType, Layout, Result, Shape, Tensor};
+
+const CANDIDATES: usize = 16;
+
+/// A configuration and its measured time (ms).
+type Timed = (f64, sys::cublasLtMatmulAlgo_t);
+const WORKSPACE: usize = 32 << 20;
+
+/// Shape class of M: up to 512 rounded up to a multiple of 16, above that to a multiple of 128.
+pub fn m_class(m: usize) -> usize {
+    if m <= 512 {
+        m.div_ceil(16) * 16
+    } else {
+        m.div_ceil(128) * 128
+    }
+}
+
+/// A tuned class: its algorithm (opaque cuBLASLt bytes, valid for this GPU and cuBLASLt version) and timings.
+#[derive(Clone, Debug)]
+pub struct Tuned {
+    pub m_class: usize,
+    pub n: usize,
+    pub k: usize,
+    pub dtype: DType,
+    pub algo: [u64; 8],
+    pub ms: f64,
+    pub heuristic_ms: f64,
+    pub tried: usize,
+}
+
+pub fn version() -> usize {
+    // SAFETY: plain query.
+    unsafe { sys::cublasLtGetVersion() }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+struct Key {
+    n: usize,
+    k: usize,
+    m_class: usize,
+    dt: DType,
+}
+
+/// Descriptors of one exact (M, N, K, dtype); created once, never destroyed (one per distinct shape).
+#[derive(Clone, Copy)]
+struct Plan {
+    desc: sys::cublasLtMatmulDesc_t,
+    a: sys::cublasLtMatrixLayout_t,
+    b: sys::cublasLtMatrixLayout_t,
+    c: sys::cublasLtMatrixLayout_t,
+}
+
+pub struct Lt {
+    handle: sys::cublasLtHandle_t,
+    workspace: CudaSlice<u8>,
+    plans: Mutex<HashMap<(usize, usize, usize, DType), Plan>>,
+    algos: Mutex<HashMap<Key, sys::cublasLtMatmulAlgo_t>>,
+    /// Classes tuned in this process (searched or timed heuristics).
+    pub tuned: Mutex<Vec<Tuned>>,
+    /// Classes taken from a table.
+    pub from_table: Mutex<usize>,
+    /// Batch-invariant mode: one algorithm per (N, K, dtype) for every M, without split-K, so that a row's result
+    /// does not depend on the other rows of the call. A shape listed here never uses another algorithm.
+    invariant: Mutex<HashMap<(usize, usize, DType), sys::cublasLtMatmulAlgo_t>>,
+}
+
+// SAFETY: the handle and descriptors are only used under the plan/algo locks on candle's single stream.
+unsafe impl Send for Lt {}
+unsafe impl Sync for Lt {}
+
+fn st(s: sys::cublasStatus_t, what: &str) -> Result<()> {
+    if s == sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS {
+        Ok(())
+    } else {
+        candle_core::bail!("cuBLASLt {what}: {s:?}")
+    }
+}
+
+fn data_type(dt: DType) -> Result<sys::cudaDataType> {
+    match dt {
+        DType::F16 => Ok(sys::cudaDataType::CUDA_R_16F),
+        DType::BF16 => Ok(sys::cudaDataType::CUDA_R_16BF),
+        d => candle_core::bail!("cuBLASLt matmul: unsupported dtype {d:?}"),
+    }
+}
+
+impl Lt {
+    pub fn new(dev: &candle_core::CudaDevice) -> Result<Self> {
+        let mut handle = std::ptr::null_mut();
+        // SAFETY: plain handle creation.
+        st(unsafe { sys::cublasLtCreate(&mut handle) }, "create")?;
+        // SAFETY: scratch memory for cuBLASLt, never read by us.
+        let workspace = unsafe { dev.alloc::<u8>(WORKSPACE)? };
+        Ok(Self {
+            handle,
+            workspace,
+            plans: Mutex::new(HashMap::new()),
+            algos: Mutex::new(HashMap::new()),
+            tuned: Mutex::new(Vec::new()),
+            from_table: Mutex::new(0),
+            invariant: Mutex::new(HashMap::new()),
+        })
+    }
+
+    /// Batch-invariant table: the one algorithm of each (N, K, dtype).
+    pub fn load_invariant(&self, entries: &[Tuned]) -> Result<()> {
+        let mut inv = self.invariant.lock().unwrap();
+        for e in entries {
+            let a = sys::cublasLtMatmulAlgo_t { data: e.algo };
+            if let Some(prev) = inv.insert((e.n, e.k, e.dtype), a) {
+                if prev.data != e.algo {
+                    candle_core::bail!("invariant table: two algorithms for n={} k={}", e.n, e.k);
+                }
+            }
+        }
+        *self.from_table.lock().unwrap() += entries.len();
+        Ok(())
+    }
+
+    pub fn is_invariant(&self) -> bool {
+        !self.invariant.lock().unwrap().is_empty()
+    }
+
+    fn plan_cached(&self, m: usize, n: usize, k: usize, dt: DType) -> Result<Plan> {
+        let mut plans = self.plans.lock().unwrap();
+        Ok(*match plans.entry((m, n, k, dt)) {
+            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+            std::collections::hash_map::Entry::Vacant(e) => e.insert(self.plan(m, n, k, dt)?),
+        })
+    }
+
+    /// Mean time of `reps` runs of `a`, reading the weight copies in turn starting at copy `start`.
+    ///
+    /// # Safety
+    /// As [`Lt::run`], with `w` holding `copies` weights of `w_bytes`.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn time_algo(
+        &self,
+        p: &Plan,
+        a: &sys::cublasLtMatmulAlgo_t,
+        w: u64,
+        copies: usize,
+        w_bytes: u64,
+        x: u64,
+        y: u64,
+        stream: &candle_core::cuda_backend::cudarc::driver::CudaStream,
+        reps: usize,
+    ) -> Result<f64> {
+        let wi = |i: usize| w + (i % copies.max(1)) as u64 * w_bytes;
+        self.run(p, a, wi(reps + 1), x, y, stream)?;
+        stream.synchronize().w()?;
+        let t = Instant::now();
+        for i in 0..reps {
+            self.run(p, a, wi(i), x, y, stream)?;
+        }
+        stream.synchronize().w()?;
+        Ok(t.elapsed().as_secs_f64() * 1e3 / reps as f64)
+    }
+
+    /// Batch-invariant choice for one weight shape: candidates without split-K from searches at a few M, each timed
+    /// at every class in `classes`; the chosen one has the smallest mean slowdown against the best candidate of each
+    /// class. `x` holds at least `max(classes)` rows. Returns (chosen algorithm, per-class (ms, best ms), candidates).
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    unsafe fn invariant_search(
+        &self,
+        n: usize,
+        k: usize,
+        dt: DType,
+        w: u64,
+        copies: usize,
+        w_bytes: u64,
+        x: u64,
+        y: u64,
+        classes: &[usize],
+        stream: &candle_core::cuda_backend::cudarc::driver::CudaStream,
+    ) -> Result<(sys::cublasLtMatmulAlgo_t, Vec<(f64, f64)>, usize)> {
+        let mut cands: Vec<sys::cublasLtMatmulAlgo_t> = Vec::new();
+        for m in [64, 128, 192, 256, 384, 512, 1024, 2048] {
+            if !classes.contains(&m) {
+                continue;
+            }
+            let p = self.plan_cached(m, n, k, dt)?;
+            let (top, _, _) = self.search(&p, dt, w, copies, w_bytes, x, y, stream, false)?;
+            for (_, a) in top {
+                if !cands.iter().any(|c| c.data == a.data) {
+                    cands.push(a);
+                }
+            }
+        }
+        let mut times = vec![vec![f64::INFINITY; classes.len()]; cands.len()];
+        for (ci, &m) in classes.iter().enumerate() {
+            let p = self.plan_cached(m, n, k, dt)?;
+            for (ai, a) in cands.iter().enumerate() {
+                if self.check(&p, a) {
+                    times[ai][ci] = self.time_algo(&p, a, w, copies, w_bytes, x, y, stream, 10)?;
+                }
+            }
+        }
+        let best: Vec<f64> =
+            (0..classes.len()).map(|ci| times.iter().map(|t| t[ci]).fold(f64::INFINITY, f64::min)).collect();
+        let score = |t: &Vec<f64>| t.iter().zip(&best).map(|(a, b)| a / b).sum::<f64>() / best.len() as f64;
+        let (ai, _) = times
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (i, score(t)))
+            .filter(|(_, s)| s.is_finite())
+            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .ok_or_else(|| {
+                candle_core::Error::Msg(format!("no batch-invariant algorithm valid for every M (n={n} k={k})"))
+            })?;
+        let per_class = times[ai].iter().zip(&best).map(|(&a, &b)| (a, b)).collect();
+        Ok((cands[ai], per_class, cands.len()))
+    }
+
+    /// Use the algorithms of a search table for their classes.
+    pub fn load(&self, entries: &[Tuned]) {
+        let mut algos = self.algos.lock().unwrap();
+        for e in entries {
+            let key = Key { n: e.n, k: e.k, m_class: e.m_class, dt: e.dtype };
+            algos.insert(key, sys::cublasLtMatmulAlgo_t { data: e.algo });
+        }
+        *self.from_table.lock().unwrap() += entries.len();
+    }
+
+    /// Exhaustive search of cuBLASLt configurations for one shape on the given operands (f32 accumulation; split-K
+    /// only with f32 reduction). Returns the fastest valid algorithm, its time, the heuristic's first choice time and
+    /// the number of valid configurations timed.
+    ///
+    /// # Safety
+    /// As [`Lt::run`].
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn search(
+        &self,
+        p: &Plan,
+        dt: DType,
+        w: u64,
+        w_copies: usize,
+        w_bytes: u64,
+        x: u64,
+        y: u64,
+        stream: &candle_core::cuda_backend::cudarc::driver::CudaStream,
+        allow_splitk: bool,
+    ) -> Result<(Vec<Timed>, f64, usize)> {
+        use sys::cublasLtMatmulAlgoCapAttributes_t as Cap;
+        use sys::cublasLtMatmulAlgoConfigAttributes_t as Cfg;
+        let t = data_type(dt)?;
+        let ct = sys::cublasComputeType_t::CUBLAS_COMPUTE_32F;
+        let st32 = sys::cudaDataType::CUDA_R_32F;
+        // Successive runs read successive copies of the weight (together larger than L2), as the layers of a
+        // forward do; timing one resident copy would favour configurations that re-read the weight.
+        let next = std::cell::Cell::new(0usize);
+        let wi = || {
+            let i = next.get();
+            next.set(i + 1);
+            w + (i % w_copies.max(1)) as u64 * w_bytes
+        };
+        let time = |a: &sys::cublasLtMatmulAlgo_t, reps: usize| -> Result<f64> {
+            self.run(p, a, wi(), x, y, stream)?;
+            stream.synchronize().w()?;
+            let t = Instant::now();
+            for _ in 0..reps {
+                self.run(p, a, wi(), x, y, stream)?;
+            }
+            stream.synchronize().w()?;
+            Ok(t.elapsed().as_secs_f64() * 1e3 / reps as f64)
+        };
+        let heur = self.heuristics(p)?;
+        let heuristic_ms = match heur.first() {
+            Some(r) => time(&r.algo, 20)?,
+            None => f64::NAN,
+        };
+        let mut ids = vec![0i32; 128];
+        let mut nids = 0;
+        st(sys::cublasLtMatmulAlgoGetIds(self.handle, ct, st32, t, t, t, t, 128, ids.as_mut_ptr(), &mut nids), "ids")?;
+        ids.truncate(nids as usize);
+        let cap_u32s = |algo: &sys::cublasLtMatmulAlgo_t, attr: Cap| -> Vec<u32> {
+            let mut size = 0usize;
+            sys::cublasLtMatmulAlgoCapGetAttribute(algo, attr, std::ptr::null_mut(), 0, &mut size);
+            let mut v = vec![0u32; size / 4];
+            if !v.is_empty() {
+                sys::cublasLtMatmulAlgoCapGetAttribute(algo, attr, v.as_mut_ptr() as *mut c_void, size, &mut size);
+            }
+            v
+        };
+        let cap_u32 = |algo: &sys::cublasLtMatmulAlgo_t, attr: Cap| -> u32 {
+            let (mut v, mut size) = (0u32, 0usize);
+            sys::cublasLtMatmulAlgoCapGetAttribute(algo, attr, &mut v as *mut u32 as *mut c_void, 4, &mut size);
+            v
+        };
+        let set = |algo: &mut sys::cublasLtMatmulAlgo_t, attr: Cfg, v: u32| {
+            sys::cublasLtMatmulAlgoConfigSetAttribute(algo, attr, &v as *const u32 as *const c_void, 4);
+        };
+        let mut cands: Vec<(f64, sys::cublasLtMatmulAlgo_t)> = Vec::new();
+        for &id in &ids {
+            let mut base: sys::cublasLtMatmulAlgo_t = std::mem::zeroed();
+            if sys::cublasLtMatmulAlgoInit(self.handle, ct, st32, t, t, t, t, id, &mut base)
+                != sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS
+            {
+                continue;
+            }
+            let mut tiles = cap_u32s(&base, Cap::CUBLASLT_ALGO_CAP_TILE_IDS);
+            if tiles.is_empty() {
+                tiles.push(0);
+            }
+            let mut stages = cap_u32s(&base, Cap::CUBLASLT_ALGO_CAP_STAGES_IDS);
+            if stages.is_empty() {
+                stages.push(0);
+            }
+            let splitk = cap_u32(&base, Cap::CUBLASLT_ALGO_CAP_SPLITK_SUPPORT) != 0;
+            let red_f32 = cap_u32(&base, Cap::CUBLASLT_ALGO_CAP_REDUCTION_SCHEME_MASK) & 2 != 0; // COMPUTE_TYPE
+            let swz = cap_u32(&base, Cap::CUBLASLT_ALGO_CAP_CTA_SWIZZLING_SUPPORT);
+            let splits: &[u32] = if allow_splitk && splitk && red_f32 { &[1, 2, 3, 4, 6, 8] } else { &[1] };
+            for &tile in &tiles {
+                for &stage in &stages {
+                    for &sk in splits {
+                        for sw in 0..=swz.min(1) {
+                            let mut a = base;
+                            set(&mut a, Cfg::CUBLASLT_ALGO_CONFIG_TILE_ID, tile);
+                            set(&mut a, Cfg::CUBLASLT_ALGO_CONFIG_STAGES_ID, stage);
+                            set(&mut a, Cfg::CUBLASLT_ALGO_CONFIG_SPLITK_NUM, sk);
+                            set(&mut a, Cfg::CUBLASLT_ALGO_CONFIG_REDUCTION_SCHEME, if sk > 1 { 2 } else { 0 });
+                            set(&mut a, Cfg::CUBLASLT_ALGO_CONFIG_CTA_SWIZZLING, sw);
+                            if !self.check(p, &a) {
+                                continue;
+                            }
+                            if let Ok(ms) = time(&a, 5) {
+                                cands.push((ms, a));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let tried = cands.len();
+        cands.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        cands.truncate(8);
+        if allow_splitk {
+            for c in heur.iter().take(4) {
+                cands.push((0.0, c.algo));
+            }
+        }
+        let mut timed = Vec::with_capacity(cands.len());
+        for (_, a) in &cands {
+            timed.push((time(a, 30)?, *a));
+        }
+        timed.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        if timed.is_empty() {
+            candle_core::bail!("cuBLASLt search: no valid configuration");
+        }
+        Ok((timed, heuristic_ms, tried))
+    }
+
+    /// Row-major `y[m, n] = x[m, k] @ w[n, k]^T` is column-major `y^T[n, m] = op_T(w)[n, k] x^T[k, m]`.
+    fn plan(&self, m: usize, n: usize, k: usize, dt: DType) -> Result<Plan> {
+        let t = data_type(dt)?;
+        let mut desc = std::ptr::null_mut();
+        let (mut a, mut b, mut c) = (std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut());
+        // SAFETY: descriptor creation with valid out-pointers; attribute buffers outlive the calls.
+        unsafe {
+            st(
+                sys::cublasLtMatmulDescCreate(
+                    &mut desc,
+                    sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
+                    sys::cudaDataType::CUDA_R_32F,
+                ),
+                "desc",
+            )?;
+            let tr: i32 = 1; // CUBLAS_OP_T
+            st(
+                sys::cublasLtMatmulDescSetAttribute(
+                    desc,
+                    sys::cublasLtMatmulDescAttributes_t::CUBLASLT_MATMUL_DESC_TRANSA,
+                    &tr as *const _ as *const c_void,
+                    std::mem::size_of_val(&tr),
+                ),
+                "transa",
+            )?;
+            st(sys::cublasLtMatrixLayoutCreate(&mut a, t, k as u64, n as u64, k as i64), "layout a")?;
+            st(sys::cublasLtMatrixLayoutCreate(&mut b, t, k as u64, m as u64, k as i64), "layout b")?;
+            st(sys::cublasLtMatrixLayoutCreate(&mut c, t, n as u64, m as u64, n as i64), "layout c")?;
+        }
+        Ok(Plan { desc, a, b, c })
+    }
+
+    fn heuristics(&self, p: &Plan) -> Result<Vec<sys::cublasLtMatmulHeuristicResult_t>> {
+        let mut pref = std::ptr::null_mut();
+        let ws = WORKSPACE as u64;
+        // SAFETY: preference descriptor with a valid out-pointer; results buffer sized to the request.
+        unsafe {
+            st(sys::cublasLtMatmulPreferenceCreate(&mut pref), "pref")?;
+            st(
+                sys::cublasLtMatmulPreferenceSetAttribute(
+                    pref,
+                    sys::cublasLtMatmulPreferenceAttributes_t::CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+                    &ws as *const _ as *const c_void,
+                    std::mem::size_of_val(&ws),
+                ),
+                "pref workspace",
+            )?;
+            let mut res: Vec<sys::cublasLtMatmulHeuristicResult_t> = vec![std::mem::zeroed(); CANDIDATES];
+            let mut found = 0;
+            let s = sys::cublasLtMatmulAlgoGetHeuristic(
+                self.handle,
+                p.desc,
+                p.a,
+                p.b,
+                p.c,
+                p.c,
+                pref,
+                CANDIDATES as i32,
+                res.as_mut_ptr(),
+                &mut found,
+            );
+            sys::cublasLtMatmulPreferenceDestroy(pref);
+            st(s, "heuristic")?;
+            res.truncate(found as usize);
+            Ok(res.into_iter().filter(|r| r.state == sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS).collect())
+        }
+    }
+
+    fn check(&self, p: &Plan, algo: &sys::cublasLtMatmulAlgo_t) -> bool {
+        // SAFETY: the check only reads the descriptors and the algorithm.
+        unsafe {
+            let mut r: sys::cublasLtMatmulHeuristicResult_t = std::mem::zeroed();
+            sys::cublasLtMatmulAlgoCheck(self.handle, p.desc, p.a, p.b, p.c, p.c, algo, &mut r)
+                == sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS
+                && r.workspaceSize <= WORKSPACE
+        }
+    }
+
+    /// # Safety
+    /// `w`, `x`, `y` must be device pointers of `n*k`, `m*k`, `m*n` elements of the plan's dtype on `stream`.
+    unsafe fn run(
+        &self,
+        p: &Plan,
+        algo: &sys::cublasLtMatmulAlgo_t,
+        w: u64,
+        x: u64,
+        y: u64,
+        stream: &candle_core::cuda_backend::cudarc::driver::CudaStream,
+    ) -> Result<()> {
+        let (alpha, beta) = (1f32, 0f32);
+        let (ws, _g) = self.workspace.device_ptr(stream);
+        st(
+            sys::cublasLtMatmul(
+                self.handle,
+                p.desc,
+                &alpha as *const f32 as *const c_void,
+                w as *const c_void,
+                p.a,
+                x as *const c_void,
+                p.b,
+                &beta as *const f32 as *const c_void,
+                y as *mut c_void,
+                p.c,
+                y as *mut c_void,
+                p.c,
+                algo,
+                ws as *mut c_void,
+                WORKSPACE,
+                stream.cu_stream() as _,
+            ),
+            "matmul",
+        )
+    }
+
+    fn matmul(
+        &self,
+        x: &CudaStorage,
+        xl: &Layout,
+        w: &CudaStorage,
+        wl: &Layout,
+        mode: &Mode,
+    ) -> Result<(CudaStorage, Shape)> {
+        let (m, k) = xl.shape().dims2()?;
+        // With a search, `w` holds stacked copies of the weight.
+        let copies = match mode {
+            Mode::Plain => 1,
+            Mode::Search(c) | Mode::Invariant(c, _) => (*c).max(1),
+        };
+        let (n_all, k2) = wl.shape().dims2()?;
+        let n = n_all / copies;
+        if k != k2 || x.dtype() != w.dtype() {
+            candle_core::bail!(
+                "cuBLASLt matmul: x {:?} {:?}, w {:?} {:?}",
+                xl.shape(),
+                x.dtype(),
+                wl.shape(),
+                w.dtype()
+            );
+        }
+        let (Some((xo, _)), Some((wo, _))) = (xl.contiguous_offsets(), wl.contiguous_offsets()) else {
+            candle_core::bail!("cuBLASLt matmul: operands must be contiguous");
+        };
+        let dt = x.dtype();
+        let dev = x.device.clone();
+        let stream = dev.cuda_stream();
+        macro_rules! ptrs {
+            ($v:ident, $t:ty) => {{
+                let (Cs::$v(xs), Cs::$v(ws)) = (&x.slice, &w.slice) else { unreachable!() };
+                // SAFETY: every element of the output is written by the matmul.
+                let mut out = unsafe { dev.alloc::<$t>(m * n)? };
+                {
+                    let (xv, wv) = (xs.slice(xo..), ws.slice(wo..));
+                    let (xp, _gx) = xv.device_ptr(&stream);
+                    let (wp, _gw) = wv.device_ptr(&stream);
+                    let (yp, _gy) = out.device_ptr_mut(&stream);
+                    let w_bytes = (n * k * dt.size_in_bytes()) as u64;
+                    let search = match mode {
+                        Mode::Plain => 0,
+                        Mode::Search(c) => *c,
+                        Mode::Invariant(c, classes) => {
+                            // SAFETY: x holds m >= max(classes) rows, w holds c copies, y holds m*n elements.
+                            let (a, per_class, ncand) =
+                                unsafe { self.invariant_search(n, k, dt, wp, *c, w_bytes, xp, yp, classes, &stream)? };
+                            let mut tuned = self.tuned.lock().unwrap();
+                            for (&mc, (ms, best)) in classes.iter().zip(per_class) {
+                                tuned.push(Tuned {
+                                    m_class: mc,
+                                    n,
+                                    k,
+                                    dtype: dt,
+                                    algo: a.data,
+                                    ms,
+                                    heuristic_ms: best,
+                                    tried: ncand,
+                                });
+                            }
+                            self.invariant.lock().unwrap().insert((n, k, dt), a);
+                            0
+                        }
+                    };
+                    self.dispatch(m, n, k, dt, wp, xp, yp, &stream, search)?;
+                }
+                Cs::$v(out)
+            }};
+        }
+        let slice = match dt {
+            DType::F16 => ptrs!(F16, half::f16),
+            DType::BF16 => ptrs!(BF16, half::bf16),
+            d => candle_core::bail!("cuBLASLt matmul: unsupported dtype {d:?}"),
+        };
+        Ok((CudaStorage { slice, device: dev }, Shape::from((m, n))))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch(
+        &self,
+        m: usize,
+        n: usize,
+        k: usize,
+        dt: DType,
+        w: u64,
+        x: u64,
+        y: u64,
+        stream: &candle_core::cuda_backend::cudarc::driver::CudaStream,
+        search: usize,
+    ) -> Result<()> {
+        let p = &self.plan_cached(m, n, k, dt)?;
+        let inv = self.invariant.lock().unwrap().get(&(n, k, dt)).copied();
+        if let Some(a) = inv {
+            if !self.check(p, &a) {
+                candle_core::bail!("batch-invariant cuBLASLt algorithm rejected for M={m} (n={n} k={k})");
+            }
+            // SAFETY: device pointers of the operands and of a fresh output of m*n elements, all on `stream`.
+            return unsafe { self.run(p, &a, w, x, y, stream) };
+        }
+        let key = Key { n, k, m_class: m_class(m), dt };
+        if search > 0 {
+            let w_bytes = (n * k * dt.size_in_bytes()) as u64;
+            // SAFETY: operand pointers as for the final run below; `w` holds `search` copies of n*k elements.
+            let (top, heuristic_ms, tried) = unsafe { self.search(p, dt, w, search, w_bytes, x, y, stream, true)? };
+            let (ms, a) = top[0];
+            self.tuned.lock().unwrap().push(Tuned {
+                m_class: key.m_class,
+                n,
+                k,
+                dtype: dt,
+                algo: a.data,
+                ms,
+                heuristic_ms,
+                tried,
+            });
+            self.algos.lock().unwrap().insert(key, a);
+        }
+        let known = self.algos.lock().unwrap().get(&key).copied();
+        let algo = match known {
+            Some(a) if self.check(p, &a) => a,
+            Some(_) => match self.heuristics(p)?.first() {
+                Some(r) => r.algo,
+                None => candle_core::bail!("cuBLASLt: no algorithm for {m}x{n}x{k}"),
+            },
+            None => {
+                let cands = self.heuristics(p)?;
+                if cands.is_empty() {
+                    candle_core::bail!("cuBLASLt: no algorithm for {m}x{n}x{k}");
+                }
+                // Time every candidate on the call's operands (the output is rewritten by the final run).
+                let time = |a: &sys::cublasLtMatmulAlgo_t| -> Result<f64> {
+                    // SAFETY: pointers as for the final run below.
+                    unsafe { self.run(p, a, w, x, y, stream)? };
+                    stream.synchronize().w()?;
+                    let t = Instant::now();
+                    for _ in 0..5 {
+                        // SAFETY: as above.
+                        unsafe { self.run(p, a, w, x, y, stream)? };
+                    }
+                    stream.synchronize().w()?;
+                    Ok(t.elapsed().as_secs_f64() * 1e3 / 5.0)
+                };
+                let mut best = (f64::INFINITY, cands[0].algo);
+                let mut first = f64::NAN;
+                for (i, c) in cands.iter().enumerate() {
+                    let ms = time(&c.algo)?;
+                    if i == 0 {
+                        first = ms;
+                    }
+                    if ms < best.0 {
+                        best = (ms, c.algo);
+                    }
+                }
+                self.tuned.lock().unwrap().push(Tuned {
+                    m_class: key.m_class,
+                    n,
+                    k,
+                    dtype: dt,
+                    algo: best.1.data,
+                    ms: best.0,
+                    heuristic_ms: first,
+                    tried: cands.len(),
+                });
+                self.algos.lock().unwrap().insert(key, best.1);
+                best.1
+            }
+        };
+        // SAFETY: device pointers of the operands and of a fresh output of m*n elements, all on `stream`.
+        unsafe { self.run(p, &algo, w, x, y, stream) }
+    }
+}
+
+enum Mode {
+    Plain,
+    /// exhaustive search for the class of this M first; `w` holds the given number of stacked weight copies
+    Search(usize),
+    /// batch-invariant choice over the M classes first (x has at least max(classes) rows)
+    Invariant(usize, Vec<usize>),
+}
+
+struct LtMatmul<'a>(&'a Lt, Mode);
+
+impl CustomOp2 for LtMatmul<'_> {
+    fn name(&self) -> &'static str {
+        "cublaslt-matmul-nt"
+    }
+    fn cpu_fwd(&self, _: &CpuStorage, _: &Layout, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> {
+        candle_core::bail!("cuBLASLt matmul runs on CUDA only")
+    }
+    fn cuda_fwd(&self, x: &CudaStorage, xl: &Layout, w: &CudaStorage, wl: &Layout) -> Result<(CudaStorage, Shape)> {
+        self.0.matmul(x, xl, w, wl, &self.1)
+    }
+}
+
+/// `x[m, k] @ w[n, k]^T` (f16 or bf16) with the measured cuBLASLt algorithm of its shape class.
+pub fn matmul_nt(lt: &Lt, x: &Tensor, w: &Tensor) -> Result<Tensor> {
+    x.apply_op2_no_bwd(w, &LtMatmul(lt, Mode::Plain))
+}
+
+/// Exhaustive configuration search for the class of `x @ w0^T` (see [`Lt::tuned`]); `w = [copies * n, k]` holds
+/// `copies` stacked weights that the timing runs read in turn. Returns `x @ w0^T`.
+pub fn search_nt(lt: &Lt, x: &Tensor, w: &Tensor, copies: usize) -> Result<Tensor> {
+    x.apply_op2_no_bwd(w, &LtMatmul(lt, Mode::Search(copies.max(1))))
+}
+
+/// Batch-invariant algorithm choice for the weight shape of `w` (see [`Lt::load_invariant`]); `x` has
+/// `max(classes)` rows, `w = [copies * n, k]`. Afterwards every call of this shape uses the chosen algorithm.
+pub fn invariant_nt(lt: &Lt, x: &Tensor, w: &Tensor, copies: usize, classes: &[usize]) -> Result<Tensor> {
+    x.apply_op2_no_bwd(w, &LtMatmul(lt, Mode::Invariant(copies.max(1), classes.to_vec())))
+}
