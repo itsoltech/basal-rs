@@ -1,0 +1,182 @@
+{
+  "batching": "Tree",
+  "reps": 10,
+  "requests": [
+    {
+      "id": "cx-01-ticket-fan-out",
+      "questions": 3,
+      "input_tokens": 1238,
+      "packed_tokens_per_question_rows": 792,
+      "packed_tokens_shared_tree": 524,
+      "median_ms": 56.9665655,
+      "min_ms": 54.349782,
+      "max_ms": 57.125386999999996,
+      "all_ms": [
+        54.349782,
+        56.553323000000006,
+        56.782829,
+        56.811723,
+        56.954367,
+        56.978764,
+        57.006220000000006,
+        57.018612000000005,
+        57.07584,
+        57.125386999999996
+      ]
+    },
+    {
+      "id": "cx-02-web-agent",
+      "questions": 2,
+      "input_tokens": 1140,
+      "packed_tokens_per_question_rows": 787,
+      "packed_tokens_shared_tree": 611,
+      "median_ms": 72.3127135,
+      "min_ms": 72.079985,
+      "max_ms": 74.658,
+      "all_ms": [
+        72.079985,
+        72.09352700000001,
+        72.211697,
+        72.234489,
+        72.28739,
+        72.338037,
+        72.540884,
+        72.541595,
+        73.449133,
+        74.658
+      ]
+    },
+    {
+      "id": "cx-03-deadline-decomposed",
+      "questions": 3,
+      "input_tokens": 1498,
+      "packed_tokens_per_question_rows": 992,
+      "packed_tokens_shared_tree": 710,
+      "median_ms": 85.548892,
+      "min_ms": 85.076083,
+      "max_ms": 85.870617,
+      "all_ms": [
+        85.076083,
+        85.382482,
+        85.45266799999999,
+        85.51165400000001,
+        85.53879,
+        85.558994,
+        85.58921699999999,
+        85.616225,
+        85.629865,
+        85.870617
+      ]
+    },
+    {
+      "id": "cx-04-loan-triage",
+      "questions": 3,
+      "input_tokens": 1616,
+      "packed_tokens_per_question_rows": 950,
+      "packed_tokens_shared_tree": 546,
+      "median_ms": 55.474371,
+      "min_ms": 55.179742,
+      "max_ms": 55.731733999999996,
+      "all_ms": [
+        55.179742,
+        55.195117,
+        55.39878,
+        55.405584,
+        55.473929999999996,
+        55.474812,
+        55.486816000000005,
+        55.515439,
+        55.563418000000006,
+        55.731733999999996
+      ]
+    },
+    {
+      "id": "cx-05-guard-check",
+      "questions": 3,
+      "input_tokens": 1220,
+      "packed_tokens_per_question_rows": 802,
+      "packed_tokens_shared_tree": 568,
+      "median_ms": 60.6623935,
+      "min_ms": 60.199229,
+      "max_ms": 61.099728999999996,
+      "all_ms": [
+        60.199229,
+        60.384259,
+        60.412105000000004,
+        60.42278,
+        60.658412,
+        60.666375,
+        60.787343,
+        60.894006,
+        60.896098,
+        61.099728999999996
+      ]
+    },
+    {
+      "id": "fanout-all-questions-on-cx-01-state",
+      "questions": 14,
+      "input_tokens": 6356,
+      "packed_tokens_per_question_rows": 4139,
+      "packed_tokens_shared_tree": 2397,
+      "median_ms": 414.1199615,
+      "min_ms": 411.23426,
+      "max_ms": 416.411633,
+      "all_ms": [
+        411.23426,
+        411.573786,
+        412.329378,
+        412.619468,
+        414.03590099999997,
+        414.204022,
+        414.662924,
+        414.865724,
+        415.94611199999997,
+        416.411633
+      ]
+    },
+    {
+      "id": "single-question-cx-01",
+      "questions": 1,
+      "input_tokens": 428,
+      "packed_tokens_per_question_rows": 281,
+      "packed_tokens_shared_tree": 281,
+      "median_ms": 28.1506135,
+      "min_ms": 27.442500000000003,
+      "max_ms": 28.349487999999997,
+      "all_ms": [
+        27.442500000000003,
+        28.092813,
+        28.094817000000003,
+        28.104479,
+        28.149303,
+        28.151923999999998,
+        28.245337999999997,
+        28.301592,
+        28.317096,
+        28.349487999999997
+      ]
+    }
+  ],
+  "backend": {
+    "backend": "cuda",
+    "device": "NVIDIA GPU through candle Device::new_cuda(0)",
+    "tensor_library": "candle-core 0.11.0 (CUDA; matmul = cuBLAS, no TF32)",
+    "weights": "f16 (converted from bf16, experiment)",
+    "activations": "f16 residual stream, norms and MLP",
+    "attention": "f32 q/k/v (bias + rotate-half RoPE fused kernel, cos/sin from f64 on host); f32 scores GEMM + additive block mask + softmax + GEMM per segment (candle ops), GQA as stacked query rows",
+    "kernels": "fused: q/k/v and gate/up projections as single GEMMs without bias; bias added in fused kernels (bias+RoPE+head split, bias+SiLU*up, bias+residual)",
+    "readout": "letter rows of lm_head only, f32",
+    "padding": "none: compact token list for GEMM/norm/MLP, attention per packed row (segment)",
+    "gemm": "cuBLASLt, f32 accumulation, fastest of up to 16 heuristic algorithms measured per (N, K, M rounded up to 32)",
+    "prefix_kv": [
+      53,
+      66
+    ],
+    "state_cache_bytes": 0,
+    "last_layer": "o_proj and MLP of the last layer only at the readout positions"
+  },
+  "state_cache": {
+    "hits": 0,
+    "inserts": 0
+  }
+}

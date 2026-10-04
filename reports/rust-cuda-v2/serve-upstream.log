@@ -1,0 +1,2 @@
+Loading weights:   0%|          | 0/963 [00:00<?, ?it/s]Loading weights:  54%|█████▎    | 516/963 [00:00<00:00, 5155.71it/s]Loading weights: 100%|██████████| 963/963 [00:00<00:00, 4528.92it/s]
+basal: model /work/.models/basal-1.0-4.5B mode fast ready in 146s on port 8101

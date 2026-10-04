@@ -1,0 +1,43 @@
+{
+  "tool": "basal export",
+  "inputs": "reports/reference-cuda-fp32",
+  "model": "basal-1.0-4.5B",
+  "model_dir": ".models/basal-1.0-4.5B",
+  "backend": {
+    "backend": "cuda",
+    "device": "NVIDIA GPU through candle Device::new_cuda(0)",
+    "tensor_library": "candle-core 0.11.0 (CUDA; matmul = cuBLAS, no TF32)",
+    "weights": "bf16 resident, widened to f32 per layer and use (exact)",
+    "activations": "f32 everywhere (numerical reference)",
+    "attention": "f32 q/k/v (bias + rotate-half RoPE fused kernel, cos/sin from f64 on host); f32 scores GEMM + additive block mask + softmax + GEMM per segment (candle ops), GQA as stacked query rows",
+    "kernels": "fused: q/k/v and gate/up projections as single GEMMs without bias; bias added in fused kernels (bias+RoPE+head split, bias+SiLU*up, bias+residual)",
+    "readout": "letter rows of lm_head only, f32",
+    "padding": "none: compact token list for GEMM/norm/MLP, attention per packed row (segment)",
+    "gemm": "cuBLASLt, f32 accumulation, fastest of up to 16 heuristic algorithms measured per (N, K, M rounded up to 32)",
+    "prefix_kv": [
+      53,
+      66
+    ],
+    "state_cache_bytes": 0,
+    "last_layer": "o_proj and MLP of the last layer only at the readout positions"
+  },
+  "bench_batching": "Single",
+  "host_math": "softmax, order average and calibration in f64",
+  "calibration": {
+    "temperatures": {
+      "noul": 1.4768261459394991,
+      "score": 1.1063695328888332,
+      "choice": 1.0748733399206964
+    }
+  },
+  "request_batching": "Tree",
+  "bench_s": 5.052066958,
+  "total_s": 11.929760094,
+  "run": {
+    "dtype": "f32",
+    "readout": "f32",
+    "kernels": "fused",
+    "prefix_cache": true,
+    "load_s": 4.08533948
+  }
+}

@@ -1,0 +1,2 @@
+{"mode": "eager-fp32", "reference_mode": "eager-fp32", "gpu": "NVIDIA RTX 6000 Ada Generation", "n": 44, "load_s": 5.9, "lat1_ms": 105.957, "lat2_ms": 185.686, "lat2_p95_ms": 224.215, "dec_s": 5.225, "mem_gb": 21.619, "acc": 0.795}
+{"mode": "fast", "reference_mode": "eager-fp32", "gpu": "NVIDIA RTX 6000 Ada Generation", "n": 44, "load_s": 145.5, "lat1_ms": 26.665, "lat2_ms": 30.485, "lat2_p95_ms": 40.448, "dec_s": 27.595, "mem_gb": 11.752, "acc": 0.773, "agree": 0.977}

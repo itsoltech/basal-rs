@@ -1,0 +1,40 @@
+{
+  "tool": "basal export",
+  "inputs": "reports/reference-cuda-fp32",
+  "model": "basal-1.0-4.5B",
+  "model_dir": ".models/basal-1.0-4.5B",
+  "backend": {
+    "backend": "cuda",
+    "device": "NVIDIA GPU through candle Device::new_cuda(0)",
+    "tensor_library": "candle-core 0.11.0 (CUDA; matmul = cuBLAS, no TF32)",
+    "weights": "f16 (converted from bf16, experiment)",
+    "activations": "f16 residual stream, norms and MLP",
+    "attention": "f32 q/k/v (bias + rotate-half RoPE fused kernel, cos/sin from f64 on host); one f32 flash-style kernel for all segments of a forward (online softmax, additive block mask, prefix K/V read from the cache, fully masked key tiles skipped), GQA as stacked query rows",
+    "kernels": "fused: q/k/v and gate/up projections as single GEMMs without bias; bias added in fused kernels (bias+RoPE+head split, bias+SiLU*up, bias+residual)",
+    "readout": "letter rows of lm_head only, f32",
+    "padding": "none: compact token list for GEMM/norm/MLP, attention per packed row (segment)",
+    "gemm": "cuBLASLt, f32 accumulation, batch-invariant: one algorithm per weight shape for every M, no split-K (--gemm-table from gemm-search --invariant); a row's result does not depend on its batch",
+    "prefix_kv": [],
+    "state_cache_bytes": 0,
+    "last_layer": "o_proj and MLP of the last layer only at the readout positions"
+  },
+  "bench_batching": "Single",
+  "host_math": "softmax, order average and calibration in f64",
+  "calibration": {
+    "temperatures": {
+      "score": 1.1063695328888332,
+      "choice": 1.0748733399206964,
+      "noul": 1.4768261459394991
+    }
+  },
+  "request_batching": "Tree",
+  "bench_s": 1.311875636,
+  "total_s": 2.973890867,
+  "run": {
+    "dtype": "f16",
+    "readout": "f32",
+    "kernels": "fused",
+    "prefix_cache": false,
+    "load_s": 10.800700849
+  }
+}

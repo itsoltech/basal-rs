@@ -1,0 +1,91 @@
+{
+  "n": 44,
+  "lat_n": 10,
+  "lat1_ms": 21.8290565,
+  "lat2_ms": 26.5455865,
+  "lat2_p95_ms": 31.044909999999998,
+  "lat2_ms_all": [
+    23.271155,
+    25.09855,
+    25.302913999999998,
+    25.460597,
+    26.48219,
+    26.608983,
+    26.794106000000003,
+    26.810423,
+    27.892209,
+    31.044909999999998
+  ],
+  "lat1_ms_all": [
+    20.39865,
+    21.371025,
+    21.549849,
+    21.70936,
+    21.816236999999997,
+    21.841876,
+    21.995356,
+    24.250842000000002,
+    25.746985,
+    28.110847
+  ],
+  "lat2_prepare_ms": {
+    "n": 10,
+    "max": 0.25630400000000003,
+    "p50": 0.219531,
+    "p95": 0.25630400000000003,
+    "p99": 0.25630400000000003,
+    "mean": 0.2167386
+  },
+  "lat2_forward_ms": {
+    "n": 10,
+    "max": 30.824519000000002,
+    "p50": 26.295081500000002,
+    "p95": 30.824519000000002,
+    "p99": 30.824519000000002,
+    "mean": 26.259865100000003
+  },
+  "lat2_packed_tokens": {
+    "n": 10,
+    "max": 294.0,
+    "p50": 229.5,
+    "p95": 294.0,
+    "p99": 294.0,
+    "mean": 233.4
+  },
+  "dec_s": 47.53483913706999,
+  "dec_s_runs": [
+    43.58593518483771,
+    47.58222916986211,
+    47.53483913706999
+  ],
+  "dec_s_questions": 44,
+  "dec_s_batching": "Budget",
+  "all_items_s": 1.451170386,
+  "acc": 0.7954545454545454,
+  "correct": 35,
+  "with_gold": 44,
+  "gpu_probe_tflops": {
+    "before": 168.74468752209117,
+    "after": 149.01187319911182
+  },
+  "load_s": 11.376042204,
+  "backend": {
+    "backend": "cuda",
+    "device": "NVIDIA GPU through candle Device::new_cuda(0)",
+    "tensor_library": "candle-core 0.11.0 (CUDA; matmul = cuBLAS, no TF32)",
+    "weights": "f16 (converted from bf16, experiment)",
+    "activations": "f16 residual stream, norms and MLP",
+    "attention": "f32 q/k/v (bias + rotate-half RoPE fused kernel, cos/sin from f64 on host); f32 scores GEMM + additive block mask + softmax + GEMM per segment (candle ops), GQA as stacked query rows",
+    "kernels": "fused: q/k/v and gate/up projections as single GEMMs without bias; bias added in fused kernels (bias+RoPE+head split, bias+SiLU*up, bias+residual)",
+    "readout": "letter rows of lm_head only, f32",
+    "padding": "none: compact token list for GEMM/norm/MLP, attention per packed row (segment)",
+    "gemm": "cuBLASLt, f32 accumulation, fastest of up to 16 heuristic algorithms measured per (N, K, M rounded up to 32)",
+    "prefix_kv": [
+      53,
+      66
+    ],
+    "state_cache_bytes": 0,
+    "last_layer": "o_proj and MLP of the last layer only at the readout positions"
+  },
+  "model": "basal-1.0-4.5B"
+}
