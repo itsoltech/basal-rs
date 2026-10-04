@@ -1,0 +1,237 @@
+{
+  "batching": "Tree",
+  "reps": 3,
+  "requests": [
+    {
+      "id": "cx-01-ticket-fan-out/category",
+      "questions": 1,
+      "input_tokens": 428,
+      "packed_tokens_per_question_rows": 281,
+      "packed_tokens_shared_tree": 281,
+      "median_ms": 647.869541,
+      "min_ms": 646.708792,
+      "max_ms": 648.14225,
+      "all_ms": [
+        646.708792,
+        647.869541,
+        648.14225
+      ]
+    },
+    {
+      "id": "cx-01-ticket-fan-out/needs_photo",
+      "questions": 1,
+      "input_tokens": 396,
+      "packed_tokens_per_question_rows": 246,
+      "packed_tokens_shared_tree": 246,
+      "median_ms": 635.935833,
+      "min_ms": 635.54225,
+      "max_ms": 636.395875,
+      "all_ms": [
+        635.54225,
+        635.935833,
+        636.395875
+      ]
+    },
+    {
+      "id": "cx-01-ticket-fan-out/tone",
+      "questions": 1,
+      "input_tokens": 414,
+      "packed_tokens_per_question_rows": 265,
+      "packed_tokens_shared_tree": 265,
+      "median_ms": 642.478792,
+      "min_ms": 641.89825,
+      "max_ms": 642.658333,
+      "all_ms": [
+        641.89825,
+        642.478792,
+        642.658333
+      ]
+    },
+    {
+      "id": "cx-02-web-agent/operation",
+      "questions": 1,
+      "input_tokens": 532,
+      "packed_tokens_per_question_rows": 356,
+      "packed_tokens_shared_tree": 356,
+      "median_ms": 804.3809170000001,
+      "min_ms": 803.454,
+      "max_ms": 804.4475,
+      "all_ms": [
+        803.454,
+        804.3809170000001,
+        804.4475
+      ]
+    },
+    {
+      "id": "cx-02-web-agent/click_target",
+      "questions": 1,
+      "input_tokens": 608,
+      "packed_tokens_per_question_rows": 431,
+      "packed_tokens_shared_tree": 431,
+      "median_ms": 966.3150830000001,
+      "min_ms": 965.011417,
+      "max_ms": 966.6915,
+      "all_ms": [
+        965.011417,
+        966.3150830000001,
+        966.6915
+      ]
+    },
+    {
+      "id": "cx-03-deadline-decomposed/last_day",
+      "questions": 1,
+      "input_tokens": 586,
+      "packed_tokens_per_question_rows": 418,
+      "packed_tokens_shared_tree": 418,
+      "median_ms": 965.3512079999999,
+      "min_ms": 964.8953329999999,
+      "max_ms": 965.471166,
+      "all_ms": [
+        964.8953329999999,
+        965.3512079999999,
+        965.471166
+      ]
+    },
+    {
+      "id": "cx-03-deadline-decomposed/filing_date",
+      "questions": 1,
+      "input_tokens": 524,
+      "packed_tokens_per_question_rows": 342,
+      "packed_tokens_shared_tree": 342,
+      "median_ms": 801.696375,
+      "min_ms": 801.03,
+      "max_ms": 802.7063330000001,
+      "all_ms": [
+        801.03,
+        801.696375,
+        802.7063330000001
+      ]
+    },
+    {
+      "id": "cx-03-deadline-decomposed/in_time",
+      "questions": 1,
+      "input_tokens": 388,
+      "packed_tokens_per_question_rows": 232,
+      "packed_tokens_shared_tree": 232,
+      "median_ms": 494.687625,
+      "min_ms": 494.34,
+      "max_ms": 494.703708,
+      "all_ms": [
+        494.34,
+        494.687625,
+        494.703708
+      ]
+    },
+    {
+      "id": "cx-04-loan-triage/within_limit",
+      "questions": 1,
+      "input_tokens": 542,
+      "packed_tokens_per_question_rows": 309,
+      "packed_tokens_shared_tree": 309,
+      "median_ms": 633.747959,
+      "min_ms": 633.0415830000001,
+      "max_ms": 635.207792,
+      "all_ms": [
+        633.0415830000001,
+        633.747959,
+        635.207792
+      ]
+    },
+    {
+      "id": "cx-04-loan-triage/risk",
+      "questions": 1,
+      "input_tokens": 516,
+      "packed_tokens_per_question_rows": 300,
+      "packed_tokens_shared_tree": 300,
+      "median_ms": 652.512333,
+      "min_ms": 652.19825,
+      "max_ms": 653.19025,
+      "all_ms": [
+        652.19825,
+        652.512333,
+        653.19025
+      ]
+    },
+    {
+      "id": "cx-04-loan-triage/decision",
+      "questions": 1,
+      "input_tokens": 558,
+      "packed_tokens_per_question_rows": 341,
+      "packed_tokens_shared_tree": 341,
+      "median_ms": 794.489,
+      "min_ms": 794.236917,
+      "max_ms": 794.854833,
+      "all_ms": [
+        794.236917,
+        794.489,
+        794.854833
+      ]
+    },
+    {
+      "id": "cx-05-guard-check/injection",
+      "questions": 1,
+      "input_tokens": 370,
+      "packed_tokens_per_question_rows": 225,
+      "packed_tokens_shared_tree": 225,
+      "median_ms": 485.89579100000003,
+      "min_ms": 485.78883299999995,
+      "max_ms": 487.188708,
+      "all_ms": [
+        485.78883299999995,
+        485.89579100000003,
+        487.188708
+      ]
+    },
+    {
+      "id": "cx-05-guard-check/data_request",
+      "questions": 1,
+      "input_tokens": 428,
+      "packed_tokens_per_question_rows": 289,
+      "packed_tokens_shared_tree": 289,
+      "median_ms": 646.463708,
+      "min_ms": 645.782958,
+      "max_ms": 646.616125,
+      "all_ms": [
+        645.782958,
+        646.463708,
+        646.616125
+      ]
+    },
+    {
+      "id": "cx-05-guard-check/action",
+      "questions": 1,
+      "input_tokens": 422,
+      "packed_tokens_per_question_rows": 288,
+      "packed_tokens_shared_tree": 288,
+      "median_ms": 646.857667,
+      "min_ms": 645.437792,
+      "max_ms": 647.420875,
+      "all_ms": [
+        645.437792,
+        646.857667,
+        647.420875
+      ]
+    }
+  ],
+  "backend": {
+    "backend": "metal",
+    "device": "Apple GPU through candle Device::new_metal(0)",
+    "tensor_library": "candle-core 0.11.0 (Metal; matmul = MLX steel GEMM port)",
+    "weights": "f16 (converted from bf16, experiment)",
+    "activations": "f16 residual stream, norms and MLP",
+    "attention": "f32 q/k/v (bias + rotate-half RoPE fused kernel, cos/sin from f64 on host); candle sdpa (MLX steel attention) in f32 with additive block mask; GQA in-kernel",
+    "kernels": "fused: q/k/v and gate/up projections as single GEMMs without bias; bias added in fused kernels (bias+RoPE+head split, bias+SiLU*up, bias+residual)",
+    "readout": "letter rows of lm_head only, f32",
+    "padding": "rows padded on the right to the longest packed row of a chunk",
+    "prefix_kv": [
+      53,
+      66
+    ],
+    "state_cache_bytes": 0,
+    "last_layer": "o_proj and MLP of the last layer only at the readout positions"
+  },
+  "state_cache": {
+    "hits": 0,
+    "inserts": 0
+  }
+}

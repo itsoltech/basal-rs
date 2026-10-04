@@ -1,0 +1,141 @@
+{
+  "batching": "Tree",
+  "reps": 5,
+  "requests": [
+    {
+      "id": "cx-01-ticket-fan-out",
+      "questions": 3,
+      "input_tokens": 1238,
+      "packed_tokens_per_question_rows": 792,
+      "packed_tokens_shared_tree": 524,
+      "median_ms": 1279.694417,
+      "min_ms": 1279.0658329999999,
+      "max_ms": 1280.4341670000001,
+      "all_ms": [
+        1279.0658329999999,
+        1279.51125,
+        1279.694417,
+        1279.740459,
+        1280.4341670000001
+      ]
+    },
+    {
+      "id": "cx-02-web-agent",
+      "questions": 2,
+      "input_tokens": 1140,
+      "packed_tokens_per_question_rows": 787,
+      "packed_tokens_shared_tree": 611,
+      "median_ms": 1477.5727080000001,
+      "min_ms": 1476.858041,
+      "max_ms": 1478.9085,
+      "all_ms": [
+        1476.858041,
+        1477.258875,
+        1477.5727080000001,
+        1478.079875,
+        1478.9085
+      ]
+    },
+    {
+      "id": "cx-03-deadline-decomposed",
+      "questions": 3,
+      "input_tokens": 1498,
+      "packed_tokens_per_question_rows": 992,
+      "packed_tokens_shared_tree": 710,
+      "median_ms": 1804.860375,
+      "min_ms": 1804.4970839999999,
+      "max_ms": 1805.498417,
+      "all_ms": [
+        1804.4970839999999,
+        1804.732208,
+        1804.860375,
+        1805.4500839999998,
+        1805.498417
+      ]
+    },
+    {
+      "id": "cx-04-loan-triage",
+      "questions": 3,
+      "input_tokens": 1616,
+      "packed_tokens_per_question_rows": 950,
+      "packed_tokens_shared_tree": 546,
+      "median_ms": 1297.923333,
+      "min_ms": 1296.897,
+      "max_ms": 1298.365542,
+      "all_ms": [
+        1296.897,
+        1297.764792,
+        1297.923333,
+        1298.2762089999999,
+        1298.365542
+      ]
+    },
+    {
+      "id": "cx-05-guard-check",
+      "questions": 3,
+      "input_tokens": 1220,
+      "packed_tokens_per_question_rows": 802,
+      "packed_tokens_shared_tree": 568,
+      "median_ms": 1300.89975,
+      "min_ms": 1299.333917,
+      "max_ms": 1301.556917,
+      "all_ms": [
+        1299.333917,
+        1300.701834,
+        1300.89975,
+        1301.33425,
+        1301.556917
+      ]
+    },
+    {
+      "id": "fanout-all-questions-on-cx-01-state",
+      "questions": 14,
+      "input_tokens": 6356,
+      "packed_tokens_per_question_rows": 4139,
+      "packed_tokens_shared_tree": 2397,
+      "median_ms": 7518.345875,
+      "min_ms": 7514.338584,
+      "max_ms": 8067.515542000001,
+      "all_ms": [
+        7514.338584,
+        7515.3274169999995,
+        7518.345875,
+        7571.908665999999,
+        8067.515542000001
+      ]
+    },
+    {
+      "id": "single-question-cx-01",
+      "questions": 1,
+      "input_tokens": 428,
+      "packed_tokens_per_question_rows": 281,
+      "packed_tokens_shared_tree": 281,
+      "median_ms": 678.077167,
+      "min_ms": 676.916042,
+      "max_ms": 679.9907910000001,
+      "all_ms": [
+        676.916042,
+        677.830542,
+        678.077167,
+        679.533,
+        679.9907910000001
+      ]
+    }
+  ],
+  "backend": {
+    "backend": "metal",
+    "device": "Apple GPU through candle Device::new_metal(0)",
+    "tensor_library": "candle-core 0.11.0 (Metal; matmul = MLX steel GEMM port)",
+    "weights": "f16 (converted from bf16, experiment)",
+    "activations": "f16 residual stream, norms and MLP",
+    "attention": "f32 q/k/v (bias + rotate-half RoPE fused kernel, cos/sin from f64 on host); candle sdpa (MLX steel attention) in f32 with additive block mask; GQA in-kernel",
+    "kernels": "fused: q/k/v and gate/up projections as single GEMMs without bias; bias added in fused kernels (bias+RoPE+head split, bias+SiLU*up, bias+residual)",
+    "readout": "letter rows of lm_head only, f32",
+    "padding": "rows padded on the right to the longest packed row of a chunk",
+    "prefix_kv": [
+      53,
+      66
+    ],
+    "last_layer": "o_proj and MLP of the last layer only at the readout positions"
+  }
+}
