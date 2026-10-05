@@ -366,8 +366,10 @@ extern "C" __global__ void split_hilo_f32(const float *x, __half *out, unsigned 
 #define TC_BN 32
 #define TC_LD (ATT_HD + 8)
 
+// not volatile: an MMA only reads and writes its registers, so the compiler may interleave independent MMAs (the
+// order of the MMAs on one accumulator follows from its data dependence)
 __device__ __forceinline__ void mma16816(float *c, const unsigned *a, const unsigned *b) {
-    asm volatile(
+    asm(
         "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
         "{%0,%1,%2,%3};\n"
         : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
@@ -386,6 +388,24 @@ __device__ __forceinline__ void ldsm4t(unsigned *r, const __half *p) {
     asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];\n"
                  : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
                  : "r"(a));
+}
+
+// 16-byte asynchronous copy global -> shared; `bytes` 0 fills the 16 bytes with zeros (no read)
+__device__ __forceinline__ void cp_async16(void *smem, const void *gmem, unsigned bytes) {
+    unsigned a = (unsigned)__cvta_generic_to_shared(smem);
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(a), "l"(gmem), "r"(bytes) : "memory");
+}
+__device__ __forceinline__ void cp_async_commit() { asm volatile("cp.async.commit_group;\n" ::: "memory"); }
+template <int N>
+__device__ __forceinline__ void cp_async_wait() {
+    asm volatile("cp.async.wait_group %0;\n" ::"n"(N) : "memory");
+}
+
+// 2^x by the special function unit (relative error about 2^-22, like expf; 2^-inf = 0)
+__device__ __forceinline__ float ex2(float x) {
+    float y;
+    asm("ex2.approx.ftz.f32 %0, %1;\n" : "=f"(y) : "f"(x));
+    return y;
 }
 
 __device__ __forceinline__ unsigned pack2(__half a, __half b) {
@@ -447,6 +467,7 @@ __device__ __forceinline__ void attn_tree_tc_body(const float *qkv, const __half
     for (int i = 0; i < ATT_HD / 8; i++) o[i][0] = o[i][1] = o[i][2] = o[i][3] = 0.f;
     float m[2] = {-INFINITY, -INFINITY}, l[2] = {0.f, 0.f};
     const unsigned planes = v_exact ? 1 : 2;
+    const float scale2 = scale * 1.4426950408889634f;  // log2(e)
     for (unsigned j0 = 0; j0 < lk; j0 += TC_BN) {
         bool vis = (ok[0] && j0 <= lim[0]) || (ok[1] && j0 <= lim[1]);
         if (!__syncthreads_or(vis)) break;  // tiles are ordered: none after this one is visible either
@@ -506,7 +527,8 @@ __device__ __forceinline__ void attn_tree_tc_body(const float *qkv, const __half
                 }
             }
         }
-        // online softmax: element c of tile nt is row (c >> 1 ? g + 8 : g), key nt*8 + 2*t4 + (c & 1)
+        // online softmax in base 2 (scores scaled by scale * log2(e)): element c of tile nt is row
+        // (c >> 1 ? g + 8 : g), key nt*8 + 2*t4 + (c & 1)
         float p[TC_BN / 8][4];
 #pragma unroll
         for (int a = 0; a < 2; a++) {
@@ -516,20 +538,20 @@ __device__ __forceinline__ void attn_tree_tc_body(const float *qkv, const __half
 #pragma unroll
                 for (int e = 0; e < 2; e++) {
                     unsigned j = j0 + nt * 8 + 2 * t4 + e;
-                    float x = (ok[a] && j <= lim[a]) ? s[nt][2 * a + e] * scale : -INFINITY;
+                    float x = (ok[a] && j <= lim[a]) ? s[nt][2 * a + e] * scale2 : -INFINITY;
                     p[nt][2 * a + e] = x;
                     mt = fmaxf(mt, x);
                 }
             mt = fmaxf(mt, __shfl_xor_sync(0xffffffffu, mt, 1));
             mt = fmaxf(mt, __shfl_xor_sync(0xffffffffu, mt, 2));
             float mn = fmaxf(m[a], mt);
-            float corr = m[a] == -INFINITY ? 0.f : expf(m[a] - mn);
+            float corr = m[a] == -INFINITY ? 0.f : ex2(m[a] - mn);
             float rs = 0.f;
 #pragma unroll
             for (int nt = 0; nt < TC_BN / 8; nt++)
 #pragma unroll
                 for (int e = 0; e < 2; e++) {
-                    float y = mn == -INFINITY ? 0.f : expf(p[nt][2 * a + e] - mn);
+                    float y = mn == -INFINITY ? 0.f : ex2(p[nt][2 * a + e] - mn);
                     p[nt][2 * a + e] = y;
                     rs += y;
                 }
@@ -537,10 +559,12 @@ __device__ __forceinline__ void attn_tree_tc_body(const float *qkv, const __half
             rs += __shfl_xor_sync(0xffffffffu, rs, 2);
             l[a] = l[a] * corr + rs;
             m[a] = mn;
+            if (corr != 1.f) {  // the running maximum changed (multiplying by 1 changes nothing)
 #pragma unroll
-            for (int dt = 0; dt < ATT_HD / 8; dt++) {
-                o[dt][2 * a] *= corr;
-                o[dt][2 * a + 1] *= corr;
+                for (int dt = 0; dt < ATT_HD / 8; dt++) {
+                    o[dt][2 * a] *= corr;
+                    o[dt][2 * a + 1] *= corr;
+                }
             }
         }
         // O += P V: P (16 x 32) as A in 2 k16 steps from the score fragments; V B-fragments via ldmatrix.trans
@@ -588,6 +612,327 @@ __device__ __forceinline__ void attn_tree_tc_body(const float *qkv, const __half
     }
 }
 
+template <bool QK3, bool PL>
+__device__ __forceinline__ void attn_tree_tc_pipe_body(const float *qkv, const __half *khl, const __half *vhl, float *out,
+                                                  const TreeTable &tab, unsigned T, unsigned NH, unsigned NKV,
+                                                  float scale, unsigned v_exact) {
+    // Shared memory holds one Q plane (hi, then lo) until each warp has its Q fragments in registers, then the K / V
+    // tile stages.
+    extern __shared__ __align__(16) unsigned char smraw[];
+    __half *Qs = reinterpret_cast<__half *>(smraw);
+    // two stages of K tiles [Kh, Kl] and two of V tiles [Vh, Vl] (V row-major [key][dim]): 68 KiB per block
+    __half *Kst = reinterpret_cast<__half *>(smraw), *Vst = Kst + 4 * TC_BN * TC_LD;
+    const unsigned tid = threadIdx.x, w = tid / 32, lane = tid % 32, g = lane >> 2, t4 = lane & 3;
+    const unsigned kvh = blockIdx.y, rep = NH / NKV;
+    const TreeUnit &U = tab.u[tree_unit_of(tab, blockIdx.x)];
+    const unsigned rows = rep * U.q_len, r0 = (blockIdx.x - U.tile0) * TC_BM;
+    unsigned lk = U.np;
+    for (unsigned i = 0; i < U.nr; i++) lk += U.r_len[i];
+    const unsigned base_own = lk - U.r_len[U.nr - 1];
+    const size_t nkv_all = (size_t)NKV * T * ATT_HD, nkv_past = (size_t)NKV * U.np * ATT_HD;
+    const __half *pkh = (const __half *)U.pkh, *pvh = (const __half *)U.pvh;
+    const float *q = qkv;
+    // A fragments of the warp's 16 query rows for the 8 steps of 16 dims: plane 0 = f16(x), plane 1 = f16(x - hi)
+    unsigned qh[ATT_HD / 16][4], ql[ATT_HD / 16][4];
+#pragma unroll
+    for (int plane = 0; plane < (QK3 ? 2 : 1); plane++) {
+        for (unsigned i = tid; i < TC_BM * ATT_HD; i += TC_THREADS) {
+            unsigned rr = i / ATT_HD, d = i % ATT_HD, r = r0 + rr;
+            float x =
+                r < rows ? q[((size_t)(kvh * rep + r / U.q_len) * T + U.q_off + r % U.q_len) * ATT_HD + d] : 0.f;
+            __half h = __float2half_rn(x);
+            Qs[rr * TC_LD + d] = plane == 0 ? h : __float2half_rn(x - __half2float(h));
+        }
+        __syncthreads();
+#pragma unroll
+        for (int ks = 0; ks < ATT_HD / 16; ks++) {
+            const unsigned qo = (w * 16 + (lane % 16)) * TC_LD + ks * 16 + (lane / 16) * 8;
+            ldsm4(plane == 0 ? qh[ks] : ql[ks], Qs + qo);
+        }
+        __syncthreads();  // the next plane / the K / V tiles reuse this memory
+    }
+    const unsigned rr2[2] = {w * 16 + g, w * 16 + g + 8};
+    bool ok[2];
+    unsigned lim[2];
+    for (int a = 0; a < 2; a++) {
+        unsigned r = r0 + rr2[a];
+        ok[a] = r < rows;
+        lim[a] = ok[a] ? base_own + r % U.q_len : 0;
+    }
+    float o[ATT_HD / 8][4];
+#pragma unroll
+    for (int i = 0; i < ATT_HD / 8; i++) o[i][0] = o[i][1] = o[i][2] = o[i][3] = 0.f;
+    float m[2] = {-INFINITY, -INFINITY}, l[2] = {0.f, 0.f};
+    const unsigned planes = v_exact ? 1 : 2;
+    const float scale2 = scale * 1.4426950408889634f;  // log2(e)
+    // tiles to visit: those with a key visible to some row of the block (as the early exit of attn_tree_tc)
+    unsigned maxlim = 0;
+    for (unsigned rr = 0; rr < TC_BM; rr++)
+        if (r0 + rr < rows) maxlim = max(maxlim, base_own + (r0 + rr) % U.q_len);
+    const unsigned ntiles = maxlim / TC_BN + 1;
+    // address of the chunk c8 of key j (and the offset of its lo plane); false past the last key
+    auto key_src = [&](unsigned j, unsigned c8, const __half *&ks, const __half *&vs, size_t &plane) {
+        if (j < U.np) {
+            size_t off = ((size_t)kvh * U.np + j) * ATT_HD + c8;
+            ks = pkh + off;
+            vs = pvh + off;
+            plane = nkv_past;
+            return true;
+        }
+        if (j < lk) {
+            unsigned jr = j - U.np, ri = 0;
+            while (jr >= U.r_len[ri]) jr -= U.r_len[ri++];
+            size_t off = ((size_t)kvh * T + U.r_off[ri] + jr) * ATT_HD + c8;
+            ks = khl + off;
+            vs = vhl + off;
+            plane = nkv_all;
+            return true;
+        }
+        ks = khl;
+        vs = vhl;
+        plane = 0;
+        return false;
+    };
+    // the tile at key j0 as one contiguous run of keys (in the prefix or in one range): its first key and lo plane
+    // offset; false when it crosses a boundary or the end (then every key is looked up)
+    auto tile_src = [&](unsigned j0, const __half *&kb, const __half *&vb, size_t &plane) {
+        if (j0 + TC_BN <= U.np) {
+            size_t off = ((size_t)kvh * U.np + j0) * ATT_HD;
+            kb = pkh + off;
+            vb = pvh + off;
+            plane = nkv_past;
+            return true;
+        }
+        if (j0 >= U.np) {
+            unsigned jr = j0 - U.np, ri = 0;
+            while (ri + 1 < U.nr && jr >= U.r_len[ri]) jr -= U.r_len[ri++];
+            if (jr + TC_BN <= U.r_len[ri]) {
+                size_t off = ((size_t)kvh * T + U.r_off[ri] + jr) * ATT_HD;
+                kb = khl + off;
+                vb = vhl + off;
+                plane = nkv_all;
+                return true;
+            }
+        }
+        return false;
+    };
+    // asynchronous copies of the tile at key j0 into a K or a V stage (32 keys x 16 chunks of 8 halves per plane)
+    auto load_k = [&](unsigned j0, unsigned st) {
+        __half *Kh = Kst + st * 2 * TC_BN * TC_LD, *Kl = Kh + TC_BN * TC_LD;
+        const __half *kb, *vb;
+        size_t tp;
+        const bool run = tile_src(j0, kb, vb, tp);
+        for (unsigned i = tid; i < TC_BN * (ATT_HD / 8); i += TC_THREADS) {
+            unsigned jj = i / (ATT_HD / 8), c8 = (i % (ATT_HD / 8)) * 8;
+            const __half *ks = kb + jj * ATT_HD + c8, *vs;
+            size_t plane = tp;
+            unsigned n = 16;
+            if (!run) n = key_src(j0 + jj, c8, ks, vs, plane) ? 16 : 0;
+            cp_async16(Kh + jj * TC_LD + c8, ks, n);
+            if (QK3) cp_async16(Kl + jj * TC_LD + c8, ks + plane, n);
+        }
+    };
+    auto load_v = [&](unsigned j0, unsigned st) {
+        __half *Vh = Vst + st * 2 * TC_BN * TC_LD, *Vl = Vh + TC_BN * TC_LD;
+        const __half *kb, *vb;
+        size_t tp;
+        const bool run = tile_src(j0, kb, vb, tp);
+        for (unsigned i = tid; i < TC_BN * (ATT_HD / 8); i += TC_THREADS) {
+            unsigned jj = i / (ATT_HD / 8), c8 = (i % (ATT_HD / 8)) * 8;
+            const __half *ks, *vs = vb + jj * ATT_HD + c8;
+            size_t plane = tp;
+            unsigned n = 16;
+            if (!run) n = key_src(j0 + jj, c8, ks, vs, plane) ? 16 : 0;
+            cp_async16(Vh + jj * TC_LD + c8, vs, n);
+            if (planes == 2) cp_async16(Vl + jj * TC_LD + c8, vs + plane, n);
+        }
+    };
+    // Pipeline: iteration t uses V_t and K_{t+1} while V_{t+1} and K_{t+2} are copied; the scores of tile t + 1
+    // (tensor cores) are computed next to the softmax and P V of tile t, so the two overlap. Each row does the same
+    // operations in the same order as attn_tree_tc.
+    float sc[TC_BN / 8][4];
+    load_k(0, 0);
+    load_v(0, 0);
+    cp_async_commit();
+    if (ntiles > 1) load_k(TC_BN, 1);
+    cp_async_commit();
+    cp_async_wait<1>();
+    __syncthreads();
+    {
+        const __half *Kh = Kst, *Kl = Kst + TC_BN * TC_LD;
+        // S = Q K^T: the warp's 16 rows x 32 keys (4 n8 tiles), dims in 8 steps of 16
+        float sn[TC_BN / 8][4];
+#pragma unroll
+        for (int nt = 0; nt < TC_BN / 8; nt++) sn[nt][0] = sn[nt][1] = sn[nt][2] = sn[nt][3] = 0.f;
+#pragma unroll
+        for (int ks = 0; ks < ATT_HD / 16; ks++) {
+            const unsigned *ah = qh[ks], *al = ql[ks];
+#pragma unroll
+            for (int np2 = 0; np2 < TC_BN / 16; np2++) {
+                // two n8 key tiles (2*np2, 2*np2+1) x two dim halves
+                const unsigned ko = (np2 * 16 + (lane % 8) + (lane / 16) * 8) * TC_LD + ks * 16 + ((lane / 8) % 2) * 8;
+                unsigned bh[4], bl[4];
+                ldsm4(bh, Kh + ko);
+                if (QK3) ldsm4(bl, Kl + ko);
+#pragma unroll
+                for (int h2 = 0; h2 < 2; h2++) {
+                    float *acc = sn[2 * np2 + h2];
+                    mma16816(acc, ah, bh + 2 * h2);
+                    if (QK3) {
+                        mma16816(acc, ah, bl + 2 * h2);
+                        mma16816(acc, al, bh + 2 * h2);
+                    }
+                }
+            }
+        }
+#pragma unroll
+        for (int nt = 0; nt < TC_BN / 8; nt++)
+#pragma unroll
+            for (int c = 0; c < 4; c++) sc[nt][c] = sn[nt][c];
+    }
+    for (unsigned t = 0; t < ntiles; t++) {
+        const unsigned j0 = t * TC_BN, st = t & 1;
+        __syncthreads();  // every warp is done with K stage st (tile t) and V stage st ^ 1 (tile t - 1)
+        if (t + 1 < ntiles) load_v(j0 + TC_BN, st ^ 1);
+        if (t + 2 < ntiles) load_k(j0 + 2 * TC_BN, st);
+        cp_async_commit();
+        cp_async_wait<1>();  // K_{t+1} and V_t have arrived
+        __syncthreads();
+        float sn[TC_BN / 8][4];
+        {
+            // also in the last iteration (on a stale stage, result unused): one basic block with the softmax, so
+            // the compiler can interleave the two
+            const __half *Kh = Kst + (st ^ 1) * 2 * TC_BN * TC_LD, *Kl = Kh + TC_BN * TC_LD;
+        // S = Q K^T: the warp's 16 rows x 32 keys (4 n8 tiles), dims in 8 steps of 16
+#pragma unroll
+        for (int nt = 0; nt < TC_BN / 8; nt++) sn[nt][0] = sn[nt][1] = sn[nt][2] = sn[nt][3] = 0.f;
+#pragma unroll
+        for (int ks = 0; ks < ATT_HD / 16; ks++) {
+            const unsigned *ah = qh[ks], *al = ql[ks];
+#pragma unroll
+            for (int np2 = 0; np2 < TC_BN / 16; np2++) {
+                // two n8 key tiles (2*np2, 2*np2+1) x two dim halves
+                const unsigned ko = (np2 * 16 + (lane % 8) + (lane / 16) * 8) * TC_LD + ks * 16 + ((lane / 8) % 2) * 8;
+                unsigned bh[4], bl[4];
+                ldsm4(bh, Kh + ko);
+                if (QK3) ldsm4(bl, Kl + ko);
+#pragma unroll
+                for (int h2 = 0; h2 < 2; h2++) {
+                    float *acc = sn[2 * np2 + h2];
+                    mma16816(acc, ah, bh + 2 * h2);
+                    if (QK3) {
+                        mma16816(acc, ah, bl + 2 * h2);
+                        mma16816(acc, al, bh + 2 * h2);
+                    }
+                }
+            }
+        }
+        }
+        const __half *Vh = Vst + st * 2 * TC_BN * TC_LD, *Vl = Vh + TC_BN * TC_LD;
+        // online softmax in base 2 (scores scaled by scale * log2(e)): element c of tile nt is row
+        // (c >> 1 ? g + 8 : g), key nt*8 + 2*t4 + (c & 1)
+        float p[TC_BN / 8][4];
+        // every key of the tile visible to every row of the warp: no mask (same values as with it)
+        const bool full = __all_sync(0xffffffffu, ok[0] && ok[1] && j0 + TC_BN - 1 <= min(lim[0], lim[1]));
+#pragma unroll
+        for (int a = 0; a < 2; a++) {
+            float mt = -INFINITY;
+            if (full) {
+#pragma unroll
+                for (int nt = 0; nt < TC_BN / 8; nt++)
+#pragma unroll
+                    for (int e = 0; e < 2; e++) {
+                        float x = sc[nt][2 * a + e] * scale2;
+                        p[nt][2 * a + e] = x;
+                        mt = fmaxf(mt, x);
+                    }
+            } else {
+#pragma unroll
+                for (int nt = 0; nt < TC_BN / 8; nt++)
+#pragma unroll
+                    for (int e = 0; e < 2; e++) {
+                        unsigned j = j0 + nt * 8 + 2 * t4 + e;
+                        float x = (ok[a] && j <= lim[a]) ? sc[nt][2 * a + e] * scale2 : -INFINITY;
+                        p[nt][2 * a + e] = x;
+                        mt = fmaxf(mt, x);
+                    }
+            }
+            mt = fmaxf(mt, __shfl_xor_sync(0xffffffffu, mt, 1));
+            mt = fmaxf(mt, __shfl_xor_sync(0xffffffffu, mt, 2));
+            float mn = fmaxf(m[a], mt);
+            float corr = m[a] == -INFINITY ? 0.f : ex2(m[a] - mn);
+            float rs = 0.f;
+#pragma unroll
+            for (int nt = 0; nt < TC_BN / 8; nt++)
+#pragma unroll
+                for (int e = 0; e < 2; e++) {
+                    float y = mn == -INFINITY ? 0.f : ex2(p[nt][2 * a + e] - mn);
+                    p[nt][2 * a + e] = y;
+                    rs += y;
+                }
+            rs += __shfl_xor_sync(0xffffffffu, rs, 1);
+            rs += __shfl_xor_sync(0xffffffffu, rs, 2);
+            l[a] = l[a] * corr + rs;
+            m[a] = mn;
+            if (corr != 1.f) {  // the running maximum changed (multiplying by 1 changes nothing)
+#pragma unroll
+                for (int dt = 0; dt < ATT_HD / 8; dt++) {
+                    o[dt][2 * a] *= corr;
+                    o[dt][2 * a + 1] *= corr;
+                }
+            }
+        }
+        // O += P V: P (16 x 32) as A in 2 k16 steps from the score fragments; V B-fragments via ldmatrix.trans
+#pragma unroll
+        for (int kk = 0; kk < TC_BN / 16; kk++) {
+            __half h[8], lo[8];
+            const float pv8[8] = {p[2 * kk][0], p[2 * kk][1], p[2 * kk][2], p[2 * kk][3],
+                                  p[2 * kk + 1][0], p[2 * kk + 1][1], p[2 * kk + 1][2], p[2 * kk + 1][3]};
+#pragma unroll
+            for (int e = 0; e < 8; e++) {
+                h[e] = __float2half_rn(pv8[e]);
+                lo[e] = __float2half_rn(pv8[e] - __half2float(h[e]));
+            }
+            unsigned ph[4] = {pack2(h[0], h[1]), pack2(h[2], h[3]), pack2(h[4], h[5]), pack2(h[6], h[7])};
+            unsigned pl[4] = {pack2(lo[0], lo[1]), pack2(lo[2], lo[3]), pack2(lo[4], lo[5]), pack2(lo[6], lo[7])};
+#pragma unroll
+            for (int dp = 0; dp < ATT_HD / 16; dp++) {
+                // two n8 dim tiles (2*dp, 2*dp+1) x two key halves
+                const unsigned vo = (kk * 16 + (lane % 8) + ((lane / 8) % 2) * 8) * TC_LD + dp * 16 + (lane / 16) * 8;
+                unsigned bh[4];
+                ldsm4t(bh, Vh + vo);
+#pragma unroll
+                for (int h2 = 0; h2 < 2; h2++) {
+                    mma16816(o[2 * dp + h2], ph, bh + 2 * h2);
+                    if (PL) mma16816(o[2 * dp + h2], pl, bh + 2 * h2);
+                }
+                if (planes == 2) {
+                    unsigned bl[4];
+                    ldsm4t(bl, Vl + vo);
+#pragma unroll
+                    for (int h2 = 0; h2 < 2; h2++) mma16816(o[2 * dp + h2], ph, bl + 2 * h2);
+                }
+            }
+        }
+#pragma unroll
+        for (int nt = 0; nt < TC_BN / 8; nt++)
+#pragma unroll
+            for (int c = 0; c < 4; c++) sc[nt][c] = sn[nt][c];
+    }
+    cp_async_wait<0>();
+#pragma unroll
+    for (int a = 0; a < 2; a++) {
+        unsigned r = r0 + rr2[a];
+        if (r >= rows) continue;
+        float inv = 1.0f / l[a];
+        float *dst = out + ((size_t)(kvh * rep + r / U.q_len) * T + U.q_off + r % U.q_len) * ATT_HD;
+#pragma unroll
+        for (int dt = 0; dt < ATT_HD / 8; dt++)
+            *reinterpret_cast<float2 *>(dst + dt * 8 + 2 * t4) = make_float2(o[dt][2 * a] * inv, o[dt][2 * a + 1] * inv);
+    }
+}
+
+
 #define ATTN_TC_ENTRY(name, qk3, pl)                                                                                 \
     extern "C" __global__ void __launch_bounds__(TC_THREADS)                                                       \
         name(const float *qkv, const __half *khl, const __half *vhl, float *out, TreeTable tab, unsigned T,          \
@@ -598,3 +943,11 @@ ATTN_TC_ENTRY(attn_tree_tc, true, true)
 ATTN_TC_ENTRY(attn_tree_tc_pv1, true, false)
 ATTN_TC_ENTRY(attn_tree_tc_qk1, false, true)
 ATTN_TC_ENTRY(attn_tree_tc_f16, false, false)
+
+#define ATTN_TC_PIPE_ENTRY(name, qk3, pl)                                                                            \
+    extern "C" __global__ void __launch_bounds__(TC_THREADS)                                                       \
+        name(const float *qkv, const __half *khl, const __half *vhl, float *out, TreeTable tab, unsigned T,          \
+             unsigned NH, unsigned NKV, float scale, unsigned v_exact) {                                           \
+        attn_tree_tc_pipe_body<qk3, pl>(qkv, khl, vhl, out, tab, T, NH, NKV, scale, v_exact);                      \
+    }
+ATTN_TC_PIPE_ENTRY(attn_tree_tc_pipe, true, true)

@@ -613,7 +613,9 @@ struct AttentionTree<'a> {
 
 /// Dynamic shared memory of attn_tree_tc: Q hi/lo [64][136], K hi/lo and V hi/lo [32][136] (f16).
 #[cfg(feature = "cuda")]
-const TC_SMEM: usize = 128 * 136 * 2; // one Q plane of 128 rows; the K / V tiles (4 x 32 x 136 x 2) reuse it
+// attn_tree_tc: one Q plane of 128 rows, then the K / V tiles (4 x 32 x 136 x 2) in the same memory;
+// attn_tree_tc_pipe: two stages of K and of V tiles (8 x 32 x 136 x 2)
+const TC_SMEM: usize = 8 * 32 * 136 * 2;
 
 #[cfg(feature = "cuda")]
 impl CustomOp3 for AttentionTree<'_> {
@@ -741,6 +743,7 @@ pub fn tc_kernel() -> &'static str {
         Ok("tc-pv1") => "attn_tree_tc_pv1",
         Ok("tc-qk1") => "attn_tree_tc_qk1",
         Ok("tc-f16") => "attn_tree_tc_f16",
+        Ok("tc-pipe") => "attn_tree_tc_pipe",
         _ => "attn_tree_tc",
     })
 }
