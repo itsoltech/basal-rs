@@ -1,0 +1,39 @@
+basal-rs
+Copyright 2026 basal-rs contributors
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This project reimplements in Rust the inference protocol of basal
+(https://github.com/rkinas/basal, Copyright 2026 Remigiusz Kinas, Apache License 2.0) and ports parts of it:
+the prompt format and letter readout (basal/prompt.py), the System One request handling and answer semantics
+including multi and act (basal/server.py), facts injection (basal/facts.py -> crates/basal-core/src/facts.rs),
+evidence spans (basal/evidence.py -> crates/basal-core/src/evidence.rs) and shared-prefix packing (basal/engine.py).
+Reference requests in tools/reference include examples from basal/examples.
+
+The basal model weights (Remek/basal-1.0-*, Remek/basal-1.5-*) are not part of this repository; they are released by
+their author under the Apache License 2.0.
+
+The NOTICE file of basal (v1.5.0) follows.
+
+--------------------------------------------------------------------------------
+
+basal
+Copyright 2026 Remigiusz Kinas
+
+This product includes models fine-tuned from the following works, licensed under the Apache License, Version 2.0:
+
+  basal-1.5-4.5B  <- speakleash/Bielik-4.5B-v3.0-Instruct  (https://huggingface.co/speakleash/Bielik-4.5B-v3.0-Instruct)
+  basal-1.5-max   <- speakleash/Bielik-PL-11B-v3.0-Instruct  (https://huggingface.co/speakleash/Bielik-PL-11B-v3.0-Instruct)
+  basal-1.5-mini  <- speakleash/Bielik-1.5B-v3.0-Instruct  (https://huggingface.co/speakleash/Bielik-1.5B-v3.0-Instruct)
+  basal-1.0-4.5B  <- speakleash/Bielik-4.5B-v3.0-Instruct  (https://huggingface.co/speakleash/Bielik-4.5B-v3.0-Instruct)
+  basal-1.0-1.5B  <- speakleash/Bielik-1.5B-v3.0-Instruct  (https://huggingface.co/speakleash/Bielik-1.5B-v3.0-Instruct)
+
+The inference engine in this repository is original work licensed under the Apache License, Version 2.0.
+
+Training data attribution (basal-1.0 models):
+  English decision items in the training data were converted from the public corpus
+  avbiswas/bev-decision-150K (https://huggingface.co/datasets/avbiswas/bev-decision-150K), which aggregates questions
+  derived from many upstream sources. Its maintainers ask users to check and attribute those upstream sources; row-level
+  source identifiers are not available, so the upstream sources of these items are not documented individually.
+
+basal-1.5 models: released under the Apache License, Version 2.0.
