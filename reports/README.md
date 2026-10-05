@@ -9,6 +9,9 @@ Metodyka: [docs/BENCHMARKS.md](../docs/BENCHMARKS.md).
 |---|---|
 | [rust-cuda-1.5-max](rust-cuda-1.5-max/README.md) | zgodność z FP32 upstream, pojedyncza decyzja, długie stany, serwer HTTP, współbieżność, tabele GEMM |
 | [rust-cuda-1.5-max/mixed-load](rust-cuda-1.5-max/mixed-load/README.md) | ruch mieszany, Rust a upstream, warianty harmonogramu |
+| [rust-cuda-1.5-max/profile-floor](rust-cuda-1.5-max/profile-floor/README.md) | rozkład czasu forwardu: GEMM, attention, reszta |
+| [rust-cuda-1.5-max/attn-precision](rust-cuda-1.5-max/attn-precision/README.md) | attention na tensor cores: warianty precyzji, organizacja kernela |
+| [rust-cuda-1.5-max/gemm-retune](rust-cuda-1.5-max/gemm-retune/README.md) | tabela GEMM niezależna od partii dobrana na M 128–16384 |
 | [baseline-cuda-1.5-max](baseline-cuda-1.5-max/README.md) | upstream v1.5.0 na tej samej karcie |
 | `reference-1.5-max-fp32`, `-cases`, `-cases2` | referencja upstream FP32: 44 przykłady basal-bench, żądania System One z `multi`, `act`, `facts`, `evidence` |
 

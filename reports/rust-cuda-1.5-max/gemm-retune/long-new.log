@@ -1,0 +1,13 @@
+basal: basal-1.5-max loaded on the GPU in 24.4s
+basal: 32 GEMM classes from reports/rust-cuda-1.5-max/gemm-retune/gemm-algos-f16-invariant-ladder.json
+basal: template prefixes precomputed ([53, 66] tokens)
+"long-1000-q1" q=1 median 287.9 ms
+"long-1000-q5" q=5 median 439.5 ms
+"long-2000-q1" q=1 median 582.9 ms
+"long-2000-q5" q=5 median 759.0 ms
+"long-4000-q1" q=1 median 1200.9 ms
+"long-4000-q5" q=5 median 1438.9 ms
+"long-8000-q1" q=1 median 2763.2 ms
+"long-8000-q5" q=5 median 3060.1 ms
+"long-16000-q1" q=1 median 6785.6 ms
+"long-16000-q5" q=5 median 7315.9 ms

@@ -1,0 +1,5 @@
+gemm-search invariant n=6144 k=4096: 36 candidates, slowdown vs best per class: mean 1.210, max 2.141
+gemm-search invariant n=4096 k=4096: 38 candidates, slowdown vs best per class: mean 1.233, max 2.059
+gemm-search invariant n=28672 k=4096: 30 candidates, slowdown vs best per class: mean 1.233, max 2.120
+gemm-search invariant n=4096 k=14336: 38 candidates, slowdown vs best per class: mean 1.624, max 3.054
+SEARCH-DONE

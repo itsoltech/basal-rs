@@ -1,0 +1,14 @@
+tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.16519908374023373; max TV avg 0.002035177147754485
+tokens: 8 mismatches; bench argmax avg "0/0", cal "0/0"; max |logit diff| null; max TV avg null
+tc done
+tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.33894308374023296; max TV avg 0.0014708428644616437
+tokens: 8 mismatches; bench argmax avg "0/0", cal "0/0"; max |logit diff| null; max TV avg null
+tc-pv1 done
+tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.22581108374023273; max TV avg 0.0066216890171408305
+tokens: 8 mismatches; bench argmax avg "0/0", cal "0/0"; max |logit diff| null; max TV avg null
+tc-qk1 done
+tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.314857083740236; max TV avg 0.010180253205145984
+tokens: 8 mismatches; bench argmax avg "0/0", cal "0/0"; max |logit diff| null; max TV avg null
+tc-f16 done
+tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.0; max TV avg 0.0
+PRECISION-DONE

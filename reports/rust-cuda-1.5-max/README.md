@@ -163,6 +163,18 @@ harmonogram z drugim torem dla długich żądań: [mixed-load/](mixed-load/READM
 Sekwencyjnie Rust 1,74 żądania/s, upstream 0,29; z dwoma torami żądania krótkie
 i do ~2k tokenów mają p95 poniżej 1,8 s przy napływie do 1,6 żądania/s.
 
+## Dalsze optymalizacje
+
+- [profile-floor](profile-floor/README.md): GEMM to ~81% czasu krótkiego
+  pytania, attention 61% przy stanie 16k; GPU bezczynne 0,4–1,8% forwardu.
+- [attn-precision](attn-precision/README.md): pojedyncze MMA zamiast hi/lo
+  daje tylko ~11% przy 16k kosztem dwukrotnie większego błędu, więc
+  domyślnie zostaje hi/lo; fragmenty Q w rejestrach i 32 tokeny zapytań na
+  blok skracają 16k o ~7% przy bitowo tych samych wynikach.
+- [gemm-retune](gemm-retune/README.md): tabela GEMM dobrana na M 128–16384
+  daje ~6% więcej żądań/s pod obciążeniem i ~6% mniej energii na decyzję,
+  pojedyncza decyzja w basal-bench wolniejsza o ~5%.
+
 ## Ograniczenia
 
 - Pomiary przy limicie 250 W; przy 300 W oba runtime'y byłyby szybsze, czego

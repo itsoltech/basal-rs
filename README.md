@@ -73,7 +73,7 @@ tokenizer; niezgodność z obsługiwanym kontraktem promptu kończy się błęde
 
 ```sh
 ./target/release/basal serve --model .models/basal-1.5-max \
-  --gemm-table reports/rust-cuda-1.5-max/gemm/gemm-algos-f16-invariant.json \
+  --gemm-table reports/rust-cuda-1.5-max/gemm-retune/gemm-algos-f16-invariant-ladder.json \
   --addr 0.0.0.0:8000
 ```
 
@@ -112,9 +112,14 @@ Najważniejsze opcje `basal serve`:
 | `--state-cache-mb` | 0 | cache K/V stanu między żądaniami |
 | `--max-inflight` | 1024 | limit żądań w kolejce i w trakcie; nadmiar dostaje 503 |
 
-Tabela GEMM w repozytorium jest dla RTX 6000 Ada i cuBLASLt 12.9.1; dla innej
+Tabele GEMM w repozytorium są dla RTX 6000 Ada i cuBLASLt 12.9.1:
+`gemm-retune/gemm-algos-f16-invariant-ladder.json` (~6% więcej żądań/s pod
+obciążeniem i przy długich stanach) i `gemm/gemm-algos-f16-invariant.json`
+(o kilka ms szybsza pojedyncza decyzja bez kolejki,
+[porównanie](reports/rust-cuda-1.5-max/gemm-retune/README.md)). Dla innej
 karty lub wersji trzeba ją wygenerować (`basal gemm-search --model ...
---invariant --out gemm.json`). Bez tabeli algorytmy są dobierane przy
+--invariant --m-classes 128,256,512,1024,2048,4096,8192,16384 --out
+gemm.json`). Bez tabeli algorytmy są dobierane przy
 pierwszym użyciu.
 
 ## Polecenia
