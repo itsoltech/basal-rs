@@ -1,0 +1,146 @@
+# Architektura
+
+## Przegląd
+
+```text
+HTTP (axum, tokio)
+  -> wątek GPU: walidacja i plan żądania (prompty, tokeny), kolejka, partie
+       -> Engine::run_plans: wiersze-drzewa wspólnych prefiksów
+            -> Backend::letter_logits: forward Llama, logity liter
+       -> uśrednienie porządków, kalibracja, odpowiedź System One
+```
+
+| Crate | Odpowiedzialność |
+|---|---|
+| `basal-core` | kontrakt żądań (`request.rs`), prompt (`prompt.rs`), tokenizer i litery (`tokenize.rs`), JSON jak `json.dumps` Pythona (`pyjson.rs`), pakowanie (`pack.rs`), decyzje i confidence (`decision.rs`), `facts.rs`, `evidence.rs`, Choice 11–255 (`large_choice.rs`), silnik i trait `Backend` (`engine.rs`), współdzielenie GPU przez dwa silniki (`gate.rs`) |
+| `basal-gpu` | loader safetensors, forward Llama na candle 0.11, fuzje (`fused.rs`, kernele `kernels.cu` i `kernels.metal`), GEMM przez cuBLASLt (`cublaslt.rs`) lub port GEMM MLX (`gemm.rs`, Metal), głowica `evidence_head.pt` |
+| `basal-cli` | polecenie `basal`, serwer (`serve.rs`), eksport i porównania z referencją, pomiary |
+
+## Kontrakt promptu
+
+Prompt, szablon czatu, heurystyka języka (polskie znaki), serializacja stanu,
+kolejność opcji i litery odtwarzają upstream (`prompt.py`, `server.py`).
+Manifest przy ładowaniu porównuje `config.json`, szablony z `basal.json` i
+`chat_template.jinja`; inny kontrakt kończy się błędem.
+
+Tokenizer: transformers 5 buduje pre-tokenizer jako
+`Metaspace(prepend_scheme="first")`, a `tokenizer.json` zawiera `"always"`.
+Runtime stosuje `"first"` jak upstream i wyłącza obcinanie oraz padding z
+`tokenizer.json` (obcinanie do 1536 tokenów zmieniałoby prompty długich
+stanów).
+
+Każde pytanie to dwa prompty z opcjami w dwóch porządkach. Z logitów liter
+liczymy softmax osobno dla każdego porządku, odwracamy permutację, uśredniamy
+i stosujemy temperaturę typu pytania:
+
+```text
+p = (softmax(l_forward) + unpermute(softmax(l_reverse))) / 2
+p_cal = softmax(log(max(p, 1e-12)) / T_type)
+```
+
+## Pakowanie
+
+Prompty partii są pakowane w wiersze-drzewa: skompresowane trie wszystkich
+promptów wiersza (jak `_pack` upstream 1.5), spłaszczone w głąb. Każdy
+wspólny prefiks liczy się raz: szablon, stan wspólny dla wszystkich pytań o
+niego (także z różnych żądań jednej partii), treść pytania wspólna dla obu
+porządków. Identyczne prompty mają jeden odczyt. Pozycje RoPE to indeksy
+tokenów w ich własnych promptach, a token widzi wcześniejsze tokeny swojego
+bloku i bloków przodków, co jest równoważne osobnym forwardom pełnych
+promptów. Głębokość drzewa jest ograniczona do 8 bloków; poniżej prompty
+dostają osobne bloki.
+
+Wiersz ma do 32768 tokenów, forward do 8192 (wiersze dłuższe liczą się
+osobno). Pytania o ten sam stan trafiają obok siebie.
+
+Stały prefiks promptu (szablon do stanu, 53 tokeny PL i 66 EN) jest liczony
+raz przy starcie. Opcjonalny cache stanu (`--state-cache-mb`) przechowuje K/V
+szablonu ze stanem dla kolejnych żądań o ten sam stan (LRU z budżetem
+pamięci). Oba działają tylko przy dokładnej zgodności token IDs.
+
+## Forward
+
+Model Llama z biasami lub bez (basal-1.0 ma biasy, basal-1.5 nie). Domyślna
+precyzja to f16: wagi bf16 konwertowane przy ładowaniu, strumień residualny,
+normy i MLP w f16, akumulacja GEMM w f32. Precyzja `f32` trzyma wagi bf16 i
+rozszerza je przed użyciem (dokładny forward FP32, punkt odniesienia).
+
+- GEMM, normy i MLP działają na zwartej liście tokenów całej partii, bez
+  paddingu.
+- Projekcje q/k/v oraz gate/up to pojedyncze GEMM; bias, RoPE i podział głów,
+  bias+SiLU·up oraz bias+residual to własne kernele.
+- Attention w f32 po jednostkach drzewa: zapytania jednego bloku i klucze
+  jego przodków oraz własnego bloku, kafelkowane według pozycji klucza w
+  prompcie. CUDA: `attn_tree_tc` na tensor cores (mma.sync, operandy f16
+  rozbite na część wysoką i niską, czyli dokładność bliska f32) dla f16/bf16,
+  `attn_tree_f32` dla ścieżki f32. Metal: SDPA w f32 z maską.
+- W ostatniej warstwie o_proj i MLP liczą się tylko dla pozycji odczytu, a
+  logity tylko dla wierszy `lm_head` odpowiadających literom, w f32.
+- CUDA GEMM przez cuBLASLt z tabelą algorytmów z pełnego przeszukania
+  (`basal gemm-search`): algorytm, kafelek, liczba etapów, split-K z
+  redukcją f32, swizzle; bez tabeli najszybszy z 16 algorytmów heurystyki
+  mierzony przy pierwszym użyciu.
+
+### Niezależność od partii
+
+Z tabelą `--invariant` (jeden algorytm bez split-K na kształt wag, dla każdej
+liczby wierszy), attention kafelkowanym według pozycji klucza i odczytem liter
+własnym kernelem wynik pytania jest bitowo ten sam pojedynczo, w dowolnej
+partii, w drzewie z innymi pytaniami i z cache prefiksu. Odpowiedź serwera nie
+zależy więc od ruchu w tej samej chwili.
+
+## Rozszerzenia basal-1.5
+
+- `multi`: osobne pytanie tak/nie dla każdej etykiety, temperatura `noul`;
+  gałęzie idą do tego samego drzewa co reszta żądania.
+- `act`: odczyt jak `noul` lub `choice`, potem akcja o najmniejszym
+  oczekiwanym koszcie; `max_error` porównuje confidence z certyfikowanym
+  progiem z `CALIBRATION.json` i w razie potrzeby wybiera odroczenie.
+- `facts: "auto"`: port `facts.py` (fakty wyliczone z dat i kwot w stanie,
+  dopisane do stanu), wynik zgodny co do bajtu.
+- `evidence`: osobny forward promptu w oryginalnej kolejności opcji i głowica
+  `evidence_head.pt` (f32) na stanach tokenów stanu; do 3 nienakładających się
+  fragmentów do 80 tokenów z offsetami znakowymi.
+
+## Choice 11–255
+
+Opcje dzielone są dwa razy na `ceil(n/10)` grup: blokami i cyklicznie, więc
+każda opcja jest w dwóch grupach, a graf grup jest spójny. Każda grupa to
+zwykłe pytanie basal (oba porządki, jedno drzewo ze wspólnym stanem). Wspólny
+rozkład to model Luce `softmax(theta)` dopasowany metodą największej
+wiarygodności do rozkładów grup, uzupełniony rundą finałową z 10 najlepszymi
+opcjami. To przybliżenie (model nie widzi wszystkich opcji naraz); ocena w
+[reports/large-choice](../reports/large-choice/README.md).
+
+## Serwer
+
+Handlery HTTP (tokio) przekazują żądania do wątku właściciela GPU. Wątek
+tokenizuje i planuje każde żądanie przy przyjściu (błędy walidacji wracają
+od razu), szacuje jego koszt liczbą tokenów po współdzieleniu prefiksów i
+układa kolejkę:
+
+- `hrrn` (domyślnie): najwyższy stosunek (czekanie + szacowany czas) /
+  szacowany czas; krótkie żądania wyprzedzają długie, a długie awansują z
+  czasem oczekiwania.
+- `fifo`: kolejność przyjścia.
+
+Partia to pierwsze żądanie z kolejki i każde następne, które mieści się w
+`--max-batch-tokens`; pytania wszystkich żądań partii dzielą forwardy.
+Żądania porzucone przez klienta są pomijane, a ponad `--max-inflight` żądań
+w toku dostaje 503.
+
+Żądania powyżej `--long-tokens` liczy drugi tor: drugi silnik na tym samym
+GPU, ze wspólnymi wagami, tabelą GEMM i prefiksami szablonu. Oba tory
+korzystają z GPU na zmianę (`basal_core::gate`): tor długich żądań po każdej
+warstwie czeka na zakończenie swoich kerneli i oddaje GPU, gdy główny tor ma
+partię, a on sam pracował co najmniej `--long-slice-ms`. Po jednej partii
+głównego toru wraca do tej samej warstwy. Zatrzymany forward kontynuuje z tymi
+samymi tensorami, więc wyniki nie zależą od toru ani przerw. Krótkie żądania
+nie czekają w ten sposób na kilkusekundowy forward długiego dokumentu.
+
+## Ograniczenia
+
+- Score powyżej 10 poziomów i pytania z jedną opcją kończą się jawnym błędem.
+- Tabela GEMM jest specyficzna dla karty i wersji cuBLASLt.
+- Metal sprawdzony tylko z basal-1.0-4.5B (basal-1.5-max wymaga ~23 GB na
+  same wagi).
