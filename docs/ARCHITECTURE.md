@@ -83,8 +83,8 @@ rozszerza je przed użyciem (dokładny forward FP32, punkt odniesienia).
 
 ### Niezależność od partii
 
-Z tabelą `--invariant` (jeden algorytm bez split-K na kształt wag, dla każdej
-liczby wierszy), attention kafelkowanym według pozycji klucza i odczytem liter
+Z tabelą `--invariant` (dla każdego kształtu wag algorytmy bez split-K z
+jednej grupy dającej bitowo te same wyniki, najszybszy w każdej klasie M), attention kafelkowanym według pozycji klucza i odczytem liter
 własnym kernelem wynik pytania jest bitowo ten sam pojedynczo, w dowolnej
 partii, w drzewie z innymi pytaniami i z cache prefiksu. Odpowiedź serwera nie
 zależy więc od ruchu w tej samej chwili.

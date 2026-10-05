@@ -29,15 +29,20 @@ karcie. Szczegóły i dane:
 
 | Pomiar | Upstream | basal-rs |
 |---|---:|---:|
-| Pojedyncza decyzja (basal-bench, mediana) | 90,7 ms | 59,1–59,7 ms |
-| Jedno pytanie przez HTTP, p50 | 118 ms | 66 ms |
-| Jedno pytanie przez HTTP, 32 klientów | 6,8 żądania/s | 16,1 żądania/s |
-| Dokument 16k tokenów, 5 pytań | 49,1 s | 7,9 s |
-| Ruch mieszany (stany 0,1–16k tokenów, 1–14 pytań) | 17 żądań/min | 104 żądania/min |
+| Pojedyncza decyzja (basal-bench, mediana) | 90,7 ms | 63,4–64,0 ms |
+| Jedno pytanie przez HTTP, p50 | 118 ms | 73 ms |
+| Jedno pytanie przez HTTP, 32 klientów | 6,8 żądania/s | 21,1–21,2 żądania/s |
+| Dokument 16k tokenów, 5 pytań | 49,1 s | 6,4 s |
+| Ruch mieszany (stany 0,1–16k tokenów, 1–14 pytań)¹ | 17 żądań/min | 104 żądania/min |
+
+¹ Zmierzone przed zmianami tabeli GEMM i kernela attention z
+[gemm-equiv](reports/rust-cuda-1.5-max/gemm-equiv/README.md) i
+[attn-kernel](reports/rust-cuda-1.5-max/attn-kernel/README.md).
 
 Zgodność z upstream FP32 na 44 przykładach basal-bench: te same decyzje
-44/44; maksymalna różnica logitu 1,3·10⁻⁴ dla ścieżki FP32 i 0,165 dla
-domyślnej FP16. `multi`, `act`, `facts` i `evidence` dają te same pola
+44/44; maksymalna różnica logitu 1,3·10⁻⁴ dla ścieżki FP32 i 0,27 dla
+domyślnej FP16 (mediana 0,013, maks. różnica prawdopodobieństwa po
+kalibracji 0,0008). `multi`, `act`, `facts` i `evidence` dają te same pola
 odpowiedzi co upstream; `facts` jest zgodne co do bajtu na 432 stanach.
 Wynik pytania nie zależy od tego, z czym trafi do partii (bitowo te same
 logity pojedynczo, w partii i pod obciążeniem HTTP).
@@ -73,7 +78,7 @@ tokenizer; niezgodność z obsługiwanym kontraktem promptu kończy się błęde
 
 ```sh
 ./target/release/basal serve --model .models/basal-1.5-max \
-  --gemm-table reports/rust-cuda-1.5-max/gemm-retune/gemm-algos-f16-invariant-ladder.json \
+  --gemm-table reports/rust-cuda-1.5-max/gemm-equiv/gemm-algos-f16-invariant-groups.json \
   --addr 0.0.0.0:8000
 ```
 
@@ -112,14 +117,13 @@ Najważniejsze opcje `basal serve`:
 | `--state-cache-mb` | 0 | cache K/V stanu między żądaniami |
 | `--max-inflight` | 1024 | limit żądań w kolejce i w trakcie; nadmiar dostaje 503 |
 
-Tabele GEMM w repozytorium są dla RTX 6000 Ada i cuBLASLt 12.9.1:
-`gemm-retune/gemm-algos-f16-invariant-ladder.json` (~6% więcej żądań/s pod
-obciążeniem i przy długich stanach) i `gemm/gemm-algos-f16-invariant.json`
-(o kilka ms szybsza pojedyncza decyzja bez kolejki,
-[porównanie](reports/rust-cuda-1.5-max/gemm-retune/README.md)). Dla innej
-karty lub wersji trzeba ją wygenerować (`basal gemm-search --model ...
---invariant --m-classes 128,256,512,1024,2048,4096,8192,16384 --out
-gemm.json`). Bez tabeli algorytmy są dobierane przy
+Tabela GEMM w repozytorium (`gemm-equiv/gemm-algos-f16-invariant-groups.json`)
+jest dla RTX 6000 Ada i cuBLASLt 12.9.1: dla każdej klasy M najszybszy
+algorytm z grupy algorytmów dających bitowo te same wyniki
+([pomiar](reports/rust-cuda-1.5-max/gemm-equiv/README.md)). Dla innej karty
+lub wersji trzeba ją wygenerować (`basal gemm-search --model ... --invariant
+--m-classes 16,32,48,64,96,128,160,192,224,256,320,384,448,512,640,768,1024,1536,2048,3072,4096,6144,8192,12288,16384
+--out gemm.json`). Bez tabeli algorytmy są dobierane przy
 pierwszym użyciu.
 
 ## Polecenia

@@ -174,6 +174,13 @@ i do ~2k tokenów mają p95 poniżej 1,8 s przy napływie do 1,6 żądania/s.
 - [gemm-retune](gemm-retune/README.md): tabela GEMM dobrana na M 128–16384
   daje ~6% więcej żądań/s pod obciążeniem i ~6% mniej energii na decyzję,
   pojedyncza decyzja w basal-bench wolniejsza o ~5%.
+- [attn-kernel](attn-kernel/README.md): softmax przy podstawie 2 (~3% przy
+  16k); potokowanie w stylu FlashAttention-3 bez zysku pod limitem mocy.
+- [gemm-equiv](gemm-equiv/README.md): algorytmy GEMM o bitowo identycznych
+  wynikach tworzą grupy, więc tabela niezależna od partii może mieć
+  najszybszy algorytm dla każdej klasy M: pod obciążeniem +13% żądań/s,
+  −12% energii na decyzję, długie stany 9–12% szybciej, pojedyncza decyzja
+  bez kolejki 2–6% wolniej.
 
 ## Ograniczenia
 

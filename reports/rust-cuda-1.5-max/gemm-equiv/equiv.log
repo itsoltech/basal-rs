@@ -1,0 +1,16 @@
+equivalence n=6144 k=4096: 38 candidates, 2 groups; best single algorithm 1.114
+  group of 25: best member per class 1.002
+  group of 13: best member per class 1.110
+gemm-search invariant n=6144 k=4096: 38 candidates, slowdown vs best per class: mean 1.120, max 1.289
+equivalence n=4096 k=4096: 38 candidates, 2 groups; best single algorithm 1.137
+  group of 28: best member per class 1.000
+  group of 10: best member per class 1.140
+gemm-search invariant n=4096 k=4096: 38 candidates, slowdown vs best per class: mean 1.159, max 1.813
+equivalence n=28672 k=4096: 32 candidates, 2 groups; best single algorithm 1.101
+  group of 21: best member per class 1.008
+  group of 11: best member per class 1.301
+gemm-search invariant n=28672 k=4096: 32 candidates, slowdown vs best per class: mean 1.103, max 1.207
+equivalence n=4096 k=14336: 42 candidates, 2 groups; best single algorithm 1.236
+  group of 29: best member per class 1.000
+  group of 13: best member per class 1.223
+gemm-search invariant n=4096 k=14336: 42 candidates, slowdown vs best per class: mean 1.261, max 1.690

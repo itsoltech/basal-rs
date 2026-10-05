@@ -81,7 +81,7 @@ pub struct Lt {
     pub from_table: Mutex<usize>,
     /// Batch-invariant mode: one algorithm per (N, K, dtype) for every M, without split-K, so that a row's result
     /// does not depend on the other rows of the call. A shape listed here never uses another algorithm.
-    invariant: Mutex<HashMap<(usize, usize, DType), sys::cublasLtMatmulAlgo_t>>,
+    invariant: Mutex<HashMap<(usize, usize, DType), Vec<(usize, sys::cublasLtMatmulAlgo_t)>>>,
 }
 
 // SAFETY: the handle and descriptors are only used under the plan/algo locks on candle's single stream.
@@ -122,16 +122,15 @@ impl Lt {
         })
     }
 
-    /// Batch-invariant table: the one algorithm of each (N, K, dtype).
+    /// Batch-invariant table: for each (N, K, dtype) the algorithms of its M classes, all of them giving bitwise the
+    /// same results (one algorithm for every class in tables written before the grouping).
     pub fn load_invariant(&self, entries: &[Tuned]) -> Result<()> {
         let mut inv = self.invariant.lock().unwrap();
         for e in entries {
-            let a = sys::cublasLtMatmulAlgo_t { data: e.algo };
-            if let Some(prev) = inv.insert((e.n, e.k, e.dtype), a) {
-                if prev.data != e.algo {
-                    candle_core::bail!("invariant table: two algorithms for n={} k={}", e.n, e.k);
-                }
-            }
+            let list = inv.entry((e.n, e.k, e.dtype)).or_default();
+            list.push((e.m_class, sys::cublasLtMatmulAlgo_t { data: e.algo }));
+            list.sort_by_key(|(c, _)| *c);
+            list.dedup_by_key(|(c, _)| *c);
         }
         *self.from_table.lock().unwrap() += entries.len();
         Ok(())
@@ -193,7 +192,7 @@ impl Lt {
         y: u64,
         classes: &[usize],
         stream: &candle_core::cuda_backend::cudarc::driver::CudaStream,
-    ) -> Result<(sys::cublasLtMatmulAlgo_t, Vec<(f64, f64)>, usize)> {
+    ) -> Result<(Vec<(sys::cublasLtMatmulAlgo_t, f64, f64)>, usize)> {
         let mut cands: Vec<sys::cublasLtMatmulAlgo_t> = Vec::new();
         for m in [64, 128, 192, 256, 384, 512, 1024, 2048, 4096, 8192, 16384] {
             if !classes.contains(&m) {
@@ -218,21 +217,99 @@ impl Lt {
         }
         let best: Vec<f64> =
             (0..classes.len()).map(|ci| times.iter().map(|t| t[ci]).fold(f64::INFINITY, f64::min)).collect();
-        // geometric mean of the slowdown against the best algorithm of each class: every class (a typical forward
-        // size of the ladder) weighs the same, small forwards are not traded for large ones
-        let score =
-            |t: &Vec<f64>| (t.iter().zip(&best).map(|(a, b)| (a / b).ln()).sum::<f64>() / best.len() as f64).exp();
-        let (ai, _) = times
-            .iter()
-            .enumerate()
-            .map(|(i, t)| (i, score(t)))
-            .filter(|(_, s)| s.is_finite())
-            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
-            .ok_or_else(|| {
-                candle_core::Error::Msg(format!("no batch-invariant algorithm valid for every M (n={n} k={k})"))
-            })?;
-        let per_class = times[ai].iter().zip(&best).map(|(&a, &b)| (a, b)).collect();
-        Ok((cands[ai], per_class, cands.len()))
+        // groups of candidates with bitwise identical outputs; the group with the smallest geometric-mean slowdown
+        // of its fastest member per class (every class weighs the same) gives one algorithm per class
+        let group = self.equivalence_groups(n, k, dt, w, x, y, classes, &cands, stream)?;
+        let geo = |f: &dyn Fn(usize) -> f64| {
+            ((0..classes.len()).map(|ci| (f(ci) / best[ci]).ln()).sum::<f64>() / classes.len() as f64).exp()
+        };
+        let mut roots: Vec<usize> = group.clone();
+        roots.sort();
+        roots.dedup();
+        let fastest = |r: usize, ci: usize| {
+            (0..cands.len()).filter(|&ai| group[ai] == r).min_by(|&a, &b| times[a][ci].total_cmp(&times[b][ci]))
+        };
+        let scored: Vec<(usize, f64)> =
+            roots.iter().map(|&r| (r, geo(&|ci| fastest(r, ci).map_or(f64::INFINITY, |ai| times[ai][ci])))).collect();
+        if std::env::var("BASAL_GEMM_EQUIV").is_ok() {
+            let single = (0..cands.len()).map(|ai| geo(&|ci| times[ai][ci])).fold(f64::INFINITY, f64::min);
+            eprintln!(
+                "equivalence n={n} k={k}: {} candidates, {} groups; best single algorithm {single:.3}",
+                cands.len(),
+                roots.len()
+            );
+            for &(r, sc) in &scored {
+                eprintln!("  group of {:2}: best member per class {sc:.3}", group.iter().filter(|&&g| g == r).count());
+            }
+        }
+        let (root, _) =
+            scored.iter().copied().filter(|(_, sc)| sc.is_finite()).min_by(|a, b| a.1.total_cmp(&b.1)).ok_or_else(
+                || candle_core::Error::Msg(format!("no batch-invariant group valid for every M (n={n} k={k})")),
+            )?;
+        let per_class = (0..classes.len())
+            .map(|ci| {
+                let ai = fastest(root, ci).unwrap();
+                (cands[ai], times[ai][ci], best[ci])
+            })
+            .collect();
+        Ok((per_class, cands.len()))
+    }
+
+    /// Groups of candidates whose outputs are bitwise identical on the same operands at every class (where both are
+    /// valid): the group id of each candidate. Candidates without split-K or sliced K reduce over K in the same
+    /// order and fall into one group.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn equivalence_groups(
+        &self,
+        n: usize,
+        k: usize,
+        dt: DType,
+        w: u64,
+        x: u64,
+        y: u64,
+        classes: &[usize],
+        cands: &[sys::cublasLtMatmulAlgo_t],
+        stream: &candle_core::cuda_backend::cudarc::driver::CudaStream,
+    ) -> Result<Vec<usize>> {
+        use candle_core::cuda_backend::cudarc::driver::sys as drv;
+        let mut sig: Vec<Vec<Option<u64>>> = vec![Vec::new(); cands.len()];
+        for &m in classes {
+            let p = self.plan_cached(m, n, k, dt)?;
+            let bytes = m * n * dt.size_in_bytes();
+            let mut host = vec![0u8; bytes];
+            for (ai, a) in cands.iter().enumerate() {
+                if !self.check(&p, a) {
+                    sig[ai].push(None);
+                    continue;
+                }
+                self.run(&p, a, w, x, y, stream)?;
+                stream.synchronize().w()?;
+                let r = drv::cuMemcpyDtoH_v2(host.as_mut_ptr() as *mut c_void, y, bytes);
+                if r != drv::CUresult::CUDA_SUCCESS {
+                    candle_core::bail!("cuBLASLt equivalence: copy failed {r:?}");
+                }
+                let mut h: u64 = 0xcbf29ce484222325;
+                for c in host.chunks(8) {
+                    let mut v = [0u8; 8];
+                    v[..c.len()].copy_from_slice(c);
+                    h = (h ^ u64::from_le_bytes(v)).wrapping_mul(0x100000001b3);
+                }
+                sig[ai].push(Some(h));
+            }
+        }
+        let mut group: Vec<usize> = (0..cands.len()).collect();
+        for i in 0..cands.len() {
+            for j in 0..i {
+                if group[j] == j
+                    && sig[i].iter().zip(&sig[j]).all(|(a, b)| a.is_none() || b.is_none() || a == b)
+                    && sig[i].iter().zip(&sig[j]).any(|(a, b)| a.is_some() && b.is_some())
+                {
+                    group[i] = j;
+                    break;
+                }
+            }
+        }
+        Ok(group)
     }
 
     /// Use the algorithms of a search table for their classes.
@@ -534,10 +611,11 @@ impl Lt {
                         Mode::Search(c) => *c,
                         Mode::Invariant(c, classes) => {
                             // SAFETY: x holds m >= max(classes) rows, w holds c copies, y holds m*n elements.
-                            let (a, per_class, ncand) =
+                            let (per_class, ncand) =
                                 unsafe { self.invariant_search(n, k, dt, wp, *c, w_bytes, xp, yp, classes, &stream)? };
                             let mut tuned = self.tuned.lock().unwrap();
-                            for (&mc, (ms, best)) in classes.iter().zip(per_class) {
+                            let mut list = Vec::new();
+                            for (&mc, (a, ms, best)) in classes.iter().zip(per_class) {
                                 tuned.push(Tuned {
                                     m_class: mc,
                                     n,
@@ -548,8 +626,10 @@ impl Lt {
                                     heuristic_ms: best,
                                     tried: ncand,
                                 });
+                                list.push((mc, a));
                             }
-                            self.invariant.lock().unwrap().insert((n, k, dt), a);
+                            list.sort_by_key(|(c, _)| *c);
+                            self.invariant.lock().unwrap().insert((n, k, dt), list);
                             0
                         }
                     };
@@ -580,11 +660,16 @@ impl Lt {
         search: usize,
     ) -> Result<()> {
         let p = &self.plan_cached(m, n, k, dt)?;
-        let inv = self.invariant.lock().unwrap().get(&(n, k, dt)).copied();
-        if let Some(a) = inv {
-            if !self.check(p, &a) {
-                candle_core::bail!("batch-invariant cuBLASLt algorithm rejected for M={m} (n={n} k={k})");
-            }
+        let inv = self.invariant.lock().unwrap().get(&(n, k, dt)).cloned();
+        if let Some(list) = inv {
+            // the algorithm of the smallest class >= M's class (else the largest), or any other valid one: all of
+            // them give the same results
+            let mc = m_class(m);
+            let start = list.iter().position(|(c, _)| *c >= mc).unwrap_or(list.len() - 1);
+            let order = (start..list.len()).chain((0..start).rev());
+            let Some(a) = order.map(|i| list[i].1).find(|a| self.check(p, a)) else {
+                candle_core::bail!("batch-invariant cuBLASLt algorithms rejected for M={m} (n={n} k={k})");
+            };
             // SAFETY: device pointers of the operands and of a fresh output of m*n elements, all on `stream`.
             return unsafe { self.run(p, &a, w, x, y, stream) };
         }

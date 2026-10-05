@@ -1,0 +1,7 @@
+tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.0; max TV avg 0.0
+tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.16673099999999863; max TV avg 0.010847674848837863
+tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.2711680837402355; max TV avg 0.0005465334846832357
+  ]
+ }
+}
+AB-DONE
