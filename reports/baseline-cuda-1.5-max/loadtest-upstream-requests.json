@@ -1,0 +1,56 @@
+{
+ "tool": "tools/bench/loadtest.py",
+ "url": "http://127.0.0.1:8101/v1/systemone",
+ "source": "tools/reference/requests_fanout.jsonl",
+ "distinct_requests": 7,
+ "phases": [
+  {
+   "phase": "sequential",
+   "concurrency": 1,
+   "requests": 20,
+   "errors": 0,
+   "p50_ms": 204.9650945009489,
+   "p95_ms": 862.5708149993443,
+   "p99_ms": 862.5708149993443,
+   "requests_per_s": 3.3093239936092704,
+   "decisions_per_s": 14.230093172519863,
+   "max_prob_diff_vs_first_answer": 0.0
+  },
+  {
+   "phase": "concurrent",
+   "concurrency": 1,
+   "requests": 60,
+   "errors": 0,
+   "p50_ms": 204.1308650004794,
+   "p95_ms": 863.3220539995818,
+   "p99_ms": 864.5886260055704,
+   "requests_per_s": 3.466993120619591,
+   "decisions_per_s": 14.041322138509344,
+   "max_prob_diff_vs_first_answer": 0.0
+  },
+  {
+   "phase": "concurrent",
+   "concurrency": 4,
+   "requests": 60,
+   "errors": 0,
+   "p50_ms": 1626.0993274991051,
+   "p95_ms": 3257.9267140026786,
+   "p99_ms": 3259.599598000932,
+   "requests_per_s": 1.9853634847216652,
+   "decisions_per_s": 8.040722113122744,
+   "max_prob_diff_vs_first_answer": 0.025535136461257935
+  },
+  {
+   "phase": "concurrent",
+   "concurrency": 8,
+   "requests": 60,
+   "errors": 0,
+   "p50_ms": 2841.2184009976045,
+   "p95_ms": 3491.4104460040107,
+   "p99_ms": 3501.0958069979097,
+   "requests_per_s": 2.7725668047024343,
+   "decisions_per_s": 11.228895559044858,
+   "max_prob_diff_vs_first_answer": 0.025535136461257935
+  }
+ ]
+}

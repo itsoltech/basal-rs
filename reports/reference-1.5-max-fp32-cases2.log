@@ -1,0 +1,36 @@
+Loading weights:   0%|          | 0/453 [00:00<?, ?it/s]Loading weights:   7%|▋         | 33/453 [00:00<00:01, 329.30it/s]Loading weights:  15%|█▍        | 67/453 [00:00<00:01, 298.25it/s]Loading weights:  23%|██▎       | 103/453 [00:00<00:01, 303.65it/s]Loading weights:  31%|███       | 139/453 [00:00<00:01, 305.04it/s]Loading weights:  38%|███▊      | 170/453 [00:00<00:00, 302.66it/s]Loading weights:  45%|████▍     | 202/453 [00:00<00:00, 295.04it/s]Loading weights:  52%|█████▏    | 235/453 [00:00<00:00, 301.10it/s]Loading weights:  59%|█████▊    | 266/453 [00:00<00:00, 299.32it/s]Loading weights:  66%|██████▌   | 298/453 [00:00<00:00, 305.12it/s]Loading weights:  73%|███████▎  | 329/453 [00:01<00:00, 301.50it/s]Loading weights:  80%|████████  | 363/453 [00:01<00:00, 312.81it/s]Loading weights:  87%|████████▋ | 395/453 [00:01<00:00, 312.01it/s]Loading weights:  94%|█████████▍| 427/453 [00:01<00:00, 303.22it/s]Loading weights: 100%|██████████| 453/453 [00:01<00:00, 308.75it/s]
+systemone so-structured-state: ok
+systemone so-array-state-en: ok
+systemone so-null-and-missing-instructions: ok
+systemone so-empty-structures: ok
+systemone so-duplicate-descriptions-hide: ok
+systemone so-unicode: ok
+systemone so-polish-from-instructions: ok
+systemone so-ten-options: ok
+systemone so-score-two-levels: ok
+systemone so-score-one-level: error
+systemone so-eleven-options: error
+systemone so-unknown-type: ok
+systemone so-missing-type: ok
+systemone m15-multi-pl: ok
+systemone m15-multi-en-list: ok
+systemone m15-multi-min: ok
+systemone m15-act-short: ok
+systemone m15-act-full: ok
+systemone m15-act-maxerr-005: ok
+systemone m15-act-no-threshold: ok
+systemone m15-mixed: ok
+systemone m15-evidence-noul: ok
+systemone m15-evidence-choice-en: ok
+systemone m15-evidence-score-act: ok
+systemone m15-evidence-long: ok
+systemone m15-facts-dates: ok
+systemone m15-facts-amounts: ok
+systemone m15-facts-euro-evidence: ok
+systemone m15-facts-none: ok
+systemone cx-01-ticket-fan-out: ok
+systemone cx-02-web-agent: ok
+systemone cx-03-deadline-decomposed: ok
+systemone cx-04-loan-triage: ok
+systemone cx-05-guard-check: ok
+done in 746s -> reports/reference-1.5-max-fp32-cases2

@@ -1,0 +1,28 @@
+Loading weights:   0%|          | 0/453 [00:00<?, ?it/s]Loading weights:   9%|▉         | 40/453 [00:00<00:01, 341.32it/s]Loading weights:  17%|█▋        | 76/453 [00:00<00:01, 315.66it/s]Loading weights:  24%|██▍       | 110/453 [00:00<00:01, 316.37it/s]Loading weights:  31%|███▏      | 142/453 [00:00<00:00, 315.54it/s]Loading weights:  38%|███▊      | 174/453 [00:00<00:00, 313.99it/s]Loading weights:  45%|████▌     | 206/453 [00:00<00:00, 314.69it/s]Loading weights:  53%|█████▎    | 238/453 [00:00<00:00, 306.96it/s]Loading weights:  60%|█████▉    | 271/453 [00:00<00:00, 305.34it/s]Loading weights:  68%|██████▊   | 307/453 [00:00<00:00, 311.89it/s]Loading weights:  76%|███████▌  | 343/453 [00:01<00:00, 324.44it/s]Loading weights:  83%|████████▎ | 376/453 [00:01<00:00, 303.08it/s]Loading weights:  91%|█████████ | 410/453 [00:01<00:00, 313.27it/s]Loading weights:  98%|█████████▊| 445/453 [00:01<00:00, 311.37it/s]Loading weights: 100%|██████████| 453/453 [00:01<00:00, 317.52it/s]
+systemone so-structured-state: ok
+systemone so-array-state-en: ok
+systemone so-null-and-missing-instructions: ok
+systemone so-empty-structures: ok
+systemone so-duplicate-descriptions-hide: ok
+systemone so-unicode: ok
+systemone so-polish-from-instructions: ok
+systemone so-ten-options: ok
+systemone so-score-two-levels: ok
+systemone so-score-one-level: error
+systemone so-eleven-options: error
+systemone so-unknown-type: ok
+systemone so-missing-type: ok
+systemone m15-multi-pl: ok
+systemone m15-multi-en-list: ok
+systemone m15-multi-min: ok
+systemone m15-act-short: ok
+systemone m15-act-full: ok
+systemone m15-act-maxerr-005: ok
+systemone m15-act-no-threshold: ok
+systemone m15-mixed: ok
+systemone cx-01-ticket-fan-out: ok
+systemone cx-02-web-agent: ok
+systemone cx-03-deadline-decomposed: ok
+systemone cx-04-loan-triage: ok
+systemone cx-05-guard-check: ok
+done in 536s -> reports/reference-1.5-max-fp32-cases

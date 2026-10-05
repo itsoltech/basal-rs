@@ -1,0 +1,2 @@
+name, driver_version, power.limit [W], temperature.gpu, clocks.current.sm [MHz], memory.used [MiB]
+NVIDIA RTX 6000 Ada Generation, 580.159.03, 250.00 W, 46, 510 MHz, 2 MiB
