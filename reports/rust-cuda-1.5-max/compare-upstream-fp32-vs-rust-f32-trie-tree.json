@@ -1,0 +1,1128 @@
+{
+  "a": "reports/reference-1.5-max-fp32",
+  "b": "reports/rust-cuda-1.5-max/export-f32-trie-tree",
+  "sign": "differences are b - a",
+  "missing": [],
+  "tokens": {
+    "orders_compared": 88,
+    "mismatches": [],
+    "known_deviations": []
+  },
+  "bench": {
+    "items": 44,
+    "letter_logit_diff": {
+      "n": 268,
+      "max": 0.000266912109374573,
+      "p50": 0.000016892272949320386,
+      "p95": 0.00006629443359429388,
+      "p99": 0.0002478085937482888,
+      "mean": 0.000025532671116954465
+    },
+    "order_prob_diff": {
+      "n": 268,
+      "max": 0.00003917045744405989,
+      "p50": 1.0132711728591363e-9,
+      "p95": 1.0403192197694366e-6,
+      "p99": 0.00003881339610461998,
+      "mean": 7.555387856766424e-7
+    },
+    "avg_prob_diff": {
+      "n": 134,
+      "max": 0.00003899192677436769,
+      "p50": 1.3222072253803e-9,
+      "p95": 1.0637238536288784e-6,
+      "p99": 0.00003899192677431218,
+      "mean": 7.537516339239452e-7
+    },
+    "cal_prob_diff": {
+      "n": 134,
+      "max": 0.000026151102547666838,
+      "p50": 1.3784634697588949e-8,
+      "p95": 1.5908936832342846e-6,
+      "p99": 0.000026151102547500304,
+      "mean": 6.022816299563324e-7
+    },
+    "tv_avg": {
+      "n": 44,
+      "max": 0.000038991926774339936,
+      "p50": 4.962529585347917e-9,
+      "p95": 1.5718434098590042e-6,
+      "p99": 0.000038991926774339936,
+      "mean": 1.1477581698387348e-6
+    },
+    "tv_cal": {
+      "n": 44,
+      "max": 0.00002615110254758357,
+      "p50": 6.093266423086267e-8,
+      "p95": 2.2913415704192697e-6,
+      "p99": 0.00002615110254758357,
+      "mean": 9.171106637971424e-7
+    },
+    "argmax_agreement_avg": "44/44",
+    "argmax_agreement_cal": "44/44",
+    "flips_avg": [],
+    "flips_cal": []
+  },
+  "quality": {
+    "a_avg": {
+      "n": 44,
+      "correct": 36,
+      "accuracy": 0.8181818181818182,
+      "nll": 0.5934836612324582,
+      "brier": 0.29293858242093634,
+      "ece_10bin": 0.14782282975394428
+    },
+    "b_avg": {
+      "n": 44,
+      "correct": 36,
+      "accuracy": 0.8181818181818182,
+      "nll": 0.5934855621960362,
+      "brier": 0.29294026450146987,
+      "ece_10bin": 0.14782356161568805
+    },
+    "a_cal": {
+      "n": 44,
+      "correct": 36,
+      "accuracy": 0.8181818181818182,
+      "nll": 0.440777426301799,
+      "brier": 0.2641451099301251,
+      "ece_10bin": 0.12446352953471618
+    },
+    "b_cal": {
+      "n": 44,
+      "correct": 36,
+      "accuracy": 0.8181818181818182,
+      "nll": 0.44077866420125916,
+      "brier": 0.2641462982550899,
+      "ece_10bin": 0.1244640258886253
+    }
+  },
+  "systemone": {
+    "numeric_identical_tokens": {
+      "items": 0,
+      "letter_logit_diff": {
+        "n": 0,
+        "max": null,
+        "p50": null,
+        "p95": null,
+        "p99": null,
+        "mean": null
+      },
+      "order_prob_diff": {
+        "n": 0,
+        "max": null,
+        "p50": null,
+        "p95": null,
+        "p99": null,
+        "mean": null
+      },
+      "avg_prob_diff": {
+        "n": 0,
+        "max": null,
+        "p50": null,
+        "p95": null,
+        "p99": null,
+        "mean": null
+      },
+      "cal_prob_diff": {
+        "n": 0,
+        "max": null,
+        "p50": null,
+        "p95": null,
+        "p99": null,
+        "mean": null
+      },
+      "tv_avg": {
+        "n": 0,
+        "max": null,
+        "p50": null,
+        "p95": null,
+        "p99": null,
+        "mean": null
+      },
+      "tv_cal": {
+        "n": 0,
+        "max": null,
+        "p50": null,
+        "p95": null,
+        "p99": null,
+        "mean": null
+      },
+      "argmax_agreement_avg": "0/0",
+      "argmax_agreement_cal": "0/0",
+      "flips_avg": [],
+      "flips_cal": []
+    },
+    "cases": [
+      {
+        "id": "so-structured-state",
+        "error_a": null,
+        "error_b": {
+          "detail": [
+            {
+              "loc": [
+                "body",
+                "model"
+              ],
+              "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-max\"",
+              "type": "unknown_model"
+            }
+          ]
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "so-array-state-en",
+        "error_a": null,
+        "error_b": {
+          "detail": [
+            {
+              "loc": [
+                "body",
+                "model"
+              ],
+              "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-max\"",
+              "type": "unknown_model"
+            }
+          ]
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "so-null-and-missing-instructions",
+        "error_a": null,
+        "error_b": {
+          "detail": [
+            {
+              "loc": [
+                "body",
+                "model"
+              ],
+              "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-max\"",
+              "type": "unknown_model"
+            }
+          ]
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "so-empty-structures",
+        "error_a": null,
+        "error_b": {
+          "detail": [
+            {
+              "loc": [
+                "body",
+                "model"
+              ],
+              "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-max\"",
+              "type": "unknown_model"
+            }
+          ]
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "so-duplicate-descriptions-hide",
+        "error_a": null,
+        "error_b": {
+          "detail": [
+            {
+              "loc": [
+                "body",
+                "model"
+              ],
+              "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-max\"",
+              "type": "unknown_model"
+            }
+          ]
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "so-unicode",
+        "error_a": null,
+        "error_b": {
+          "detail": [
+            {
+              "loc": [
+                "body",
+                "model"
+              ],
+              "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-max\"",
+              "type": "unknown_model"
+            }
+          ]
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "so-polish-from-instructions",
+        "error_a": null,
+        "error_b": {
+          "detail": [
+            {
+              "loc": [
+                "body",
+                "model"
+              ],
+              "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-max\"",
+              "type": "unknown_model"
+            }
+          ]
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "so-ten-options",
+        "error_a": null,
+        "error_b": {
+          "detail": [
+            {
+              "loc": [
+                "body",
+                "model"
+              ],
+              "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-max\"",
+              "type": "unknown_model"
+            }
+          ]
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "so-score-two-levels",
+        "error_a": null,
+        "error_b": {
+          "detail": [
+            {
+              "loc": [
+                "body",
+                "model"
+              ],
+              "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-max\"",
+              "type": "unknown_model"
+            }
+          ]
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "so-score-one-level",
+        "error_a": "ValueError: question 'alarm': 1 options (supported: 2..10)",
+        "error_b": {
+          "detail": [
+            {
+              "loc": [
+                "body",
+                "model"
+              ],
+              "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-max\"",
+              "type": "unknown_model"
+            }
+          ]
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "so-eleven-options",
+        "error_a": "ValueError: question 'cat': 11 options (supported: 2..10)",
+        "error_b": {
+          "detail": [
+            {
+              "loc": [
+                "body",
+                "model"
+              ],
+              "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-max\"",
+              "type": "unknown_model"
+            }
+          ]
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "so-unknown-type",
+        "error_a": null,
+        "error_b": {
+          "detail": [
+            {
+              "loc": [
+                "body",
+                "model"
+              ],
+              "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-max\"",
+              "type": "unknown_model"
+            }
+          ]
+        },
+        "deviation": "unknown type is a validation error; upstream treats it as choice",
+        "items": []
+      },
+      {
+        "id": "so-missing-type",
+        "error_a": null,
+        "error_b": {
+          "detail": [
+            {
+              "loc": [
+                "body",
+                "questions",
+                "q",
+                "type"
+              ],
+              "msg": "Field required (choice, noul or score)",
+              "type": "union_tag_not_found"
+            }
+          ]
+        },
+        "deviation": "missing type is a validation error; upstream defaults to choice",
+        "items": []
+      },
+      {
+        "id": "cx-01-ticket-fan-out",
+        "error_a": null,
+        "error_b": {
+          "detail": [
+            {
+              "loc": [
+                "body",
+                "model"
+              ],
+              "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-max\"",
+              "type": "unknown_model"
+            }
+          ]
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "cx-02-web-agent",
+        "error_a": null,
+        "error_b": {
+          "detail": [
+            {
+              "loc": [
+                "body",
+                "model"
+              ],
+              "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-max\"",
+              "type": "unknown_model"
+            }
+          ]
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "cx-03-deadline-decomposed",
+        "error_a": null,
+        "error_b": {
+          "detail": [
+            {
+              "loc": [
+                "body",
+                "model"
+              ],
+              "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-max\"",
+              "type": "unknown_model"
+            }
+          ]
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "cx-04-loan-triage",
+        "error_a": null,
+        "error_b": {
+          "detail": [
+            {
+              "loc": [
+                "body",
+                "model"
+              ],
+              "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-max\"",
+              "type": "unknown_model"
+            }
+          ]
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "cx-05-guard-check",
+        "error_a": null,
+        "error_b": {
+          "detail": [
+            {
+              "loc": [
+                "body",
+                "model"
+              ],
+              "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-max\"",
+              "type": "unknown_model"
+            }
+          ]
+        },
+        "deviation": null,
+        "items": []
+      }
+    ]
+  },
+  "upstream_endpoint": [
+    {
+      "id": "so-structured-state",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "kind",
+          "diff": {
+            "type_a": "choice",
+            "type_b": "choice",
+            "max_abs_prob_diff": 8.07179623141252e-8,
+            "choice_a": "damage",
+            "choice_b": "damage",
+            "choice_same": true,
+            "confidence_a": 0.9950022101402283,
+            "confidence_b": 0.9950022908581906,
+            "confidence_diff": 8.07179623141252e-8,
+            "fields_same": true,
+            "type_same": true
+          }
+        },
+        {
+          "question": "refund",
+          "diff": {
+            "type_a": "noul",
+            "type_b": "noul",
+            "max_abs_prob_diff": 5.902878985608595e-8,
+            "noul_diff": 5.157820934936774e-8,
+            "confidence_a": 0.9521524906158447,
+            "confidence_b": 0.9521524315870549,
+            "confidence_diff": -5.902878985608595e-8,
+            "fields_same": true,
+            "type_same": true
+          }
+        },
+        {
+          "question": "urgency",
+          "diff": {
+            "type_a": "score",
+            "type_b": "score",
+            "max_abs_prob_diff": 7.015383139963305e-7,
+            "score_diff": -7.907099504045334e-7,
+            "confidence_a": 0.6688629388809204,
+            "confidence_b": 0.6688622373426064,
+            "confidence_diff": -7.015383139963305e-7,
+            "fields_same": true,
+            "legend_same": true,
+            "type_same": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "so-array-state-en",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "billing",
+          "diff": {
+            "type_a": "noul",
+            "type_b": "noul",
+            "max_abs_prob_diff": 4.7925146628990944e-8,
+            "noul_diff": 4.7925146628990944e-8,
+            "confidence_a": 0.9889571070671082,
+            "confidence_b": 0.9889571549922548,
+            "confidence_diff": 4.7925146628990944e-8,
+            "fields_same": true,
+            "type_same": true
+          }
+        },
+        {
+          "question": "tone",
+          "diff": {
+            "type_a": "choice",
+            "type_b": "choice",
+            "max_abs_prob_diff": 2.359595158984984e-7,
+            "choice_a": "calm",
+            "choice_b": "calm",
+            "choice_same": true,
+            "confidence_a": 0.8346273303031921,
+            "confidence_b": 0.8346271106976509,
+            "confidence_diff": -2.1960554119626607e-7,
+            "fields_same": true,
+            "type_same": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "so-null-and-missing-instructions",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "explicit_null",
+          "diff": {
+            "type_a": "noul",
+            "type_b": "noul",
+            "max_abs_prob_diff": 6.862396652040914e-7,
+            "noul_diff": -6.862396652040914e-7,
+            "confidence_a": 0.8435097336769104,
+            "confidence_b": 0.8435090474372452,
+            "confidence_diff": -6.862396652040914e-7,
+            "fields_same": true,
+            "type_same": true
+          }
+        },
+        {
+          "question": "missing",
+          "diff": {
+            "type_a": "noul",
+            "type_b": "noul",
+            "max_abs_prob_diff": 2.7475109520835872e-8,
+            "noul_diff": -2.7475109520835872e-8,
+            "confidence_a": 0.9374440312385559,
+            "confidence_b": 0.9374440037634464,
+            "confidence_diff": -2.7475109520835872e-8,
+            "fields_same": true,
+            "type_same": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "so-empty-structures",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "criteria_null",
+          "diff": {
+            "type_a": "noul",
+            "type_b": "noul",
+            "max_abs_prob_diff": 8.168497578342482e-8,
+            "noul_diff": 8.168497578342482e-8,
+            "confidence_a": 0.9894979000091553,
+            "confidence_b": 0.9894979816941311,
+            "confidence_diff": 8.168497578342482e-8,
+            "fields_same": true,
+            "type_same": true
+          }
+        },
+        {
+          "question": "empty_obj_choice",
+          "diff": {
+            "type_a": "choice",
+            "type_b": "choice",
+            "max_abs_prob_diff": 1.3830133985953674e-7,
+            "choice_a": "reject",
+            "choice_b": "reject",
+            "choice_same": true,
+            "confidence_a": 0.8415936231613159,
+            "confidence_b": 0.8415935548328181,
+            "confidence_diff": -6.832849785975981e-8,
+            "fields_same": true,
+            "type_same": true
+          }
+        },
+        {
+          "question": "empty_true",
+          "diff": {
+            "type_a": "noul",
+            "type_b": "noul",
+            "max_abs_prob_diff": 1.29924379144164e-7,
+            "noul_diff": 9.174015362482801e-8,
+            "confidence_a": 0.9909438490867615,
+            "confidence_b": 0.9909437191623823,
+            "confidence_diff": -1.29924379144164e-7,
+            "fields_same": true,
+            "type_same": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "so-duplicate-descriptions-hide",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "dup_hide",
+          "diff": {
+            "type_a": "choice",
+            "type_b": "choice",
+            "max_abs_prob_diff": 2.392936974737747e-6,
+            "choice_a": "t3",
+            "choice_b": "t3",
+            "choice_same": true,
+            "confidence_a": 0.46659794449806213,
+            "confidence_b": 0.46660033743503687,
+            "confidence_diff": 2.392936974737747e-6,
+            "fields_same": true,
+            "type_same": true
+          }
+        },
+        {
+          "question": "dup_show",
+          "diff": {
+            "type_a": "choice",
+            "type_b": "choice",
+            "max_abs_prob_diff": 1.9550082203112495e-7,
+            "choice_a": "t3",
+            "choice_b": "t3",
+            "choice_same": true,
+            "confidence_a": 0.36872953176498413,
+            "confidence_b": 0.36872965517301337,
+            "confidence_diff": 1.2340802924004635e-7,
+            "fields_same": true,
+            "type_same": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "so-unicode",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "lang",
+          "diff": {
+            "type_a": "choice",
+            "type_b": "choice",
+            "max_abs_prob_diff": 3.303525611675351e-7,
+            "choice_a": "pl",
+            "choice_b": "pl",
+            "choice_same": true,
+            "confidence_a": 0.7862007021903992,
+            "confidence_b": 0.7862010004291393,
+            "confidence_diff": 2.9823874014844876e-7,
+            "fields_same": true,
+            "type_same": true
+          }
+        },
+        {
+          "question": "ok",
+          "diff": {
+            "type_a": "noul",
+            "type_b": "noul",
+            "max_abs_prob_diff": 3.229854550479416e-8,
+            "noul_diff": -3.229854550479416e-8,
+            "confidence_a": 0.9984657764434814,
+            "confidence_b": 0.9984657441449359,
+            "confidence_diff": -3.229854550479416e-8,
+            "fields_same": true,
+            "type_same": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "so-polish-from-instructions",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "pay",
+          "diff": {
+            "type_a": "noul",
+            "type_b": "noul",
+            "max_abs_prob_diff": 2.058262182913495e-8,
+            "noul_diff": -2.058262182913495e-8,
+            "confidence_a": 0.9961926937103271,
+            "confidence_b": 0.9961926731277053,
+            "confidence_diff": -2.058262182913495e-8,
+            "fields_same": true,
+            "type_same": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "so-ten-options",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "hour",
+          "diff": {
+            "type_a": "choice",
+            "type_b": "choice",
+            "max_abs_prob_diff": 1.9862816080795653e-7,
+            "choice_a": "h17",
+            "choice_b": "h17",
+            "choice_same": true,
+            "confidence_a": 0.9513518810272217,
+            "confidence_b": 0.9513520796553825,
+            "confidence_diff": 1.9862816080795653e-7,
+            "fields_same": true,
+            "type_same": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "so-score-two-levels",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "alarm",
+          "diff": {
+            "type_a": "score",
+            "type_b": "score",
+            "max_abs_prob_diff": 6.308752453776378e-8,
+            "score_diff": -6.308752453776378e-8,
+            "confidence_a": 0.9797253012657166,
+            "confidence_b": 0.979725238178192,
+            "confidence_diff": -6.308752453776378e-8,
+            "fields_same": true,
+            "legend_same": true,
+            "type_same": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "so-score-one-level",
+      "error_upstream": "ValueError: question 'alarm': 1 options (supported: 2..10)",
+      "error_ours": "question \"alarm\": 1 options (supported: 2..10)",
+      "errors_agree": true,
+      "questions": []
+    },
+    {
+      "id": "so-eleven-options",
+      "error_upstream": "ValueError: question 'cat': 11 options (supported: 2..10)",
+      "error_ours": "question \"cat\": 11 options (supported: 2..10)",
+      "errors_agree": true,
+      "questions": []
+    },
+    {
+      "id": "so-unknown-type",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "q",
+          "diff": {
+            "type_a": "multi",
+            "type_b": "multi",
+            "max_abs_prob_diff": 2.794379927034685e-7,
+            "confidence_a": null,
+            "confidence_b": null,
+            "fields_same": true,
+            "type_same": true,
+            "selected_same": true,
+            "threshold_same": true,
+            "set_confidence_diff": -2.39648324407149e-7
+          }
+        }
+      ]
+    },
+    {
+      "id": "so-missing-type",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "q",
+          "diff": {
+            "type_a": "choice",
+            "type_b": "choice",
+            "max_abs_prob_diff": 8.380960501153112e-7,
+            "choice_a": "a",
+            "choice_b": "a",
+            "choice_same": true,
+            "confidence_a": 0.6518654823303223,
+            "confidence_b": 0.6518663204263724,
+            "confidence_diff": 8.380960501153112e-7,
+            "fields_same": true,
+            "type_same": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "cx-01-ticket-fan-out",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "category",
+          "diff": {
+            "type_a": "choice",
+            "type_b": "choice",
+            "max_abs_prob_diff": 7.208322261309519e-8,
+            "choice_a": "complaint",
+            "choice_b": "complaint",
+            "choice_same": true,
+            "confidence_a": 0.994642972946167,
+            "confidence_b": 0.9946429008629444,
+            "confidence_diff": -7.208322261309519e-8,
+            "fields_same": true,
+            "type_same": true
+          }
+        },
+        {
+          "question": "needs_photo",
+          "diff": {
+            "type_a": "noul",
+            "type_b": "noul",
+            "max_abs_prob_diff": 8.149669988855024e-8,
+            "noul_diff": -1.4441474460724635e-8,
+            "confidence_a": 0.9040054082870483,
+            "confidence_b": 0.9040053938455739,
+            "confidence_diff": -1.4441474460724635e-8,
+            "fields_same": true,
+            "type_same": true
+          }
+        },
+        {
+          "question": "tone",
+          "diff": {
+            "type_a": "score",
+            "type_b": "score",
+            "max_abs_prob_diff": 4.454946991305775e-7,
+            "score_diff": 7.512547949284354e-7,
+            "confidence_a": 0.5276506543159485,
+            "confidence_b": 0.5276508536551967,
+            "confidence_diff": 1.9933924821913251e-7,
+            "fields_same": true,
+            "legend_same": true,
+            "type_same": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "cx-02-web-agent",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "click_target",
+          "diff": {
+            "type_a": "choice",
+            "type_b": "choice",
+            "max_abs_prob_diff": 4.28682449538087e-8,
+            "choice_a": "2",
+            "choice_b": "2",
+            "choice_same": true,
+            "confidence_a": 0.9886118769645691,
+            "confidence_b": 0.988611919832814,
+            "confidence_diff": 4.28682449538087e-8,
+            "fields_same": true,
+            "type_same": true
+          }
+        },
+        {
+          "question": "operation",
+          "diff": {
+            "type_a": "choice",
+            "type_b": "choice",
+            "max_abs_prob_diff": 1.1813812950678404e-6,
+            "choice_a": "BLOCKED",
+            "choice_b": "BLOCKED",
+            "choice_same": true,
+            "confidence_a": 0.6377461552619934,
+            "confidence_b": 0.6377473175810354,
+            "confidence_diff": 1.1623190420140261e-6,
+            "fields_same": true,
+            "type_same": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "cx-03-deadline-decomposed",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "filing_date",
+          "diff": {
+            "type_a": "choice",
+            "type_b": "choice",
+            "max_abs_prob_diff": 7.552032332824865e-9,
+            "choice_a": "2025-06-20",
+            "choice_b": "2025-06-20",
+            "choice_same": true,
+            "confidence_a": 0.9998871088027954,
+            "confidence_b": 0.9998871163548277,
+            "confidence_diff": 7.552032332824865e-9,
+            "fields_same": true,
+            "type_same": true
+          }
+        },
+        {
+          "question": "in_time",
+          "diff": {
+            "type_a": "noul",
+            "type_b": "noul",
+            "max_abs_prob_diff": 5.122807957419484e-7,
+            "noul_diff": 4.5267615100819114e-7,
+            "confidence_a": 0.9534792304039001,
+            "confidence_b": 0.9534796830800512,
+            "confidence_diff": 4.5267615100819114e-7,
+            "fields_same": true,
+            "type_same": true
+          }
+        },
+        {
+          "question": "last_day",
+          "diff": {
+            "type_a": "choice",
+            "type_b": "choice",
+            "max_abs_prob_diff": 3.1932516894594976e-6,
+            "choice_a": "2025-06-23",
+            "choice_b": "2025-06-23",
+            "choice_same": true,
+            "confidence_a": 0.5274918079376221,
+            "confidence_b": 0.5274886803714604,
+            "confidence_diff": -3.1275661617202744e-6,
+            "fields_same": true,
+            "type_same": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "cx-04-loan-triage",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "decision",
+          "diff": {
+            "type_a": "choice",
+            "type_b": "choice",
+            "max_abs_prob_diff": 1.7372020505446173e-7,
+            "choice_a": "approve",
+            "choice_b": "approve",
+            "choice_same": true,
+            "confidence_a": 0.8587998747825623,
+            "confidence_b": 0.8587997358369542,
+            "confidence_diff": -1.3894560801919198e-7,
+            "fields_same": true,
+            "type_same": true
+          }
+        },
+        {
+          "question": "risk",
+          "diff": {
+            "type_a": "score",
+            "type_b": "score",
+            "max_abs_prob_diff": 2.5223203764523916e-7,
+            "score_diff": -1.4984919149974019e-7,
+            "confidence_a": 0.6531057357788086,
+            "confidence_b": 0.6531057590931917,
+            "confidence_diff": 2.3314383090777824e-8,
+            "fields_same": true,
+            "legend_same": true,
+            "type_same": true
+          }
+        },
+        {
+          "question": "within_limit",
+          "diff": {
+            "type_a": "noul",
+            "type_b": "noul",
+            "max_abs_prob_diff": 7.394541656768894e-8,
+            "noul_diff": -7.394541656768894e-8,
+            "confidence_a": 0.8404948711395264,
+            "confidence_b": 0.8404947971941098,
+            "confidence_diff": -7.394541656768894e-8,
+            "fields_same": true,
+            "type_same": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "cx-05-guard-check",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "action",
+          "diff": {
+            "type_a": "choice",
+            "type_b": "choice",
+            "max_abs_prob_diff": 1.4894900635109565e-7,
+            "choice_a": "refuse",
+            "choice_b": "refuse",
+            "choice_same": true,
+            "confidence_a": 0.9554035067558289,
+            "confidence_b": 0.9554036557048352,
+            "confidence_diff": 1.4894900635109565e-7,
+            "fields_same": true,
+            "type_same": true
+          }
+        },
+        {
+          "question": "data_request",
+          "diff": {
+            "type_a": "choice",
+            "type_b": "choice",
+            "max_abs_prob_diff": 1.0403905015277104e-7,
+            "choice_a": "other",
+            "choice_b": "other",
+            "choice_same": true,
+            "confidence_a": 0.98907870054245,
+            "confidence_b": 0.9890788045815001,
+            "confidence_diff": 1.0403905015277104e-7,
+            "fields_same": true,
+            "type_same": true
+          }
+        },
+        {
+          "question": "injection",
+          "diff": {
+            "type_a": "noul",
+            "type_b": "noul",
+            "max_abs_prob_diff": 3.726434716355698e-8,
+            "noul_diff": 3.726434716355698e-8,
+            "confidence_a": 0.9984978437423706,
+            "confidence_b": 0.9984978810067178,
+            "confidence_diff": 3.726434716355698e-8,
+            "fields_same": true,
+            "type_same": true
+          }
+        }
+      ]
+    }
+  ]
+}

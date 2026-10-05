@@ -1,0 +1,80 @@
+{
+ "tool": "tools/bench/loadtest.py",
+ "url": "http://127.0.0.1:8100/v1/systemone",
+ "source": "reports/reference-1.5-max-fp32/bench.jsonl",
+ "distinct_requests": 44,
+ "phases": [
+  {
+   "phase": "sequential",
+   "concurrency": 1,
+   "requests": 100,
+   "errors": 0,
+   "p50_ms": 66.33176250034012,
+   "p95_ms": 93.1558220036095,
+   "p99_ms": 95.33170299982885,
+   "requests_per_s": 14.634423322555378,
+   "decisions_per_s": 14.634423322555378,
+   "max_prob_diff_vs_first_answer": 0.0
+  },
+  {
+   "phase": "concurrent",
+   "concurrency": 1,
+   "requests": 400,
+   "errors": 0,
+   "p50_ms": 68.55348950193729,
+   "p95_ms": 95.75368099467596,
+   "p99_ms": 99.11094000563025,
+   "requests_per_s": 14.184113036223815,
+   "decisions_per_s": 14.184113036223815,
+   "max_prob_diff_vs_first_answer": 0.0
+  },
+  {
+   "phase": "concurrent",
+   "concurrency": 4,
+   "requests": 400,
+   "errors": 0,
+   "p50_ms": 279.3579179997323,
+   "p95_ms": 314.494652004214,
+   "p99_ms": 321.6980830038665,
+   "requests_per_s": 14.283040705045988,
+   "decisions_per_s": 14.283040705045988,
+   "max_prob_diff_vs_first_answer": 0.0
+  },
+  {
+   "phase": "concurrent",
+   "concurrency": 8,
+   "requests": 400,
+   "errors": 0,
+   "p50_ms": 516.6667550001875,
+   "p95_ms": 559.8356499976944,
+   "p99_ms": 565.7194020022871,
+   "requests_per_s": 15.32075491605117,
+   "decisions_per_s": 15.32075491605117,
+   "max_prob_diff_vs_first_answer": 0.0
+  },
+  {
+   "phase": "concurrent",
+   "concurrency": 16,
+   "requests": 400,
+   "errors": 0,
+   "p50_ms": 979.7221569970134,
+   "p95_ms": 1010.8012390046497,
+   "p99_ms": 1020.5230380015564,
+   "requests_per_s": 16.192780699027235,
+   "decisions_per_s": 16.192780699027235,
+   "max_prob_diff_vs_first_answer": 0.0
+  },
+  {
+   "phase": "concurrent",
+   "concurrency": 32,
+   "requests": 400,
+   "errors": 0,
+   "p50_ms": 1938.9978890030761,
+   "p95_ms": 1974.2009510009666,
+   "p99_ms": 1990.9073509988957,
+   "requests_per_s": 16.427803948822145,
+   "decisions_per_s": 16.427803948822145,
+   "max_prob_diff_vs_first_answer": 0.0
+  }
+ ]
+}

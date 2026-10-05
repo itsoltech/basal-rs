@@ -1,0 +1,168 @@
+{
+  "batching": "Tree",
+  "reps": 2,
+  "requests": [
+    {
+      "id": "long-1000-q1",
+      "questions": 1,
+      "input_tokens": 2156,
+      "packed_tokens_per_question_rows": 1116,
+      "packed_tokens_shared_tree": 1116,
+      "median_ms": 269.9350425,
+      "min_ms": 269.626597,
+      "max_ms": 270.24348799999996,
+      "all_ms": [
+        269.626597,
+        270.24348799999996
+      ]
+    },
+    {
+      "id": "long-1000-q5",
+      "questions": 5,
+      "input_tokens": 15060,
+      "packed_tokens_per_question_rows": 5561,
+      "packed_tokens_shared_tree": 1513,
+      "median_ms": 431.0872535,
+      "min_ms": 421.489939,
+      "max_ms": 440.684568,
+      "all_ms": [
+        421.489939,
+        440.684568
+      ]
+    },
+    {
+      "id": "long-2000-q1",
+      "questions": 1,
+      "input_tokens": 4292,
+      "packed_tokens_per_question_rows": 2184,
+      "packed_tokens_shared_tree": 2184,
+      "median_ms": 551.577267,
+      "min_ms": 544.072948,
+      "max_ms": 559.081586,
+      "all_ms": [
+        544.072948,
+        559.081586
+      ]
+    },
+    {
+      "id": "long-2000-q5",
+      "questions": 5,
+      "input_tokens": 30000,
+      "packed_tokens_per_question_rows": 10897,
+      "packed_tokens_shared_tree": 2581,
+      "median_ms": 725.4349525,
+      "min_ms": 725.346217,
+      "max_ms": 725.523688,
+      "all_ms": [
+        725.346217,
+        725.523688
+      ]
+    },
+    {
+      "id": "long-4000-q1",
+      "questions": 1,
+      "input_tokens": 8338,
+      "packed_tokens_per_question_rows": 4207,
+      "packed_tokens_shared_tree": 4207,
+      "median_ms": 1143.938691,
+      "min_ms": 1140.9565,
+      "max_ms": 1146.9208820000001,
+      "all_ms": [
+        1140.9565,
+        1146.9208820000001
+      ]
+    },
+    {
+      "id": "long-4000-q5",
+      "questions": 5,
+      "input_tokens": 58322,
+      "packed_tokens_per_question_rows": 21012,
+      "packed_tokens_shared_tree": 4604,
+      "median_ms": 1369.962677,
+      "min_ms": 1367.6865460000001,
+      "max_ms": 1372.238808,
+      "all_ms": [
+        1367.6865460000001,
+        1372.238808
+      ]
+    },
+    {
+      "id": "long-8000-q1",
+      "questions": 1,
+      "input_tokens": 16442,
+      "packed_tokens_per_question_rows": 8259,
+      "packed_tokens_shared_tree": 8259,
+      "median_ms": 2671.368219,
+      "min_ms": 2658.983489,
+      "max_ms": 2683.752949,
+      "all_ms": [
+        2658.983489,
+        2683.752949
+      ]
+    },
+    {
+      "id": "long-8000-q5",
+      "questions": 5,
+      "input_tokens": 115050,
+      "packed_tokens_per_question_rows": 41272,
+      "packed_tokens_shared_tree": 8656,
+      "median_ms": 3030.17912,
+      "min_ms": 3020.926688,
+      "max_ms": 3039.431552,
+      "all_ms": [
+        3020.926688,
+        3039.431552
+      ]
+    },
+    {
+      "id": "long-16000-q1",
+      "questions": 1,
+      "input_tokens": 33054,
+      "packed_tokens_per_question_rows": 16565,
+      "packed_tokens_shared_tree": 16565,
+      "median_ms": 7064.013268000001,
+      "min_ms": 7036.4154,
+      "max_ms": 7091.611136,
+      "all_ms": [
+        7036.4154,
+        7091.611136
+      ]
+    },
+    {
+      "id": "long-16000-q5",
+      "questions": 5,
+      "input_tokens": 231322,
+      "packed_tokens_per_question_rows": 82798,
+      "packed_tokens_shared_tree": 16962,
+      "median_ms": 7865.822124,
+      "min_ms": 7770.402954,
+      "max_ms": 7961.2412939999995,
+      "all_ms": [
+        7770.402954,
+        7961.2412939999995
+      ]
+    }
+  ],
+  "backend": {
+    "backend": "cuda",
+    "device": "NVIDIA GPU through candle Device::new_cuda(0)",
+    "tensor_library": "candle-core 0.11.0 (CUDA; matmul = cuBLAS, no TF32)",
+    "weights": "f16 (converted from bf16, experiment)",
+    "activations": "f16 residual stream, norms and MLP",
+    "attention": "f32 q/k/v (bias + rotate-half RoPE fused kernel, cos/sin from f64 on host); one f32 flash-style kernel for all segments of a forward (online softmax, additive block mask, prefix K/V read from the cache, fully masked key tiles skipped), GQA as stacked query rows",
+    "kernels": "fused: q/k/v and gate/up projections as single GEMMs without bias; bias added in fused kernels (bias+RoPE+head split, bias+SiLU*up, bias+residual)",
+    "readout": "letter rows of lm_head only, f32",
+    "padding": "none: compact token list for GEMM/norm/MLP, attention per packed row (segment)",
+    "gemm": "cuBLASLt, f32 accumulation, batch-invariant: one algorithm per weight shape for every M, no split-K (--gemm-table from gemm-search --invariant); a row's result does not depend on its batch",
+    "prefix_kv": [
+      53,
+      66
+    ],
+    "state_cache_bytes": 0,
+    "last_layer": "o_proj and MLP of the last layer only at the readout positions"
+  },
+  "state_cache": {
+    "hits": 0,
+    "inserts": 0
+  }
+}

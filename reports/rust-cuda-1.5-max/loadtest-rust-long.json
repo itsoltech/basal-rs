@@ -1,0 +1,32 @@
+{
+ "tool": "tools/bench/loadtest.py",
+ "url": "http://127.0.0.1:8100/v1/systemone",
+ "source": "tools/bench/long_states.jsonl",
+ "distinct_requests": 10,
+ "phases": [
+  {
+   "phase": "sequential",
+   "concurrency": 1,
+   "requests": 20,
+   "errors": 0,
+   "p50_ms": 3452.589808002813,
+   "p95_ms": 111484.81169800652,
+   "p99_ms": 111484.81169800652,
+   "requests_per_s": 0.054217603191388616,
+   "decisions_per_s": 0.16265280957416586,
+   "max_prob_diff_vs_first_answer": 0.0
+  },
+  {
+   "phase": "concurrent",
+   "concurrency": 1,
+   "requests": 10,
+   "errors": 0,
+   "p50_ms": 3428.2486499978404,
+   "p95_ms": 109217.61268899718,
+   "p99_ms": 109217.61268899718,
+   "requests_per_s": 0.05484691015002661,
+   "decisions_per_s": 0.16454073045007983,
+   "max_prob_diff_vs_first_answer": 0.0
+  }
+ ]
+}

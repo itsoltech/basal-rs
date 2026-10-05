@@ -1,0 +1,4 @@
+basal: basal-1.5-max loaded on the GPU in 31.4s
+basal: 208 GEMM classes from reports/rust-cuda-1.5-max/gemm/gemm-algos-f16-invariant.json
+basal: template prefixes precomputed ([53, 66] tokens)
+lat2 median 60.2 ms, p95 66.3 ms, lat1 44.7 ms, 20.760 dec/s, acc 0.8181818181818182, GEMM probe {"before":174.39554039582373,"after":159.90377849051}
