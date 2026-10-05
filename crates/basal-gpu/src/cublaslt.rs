@@ -195,7 +195,7 @@ impl Lt {
         stream: &candle_core::cuda_backend::cudarc::driver::CudaStream,
     ) -> Result<(sys::cublasLtMatmulAlgo_t, Vec<(f64, f64)>, usize)> {
         let mut cands: Vec<sys::cublasLtMatmulAlgo_t> = Vec::new();
-        for m in [64, 128, 192, 256, 384, 512, 1024, 2048] {
+        for m in [64, 128, 192, 256, 384, 512, 1024, 2048, 4096, 8192, 16384] {
             if !classes.contains(&m) {
                 continue;
             }
@@ -218,7 +218,10 @@ impl Lt {
         }
         let best: Vec<f64> =
             (0..classes.len()).map(|ci| times.iter().map(|t| t[ci]).fold(f64::INFINITY, f64::min)).collect();
-        let score = |t: &Vec<f64>| t.iter().zip(&best).map(|(a, b)| a / b).sum::<f64>() / best.len() as f64;
+        // geometric mean of the slowdown against the best algorithm of each class: every class (a typical forward
+        // size of the ladder) weighs the same, small forwards are not traded for large ones
+        let score =
+            |t: &Vec<f64>| (t.iter().zip(&best).map(|(a, b)| (a / b).ln()).sum::<f64>() / best.len() as f64).exp();
         let (ai, _) = times
             .iter()
             .enumerate()

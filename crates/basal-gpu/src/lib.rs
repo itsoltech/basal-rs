@@ -492,6 +492,15 @@ impl GpuBackend {
         })
     }
 
+    /// CUDA attention kernel of this forward precision.
+    fn attention_kernel(&self) -> &'static str {
+        #[cfg(feature = "cuda")]
+        if self.dev.is_cuda() {
+            return if self.tc_attention() { fused::tc_kernel() } else { "attn_tree_f32" };
+        }
+        "sdpa"
+    }
+
     /// The device for one call (a no-op without a gate).
     fn enter_gate(&self) -> Option<basal_core::gate::GateGuard<'_>> {
         self.gate.as_ref().map(|(g, urgent)| g.enter(*urgent))
@@ -1127,6 +1136,7 @@ impl Backend for GpuBackend {
                 Kernels::Fused => "none: compact token list for GEMM/norm/MLP, attention per packed row (segment)",
                 Kernels::Candle => "rows padded on the right to the longest packed row of a chunk",
             },
+            "attention_kernel": self.attention_kernel(),
             "gemm": if cuda { self.gemm_desc() } else { "MLX steel GEMM (candle); 32-row tiles when M mod 64 is in 1..=32 and M <= 600" },
             "prefix_kv": self.prefixes.iter().filter(|p| p.pinned).map(|p| p.ids.len()).collect::<Vec<_>>(),
             "state_cache_bytes": self.state_cache_bytes,

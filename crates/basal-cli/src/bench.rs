@@ -135,6 +135,7 @@ pub fn bench_requests<B: Backend>(engine: &mut Engine<B>, requests: &Path, reps:
             "id": r["id"], "questions": prepared.len(), "input_tokens": resp["usage"]["input_tokens"],
             "packed_tokens_per_question_rows": separate, "packed_tokens_shared_tree": tree,
             "median_ms": median(&lat), "min_ms": lat[0], "max_ms": lat[lat.len() - 1], "all_ms": lat,
+            "answers": resp["answers"],
         });
         eprintln!("{} q={} median {:.1} ms", r["id"], prepared.len(), median(&lat));
         rows.push(row);

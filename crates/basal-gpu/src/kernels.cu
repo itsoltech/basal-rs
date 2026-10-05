@@ -361,7 +361,8 @@ extern "C" __global__ void split_hilo_f32(const float *x, __half *out, unsigned 
 // are skipped, which adds exactly nothing. Block: 4 warps, 64 query rows (16 per warp); keys in tiles of 32;
 // fragments are read with ldmatrix (V transposed by ldmatrix.trans). Every row sees the same key tiles in the same
 // order whatever else is packed, so results stay independent of batching.
-#define TC_BM 64
+#define TC_BM 128  // query rows per block: 8 warps x 16 (32 tokens x 4 heads of a K/V group)
+#define TC_THREADS 256
 #define TC_BN 32
 #define TC_LD (ATT_HD + 8)
 
@@ -392,12 +393,17 @@ __device__ __forceinline__ unsigned pack2(__half a, __half b) {
     return *reinterpret_cast<unsigned *>(&v);
 }
 
-extern "C" __global__ void __launch_bounds__(128)
-    attn_tree_tc(const float *qkv, const __half *khl, const __half *vhl, float *out, TreeTable tab, unsigned T,
-                 unsigned NH, unsigned NKV, float scale, unsigned v_exact) {
+// QK3: S = Qh·Kh + Qh·Kl + Ql·Kh (f16 hi/lo split, ~f32 products) or only Qh·Kh. PL: P·V with P split into
+// hi/lo (two MMAs) or P rounded to f16 (one MMA). Softmax, accumulation and output stay f32 in every variant.
+template <bool QK3, bool PL>
+__device__ __forceinline__ void attn_tree_tc_body(const float *qkv, const __half *khl, const __half *vhl, float *out,
+                                                  const TreeTable &tab, unsigned T, unsigned NH, unsigned NKV,
+                                                  float scale, unsigned v_exact) {
+    // Shared memory holds one Q plane (hi, then lo) until each warp has its Q fragments in registers, then the K / V
+    // tiles: 34 KiB per block.
     extern __shared__ __align__(16) unsigned char smraw[];
-    __half *Qh = reinterpret_cast<__half *>(smraw), *Ql = Qh + TC_BM * TC_LD;
-    __half *Kh = Ql + TC_BM * TC_LD, *Kl = Kh + TC_BN * TC_LD;
+    __half *Qs = reinterpret_cast<__half *>(smraw);
+    __half *Kh = reinterpret_cast<__half *>(smraw), *Kl = Kh + TC_BN * TC_LD;
     __half *Vh = Kl + TC_BN * TC_LD, *Vl = Vh + TC_BN * TC_LD;  // V row-major [key][dim]
     const unsigned tid = threadIdx.x, w = tid / 32, lane = tid % 32, g = lane >> 2, t4 = lane & 3;
     const unsigned kvh = blockIdx.y, rep = NH / NKV;
@@ -409,12 +415,24 @@ extern "C" __global__ void __launch_bounds__(128)
     const size_t nkv_all = (size_t)NKV * T * ATT_HD, nkv_past = (size_t)NKV * U.np * ATT_HD;
     const __half *pkh = (const __half *)U.pkh, *pvh = (const __half *)U.pvh;
     const float *q = qkv;
-    for (unsigned i = tid; i < TC_BM * ATT_HD; i += 128) {
-        unsigned rr = i / ATT_HD, d = i % ATT_HD, r = r0 + rr;
-        float x = r < rows ? q[((size_t)(kvh * rep + r / U.q_len) * T + U.q_off + r % U.q_len) * ATT_HD + d] : 0.f;
-        __half h = __float2half_rn(x);
-        Qh[rr * TC_LD + d] = h;
-        Ql[rr * TC_LD + d] = __float2half_rn(x - __half2float(h));
+    // A fragments of the warp's 16 query rows for the 8 steps of 16 dims: plane 0 = f16(x), plane 1 = f16(x - hi)
+    unsigned qh[ATT_HD / 16][4], ql[ATT_HD / 16][4];
+#pragma unroll
+    for (int plane = 0; plane < (QK3 ? 2 : 1); plane++) {
+        for (unsigned i = tid; i < TC_BM * ATT_HD; i += TC_THREADS) {
+            unsigned rr = i / ATT_HD, d = i % ATT_HD, r = r0 + rr;
+            float x =
+                r < rows ? q[((size_t)(kvh * rep + r / U.q_len) * T + U.q_off + r % U.q_len) * ATT_HD + d] : 0.f;
+            __half h = __float2half_rn(x);
+            Qs[rr * TC_LD + d] = plane == 0 ? h : __float2half_rn(x - __half2float(h));
+        }
+        __syncthreads();
+#pragma unroll
+        for (int ks = 0; ks < ATT_HD / 16; ks++) {
+            const unsigned qo = (w * 16 + (lane % 16)) * TC_LD + ks * 16 + (lane / 16) * 8;
+            ldsm4(plane == 0 ? qh[ks] : ql[ks], Qs + qo);
+        }
+        __syncthreads();  // the next plane / the K / V tiles reuse this memory
     }
     const unsigned rr2[2] = {w * 16 + g, w * 16 + g + 8};
     bool ok[2];
@@ -433,7 +451,7 @@ extern "C" __global__ void __launch_bounds__(128)
         bool vis = (ok[0] && j0 <= lim[0]) || (ok[1] && j0 <= lim[1]);
         if (!__syncthreads_or(vis)) break;  // tiles are ordered: none after this one is visible either
         // 32 keys x 128 dims = 32 x 16 chunks of 8 halves (uint4) per plane
-        for (unsigned i = tid; i < TC_BN * (ATT_HD / 8); i += 128) {
+        for (unsigned i = tid; i < TC_BN * (ATT_HD / 8); i += TC_THREADS) {
             unsigned jj = i / (ATT_HD / 8), c8 = (i % (ATT_HD / 8)) * 8, j = j0 + jj;
             uint4 kh = make_uint4(0, 0, 0, 0), kl = kh, vh = kh, vl = kh;
             const __half *ks = nullptr, *vs = nullptr;
@@ -453,12 +471,12 @@ extern "C" __global__ void __launch_bounds__(128)
             }
             if (ks) {
                 kh = *reinterpret_cast<const uint4 *>(ks);
-                kl = *reinterpret_cast<const uint4 *>(ks + plane_k);
+                if (QK3) kl = *reinterpret_cast<const uint4 *>(ks + plane_k);
                 vh = *reinterpret_cast<const uint4 *>(vs);
                 if (planes == 2) vl = *reinterpret_cast<const uint4 *>(vs + plane_k);
             }
             *reinterpret_cast<uint4 *>(Kh + jj * TC_LD + c8) = kh;
-            *reinterpret_cast<uint4 *>(Kl + jj * TC_LD + c8) = kl;
+            if (QK3) *reinterpret_cast<uint4 *>(Kl + jj * TC_LD + c8) = kl;
             *reinterpret_cast<uint4 *>(Vh + jj * TC_LD + c8) = vh;
             if (planes == 2) *reinterpret_cast<uint4 *>(Vl + jj * TC_LD + c8) = vl;
         }
@@ -469,23 +487,22 @@ extern "C" __global__ void __launch_bounds__(128)
         for (int nt = 0; nt < TC_BN / 8; nt++) s[nt][0] = s[nt][1] = s[nt][2] = s[nt][3] = 0.f;
 #pragma unroll
         for (int ks = 0; ks < ATT_HD / 16; ks++) {
-            unsigned ah[4], al[4];
-            const unsigned qo = (w * 16 + (lane % 16)) * TC_LD + ks * 16 + (lane / 16) * 8;
-            ldsm4(ah, Qh + qo);
-            ldsm4(al, Ql + qo);
+            const unsigned *ah = qh[ks], *al = ql[ks];
 #pragma unroll
             for (int np2 = 0; np2 < TC_BN / 16; np2++) {
                 // two n8 key tiles (2*np2, 2*np2+1) x two dim halves
                 const unsigned ko = (np2 * 16 + (lane % 8) + (lane / 16) * 8) * TC_LD + ks * 16 + ((lane / 8) % 2) * 8;
                 unsigned bh[4], bl[4];
                 ldsm4(bh, Kh + ko);
-                ldsm4(bl, Kl + ko);
+                if (QK3) ldsm4(bl, Kl + ko);
 #pragma unroll
                 for (int h2 = 0; h2 < 2; h2++) {
                     float *acc = s[2 * np2 + h2];
                     mma16816(acc, ah, bh + 2 * h2);
-                    mma16816(acc, ah, bl + 2 * h2);
-                    mma16816(acc, al, bh + 2 * h2);
+                    if (QK3) {
+                        mma16816(acc, ah, bl + 2 * h2);
+                        mma16816(acc, al, bh + 2 * h2);
+                    }
                 }
             }
         }
@@ -548,7 +565,7 @@ extern "C" __global__ void __launch_bounds__(128)
 #pragma unroll
                 for (int h2 = 0; h2 < 2; h2++) {
                     mma16816(o[2 * dp + h2], ph, bh + 2 * h2);
-                    mma16816(o[2 * dp + h2], pl, bh + 2 * h2);
+                    if (PL) mma16816(o[2 * dp + h2], pl, bh + 2 * h2);
                 }
                 if (planes == 2) {
                     unsigned bl[4];
@@ -570,3 +587,14 @@ extern "C" __global__ void __launch_bounds__(128)
             *reinterpret_cast<float2 *>(dst + dt * 8 + 2 * t4) = make_float2(o[dt][2 * a] * inv, o[dt][2 * a + 1] * inv);
     }
 }
+
+#define ATTN_TC_ENTRY(name, qk3, pl)                                                                                 \
+    extern "C" __global__ void __launch_bounds__(TC_THREADS)                                                       \
+        name(const float *qkv, const __half *khl, const __half *vhl, float *out, TreeTable tab, unsigned T,          \
+             unsigned NH, unsigned NKV, float scale, unsigned v_exact) {                                           \
+        attn_tree_tc_body<qk3, pl>(qkv, khl, vhl, out, tab, T, NH, NKV, scale, v_exact);                           \
+    }
+ATTN_TC_ENTRY(attn_tree_tc, true, true)
+ATTN_TC_ENTRY(attn_tree_tc_pv1, true, false)
+ATTN_TC_ENTRY(attn_tree_tc_qk1, false, true)
+ATTN_TC_ENTRY(attn_tree_tc_f16, false, false)

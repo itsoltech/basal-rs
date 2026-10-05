@@ -160,6 +160,10 @@ enum Cmd {
         /// Questions per forward (budget batching); 1 = one question per forward
         #[arg(long, default_value_t = 1)]
         batch: usize,
+        /// Also record the largest |value| of the residual stream after every layer (f16 range check; its reduction
+        /// adds GPU time to the profile)
+        #[arg(long)]
+        residual_max: bool,
     },
     /// GEMM tile/swizzle tuning on the projection shapes (diagnostic)
     GemmTune {
@@ -209,6 +213,10 @@ enum Cmd {
         /// Largest M class (classes: multiples of 16 up to 512, then of 128)
         #[arg(long, default_value_t = 3072)]
         max_m: usize,
+        /// M classes instead of the default ladder, e.g. 64,256,1024,4096,16384 (with --invariant: the forward sizes
+        /// the single algorithm per weight shape is chosen for, by total time)
+        #[arg(long, value_delimiter = ',')]
+        m_classes: Vec<usize>,
         /// One algorithm per weight shape for every M, without split-K: results of a row do not depend on the
         /// batch it runs in
         #[arg(long)]
@@ -404,21 +412,25 @@ fn main() -> Result<()> {
             let s = large_eval::eval(&mut engine, &reference, &sizes, &seeds, duty, &out)?;
             println!("{}", serde_json::to_string_pretty(&s["sizes"])?);
         }
-        Cmd::Profile { m, g, reference, n, batch } => {
+        Cmd::Profile { m, g, reference, n, batch, residual_max } => {
             let mut engine = gpu_engine(&m, &g)?;
             let recs = reference::read_jsonl(&reference.join("bench.jsonl"))?;
             let prep: Vec<_> =
                 recs.iter().take(n + 1).map(|r| engine.prepare(reference::bench_item(r)?)).collect::<Result<_>>()?;
             engine.run(&prep[..1], basal_core::Batching::Single)?; // warm-up
             engine.backend.profile = Some(Default::default());
-            engine.backend.residual_max = Some(Default::default());
+            if residual_max {
+                engine.backend.residual_max = Some(Default::default());
+            }
+            // items after the warm-up one (the reference may hold fewer than n + 1)
+            let n = prep.len() - 1;
             let t = std::time::Instant::now();
             for c in prep[1..].chunks(batch) {
                 engine.run(c, basal_core::Batching::Budget)?;
             }
             let total = t.elapsed().as_secs_f64() * 1e3 / n as f64;
             let prof = engine.backend.profile.take().unwrap().into_inner();
-            let rmax = engine.backend.residual_max.take().unwrap().into_inner();
+            let rmax = engine.backend.residual_max.take().map(|r| r.into_inner()).unwrap_or_default();
             let nl = engine.manifest.config.num_layers;
             let per_layer: Vec<f32> =
                 (0..nl).map(|l| rmax.iter().skip(l).step_by(nl).copied().fold(0.0f32, f32::max)).collect();
@@ -426,7 +438,7 @@ fn main() -> Result<()> {
             let tokens: f64 = prep[1..].iter().map(|p| p.packed.ids.len() as f64).sum::<f64>() / n as f64;
             println!(
                 "{}",
-                json!({"items": n, "mean_packed_tokens": tokens, "ms_per_item_profiled": total, "sections_ms_per_item": prof.iter().map(|(k, v)| (k.to_string(), json!(v / n as f64))).collect::<serde_json::Map<_, _>>(), "sections_sum_ms": sum, "residual_abs_max_per_layer": per_layer, "residual_abs_max": per_layer.iter().copied().fold(0.0f32, f32::max)})
+                json!({"items": n, "mean_packed_tokens_with_template": tokens, "ms_per_item_profiled": total, "sections_ms_per_item": prof.iter().map(|(k, v)| (k.to_string(), json!(v / n as f64))).collect::<serde_json::Map<_, _>>(), "sections_sum_ms": sum, "residual_abs_max_per_layer": per_layer, "residual_abs_max": per_layer.iter().copied().fold(0.0f32, f32::max)})
             );
         }
         Cmd::GemmTune { dtype, m, reps } => {
@@ -463,10 +475,14 @@ fn main() -> Result<()> {
                 },
             )?;
         }
-        Cmd::GemmSearch { m, dtype, out, max_m, invariant } => {
+        Cmd::GemmSearch { m, dtype, out, max_m, m_classes, invariant } => {
             #[cfg(feature = "cuda")]
             {
-                let classes: Vec<usize> = (16..=512).step_by(16).chain((640..=max_m).step_by(128)).collect();
+                let classes: Vec<usize> = if m_classes.is_empty() {
+                    (16..=512).step_by(16).chain((640..=max_m).step_by(128)).collect()
+                } else {
+                    m_classes
+                };
                 // projection shapes (n, k) of the model: qkv, o, gate|up, down
                 let c = ModelManifest::load(&m.model)?.config;
                 let (h, qd, kvd, i) = (c.hidden, c.heads * c.head_dim, c.kv_heads * c.head_dim, c.intermediate);
@@ -476,7 +492,7 @@ fn main() -> Result<()> {
             }
             #[cfg(not(feature = "cuda"))]
             bail!(
-                "gemm-search needs a CUDA build ({}, {dtype}, {}, {max_m}, {invariant})",
+                "gemm-search needs a CUDA build ({}, {dtype}, {}, {max_m}, {m_classes:?}, {invariant})",
                 m.model.display(),
                 out.display()
             );

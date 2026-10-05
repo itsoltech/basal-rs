@@ -604,15 +604,16 @@ struct AttentionTree<'a> {
     nh: usize,
     nkv: usize,
     scale: f32,
-    /// tensor-core kernel (attn_tree_tc) instead of the f32 SIMT kernel (attn_tree_f32)
+    /// tensor-core kernel (`attn_tree_tc*`, see [`tc_kernel`]) instead of the f32 SIMT kernel (attn_tree_f32)
     tc: bool,
+    tc_kernel: &'static str,
     /// V values are exact f16 (f16 forward): the lo plane of V is zero and skipped
     v_exact: bool,
 }
 
 /// Dynamic shared memory of attn_tree_tc: Q hi/lo [64][136], K hi/lo and V hi/lo [32][136] (f16).
 #[cfg(feature = "cuda")]
-const TC_SMEM: usize = (2 * 64 * 136 + 4 * 32 * 136) * 2;
+const TC_SMEM: usize = 128 * 136 * 2; // one Q plane of 128 rows; the K / V tiles (4 x 32 x 136 x 2) reuse it
 
 #[cfg(feature = "cuda")]
 impl CustomOp3 for AttentionTree<'_> {
@@ -651,7 +652,9 @@ impl CustomOp3 for AttentionTree<'_> {
         let qv = view!(qkv, f32, contiguous(ql, "qkv")?);
         // SAFETY: every query of every unit is written; the units cover the token list.
         let out = unsafe { dev.alloc::<f32>(nh * t * HD)? };
-        let (name, bm, smem) = if self.tc { ("attn_tree_tc", 64, TC_SMEM) } else { ("attn_tree_f32", 16, 0) };
+        // rows per block and threads: attn_tree_tc* TC_BM / TC_THREADS, attn_tree_f32 ATT_BM / ATT_THREADS
+        let (name, bm, threads, smem) =
+            if self.tc { (self.tc_kernel, 128, 256, TC_SMEM) } else { ("attn_tree_f32", 16, 128, 0) };
         let f = dev.get_or_load_custom_func(name, "basal_fused", cu::PTX)?;
         if smem > 0 {
             use candle_core::cuda_backend::cudarc::driver::sys::CUfunction_attribute;
@@ -708,7 +711,7 @@ impl CustomOp3 for AttentionTree<'_> {
                 unsafe {
                     a.launch(LaunchConfig {
                         grid_dim: (tiles, nkv as u32, 1),
-                        block_dim: (128, 1, 1),
+                        block_dim: (threads, 1, 1),
                         shared_mem_bytes: smem as u32,
                     })
                 }
@@ -718,7 +721,7 @@ impl CustomOp3 for AttentionTree<'_> {
             a.arg(&qv).arg(&out).arg(&tab).arg(&t_).arg(&nh_).arg(&nkv_).arg(&self.scale);
             let cfg = LaunchConfig {
                 grid_dim: (tiles, nkv as u32, 1),
-                block_dim: (128, 1, 1),
+                block_dim: (threads, 1, 1),
                 shared_mem_bytes: smem as u32,
             };
             // SAFETY: argument types and counts match the kernel signature; prefix addresses are live tensors.
@@ -728,11 +731,25 @@ impl CustomOp3 for AttentionTree<'_> {
     }
 }
 
+/// Tensor-core attention kernel from `BASAL_ATT`: `tc` (default; Q·K with f16 hi/lo operands, three MMAs, and P
+/// split into hi/lo for P·V: products close to f32), `tc-pv1` (P rounded to f16), `tc-qk1` (Q·K from the f16
+/// hi parts only), `tc-f16` (both). Softmax, accumulation and output are f32 in every variant.
+#[cfg(feature = "cuda")]
+pub fn tc_kernel() -> &'static str {
+    static K: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    K.get_or_init(|| match std::env::var("BASAL_ATT").as_deref() {
+        Ok("tc-pv1") => "attn_tree_tc_pv1",
+        Ok("tc-qk1") => "attn_tree_tc_qk1",
+        Ok("tc-f16") => "attn_tree_tc_f16",
+        _ => "attn_tree_tc",
+    })
+}
+
 /// f32 attention of all units (blocks of packed rows) of a forward (CUDA), invariant to how questions are packed:
 /// `qkv` = the flat [`qkv_rope`] output over `d.l` tokens. Returns `[1, NH, total, HD]`.
-#[cfg(feature = "cuda")]
 /// `tc = Some((khl, vhl, v_exact))`: tensor cores with f16 hi/lo operands (about f32 accuracy) on the layer's K / V
 /// split by [`split_hilo`]; `None`: the f32 SIMT kernel.
+#[cfg(feature = "cuda")]
 pub fn attention_tree(
     qkv: &Tensor,
     units: &[TreeUnit],
@@ -747,6 +764,7 @@ pub fn attention_tree(
         nkv: d.nkv,
         scale,
         tc: tc.is_some(),
+        tc_kernel: tc_kernel(),
         v_exact: tc.is_some_and(|t| t.2),
     };
     match tc {
