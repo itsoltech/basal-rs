@@ -217,6 +217,29 @@ impl PrefixKv {
 }
 
 /// The GPU of this build: CUDA device 0 with the `cuda` feature, otherwise the Metal device (macOS).
+/// Weight shapes (N, K) of the projection GEMMs of a model: qkv, o, gate|up, down.
+pub fn projection_shapes(c: &LlamaConfig) -> Vec<(usize, usize)> {
+    let (h, qd, kvd, i) = (c.hidden, c.heads * c.head_dim, c.kv_heads * c.head_dim, c.intermediate);
+    vec![(qd + 2 * kvd, h), (h, qd), (2 * i, h), (h, i)]
+}
+
+/// Name of the GPU (CUDA device 0), as recorded in GEMM tables.
+pub fn gpu_name() -> Result<String> {
+    #[cfg(feature = "cuda")]
+    if let Device::Cuda(d) = gpu_device()? {
+        return Ok(d.cuda_stream().context().name()?);
+    }
+    bail!("gpu_name: CUDA only")
+}
+
+/// Version of the cuBLASLt library this build runs with (CUDA), as recorded in GEMM tables.
+pub fn cublaslt_version() -> Option<usize> {
+    #[cfg(feature = "cuda")]
+    return Some(cublaslt::version());
+    #[cfg(not(feature = "cuda"))]
+    None
+}
+
 pub fn gpu_device() -> Result<Device> {
     #[cfg(feature = "cuda")]
     return Device::new_cuda(0).context("CUDA device 0");
@@ -961,6 +984,17 @@ impl GpuBackend {
 }
 
 impl GpuBackend {
+    /// Projection weight shapes (N, K) that the loaded GEMM table does not cover (CUDA with cuBLASLt; empty
+    /// otherwise). Such shapes use algorithms timed at first use, whose results may depend on the batch.
+    pub fn gemm_table_missing(&self) -> Vec<(usize, usize)> {
+        #[cfg(feature = "cuda")]
+        if let Some(lt) = &self.lt {
+            let dt = self.precision.compute();
+            return projection_shapes(&self.cfg).into_iter().filter(|&(n, k)| !lt.covers(n, k, dt)).collect();
+        }
+        Vec::new()
+    }
+
     fn gemm_desc(&self) -> &'static str {
         #[cfg(feature = "cuda")]
         if self.lt.as_ref().is_some_and(|lt| lt.is_invariant()) {
@@ -995,6 +1029,10 @@ impl GpuBackend {
                 v["cublaslt_version"],
                 cublaslt::version()
             );
+            if let (Some(t), Device::Cuda(d)) = (v["gpu"].as_str(), &self.dev) {
+                let here = d.cuda_stream().context().name()?;
+                ensure!(t == here, "{}: table for {t}, this GPU is {here}", path.display());
+            }
             let mut entries = Vec::new();
             for e in v["entries"].as_array().context("entries")? {
                 let algo: Vec<u64> = e["algo"].as_array().context("algo")?.iter().filter_map(|x| x.as_u64()).collect();
@@ -1437,7 +1475,8 @@ pub fn gemm_search(m_classes: &[usize], shapes: &[(usize, usize)], dtype: &str, 
                    "configurations": e.tried, "tflops": 2.0 * (e.m_class * e.n * e.k) as f64 / e.ms / 1e9})
         })
         .collect();
-    Ok(json!({"cublaslt_version": cublaslt::version(), "dtype": dtype, "invariant": invariant, "entries": entries,
+    Ok(json!({"cublaslt_version": cublaslt::version(), "gpu": d.cuda_stream().context().name()?, "dtype": dtype,
+              "invariant": invariant, "shapes": shapes, "entries": entries,
               "timing": "each configuration timed on rotating copies of the weight larger than L2 (cold weights, as in a forward)",
               "note": "algorithms are opaque cuBLASLt configurations, valid for this GPU and cuBLASLt version"}))
 }

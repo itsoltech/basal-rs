@@ -1,0 +1,26 @@
+# basal serve --config serve.example.yml
+#
+# Models served by one process. A request goes to the model named in its "model" field (the name in the model's
+# basal.json); /v1/basal requests without the field go to default_model.
+
+addr: 0.0.0.0:8000
+default_model: basal-1.5-max       # default: the first model
+max_inflight: 1024                 # waiting + running requests of all models; more get 503
+long_slice_ms: 100                 # least work of a long-request lane between two hand-overs of the GPU
+gemm_cache: .cache/gemm            # tables of `gemm_table: auto`
+
+models:
+  - path: .models/basal-1.5-max
+    # auto (default): the batch-invariant GEMM table of this model, dtype and GPU from gemm_cache; generated at start
+    # when missing or made for another GPU / cuBLASLt (one-time, minutes). none: algorithms timed at first use
+    # (results may depend on the batch). Otherwise the path of a `basal gemm-search --invariant` table.
+    gemm_table: reports/rust-cuda-1.5-max/gemm-equiv/gemm-algos-f16-invariant-groups.json
+    dtype: f16                     # f16 (default), bf16, f32
+    max_batch_tokens: 8192         # packed tokens of one batch
+    schedule: hrrn                 # hrrn (default) or fifo
+    long_tokens: 4096              # requests above this run in the model's long lane (0: none)
+    state_cache_mb: 0              # cross-request state cache (0: off)
+
+  - path: .models/basal-1.5-4.5B
+
+  - path: .models/basal-1.5-mini

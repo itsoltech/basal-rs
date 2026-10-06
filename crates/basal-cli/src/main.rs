@@ -9,6 +9,7 @@
 
 mod bench;
 mod compare;
+mod config;
 mod export;
 mod large_eval;
 mod reference;
@@ -176,6 +177,10 @@ enum Cmd {
     },
     /// System One HTTP server: POST /v1/systemone, POST /v1/basal, GET /v1/models, GET /health
     Serve {
+        /// YAML file with the served models and their options (see crates/basal-cli/src/config.rs); replaces the
+        /// model, GPU and admission options below
+        #[arg(long, conflicts_with_all = ["model", "gemm_table"])]
+        config: Option<PathBuf>,
         #[command(flatten)]
         m: ModelArgs,
         #[command(flatten)]
@@ -213,8 +218,8 @@ enum Cmd {
         /// Largest M class (classes: multiples of 16 up to 512, then of 128)
         #[arg(long, default_value_t = 3072)]
         max_m: usize,
-        /// M classes instead of the default ladder, e.g. 64,256,1024,4096,16384 (with --invariant: the forward sizes
-        /// the single algorithm per weight shape is chosen for, by total time)
+        /// M classes instead of the default ladder (--invariant: the 25 classes of config::INVARIANT_CLASSES, 16 to
+        /// 16384; otherwise multiples of 16 up to 512, then of 128 up to --max-m)
         #[arg(long, value_delimiter = ',')]
         m_classes: Vec<usize>,
         /// One algorithm per weight shape for every M, without split-K: results of a row do not depend on the
@@ -451,6 +456,7 @@ fn main() -> Result<()> {
             anyhow::bail!("gemm-tune tunes the Metal GEMM kernels ({dtype}, {m:?}, {reps}, {shapes:?})");
         }
         Cmd::Serve {
+            config,
             m,
             g,
             addr,
@@ -461,32 +467,65 @@ fn main() -> Result<()> {
             long_slice_ms,
             release_date,
         } => {
-            let engine = gpu_engine(&m, &g)?;
-            serve::serve(
-                engine,
-                serve::ServeOptions {
-                    addr,
-                    release_date,
-                    max_batch_tokens,
-                    max_inflight,
-                    schedule,
-                    long_tokens,
-                    long_slice_ms,
-                },
-            )?;
+            if let Some(path) = config {
+                let c = config::ServeConfig::load(&path)?;
+                // GEMM tables first (a search needs no model weights in GPU memory), then the models
+                let mut tables = Vec::new();
+                for mc in &c.models {
+                    let manifest = ModelManifest::load(&mc.path)?;
+                    tables.push(config::gemm_table(mc, &manifest, &c.gemm_cache)?);
+                }
+                let mut models = Vec::new();
+                for (mc, table) in c.models.iter().zip(tables) {
+                    let g = GpuArgs {
+                        dtype: mc.dtype.clone(),
+                        readout: "f32".into(),
+                        kernels: "fused".into(),
+                        no_prefix_cache: mc.no_prefix_cache,
+                        state_cache_mb: mc.state_cache_mb,
+                        tree_max_tokens: mc.tree_max_tokens,
+                        gemm_table: table.clone(),
+                    };
+                    let engine = gpu_engine(&ModelArgs { model: mc.path.clone() }, &g)?;
+                    if let Some(t) = &table {
+                        config::check_gemm_coverage(&engine.manifest.name, &engine.backend.gemm_table_missing(), t)?;
+                    }
+                    models.push(serve::ServedModel {
+                        engine,
+                        max_batch_tokens: mc.max_batch_tokens,
+                        schedule: mc.schedule,
+                        long_tokens: mc.long_tokens,
+                    });
+                }
+                let opts = serve::ServeOptions {
+                    addr: c.addr,
+                    release_date: c.release_date,
+                    max_inflight: c.max_inflight,
+                    default_model: c.default_model,
+                    long_slice_ms: c.long_slice_ms,
+                };
+                serve::serve(models, opts)?;
+            } else {
+                let engine = gpu_engine(&m, &g)?;
+                if let Some(t) = &g.gemm_table {
+                    config::check_gemm_coverage(&engine.manifest.name, &engine.backend.gemm_table_missing(), t)?;
+                }
+                let model = serve::ServedModel { engine, max_batch_tokens, schedule, long_tokens };
+                let opts = serve::ServeOptions { addr, release_date, max_inflight, default_model: None, long_slice_ms };
+                serve::serve(vec![model], opts)?;
+            }
         }
         Cmd::GemmSearch { m, dtype, out, max_m, m_classes, invariant } => {
             #[cfg(feature = "cuda")]
             {
-                let classes: Vec<usize> = if m_classes.is_empty() {
-                    (16..=512).step_by(16).chain((640..=max_m).step_by(128)).collect()
-                } else {
+                let classes: Vec<usize> = if !m_classes.is_empty() {
                     m_classes
+                } else if invariant {
+                    config::INVARIANT_CLASSES.to_vec()
+                } else {
+                    (16..=512).step_by(16).chain((640..=max_m).step_by(128)).collect()
                 };
-                // projection shapes (n, k) of the model: qkv, o, gate|up, down
-                let c = ModelManifest::load(&m.model)?.config;
-                let (h, qd, kvd, i) = (c.hidden, c.heads * c.head_dim, c.kv_heads * c.head_dim, c.intermediate);
-                let shapes = [(qd + 2 * kvd, h), (h, qd), (2 * i, h), (h, i)];
+                let shapes = basal_gpu::projection_shapes(&ModelManifest::load(&m.model)?.config);
                 let t = basal_gpu::gemm_search(&classes, &shapes, &dtype, invariant)?;
                 write_json(&out, &t)?;
             }

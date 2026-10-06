@@ -136,6 +136,12 @@ impl Lt {
         Ok(())
     }
 
+    /// A table entry (batch-invariant or per class) exists for the weight shape (N, K) in `dt`.
+    pub fn covers(&self, n: usize, k: usize, dt: DType) -> bool {
+        self.invariant.lock().unwrap().contains_key(&(n, k, dt))
+            || self.algos.lock().unwrap().keys().any(|key| key.n == n && key.k == k && key.dt == dt)
+    }
+
     pub fn is_invariant(&self) -> bool {
         !self.invariant.lock().unwrap().is_empty()
     }

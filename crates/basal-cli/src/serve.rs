@@ -15,9 +15,15 @@
 //! main lane has a batch, the long lane pauses after its current layer (once it has worked `--long-slice-ms`), the
 //! main batch runs, and the long forward continues. Results do not depend on the lane or the pauses.
 //!
+//! Several models (`basal serve --config FILE`, [`crate::config`]) run in one process: each has its own engine,
+//! queue and long lane, requests go to the model named in their `model` field (/v1/basal: the default model when the
+//! field is missing), and all engines take turns on the GPU through one gate, so short batches of any model go
+//! before long requests.
+//!
 //! Timing headers (not part of the System One body): `x-basal-queue-ms` (arrival to the start of its batch),
 //! `x-basal-compute-ms` (planning + forwards of its batch), `x-basal-batch-requests`.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -41,12 +47,21 @@ pub struct ServeOptions {
     pub addr: SocketAddr,
     /// `release_date` of GET /v1/models (TypeSafe ModelMetadata; upstream reports its engine release date)
     pub release_date: String,
-    pub max_batch_tokens: usize,
+    /// Waiting + running requests of all models.
     pub max_inflight: usize,
+    /// Model of /v1/basal requests without a "model" field (default: the first model).
+    pub default_model: Option<String>,
+    /// Least work of a long lane between two hand-overs of the GPU.
+    pub long_slice_ms: u64,
+}
+
+/// One served model: its engine and admission options.
+pub struct ServedModel<B: Backend> {
+    pub engine: Engine<B>,
+    pub max_batch_tokens: usize,
     pub schedule: Schedule,
     /// Requests above this many packed tokens run in a second lane that yields the GPU between layers (0 = one lane).
     pub long_tokens: usize,
-    pub long_slice_ms: u64,
 }
 
 struct Timing {
@@ -65,10 +80,12 @@ struct Job {
 }
 
 struct App {
-    tx: mpsc::UnboundedSender<Job>,
+    /// Job queue of every served model, by name.
+    routes: HashMap<String, mpsc::UnboundedSender<Job>>,
+    names: Vec<String>,
+    default_model: String,
     inflight: AtomicUsize,
     max_inflight: usize,
-    model: String,
     release_date: String,
 }
 
@@ -77,7 +94,8 @@ fn plan_prompts(p: &RequestPlan) -> Vec<&[u32]> {
 }
 
 /// Order in which waiting requests are admitted to a batch.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Schedule {
     /// Arrival order.
     Fifo,
@@ -273,8 +291,22 @@ async fn decide(app: Arc<App>, body: Value, dialect: Dialect, arrived: Instant) 
             json!({"error": "overloaded", "detail": "too many requests in flight"}),
         );
     }
+    // The request's model, or the default one when the field is missing or not a string (/v1/systemone then
+    // answers the schema error of the field).
+    let model = match body.get("model").and_then(Value::as_str) {
+        Some(m) if app.routes.contains_key(m) => m.to_string(),
+        Some(m) => {
+            let e = DecideError::Validation(vec![basal_core::request::FieldError {
+                loc: vec!["body".into(), "model".into()],
+                msg: format!("unknown model {m:?}; served: {:?}", app.names),
+                kind: "unknown_model".into(),
+            }]);
+            return error_body(dialect, e);
+        }
+        None => app.default_model.clone(),
+    };
     let (tx, rx) = oneshot::channel();
-    let sent = app.tx.send(Job { body, dialect, arrived, reply: tx });
+    let sent = app.routes[&model].send(Job { body, dialect, arrived, reply: tx });
     let reply = match sent {
         Ok(()) => rx.await.ok(),
         Err(_) => None,
@@ -305,67 +337,103 @@ async fn decide(app: Arc<App>, body: Value, dialect: Dialect, arrived: Instant) 
             }
             (StatusCode::OK, headers, Json(v)).into_response()
         }
-        Err(e) if dialect == Dialect::Upstream => {
-            error_response(StatusCode::UNPROCESSABLE_ENTITY, e.to_upstream_json())
-        }
-        Err(e @ (DecideError::Validation(_) | DecideError::Unsupported(_))) => {
+        Err(e) => error_body(dialect, e),
+    }
+}
+
+/// Error answer of an endpoint: upstream: 422 `{"error"}` for every failure; TypeSafe: 422 for invalid or
+/// unsupported requests, 500 otherwise.
+fn error_body(dialect: Dialect, e: DecideError) -> Response {
+    match e {
+        e if dialect == Dialect::Upstream => error_response(StatusCode::UNPROCESSABLE_ENTITY, e.to_upstream_json()),
+        e @ (DecideError::Validation(_) | DecideError::Unsupported(_)) => {
             error_response(StatusCode::UNPROCESSABLE_ENTITY, e.to_json())
         }
-        Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_json()),
+        e => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_json()),
     }
 }
 
 /// TypeSafe `ModelMetadataList` (name, description, release_date) plus the upstream fields `mode` and `early_exit`
 /// (no early-exit policies in this runtime).
-async fn models(State(app): State<Arc<App>>) -> Json<Value> {
-    Json(json!({"models": [{"name": app.model, "release_date": app.release_date,
-        "description": "basal typed-decision model (choice / noul / score / act / multi), Polish and English",
-        "mode": "basal-rs", "early_exit": []}]}))
+async fn models_list(State(app): State<Arc<App>>) -> Json<Value> {
+    let models: Vec<Value> = app
+        .names
+        .iter()
+        .map(|name| {
+            json!({"name": name, "release_date": app.release_date,
+                "description": "basal typed-decision model (choice / noul / score / act / multi), Polish and English",
+                "mode": "basal-rs", "early_exit": []})
+        })
+        .collect();
+    Json(json!({ "models": models }))
 }
 
-async fn health() -> Json<Value> {
-    Json(json!({"status": "ok"}))
+async fn health(State(app): State<Arc<App>>) -> Json<Value> {
+    Json(json!({"status": "ok", "models": app.names, "default_model": app.default_model}))
 }
 
-pub fn serve<B: Backend + Send + 'static>(mut engine: Engine<B>, opts: ServeOptions) -> Result<()> {
-    let model = engine.manifest.name.clone();
-    let (tx, rx) = mpsc::unbounded_channel();
-    let lane = || Lane::new(opts.schedule, opts.max_batch_tokens);
-    let long = if opts.long_tokens > 0 {
-        let mut le = engine.fork().context("second engine for the long lane")?;
-        let gate = Arc::new(Gate::new(std::time::Duration::from_millis(opts.long_slice_ms)));
-        engine.backend.set_gate(gate.clone(), true);
-        le.backend.set_gate(gate, false);
-        let (ltx, lrx) = std::sync::mpsc::channel();
-        let l = lane();
-        std::thread::Builder::new()
-            .name("basal-gpu-long".into())
-            .spawn(move || long_lane(le, lrx, l))
-            .context("starting the long-lane thread")?;
-        eprintln!(
-            "basal: long lane for requests above {} packed tokens (main lane may preempt it after {} ms)",
-            opts.long_tokens, opts.long_slice_ms
+pub fn serve<B: Backend + Send + 'static>(models: Vec<ServedModel<B>>, opts: ServeOptions) -> Result<()> {
+    anyhow::ensure!(!models.is_empty(), "no models to serve");
+    let names: Vec<String> = models.iter().map(|m| m.engine.manifest.name.clone()).collect();
+    for (i, n) in names.iter().enumerate() {
+        anyhow::ensure!(!names[..i].contains(n), "model {n} configured twice");
+    }
+    let default_model = opts.default_model.clone().unwrap_or_else(|| names[0].clone());
+    anyhow::ensure!(names.contains(&default_model), "default model {default_model} is not served ({names:?})");
+    // One GPU: with several models or a long lane, every engine takes turns through one gate (short batches of any
+    // model before long requests, which yield between layers).
+    let shared = models.len() > 1 || models.iter().any(|m| m.long_tokens > 0);
+    let gate = shared.then(|| Arc::new(Gate::new(std::time::Duration::from_millis(opts.long_slice_ms))));
+    let mut routes = HashMap::new();
+    let mut threads = Vec::new();
+    for m in models {
+        let ServedModel { mut engine, max_batch_tokens, schedule, long_tokens } = m;
+        let name = engine.manifest.name.clone();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let lane = || Lane::new(schedule, max_batch_tokens);
+        let long = if long_tokens > 0 {
+            let mut le = engine.fork().with_context(|| format!("{name}: second engine for the long lane"))?;
+            le.backend.set_gate(gate.clone().unwrap(), false);
+            let (ltx, lrx) = std::sync::mpsc::channel();
+            let l = lane();
+            threads.push(
+                std::thread::Builder::new()
+                    .name(format!("{name}-long"))
+                    .spawn(move || long_lane(le, lrx, l))
+                    .context("starting a long-lane thread")?,
+            );
+            Some((ltx, long_tokens))
+        } else {
+            None
+        };
+        if let Some(g) = &gate {
+            engine.backend.set_gate(g.clone(), true);
+        }
+        let main_lane = lane();
+        threads.push(
+            std::thread::Builder::new()
+                .name(name.clone())
+                .spawn(move || scheduler(engine, rx, main_lane, long))
+                .context("starting a GPU thread")?,
         );
-        Some((ltx, opts.long_tokens))
-    } else {
-        None
-    };
-    let main_lane = lane();
-    let gpu = std::thread::Builder::new()
-        .name("basal-gpu".into())
-        .spawn(move || scheduler(engine, rx, main_lane, long))
-        .context("starting the GPU thread")?;
+        eprintln!(
+            "basal: serving {name} (batch {max_batch_tokens} tokens, {schedule:?}{})",
+            if long_tokens > 0 { format!(", long lane above {long_tokens} tokens") } else { String::new() }
+        );
+        routes.insert(name, tx);
+    }
     let app = Arc::new(App {
-        tx,
+        routes,
+        names,
+        default_model,
         inflight: AtomicUsize::new(0),
         max_inflight: opts.max_inflight,
-        model,
         release_date: opts.release_date.clone(),
     });
     let router = Router::new()
         .route("/v1/systemone", post(systemone))
         .route("/v1/basal", post(basal))
-        .route("/v1/models", get(models))
+        .route("/v1/models", get(models_list))
         .route("/health", get(health))
         .with_state(app);
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
@@ -380,6 +448,11 @@ pub fn serve<B: Backend + Send + 'static>(mut engine: Engine<B>, opts: ServeOpti
             .await
             .context("HTTP server")
     })?;
-    drop(gpu);
+    // The router and with it every job queue are gone: the GPU threads finish their batch, return and drop their
+    // engines (CUDA resources) before the process exits.
+    drop(rt);
+    for t in threads {
+        let _ = t.join();
+    }
     Ok(())
 }
