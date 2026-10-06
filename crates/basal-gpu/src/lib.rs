@@ -242,7 +242,26 @@ pub fn cublaslt_version() -> Option<usize> {
 
 pub fn gpu_device() -> Result<Device> {
     #[cfg(feature = "cuda")]
-    return Device::new_cuda(0).context("CUDA device 0");
+    {
+        let dev = Device::new_cuda(0).context("CUDA device 0")?;
+        if let Device::Cuda(d) = &dev {
+            use candle_core::cuda_backend::cudarc::driver::sys::CUdevice_attribute as A;
+            let ctx = d.cuda_stream().context().clone();
+            let major = ctx.attribute(A::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)?;
+            let minor = ctx.attribute(A::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)?;
+            let built: i32 = env!("BASAL_CUDA_COMPUTE_CAP").parse().unwrap_or(0);
+            ensure!(
+                major * 10 + minor >= built,
+                "this build targets CUDA compute capability {}.{} and newer, but {} is {major}.{minor}: use a build \
+                 for {major}{minor} or lower (CUDA_COMPUTE_CAP; container image tags: latest = 8.9, -sm80 = 8.0, \
+                 -sm90 = 9.0)",
+                built / 10,
+                built % 10,
+                ctx.name()?
+            );
+        }
+        return Ok(dev);
+    }
     #[cfg(all(not(feature = "cuda"), target_os = "macos"))]
     return Device::new_metal(0).context("Metal device");
     #[cfg(all(not(feature = "cuda"), not(target_os = "macos")))]

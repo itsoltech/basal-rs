@@ -9,6 +9,8 @@ fn main() {
         return;
     }
     let cap = std::env::var("CUDA_COMPUTE_CAP").unwrap_or_else(|_| "89".into());
+    // checked at run time against the GPU (PTX runs on this compute capability and newer ones only)
+    println!("cargo:rustc-env=BASAL_CUDA_COMPUTE_CAP={cap}");
     let nvcc = std::env::var("NVCC").unwrap_or_else(|_| "nvcc".into());
     let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("kernels.ptx");
     let status = std::process::Command::new(&nvcc)
