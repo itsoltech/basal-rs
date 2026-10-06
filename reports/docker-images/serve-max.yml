@@ -1,0 +1,3 @@
+models:
+  - path: /work/.models/basal-1.5-max
+    gemm_table: /work/reports/rust-cuda-1.5-max/gemm-equiv/gemm-algos-f16-invariant-groups.json

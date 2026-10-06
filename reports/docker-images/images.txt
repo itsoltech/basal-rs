@@ -1,0 +1,3 @@
+latest ghcr.io/itsoltech/basal-rs@sha256:b6b6716fe946eef91dbbd59d37f18a73e393f84e223ca6f0038c6a4341231abe
+latest-sm80 ghcr.io/itsoltech/basal-rs@sha256:c6a903331035ca62c41e478de2d3e58b604c91feb1b7cdfdbfc264829d5b47cb
+latest-sm90 ghcr.io/itsoltech/basal-rs@sha256:7fb169e02c026f957b1441bd566b6efd04fb8e8cf89c6b64e36a042f0df4650b

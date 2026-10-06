@@ -82,6 +82,11 @@ architektury GPU:
 | ten sam z `-sm80` | 80 | A100, RTX 30xx |
 | ten sam z `-sm90` | 90 | H100 |
 
+Obraz działa na karcie o tej samej lub nowszej architekturze, nie starszej
+(na starszej przy starcie jest błąd z nazwą właściwego tagu). Na RTX 6000
+Ada `-sm80` i `latest` dają bitowo te same wyniki i tę samą wydajność
+([pomiar](reports/docker-images/README.md)).
+
 Przy pierwszym starcie serwer pobiera modele z Hugging Face i generuje dla
 nich tabele GEMM (jednorazowo; basal-1.5-mini: ~35 s pobierania i ~150 s
 tabeli na RTX 6000 Ada). Oba trafiają do wolumenu `basal-data` (`/data`),

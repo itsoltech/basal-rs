@@ -1,0 +1,2 @@
+ready after 203 s
+{"models":[{"name":"basal-1.5-mini","release_date":"2026-10-05","description":"basal typed-decision model (choice / noul / score / act / multi), Polish and English","mode":"basal-rs","early_exit":[]}]}exit 0

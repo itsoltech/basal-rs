@@ -1,0 +1,62 @@
+{
+ "tool": "tools/bench/loadtest.py",
+ "url": "http://127.0.0.1:8110/v1/systemone",
+ "source": "reports/reference-1.5-max-fp32/bench.jsonl",
+ "distinct_requests": 44,
+ "phases": [
+  {
+   "phase": "sequential",
+   "concurrency": 1,
+   "offered_requests_per_s": null,
+   "requests": 44,
+   "errors": 0,
+   "p50_ms": 55.53812949801795,
+   "p95_ms": 72.06254100310616,
+   "p99_ms": 74.1895750106778,
+   "requests_per_s": 17.605532130107463,
+   "decisions_per_s": 17.605532130107463,
+   "max_prob_diff_vs_first_answer": 0.0,
+   "mean_batch_requests": 1,
+   "classes": {
+    "bench": {
+     "n": 44,
+     "p50_ms": 55.53812949801795,
+     "p95_ms": 72.06254100310616,
+     "max_ms": 74.1895750106778
+    }
+   },
+   "gpu_power_w": 293.41846153846154,
+   "gpu_sm_mhz": 1231.1538461538462,
+   "gpu_temp_c": 66.0,
+   "gpu_util": 89.38461538461539,
+   "joules_per_decision": 16.66626486322913
+  },
+  {
+   "phase": "concurrent",
+   "concurrency": 32,
+   "offered_requests_per_s": null,
+   "requests": 300,
+   "errors": 0,
+   "p50_ms": 1168.893798996578,
+   "p95_ms": 1205.1419939962216,
+   "p99_ms": 1233.675133989891,
+   "requests_per_s": 27.012028950820984,
+   "decisions_per_s": 27.012028950820984,
+   "max_prob_diff_vs_first_answer": 0.0,
+   "mean_batch_requests": 18.706666666666667,
+   "classes": {
+    "bench": {
+     "n": 300,
+     "p50_ms": 1168.893798996578,
+     "p95_ms": 1205.1419939962216,
+     "max_ms": 1236.039970011916
+    }
+   },
+   "gpu_power_w": 297.9229090909091,
+   "gpu_sm_mhz": 1276.6363636363637,
+   "gpu_temp_c": 71.05454545454545,
+   "gpu_util": 97.0,
+   "joules_per_decision": 11.029268095088957
+  }
+ ]
+}

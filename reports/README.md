@@ -19,6 +19,12 @@ Metodyka: [docs/BENCHMARKS.md](../docs/BENCHMARKS.md).
 | [baseline-cuda-1.5-max](baseline-cuda-1.5-max/README.md) | upstream v1.5.0 na tej samej karcie |
 | `reference-1.5-max-fp32`, `-cases`, `-cases2` | referencja upstream FP32: 44 przykłady basal-bench, żądania System One z `multi`, `act`, `facts`, `evidence` |
 
+## Obrazy kontenerów
+
+| Katalog | Zawartość |
+|---|---|
+| [docker-images](docker-images/README.md) | obrazy z GHCR na RTX 6000 Ada: start od zera, `-sm80` a `latest`, `-sm90` na starszej karcie |
+
 ## basal-1.5-4.5B i basal-1.5-mini
 
 | Katalog | Zawartość |

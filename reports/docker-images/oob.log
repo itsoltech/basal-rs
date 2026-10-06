@@ -1,0 +1,17 @@
+basal: Remek/basal-1.5-mini@1978d0705ce09cd2d7d8d3e87b304468121e7255: fetching the model files (Hugging Face cache)
+basal: Remek/basal-1.5-mini: 8 file(s), 3.20 GB
+basal: Remek/basal-1.5-mini: 0.51 / 3.20 GB (16%)
+basal: Remek/basal-1.5-mini: 3.06 / 3.20 GB (95%)
+basal: Remek/basal-1.5-mini@1978d0705ce09cd2d7d8d3e87b304468121e7255: /data/hf/hub/models--Remek--basal-1.5-mini/snapshots/1978d0705ce09cd2d7d8d3e87b304468121e7255 (37 s)
+basal: basal-1.5-mini: generating the batch-invariant GEMM table for NVIDIA RTX 6000 Ada Generation (no table; 25 classes x 4 shapes, one-time) -> .cache/gemm/basal-1.5-mini-f16.json
+gemm-search invariant n=2048 k=1536: 50 candidates, slowdown vs best per class: mean 1.000, max 1.000
+gemm-search invariant n=1536 k=1536: 46 candidates, slowdown vs best per class: mean 1.000, max 1.000
+gemm-search invariant n=17920 k=1536: 45 candidates, slowdown vs best per class: mean 1.000, max 1.005
+gemm-search invariant n=1536 k=8960: 43 candidates, slowdown vs best per class: mean 1.012, max 1.159
+basal: basal-1.5-mini: GEMM table done in 153 s
+basal: basal-1.5-mini loaded on the GPU in 5.1s
+basal: 100 GEMM classes from .cache/gemm/basal-1.5-mini-f16.json
+basal: template prefixes precomputed ([53, 66] tokens)
+basal: serving basal-1.5-mini (batch 8192 tokens, Hrrn, long lane above 4096 tokens)
+basal: serving on http://127.0.0.1:8110
+basal: shutting down

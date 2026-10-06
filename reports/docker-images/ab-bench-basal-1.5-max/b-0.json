@@ -1,0 +1,464 @@
+{
+  "n": 44,
+  "lat_n": 39,
+  "lat1_ms": 37.588122,
+  "lat2_ms": 47.103772,
+  "lat2_p95_ms": 56.802640000000004,
+  "lat2_ms_all": [
+    39.243621,
+    39.78349,
+    40.69109,
+    40.729753,
+    40.807321,
+    41.565222,
+    41.703651,
+    42.218230000000005,
+    44.393572,
+    44.515642,
+    44.871956999999995,
+    45.127889999999994,
+    45.346292000000005,
+    45.624298,
+    45.84641,
+    45.901708,
+    46.154009,
+    46.53456,
+    46.536396,
+    47.103772,
+    47.224947,
+    47.544083,
+    47.836834,
+    48.221446,
+    48.299507999999996,
+    50.826747999999995,
+    52.12943,
+    52.522603000000004,
+    52.618883,
+    53.25263,
+    53.978889,
+    54.191502,
+    54.226348,
+    54.369013,
+    54.369789000000004,
+    55.871622,
+    55.946227,
+    56.802640000000004,
+    57.348233
+  ],
+  "lat1_ms_all": [
+    35.860577,
+    36.09629,
+    36.640639,
+    36.660167,
+    36.720989,
+    36.730008,
+    36.92039200000001,
+    36.963227,
+    36.98975,
+    37.000743,
+    37.014607,
+    37.050639000000004,
+    37.152159,
+    37.185217,
+    37.210967999999994,
+    37.482128,
+    37.505555,
+    37.543580999999996,
+    37.544112999999996,
+    37.588122,
+    37.652837,
+    38.606126999999994,
+    41.958470999999996,
+    42.027181,
+    42.93006,
+    43.110069,
+    43.594401999999995,
+    45.994399,
+    46.165555,
+    46.626162,
+    47.057458000000004,
+    47.631859,
+    48.084186,
+    48.188241,
+    48.650791999999996,
+    48.704191,
+    49.233968000000004,
+    49.830436,
+    53.602405
+  ],
+  "per_item": [
+    {
+      "index": 5,
+      "packed_tokens": 222,
+      "lat1_ms": 37.050639000000004,
+      "lat2_ms": 45.346292000000005,
+      "lat2_prepare_ms": 0.18457,
+      "lat2_forward_ms": 45.161722000000005
+    },
+    {
+      "index": 6,
+      "packed_tokens": 264,
+      "lat1_ms": 46.626162,
+      "lat2_ms": 52.12943,
+      "lat2_prepare_ms": 0.170769,
+      "lat2_forward_ms": 51.958661000000006
+    },
+    {
+      "index": 7,
+      "packed_tokens": 206,
+      "lat1_ms": 36.98975,
+      "lat2_ms": 41.565222,
+      "lat2_prepare_ms": 0.14512999999999998,
+      "lat2_forward_ms": 41.420092
+    },
+    {
+      "index": 8,
+      "packed_tokens": 223,
+      "lat1_ms": 36.640639,
+      "lat2_ms": 40.807321,
+      "lat2_prepare_ms": 0.170323,
+      "lat2_forward_ms": 40.636998
+    },
+    {
+      "index": 9,
+      "packed_tokens": 247,
+      "lat1_ms": 38.606126999999994,
+      "lat2_ms": 50.826747999999995,
+      "lat2_prepare_ms": 0.137311,
+      "lat2_forward_ms": 50.689437
+    },
+    {
+      "index": 10,
+      "packed_tokens": 294,
+      "lat1_ms": 49.830436,
+      "lat2_ms": 57.348233,
+      "lat2_prepare_ms": 0.209254,
+      "lat2_forward_ms": 57.138979
+    },
+    {
+      "index": 11,
+      "packed_tokens": 226,
+      "lat1_ms": 37.544112999999996,
+      "lat2_ms": 46.536396,
+      "lat2_prepare_ms": 0.22202300000000003,
+      "lat2_forward_ms": 46.314372999999996
+    },
+    {
+      "index": 12,
+      "packed_tokens": 186,
+      "lat1_ms": 36.730008,
+      "lat2_ms": 39.243621,
+      "lat2_prepare_ms": 0.15336,
+      "lat2_forward_ms": 39.090261
+    },
+    {
+      "index": 13,
+      "packed_tokens": 233,
+      "lat1_ms": 37.185217,
+      "lat2_ms": 45.901708,
+      "lat2_prepare_ms": 0.213208,
+      "lat2_forward_ms": 45.6885
+    },
+    {
+      "index": 14,
+      "packed_tokens": 233,
+      "lat1_ms": 42.027181,
+      "lat2_ms": 47.544083,
+      "lat2_prepare_ms": 0.224725,
+      "lat2_forward_ms": 47.319358
+    },
+    {
+      "index": 15,
+      "packed_tokens": 235,
+      "lat1_ms": 41.958470999999996,
+      "lat2_ms": 46.53456,
+      "lat2_prepare_ms": 0.25578500000000004,
+      "lat2_forward_ms": 46.278775
+    },
+    {
+      "index": 16,
+      "packed_tokens": 243,
+      "lat1_ms": 37.505555,
+      "lat2_ms": 47.103772,
+      "lat2_prepare_ms": 0.214138,
+      "lat2_forward_ms": 46.889634
+    },
+    {
+      "index": 17,
+      "packed_tokens": 240,
+      "lat1_ms": 43.594401999999995,
+      "lat2_ms": 48.299507999999996,
+      "lat2_prepare_ms": 0.20152599999999998,
+      "lat2_forward_ms": 48.097981999999995
+    },
+    {
+      "index": 18,
+      "packed_tokens": 288,
+      "lat1_ms": 49.233968000000004,
+      "lat2_ms": 55.946227,
+      "lat2_prepare_ms": 0.231937,
+      "lat2_forward_ms": 55.71429
+    },
+    {
+      "index": 19,
+      "packed_tokens": 220,
+      "lat1_ms": 37.652837,
+      "lat2_ms": 46.154009,
+      "lat2_prepare_ms": 0.21251,
+      "lat2_forward_ms": 45.94149899999999
+    },
+    {
+      "index": 20,
+      "packed_tokens": 217,
+      "lat1_ms": 36.92039200000001,
+      "lat2_ms": 44.393572,
+      "lat2_prepare_ms": 0.227599,
+      "lat2_forward_ms": 44.165972999999994
+    },
+    {
+      "index": 21,
+      "packed_tokens": 197,
+      "lat1_ms": 35.860577,
+      "lat2_ms": 39.78349,
+      "lat2_prepare_ms": 0.167688,
+      "lat2_forward_ms": 39.615801999999995
+    },
+    {
+      "index": 22,
+      "packed_tokens": 264,
+      "lat1_ms": 45.994399,
+      "lat2_ms": 52.522603000000004,
+      "lat2_prepare_ms": 0.23719600000000002,
+      "lat2_forward_ms": 52.285407
+    },
+    {
+      "index": 23,
+      "packed_tokens": 243,
+      "lat1_ms": 43.110069,
+      "lat2_ms": 48.221446,
+      "lat2_prepare_ms": 0.180592,
+      "lat2_forward_ms": 48.040854
+    },
+    {
+      "index": 24,
+      "packed_tokens": 205,
+      "lat1_ms": 36.09629,
+      "lat2_ms": 40.729753,
+      "lat2_prepare_ms": 0.172678,
+      "lat2_forward_ms": 40.557075
+    },
+    {
+      "index": 25,
+      "packed_tokens": 237,
+      "lat1_ms": 37.000743,
+      "lat2_ms": 47.224947,
+      "lat2_prepare_ms": 0.20623,
+      "lat2_forward_ms": 47.018717
+    },
+    {
+      "index": 26,
+      "packed_tokens": 259,
+      "lat1_ms": 47.631859,
+      "lat2_ms": 54.191502,
+      "lat2_prepare_ms": 0.228389,
+      "lat2_forward_ms": 53.963113
+    },
+    {
+      "index": 27,
+      "packed_tokens": 205,
+      "lat1_ms": 36.720989,
+      "lat2_ms": 41.703651,
+      "lat2_prepare_ms": 0.164501,
+      "lat2_forward_ms": 41.53915
+    },
+    {
+      "index": 28,
+      "packed_tokens": 241,
+      "lat1_ms": 37.152159,
+      "lat2_ms": 45.84641,
+      "lat2_prepare_ms": 0.228674,
+      "lat2_forward_ms": 45.617736
+    },
+    {
+      "index": 29,
+      "packed_tokens": 278,
+      "lat1_ms": 48.084186,
+      "lat2_ms": 55.871622,
+      "lat2_prepare_ms": 0.21343600000000001,
+      "lat2_forward_ms": 55.658186
+    },
+    {
+      "index": 30,
+      "packed_tokens": 216,
+      "lat1_ms": 37.588122,
+      "lat2_ms": 45.624298,
+      "lat2_prepare_ms": 0.180956,
+      "lat2_forward_ms": 45.443342
+    },
+    {
+      "index": 31,
+      "packed_tokens": 217,
+      "lat1_ms": 36.660167,
+      "lat2_ms": 44.515642,
+      "lat2_prepare_ms": 0.19273099999999999,
+      "lat2_forward_ms": 44.322911
+    },
+    {
+      "index": 32,
+      "packed_tokens": 270,
+      "lat1_ms": 47.057458000000004,
+      "lat2_ms": 54.369013,
+      "lat2_prepare_ms": 0.166409,
+      "lat2_forward_ms": 54.202604
+    },
+    {
+      "index": 33,
+      "packed_tokens": 220,
+      "lat1_ms": 37.014607,
+      "lat2_ms": 42.218230000000005,
+      "lat2_prepare_ms": 0.141647,
+      "lat2_forward_ms": 42.076583
+    },
+    {
+      "index": 34,
+      "packed_tokens": 241,
+      "lat1_ms": 37.543580999999996,
+      "lat2_ms": 47.836834,
+      "lat2_prepare_ms": 0.258064,
+      "lat2_forward_ms": 47.57877
+    },
+    {
+      "index": 35,
+      "packed_tokens": 220,
+      "lat1_ms": 36.963227,
+      "lat2_ms": 44.871956999999995,
+      "lat2_prepare_ms": 0.160474,
+      "lat2_forward_ms": 44.711483
+    },
+    {
+      "index": 36,
+      "packed_tokens": 228,
+      "lat1_ms": 37.210967999999994,
+      "lat2_ms": 45.127889999999994,
+      "lat2_prepare_ms": 0.161249,
+      "lat2_forward_ms": 44.966641
+    },
+    {
+      "index": 37,
+      "packed_tokens": 274,
+      "lat1_ms": 48.704191,
+      "lat2_ms": 54.369789000000004,
+      "lat2_prepare_ms": 0.195268,
+      "lat2_forward_ms": 54.174521000000006
+    },
+    {
+      "index": 38,
+      "packed_tokens": 284,
+      "lat1_ms": 53.602405,
+      "lat2_ms": 56.802640000000004,
+      "lat2_prepare_ms": 0.193917,
+      "lat2_forward_ms": 56.608723
+    },
+    {
+      "index": 39,
+      "packed_tokens": 276,
+      "lat1_ms": 48.188241,
+      "lat2_ms": 53.978889,
+      "lat2_prepare_ms": 0.185398,
+      "lat2_forward_ms": 53.793490999999996
+    },
+    {
+      "index": 40,
+      "packed_tokens": 273,
+      "lat1_ms": 48.650791999999996,
+      "lat2_ms": 54.226348,
+      "lat2_prepare_ms": 0.18709900000000002,
+      "lat2_forward_ms": 54.039249
+    },
+    {
+      "index": 41,
+      "packed_tokens": 251,
+      "lat1_ms": 46.165555,
+      "lat2_ms": 52.618883,
+      "lat2_prepare_ms": 0.178077,
+      "lat2_forward_ms": 52.440806
+    },
+    {
+      "index": 42,
+      "packed_tokens": 194,
+      "lat1_ms": 37.482128,
+      "lat2_ms": 40.69109,
+      "lat2_prepare_ms": 0.140569,
+      "lat2_forward_ms": 40.550520999999996
+    },
+    {
+      "index": 43,
+      "packed_tokens": 264,
+      "lat1_ms": 42.93006,
+      "lat2_ms": 53.25263,
+      "lat2_prepare_ms": 0.22989700000000002,
+      "lat2_forward_ms": 53.022733
+    }
+  ],
+  "lat2_prepare_ms": {
+    "n": 39,
+    "max": 0.258064,
+    "p50": 0.19273099999999999,
+    "p95": 0.25578500000000004,
+    "p99": 0.258064,
+    "mean": 0.19346941025641023
+  },
+  "lat2_forward_ms": {
+    "n": 39,
+    "max": 57.138979,
+    "p50": 46.889634,
+    "p95": 56.608723,
+    "p99": 57.138979,
+    "mean": 47.813716717948715
+  },
+  "lat2_packed_tokens": {
+    "n": 39,
+    "max": 294.0,
+    "p50": 237.0,
+    "p95": 288.0,
+    "p99": 294.0,
+    "mean": 239.33333333333334
+  },
+  "dec_s": 30.246636386882717,
+  "dec_s_runs": [
+    30.276925566999065,
+    30.246636386882717,
+    30.108063485109962
+  ],
+  "dec_s_questions": 44,
+  "dec_s_batching": "Budget",
+  "all_items_s": 1.312632932,
+  "acc": 0.8181818181818182,
+  "correct": 36,
+  "with_gold": 44,
+  "gpu_probe_tflops": {
+    "before": 182.89095672102408,
+    "after": 165.76820656947126
+  },
+  "load_s": 27.290477944,
+  "backend": {
+    "backend": "cuda",
+    "device": "NVIDIA GPU through candle Device::new_cuda(0)",
+    "tensor_library": "candle-core 0.11.0 (CUDA; matmul = cuBLAS, no TF32)",
+    "weights": "f16 (converted from bf16, experiment)",
+    "activations": "f16 residual stream, norms and MLP",
+    "attention": "f32 q/k/v (bias + rotate-half RoPE fused kernel, cos/sin from f64 on host); one f32 flash-style kernel for all segments of a forward (online softmax, additive block mask, prefix K/V read from the cache, fully masked key tiles skipped), GQA as stacked query rows",
+    "kernels": "fused: q/k/v and gate/up projections as single GEMMs without bias; bias added in fused kernels (bias+RoPE+head split, bias+SiLU*up, bias+residual)",
+    "readout": "letter rows of lm_head only, f32",
+    "padding": "none: compact token list for GEMM/norm/MLP, attention per packed row (segment)",
+    "attention_kernel": "attn_tree_tc",
+    "gemm": "cuBLASLt, f32 accumulation, batch-invariant: one algorithm per weight shape for every M, no split-K (--gemm-table from gemm-search --invariant); a row's result does not depend on its batch",
+    "prefix_kv": [
+      53,
+      66
+    ],
+    "state_cache_bytes": 0,
+    "last_layer": "o_proj and MLP of the last layer only at the readout positions"
+  },
+  "model": "basal-1.5-max"
+}

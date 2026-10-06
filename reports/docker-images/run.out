@@ -1,0 +1,15 @@
+tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.2711680837402355; max TV avg 0.0005465334846832357
+tokens: 8 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.024524793701171888; max TV avg 0.006970583195930957
+tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.2711680837402355; max TV avg 0.0005465334846832357
+tokens: 8 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.024524793701171888; max TV avg 0.006970583195930957
+tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.0; max TV avg 0.0
+tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.0; max TV avg 0.0
+   30.156105168772534
+  ]
+ }
+}
+   177.03421689984407
+  ]
+ }
+}
+IMAGES-DONE

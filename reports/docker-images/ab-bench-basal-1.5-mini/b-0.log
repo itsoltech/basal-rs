@@ -1,0 +1,4 @@
+basal: basal-1.5-mini loaded on the GPU in 4.7s
+basal: 100 GEMM classes from .cache/gemm/basal-1.5-mini-f16.json
+basal: template prefixes precomputed ([53, 66] tokens)
+lat2 median 7.7 ms, p95 8.4 ms, lat1 7.2 ms, 176.956 dec/s, acc 0.7045454545454546, GEMM probe {"before":169.99946042412006,"after":165.28649877462928}

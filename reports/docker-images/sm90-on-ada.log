@@ -1,0 +1,4 @@
+basal: basal-1.5-mini loaded on the GPU in 7.2s
+basal: 100 GEMM classes from .cache/gemm/basal-1.5-mini-f16.json
+Error: DriverError(CUDA_ERROR_INVALID_PTX, "a PTX JIT compilation failed")
+exit 1
