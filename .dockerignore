@@ -1,0 +1,10 @@
+target
+target-*
+.git
+.models
+.baseline
+.cache
+.venv*
+reports
+tools
+docs

@@ -61,6 +61,34 @@ odpowiedzi co upstream; `facts` jest zgodne co do bajtu na 432 stanach.
 Wynik pytania nie zależy od tego, z czym trafi do partii (bitowo te same
 logity pojedynczo, w partii i pod obciążeniem HTTP).
 
+## Uruchomienie w Dockerze
+
+Wymagane: sterownik NVIDIA i NVIDIA Container Toolkit. Modele wpisane w
+[serve.yml](serve.yml) (repozytorium Hugging Face i rewizja):
+
+```sh
+docker compose up -d          # build obrazu i start
+docker compose logs -f        # pobieranie modeli, tabele GEMM, start serwera
+curl localhost:8000/health
+```
+
+Przy pierwszym starcie serwer pobiera modele z Hugging Face i generuje dla
+nich tabele GEMM (jednorazowo; basal-1.5-mini: ~35 s pobierania i ~150 s
+tabeli na RTX 6000 Ada). Oba trafiają do wolumenu `basal-data` (`/data`),
+więc kolejne starty trwają kilka sekund, a przy braku dostępu do Hugging Face
+serwer wczytuje modele z cache. Repozytoria prywatne: `HF_TOKEN` w
+środowisku. Obraz budowany jest dla architektury `CUDA_COMPUTE_CAP` (89:
+RTX 6000 Ada, L40S, RTX 40xx; 80: A100; 90: H100) w `docker-compose.yml`.
+`docker stop` zamyka serwer łagodnie (SIGTERM).
+
+Sam obraz, bez compose:
+
+```sh
+docker build -t basal-rs -f docker/Dockerfile .
+docker run -d --gpus all -p 8000:8000 -v "$PWD/serve.yml:/config/serve.yml:ro" \
+  -v basal-data:/data -e HF_TOKEN basal-rs
+```
+
 ## Budowanie
 
 Rust stable (sprawdzony na 1.95).
@@ -79,6 +107,9 @@ Kernele CUDA są kompilowane do PTX przez `nvcc` w `crates/basal-gpu/build.rs`
 (`CUDA_COMPUTE_CAP`, domyślnie 89).
 
 ## Model
+
+W pliku konfiguracji serwera wystarczy `repo` i `revision` (pobieranie przy
+starcie). Ręcznie, np. dla poleceń innych niż `serve`:
 
 ```sh
 huggingface-cli download Remek/basal-1.5-max \
@@ -101,9 +132,10 @@ Jeden proces obsługuje jeden lub kilka modeli. Konfiguracja w YAML
 addr: 0.0.0.0:8000
 default_model: basal-1.5-max
 models:
-  - path: .models/basal-1.5-max
-  - path: .models/basal-1.5-4.5B
-  - path: .models/basal-1.5-mini
+  - repo: Remek/basal-1.5-max            # pobierany z Hugging Face przy starcie
+    revision: be1b5ee7e7a9755a931262fa7fab4f59be0fd03c
+  - path: .models/basal-1.5-4.5B         # albo lokalny katalog
+  - repo: Remek/basal-1.5-mini
     long_tokens: 0
 ```
 
@@ -149,7 +181,8 @@ wiersza poleceń, np. `--max-batch-tokens`):
 
 | Klucz | Domyślnie | Znaczenie |
 |---|---|---|
-| `path` | | katalog modelu |
+| `repo`, `revision` | | repozytorium Hugging Face `owner/name` i gałąź, tag albo commit (domyślnie `main`); pobierane do cache Hugging Face (`HF_HOME`, w obrazie `/data/hf`), przy braku dostępu do Hub z cache |
+| `path` | | lokalny katalog modelu (zamiast `repo`) |
 | `gemm_table` | `auto` | tabela algorytmów cuBLASLt (opis niżej); `none`: algorytmy dobierane przy pierwszym użyciu, wynik może zależeć od partii; albo ścieżka tabeli |
 | `dtype` | `f16` | `f16`, `bf16` albo `f32` (referencja numeryczna, wolna) |
 | `max_batch_tokens` | 8192 | tokeny jednej partii, liczone po współdzieleniu prefiksów |
@@ -157,7 +190,8 @@ wiersza poleceń, np. `--max-batch-tokens`):
 | `long_tokens` | 4096 | żądania powyżej tej liczby tokenów idą do toru długich żądań, który oddaje GPU krótkim partiom między warstwami; `0` wyłącza |
 | `state_cache_mb` | 0 | cache K/V stanu między żądaniami |
 
-Opcje procesu: `addr`, `default_model`, `max_inflight` (1024, limit żądań w
+Opcje procesu: `addr` (nadpisywany przez zmienną `BASAL_ADDR`; w obrazie
+`0.0.0.0:8000`), `default_model`, `max_inflight` (1024, limit żądań w
 kolejce i w trakcie wszystkich modeli; nadmiar dostaje 503), `long_slice_ms`
 (100, minimalny czas pracy toru długich żądań między oddaniami GPU),
 `gemm_cache` (`.cache/gemm`).
@@ -188,6 +222,8 @@ referencją upstream), `bench` i `bench-requests` (pomiary), `gemm-search`.
 | `crates/basal-core` | kontrakt System One, prompt, tokenizer, pakowanie, decyzje, `facts`, `evidence`, silnik i trait `Backend` |
 | `crates/basal-gpu` | forward Llama na candle z własnymi kernelami CUDA i Metal, cuBLASLt, attention po węzłach drzewa |
 | `crates/basal-cli` | polecenie `basal` i serwer HTTP |
+| `docker/`, `docker-compose.yml`, `serve.yml` | obraz do uruchamiania serwera i domyślna konfiguracja modeli |
+| `tools/cuda` | obraz deweloperski CUDA (budowanie, pomiary, upstream) |
 | `tools/reference` | eksport referencji z upstream, zestawy żądań |
 | `tools/bench` | pomiary A/B i obciążeniowe, generatory ruchu |
 | `contracts/typesafe` | migawka OpenAPI TypeSafe |

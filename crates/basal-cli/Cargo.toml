@@ -15,6 +15,7 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml = "0.9"
+hf-hub = { version = "1", features = ["blocking", "rustls-tls"] }
 clap.workspace = true
 tokio.workspace = true
 axum.workspace = true

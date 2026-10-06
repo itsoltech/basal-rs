@@ -5,9 +5,10 @@
 //! default_model: basal-1.5-max     # /v1/basal requests without "model" (default: the first model)
 //! gemm_cache: .cache/gemm          # tables written by `gemm_table: auto`
 //! models:
-//!   - path: .models/basal-1.5-max
+//!   - repo: Remek/basal-1.5-max    # downloaded from Hugging Face at start (HF_HOME cache, HF_TOKEN)
+//!     revision: be1b5ee7e7a9755a931262fa7fab4f59be0fd03c
 //!     gemm_table: auto             # auto (default) | none | path of a `basal gemm-search` table
-//!   - path: .models/basal-1.5-mini
+//!   - path: .models/basal-1.5-mini # or a local model directory
 //!     long_tokens: 0
 //! ```
 //!
@@ -56,8 +57,16 @@ pub struct ServeConfig {
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelConfig {
-    /// Model directory (config.json, basal.json, tokenizer.json, model.safetensors, CALIBRATION.json).
-    pub path: PathBuf,
+    /// Local model directory (config.json, basal.json, tokenizer.json, model.safetensors, CALIBRATION.json, ...).
+    #[serde(default)]
+    pub path: Option<PathBuf>,
+    /// Hugging Face repository `owner/name`, downloaded at start into the Hugging Face cache (`HF_HOME`,
+    /// default ~/.cache/huggingface; token from `HF_TOKEN`); instead of `path`.
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// Branch, tag or commit of `repo` (default: main). A commit pins the weights.
+    #[serde(default)]
+    pub revision: Option<String>,
     /// f16 (default), bf16 or f32.
     #[serde(default = "default_dtype")]
     pub dtype: String,
@@ -122,6 +131,115 @@ impl ServeConfig {
         let c: Self = serde_yaml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
         ensure!(!c.models.is_empty(), "{}: no models", path.display());
         Ok(c)
+    }
+}
+
+/// Files of a model directory the runtime reads (`evidence_head.pt` is optional: without it `evidence` is refused).
+const MODEL_FILES: [&str; 8] = [
+    "config.json",
+    "basal.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "chat_template.jinja",
+    "CALIBRATION.json",
+    "model.safetensors",
+    "evidence_head.pt",
+];
+
+/// Directory of a configured model: `path`, or the Hugging Face snapshot of `repo` at `revision` (downloaded when
+/// missing; a cached snapshot is used when the Hub cannot be reached).
+pub fn model_dir(m: &ModelConfig) -> Result<PathBuf> {
+    match (&m.path, &m.repo) {
+        (Some(p), None) => {
+            ensure!(m.revision.is_none(), "model {}: revision needs repo", p.display());
+            Ok(p.clone())
+        }
+        (None, Some(repo)) => download(repo, m.revision.as_deref()),
+        (Some(_), Some(_)) => bail!("model entry: give either path or repo, not both"),
+        (None, None) => bail!("model entry: needs path or repo"),
+    }
+}
+
+fn download(repo: &str, revision: Option<&str>) -> Result<PathBuf> {
+    let (owner, name) = repo.split_once('/').with_context(|| format!("repo {repo:?}: expected owner/name"))?;
+    let client = hf_hub::HFClientSync::new().context("Hugging Face client")?;
+    let r = client.model(owner, name);
+    let at = revision.unwrap_or("main");
+    let files: Vec<String> = MODEL_FILES.iter().map(|f| f.to_string()).collect();
+    eprintln!("basal: {repo}@{at}: fetching the model files (Hugging Face cache)");
+    let t = std::time::Instant::now();
+    let progress = std::sync::Arc::new(DownloadLog::new(repo));
+    let fetched = r
+        .snapshot_download()
+        .maybe_revision(revision.map(str::to_string))
+        .allow_patterns(files.clone())
+        .progress(progress.clone())
+        .send();
+    let dir = match fetched {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("basal: {repo}@{at}: Hub not reachable or download failed ({e}); trying the cache");
+            r.snapshot_download()
+                .maybe_revision(revision.map(str::to_string))
+                .allow_patterns(files)
+                .local_files_only(true)
+                .send()
+                .with_context(|| format!("{repo}@{at}: download failed ({e}) and no cached copy"))?
+        }
+    };
+    for f in &MODEL_FILES[..7] {
+        ensure!(dir.join(f).exists(), "{repo}@{at}: {f} missing in {}", dir.display());
+    }
+    eprintln!("basal: {repo}@{at}: {} ({:.0} s)", dir.display(), t.elapsed().as_secs_f64());
+    Ok(dir)
+}
+
+/// Download progress on stderr, at most every 15 s.
+struct DownloadLog {
+    repo: String,
+    state: std::sync::Mutex<(u64, std::collections::HashMap<String, u64>, std::time::Instant)>,
+}
+
+impl DownloadLog {
+    fn new(repo: &str) -> Self {
+        Self { repo: repo.into(), state: std::sync::Mutex::new((0, Default::default(), std::time::Instant::now())) }
+    }
+}
+
+impl hf_hub::progress::ProgressHandler for DownloadLog {
+    fn on_progress(&self, event: &hf_hub::progress::ProgressEvent) {
+        use hf_hub::progress::{DownloadEvent, ProgressEvent};
+        let ProgressEvent::Download(ev) = event else { return };
+        let mut s = self.state.lock().unwrap();
+        let done = match ev {
+            // the first Start has the totals of the snapshot (single files of it start again)
+            DownloadEvent::Start { total_files, total_bytes } => {
+                if s.0 == 0 {
+                    s.0 = *total_bytes;
+                    eprintln!("basal: {}: {total_files} file(s), {:.2} GB", self.repo, *total_bytes as f64 / 1e9);
+                }
+                return;
+            }
+            DownloadEvent::Progress { files } => {
+                for f in files {
+                    s.1.insert(f.filename.clone(), f.bytes_completed);
+                }
+                s.1.values().sum::<u64>()
+            }
+            DownloadEvent::AggregateProgress { bytes_completed, .. } => (*bytes_completed).max(s.1.values().sum()),
+            _ => return,
+        };
+        if s.2.elapsed().as_secs() >= 15 && s.0 > 0 {
+            s.2 = std::time::Instant::now();
+            let total = s.0;
+            eprintln!(
+                "basal: {}: {:.2} / {:.2} GB ({:.0}%)",
+                self.repo,
+                done as f64 / 1e9,
+                total as f64 / 1e9,
+                100.0 * done as f64 / total as f64
+            );
+        }
     }
 }
 

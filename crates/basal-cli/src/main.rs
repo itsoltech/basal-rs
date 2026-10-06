@@ -469,14 +469,16 @@ fn main() -> Result<()> {
         } => {
             if let Some(path) = config {
                 let c = config::ServeConfig::load(&path)?;
-                // GEMM tables first (a search needs no model weights in GPU memory), then the models
+                // model files (local or downloaded), then GEMM tables (a search needs no model weights in GPU
+                // memory), then the models
+                let dirs: Vec<PathBuf> = c.models.iter().map(config::model_dir).collect::<Result<_>>()?;
                 let mut tables = Vec::new();
-                for mc in &c.models {
-                    let manifest = ModelManifest::load(&mc.path)?;
+                for (mc, dir) in c.models.iter().zip(&dirs) {
+                    let manifest = ModelManifest::load(dir)?;
                     tables.push(config::gemm_table(mc, &manifest, &c.gemm_cache)?);
                 }
                 let mut models = Vec::new();
-                for (mc, table) in c.models.iter().zip(tables) {
+                for ((mc, table), dir) in c.models.iter().zip(tables).zip(dirs) {
                     let g = GpuArgs {
                         dtype: mc.dtype.clone(),
                         readout: "f32".into(),
@@ -486,7 +488,7 @@ fn main() -> Result<()> {
                         tree_max_tokens: mc.tree_max_tokens,
                         gemm_table: table.clone(),
                     };
-                    let engine = gpu_engine(&ModelArgs { model: mc.path.clone() }, &g)?;
+                    let engine = gpu_engine(&ModelArgs { model: dir }, &g)?;
                     if let Some(t) = &table {
                         config::check_gemm_coverage(&engine.manifest.name, &engine.backend.gemm_table_missing(), t)?;
                     }
@@ -497,8 +499,13 @@ fn main() -> Result<()> {
                         long_tokens: mc.long_tokens,
                     });
                 }
+                // BASAL_ADDR (e.g. 0.0.0.0:8000 in the container image) overrides `addr`
+                let addr = match std::env::var("BASAL_ADDR") {
+                    Ok(v) => v.parse().with_context(|| format!("BASAL_ADDR {v:?}"))?,
+                    Err(_) => c.addr,
+                };
                 let opts = serve::ServeOptions {
-                    addr: c.addr,
+                    addr,
                     release_date: c.release_date,
                     max_inflight: c.max_inflight,
                     default_model: c.default_model,

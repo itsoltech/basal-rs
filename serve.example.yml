@@ -10,7 +10,8 @@ long_slice_ms: 100                 # least work of a long-request lane between t
 gemm_cache: .cache/gemm            # tables of `gemm_table: auto`
 
 models:
-  - path: .models/basal-1.5-max
+  - repo: Remek/basal-1.5-max      # Hugging Face repository, downloaded at start into HF_HOME (HF_TOKEN if needed)
+    revision: be1b5ee7e7a9755a931262fa7fab4f59be0fd03c   # branch, tag or commit (default: main)
     # auto (default): the batch-invariant GEMM table of this model, dtype and GPU from gemm_cache; generated at start
     # when missing or made for another GPU / cuBLASLt (one-time, minutes). none: algorithms timed at first use
     # (results may depend on the batch). Otherwise the path of a `basal gemm-search --invariant` table.
@@ -21,6 +22,6 @@ models:
     long_tokens: 4096              # requests above this run in the model's long lane (0: none)
     state_cache_mb: 0              # cross-request state cache (0: off)
 
-  - path: .models/basal-1.5-4.5B
+  - path: .models/basal-1.5-4.5B   # or a local model directory
 
   - path: .models/basal-1.5-mini

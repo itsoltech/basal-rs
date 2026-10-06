@@ -1,0 +1,29 @@
+# basal-rs server: edit serve.yml (models, options), then `docker compose up -d`.
+# The first start downloads the models and generates their GEMM tables (minutes to an hour, see `docker compose
+# logs -f`); later starts reuse them from the basal-data volume.
+services:
+  basal:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        CUDA_COMPUTE_CAP: "89"
+    image: basal-rs
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./serve.yml:/config/serve.yml:ro
+      - basal-data:/data
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+volumes:
+  basal-data:

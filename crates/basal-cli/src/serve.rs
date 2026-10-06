@@ -368,6 +368,22 @@ async fn models_list(State(app): State<Arc<App>>) -> Json<Value> {
     Json(json!({ "models": models }))
 }
 
+/// Ctrl-C, or SIGTERM (`docker stop`) on Unix.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut term =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = tokio::signal::ctrl_c().await;
+    eprintln!("basal: shutting down");
+}
+
 async fn health(State(app): State<Arc<App>>) -> Json<Value> {
     Json(json!({"status": "ok", "models": app.names, "default_model": app.default_model}))
 }
@@ -441,12 +457,7 @@ pub fn serve<B: Backend + Send + 'static>(models: Vec<ServedModel<B>>, opts: Ser
         let listener =
             tokio::net::TcpListener::bind(opts.addr).await.with_context(|| format!("binding {}", opts.addr))?;
         eprintln!("basal: serving on http://{}", opts.addr);
-        axum::serve(listener, router)
-            .with_graceful_shutdown(async {
-                let _ = tokio::signal::ctrl_c().await;
-            })
-            .await
-            .context("HTTP server")
+        axum::serve(listener, router).with_graceful_shutdown(shutdown_signal()).await.context("HTTP server")
     })?;
     // The router and with it every job queue are gone: the GPU threads finish their batch, return and drop their
     // engines (CUDA resources) before the process exits.
