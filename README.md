@@ -15,8 +15,8 @@ prefiksów, własnymi kernelami i harmonogramem serwera.
 | Model | Status |
 |---|---|
 | `Remek/basal-1.5-max` (11B), rewizja `be1b5ee7` | główny cel, CUDA |
-| `Remek/basal-1.5-4.5B`, rewizja `784a683b` | CUDA, [zgodność](reports/compat-1.5-small/README.md) |
-| `Remek/basal-1.5-mini` (1.5B), rewizja `1978d070` | CUDA, [zgodność](reports/compat-1.5-small/README.md) |
+| `Remek/basal-1.5-4.5B`, rewizja `784a683b` | CUDA, [zgodność](reports/compat-1.5-small/README.md), [wydajność](reports/perf-1.5-small/README.md) |
+| `Remek/basal-1.5-mini` (1.5B), rewizja `1978d070` | CUDA, [zgodność](reports/compat-1.5-small/README.md), [wydajność](reports/perf-1.5-small/README.md) |
 | `Remek/basal-1.0-4.5B`, rewizja `b9528804` | CUDA i Metal |
 
 Typy pytań: `choice` (2–10 opcji oraz 11–255 strategią grupową), `noul`,
@@ -41,6 +41,17 @@ Przy domyślnym limicie 300 W (upstream nie był mierzony w tych warunkach)
 basal-rs obsługuje ~20% więcej: 17,3 żądania/s przy jednym kliencie (p50
 56 ms), 26,3 żądania/s przy 32 klientach, ruch mieszany 143 żądania/min
 ([pomiar](reports/rust-cuda-1.5-max/power/README.md)).
+
+Mniejsze modele przy 300 W, ten sam klient, upstream v1.5.0 `fast`
+([pomiar](reports/perf-1.5-small/README.md)):
+
+| Pomiar | 1.5-4.5B upstream | 1.5-4.5B basal-rs | 1.5-mini upstream | 1.5-mini basal-rs |
+|---|---:|---:|---:|---:|
+| Pojedyncza decyzja (mediana) | 31,5 ms | 20,4 ms | 9,9 ms | 7,9 ms |
+| Jedno pytanie przez HTTP, 32 klientów | 21,8 żądania/s | 54,5 żądania/s | 60,2 żądania/s | 141,7 żądania/s |
+| Ruch mieszany, 32 klientów¹ | 59 żądań/min | 336 żądań/min | 818 żądań/min | 2501 żądań/min |
+
+¹ Dla mini bez dokumentów ~8k i ~16k tokenów (limit 8192 pozycji modelu).
 
 Zgodność z upstream FP32 na 44 przykładach basal-bench: te same decyzje
 44/44; maksymalna różnica logitu 1,3·10⁻⁴ dla ścieżki FP32 i 0,27 dla

@@ -1,0 +1,5 @@
+Loading weights:   0%|          | 0/963 [00:00<?, ?it/s]Loading weights:  55%|█████▍    | 528/963 [00:00<00:00, 5278.14it/s]Loading weights: 100%|██████████| 963/963 [00:00<00:00, 4910.25it/s]
+{"mode": "fast", "reference_mode": "fast", "gpu": "NVIDIA RTX 6000 Ada Generation", "n": 44, "load_s": 165.2, "lat1_ms": 27.16, "lat2_ms": 31.484, "lat2_p95_ms": 41.577, "dec_s": 27.803, "mem_gb": 12.193, "acc": 0.795}
+
+mode                lat2 ms  lat1 ms   dec/s   agree    acc    GB
+fast                   31.5     27.2    27.8     nan  0.795  12.2

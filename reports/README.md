@@ -24,6 +24,7 @@ Metodyka: [docs/BENCHMARKS.md](../docs/BENCHMARKS.md).
 | Katalog | Zawartość |
 |---|---|
 | [compat-1.5-small](compat-1.5-small/README.md) | zgodność z upstream FP32: basal-bench, `/v1/basal`, `multi`, `act`, `facts`, `evidence` |
+| [perf-1.5-small](perf-1.5-small/README.md) | wydajność wobec upstream v1.5.0: pojedyncza decyzja, HTTP, długie stany, ruch mieszany |
 | `reference-basal-1.5-{4.5B,mini}-{fp32,bf16}` | referencje upstream FP32 i ścieżka serwowana BF16 |
 
 ## basal-1.0-4.5B

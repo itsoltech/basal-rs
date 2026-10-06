@@ -1,0 +1,2 @@
+Loading weights:   0%|          | 0/515 [00:00<?, ?it/s]Loading weights: 100%|██████████| 515/515 [00:00<00:00, 5380.49it/s]
+basal: model /work/.models/basal-1.5-mini mode fast ready in 74s on port 8101
