@@ -1,14 +1,19 @@
 # basal-rs server: edit serve.yml (models, options), then `docker compose up -d`.
 # The first start downloads the models and generates their GEMM tables (minutes to an hour, see `docker compose
 # logs -f`); later starts reuse them from the basal-data volume.
+#
+# Image: ghcr.io/itsoltech/basal-rs, built by .github/workflows/docker.yml; tags :latest (CUDA_COMPUTE_CAP 89:
+# RTX 6000 Ada, L40S, RTX 40xx), :latest-sm80 (A100, RTX 30xx), :latest-sm90 (H100). Local build instead:
+# `docker compose build` (uses the build section below) or `docker build -t basal-rs -f docker/Dockerfile .`.
 services:
   basal:
+    image: ghcr.io/itsoltech/basal-rs:latest
     build:
       context: .
       dockerfile: docker/Dockerfile
       args:
         CUDA_COMPUTE_CAP: "89"
-    image: basal-rs
+    pull_policy: missing
     ports:
       - "8000:8000"
     volumes:

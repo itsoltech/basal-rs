@@ -1,0 +1,100 @@
+# Container images of the server on GitHub Container Registry (ghcr.io/<owner>/<repo>), one per GPU architecture:
+#   :latest, :main, :sha-<commit>, :<version> from v* tags          CUDA_COMPUTE_CAP 89 (RTX 6000 Ada, L40S, RTX 40xx)
+#   the same tags with -sm80 / -sm90                                  A100, RTX 30xx / H100
+# Pull requests build the images without pushing them. The build needs no GPU; the Docker layer cache (Rust toolchain,
+# dependencies with the CUDA kernels of candle) is kept in the registry under :buildcache-sm<cap>.
+name: docker
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "docker/**"
+      - ".github/workflows/docker.yml"
+  pull_request:
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "docker/**"
+      - ".github/workflows/docker.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cap: "89"
+            suffix: ""
+          - cap: "80"
+            suffix: "-sm80"
+          - cap: "90"
+            suffix: "-sm90"
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}
+      PUSH: ${{ github.event_name != 'pull_request' }}
+    steps:
+      - name: Free disk space (the CUDA devel image and the build need ~25 GB)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune --all --force
+          df -h /
+
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        if: env.PUSH == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: |
+            latest=false
+            suffix=${{ matrix.suffix }},onlatest=true
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-,format=short
+          labels: |
+            org.opencontainers.image.title=basal-rs
+            ai.basal.cuda-compute-cap=${{ matrix.cap }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          build-args: CUDA_COMPUTE_CAP=${{ matrix.cap }}
+          push: ${{ env.PUSH == 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache-sm${{ matrix.cap }}
+          cache-to: ${{ env.PUSH == 'true' && format('type=registry,ref={0}:buildcache-sm{1},mode=max', env.IMAGE, matrix.cap) || '' }}

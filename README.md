@@ -67,24 +67,33 @@ Wymagane: sterownik NVIDIA i NVIDIA Container Toolkit. Modele wpisane w
 [serve.yml](serve.yml) (repozytorium Hugging Face i rewizja):
 
 ```sh
-docker compose up -d          # build obrazu i start
+docker compose up -d          # obraz ghcr.io/itsoltech/basal-rs:latest i start
 docker compose logs -f        # pobieranie modeli, tabele GEMM, start serwera
 curl localhost:8000/health
 ```
+
+Obrazy buduje [.github/workflows/docker.yml](.github/workflows/docker.yml)
+przy każdej zmianie kodu na `main` i przy tagach `v*`, osobno dla
+architektury GPU:
+
+| Tag | `CUDA_COMPUTE_CAP` | GPU |
+|---|---|---|
+| `latest`, `main`, `sha-<commit>`, `<wersja>` | 89 | RTX 6000 Ada, L40S, RTX 40xx |
+| ten sam z `-sm80` | 80 | A100, RTX 30xx |
+| ten sam z `-sm90` | 90 | H100 |
 
 Przy pierwszym starcie serwer pobiera modele z Hugging Face i generuje dla
 nich tabele GEMM (jednorazowo; basal-1.5-mini: ~35 s pobierania i ~150 s
 tabeli na RTX 6000 Ada). Oba trafiają do wolumenu `basal-data` (`/data`),
 więc kolejne starty trwają kilka sekund, a przy braku dostępu do Hugging Face
 serwer wczytuje modele z cache. Repozytoria prywatne: `HF_TOKEN` w
-środowisku. Obraz budowany jest dla architektury `CUDA_COMPUTE_CAP` (89:
-RTX 6000 Ada, L40S, RTX 40xx; 80: A100; 90: H100) w `docker-compose.yml`.
-`docker stop` zamyka serwer łagodnie (SIGTERM).
+środowisku. `docker stop` zamyka serwer łagodnie (SIGTERM).
 
-Sam obraz, bez compose:
+Własny build (wieloetapowy: toolkit CUDA i Rust, zależności w osobnej
+warstwie przez cargo-chef, obraz wynikowy z samym runtime CUDA):
 
 ```sh
-docker build -t basal-rs -f docker/Dockerfile .
+docker build -t basal-rs -f docker/Dockerfile --build-arg CUDA_COMPUTE_CAP=89 .
 docker run -d --gpus all -p 8000:8000 -v "$PWD/serve.yml:/config/serve.yml:ro" \
   -v basal-data:/data -e HF_TOKEN basal-rs
 ```
