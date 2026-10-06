@@ -1,0 +1,3 @@
+start with table generation: 391 s
+34426 MiB
+restart with cached tables: 39 s

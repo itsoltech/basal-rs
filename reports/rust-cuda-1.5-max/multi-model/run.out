@@ -1,0 +1,19 @@
+ok   GET /v1/models lists every model
+ok   GET /health
+ok   /v1/systemone basal-1.5-max
+ok   /v1/basal model=basal-1.5-max
+ok   /v1/systemone basal-1.5-4.5B
+ok   /v1/basal model=basal-1.5-4.5B
+ok   /v1/systemone basal-1.5-mini
+ok   /v1/basal model=basal-1.5-mini
+ok   /v1/basal without model -> default
+ok   /v1/basal without model answers as the default model
+ok   /v1/systemone unknown model -> 422 unknown_model
+ok   /v1/basal unknown model -> 422 {error}
+ok   /v1/systemone without model -> 422 Field required
+13/13 checks passed
+reports/rust-cuda-1.5-max/multi-model/run.sh: line 33: 30777 Segmentation fault      (core dumped) $B serve --model .models/basal-1.5-max --gemm-table $MAXT --addr 127.0.0.1:8100 > $O/serve-single.log 2>&1
+tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.0; max TV avg 0.0
+tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.0; max TV avg 0.0
+reports/rust-cuda-1.5-max/multi-model/run.sh: line 49: 30907 Segmentation fault      (core dumped) $B serve --config $O/config.yml > $O/serve-2.log 2>&1
+MULTI-DONE

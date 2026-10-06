@@ -114,7 +114,8 @@ opcjami. To przybliżenie (model nie widzi wszystkich opcji naraz); ocena w
 
 ## Serwer
 
-Handlery HTTP (tokio) przekazują żądania do wątku właściciela GPU. Wątek
+Handlery HTTP (tokio) przekazują żądania do wątku modelu z pola `model`
+(`/v1/basal` bez tego pola: do modelu domyślnego). Wątek
 tokenizuje i planuje każde żądanie przy przyjściu (błędy walidacji wracają
 od razu), szacuje jego koszt liczbą tokenów po współdzieleniu prefiksów i
 układa kolejkę:
@@ -137,6 +138,14 @@ partię, a on sam pracował co najmniej `--long-slice-ms`. Po jednej partii
 głównego toru wraca do tej samej warstwy. Zatrzymany forward kontynuuje z tymi
 samymi tensorami, więc wyniki nie zależą od toru ani przerw. Krótkie żądania
 nie czekają w ten sposób na kilkusekundowy forward długiego dokumentu.
+
+Kilka modeli w jednym procesie (`basal serve --config`): każdy ma własny
+silnik, kolejkę i tor długich żądań, a wszystkie silniki korzystają z jednego
+`gate`. Główne tory wszystkich modeli są pilne, tory długich żądań oddają GPU
+między warstwami, więc krótkie partie dowolnego modelu wyprzedzają długie
+żądania każdego modelu. Silniki różnych modeli nie liczą jednocześnie: GPU
+jest i tak ograniczone mocą, a kolejność decyduje harmonogram zamiast
+sterownika.
 
 ## Ograniczenia
 

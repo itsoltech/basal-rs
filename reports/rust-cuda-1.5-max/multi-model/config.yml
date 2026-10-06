@@ -1,0 +1,9 @@
+# Test configuration of run.sh: the three basal-1.5 models in one process.
+addr: 127.0.0.1:8100
+default_model: basal-1.5-max
+gemm_cache: .cache/gemm
+models:
+  - path: .models/basal-1.5-max
+    gemm_table: reports/rust-cuda-1.5-max/gemm-equiv/gemm-algos-f16-invariant-groups.json
+  - path: .models/basal-1.5-4.5B
+  - path: .models/basal-1.5-mini

@@ -1,0 +1,5 @@
+basal: basal-1.5-max loaded on the GPU in 24.8s
+basal: 100 GEMM classes from reports/rust-cuda-1.5-max/gemm-equiv/gemm-algos-f16-invariant-groups.json
+basal: template prefixes precomputed ([53, 66] tokens)
+basal: serving basal-1.5-max (batch 8192 tokens, Hrrn, long lane above 4096 tokens)
+basal: serving on http://127.0.0.1:8100

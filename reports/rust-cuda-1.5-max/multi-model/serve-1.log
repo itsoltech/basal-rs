@@ -1,0 +1,25 @@
+basal: basal-1.5-max loaded on the GPU in 24.0s
+basal: 100 GEMM classes from reports/rust-cuda-1.5-max/gemm-equiv/gemm-algos-f16-invariant-groups.json
+basal: template prefixes precomputed ([53, 66] tokens)
+basal: basal-1.5-4.5B: generating the batch-invariant GEMM table for NVIDIA RTX 6000 Ada Generation (no table; 25 classes x 4 shapes, one-time) -> .cache/gemm/basal-1.5-4.5B-f16.json
+gemm-search invariant n=2560 k=2048: 47 candidates, slowdown vs best per class: mean 1.000, max 1.000
+gemm-search invariant n=2048 k=2048: 54 candidates, slowdown vs best per class: mean 1.000, max 1.000
+gemm-search invariant n=22016 k=2048: 42 candidates, slowdown vs best per class: mean 1.002, max 1.038
+gemm-search invariant n=2048 k=11008: 43 candidates, slowdown vs best per class: mean 1.001, max 1.008
+basal: basal-1.5-4.5B: GEMM table done in 213 s
+basal: basal-1.5-4.5B loaded on the GPU in 9.9s
+basal: 100 GEMM classes from .cache/gemm/basal-1.5-4.5B-f16.json
+basal: template prefixes precomputed ([53, 66] tokens)
+basal: basal-1.5-mini: generating the batch-invariant GEMM table for NVIDIA RTX 6000 Ada Generation (no table; 25 classes x 4 shapes, one-time) -> .cache/gemm/basal-1.5-mini-f16.json
+gemm-search invariant n=2048 k=1536: 46 candidates, slowdown vs best per class: mean 1.001, max 1.030
+gemm-search invariant n=1536 k=1536: 44 candidates, slowdown vs best per class: mean 1.000, max 1.000
+gemm-search invariant n=17920 k=1536: 40 candidates, slowdown vs best per class: mean 1.000, max 1.000
+gemm-search invariant n=1536 k=8960: 42 candidates, slowdown vs best per class: mean 1.003, max 1.033
+basal: basal-1.5-mini: GEMM table done in 140 s
+basal: basal-1.5-mini loaded on the GPU in 3.0s
+basal: 100 GEMM classes from .cache/gemm/basal-1.5-mini-f16.json
+basal: template prefixes precomputed ([53, 66] tokens)
+basal: serving basal-1.5-max (batch 8192 tokens, Hrrn, long lane above 4096 tokens)
+basal: serving basal-1.5-4.5B (batch 8192 tokens, Hrrn, long lane above 4096 tokens)
+basal: serving basal-1.5-mini (batch 8192 tokens, Hrrn, long lane above 4096 tokens)
+basal: serving on http://127.0.0.1:8100

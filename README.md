@@ -77,6 +77,32 @@ tokenizer; niezgodność z obsługiwanym kontraktem promptu kończy się błęde
 
 ## Serwer
 
+Jeden proces obsługuje jeden lub kilka modeli. Konfiguracja w YAML
+([serve.example.yml](serve.example.yml)):
+
+```sh
+./target/release/basal serve --config serve.example.yml
+```
+
+```yaml
+addr: 0.0.0.0:8000
+default_model: basal-1.5-max
+models:
+  - path: .models/basal-1.5-max
+  - path: .models/basal-1.5-4.5B
+  - path: .models/basal-1.5-mini
+    long_tokens: 0
+```
+
+Żądanie trafia do modelu z pola `model` (nazwa z `basal.json` modelu);
+`/v1/basal` bez tego pola trafia do `default_model`, a nieznana nazwa daje
+błąd 422 z listą obsługiwanych modeli. Każdy model ma własną kolejkę i tor
+długich żądań; wszystkie dzielą GPU tak, że krótkie partie dowolnego modelu
+idą przed długimi żądaniami. Pamięć GPU to suma wag modeli (bf16/f16:
+1.5-max ~23 GB, 1.5-4.5B ~9,5 GB, 1.5-mini ~3,2 GB) plus aktywacje.
+
+Jeden model bez pliku konfiguracji:
+
 ```sh
 ./target/release/basal serve --model .models/basal-1.5-max \
   --gemm-table reports/rust-cuda-1.5-max/gemm-equiv/gemm-algos-f16-invariant-groups.json \
@@ -105,27 +131,36 @@ curl --fail-with-body localhost:8000/v1/systemone -H 'content-type: application/
 }'
 ```
 
-Najważniejsze opcje `basal serve`:
+Opcje modelu (klucze YAML w `models`; dla jednego modelu te same opcje
+wiersza poleceń, np. `--max-batch-tokens`):
 
-| Opcja | Domyślnie | Znaczenie |
+| Klucz | Domyślnie | Znaczenie |
 |---|---|---|
-| `--dtype` | `f16` | `f16`, `bf16` albo `f32` (referencja numeryczna, wolna) |
-| `--gemm-table` | brak | tabela algorytmów cuBLASLt z `basal gemm-search`; wariant `--invariant` daje wyniki niezależne od partii |
-| `--max-batch-tokens` | 8192 | tokeny jednej partii, liczone po współdzieleniu prefiksów |
-| `--schedule` | `hrrn` | kolejność przyjmowania żądań: `hrrn` (krótkie przed długimi, bez zagłodzenia) albo `fifo` |
-| `--long-tokens` | 4096 | żądania powyżej tej liczby tokenów idą do drugiego toru, który oddaje GPU krótkim partiom między warstwami; `0` wyłącza |
-| `--long-slice-ms` | 100 | minimalny czas pracy toru długich żądań między oddaniami GPU |
-| `--state-cache-mb` | 0 | cache K/V stanu między żądaniami |
-| `--max-inflight` | 1024 | limit żądań w kolejce i w trakcie; nadmiar dostaje 503 |
+| `path` | | katalog modelu |
+| `gemm_table` | `auto` | tabela algorytmów cuBLASLt (opis niżej); `none`: algorytmy dobierane przy pierwszym użyciu, wynik może zależeć od partii; albo ścieżka tabeli |
+| `dtype` | `f16` | `f16`, `bf16` albo `f32` (referencja numeryczna, wolna) |
+| `max_batch_tokens` | 8192 | tokeny jednej partii, liczone po współdzieleniu prefiksów |
+| `schedule` | `hrrn` | kolejność przyjmowania żądań: `hrrn` (krótkie przed długimi, bez zagłodzenia) albo `fifo` |
+| `long_tokens` | 4096 | żądania powyżej tej liczby tokenów idą do toru długich żądań, który oddaje GPU krótkim partiom między warstwami; `0` wyłącza |
+| `state_cache_mb` | 0 | cache K/V stanu między żądaniami |
 
-Tabela GEMM w repozytorium (`gemm-equiv/gemm-algos-f16-invariant-groups.json`)
-jest dla RTX 6000 Ada i cuBLASLt 12.9.1: dla każdej klasy M najszybszy
-algorytm z grupy algorytmów dających bitowo te same wyniki
-([pomiar](reports/rust-cuda-1.5-max/gemm-equiv/README.md)). Dla innej karty
-lub wersji trzeba ją wygenerować (`basal gemm-search --model ... --invariant
---m-classes 16,32,48,64,96,128,160,192,224,256,320,384,448,512,640,768,1024,1536,2048,3072,4096,6144,8192,12288,16384
---out gemm.json`). Bez tabeli algorytmy są dobierane przy
-pierwszym użyciu.
+Opcje procesu: `addr`, `default_model`, `max_inflight` (1024, limit żądań w
+kolejce i w trakcie wszystkich modeli; nadmiar dostaje 503), `long_slice_ms`
+(100, minimalny czas pracy toru długich żądań między oddaniami GPU),
+`gemm_cache` (`.cache/gemm`).
+
+Tabela GEMM ustala algorytmy cuBLASLt tak, by wynik pytania nie zależał od
+partii: dla każdej klasy liczby wierszy najszybszy algorytm z grupy
+algorytmów dających bitowo te same wyniki
+([pomiar](reports/rust-cuda-1.5-max/gemm-equiv/README.md)). Zależy od
+modelu (kształtów wag), GPU, wersji cuBLASLt i precyzji. Przy `gemm_table:
+auto` serwer szuka tabeli w `gemm_cache` i generuje ją przy starcie, gdy jej
+nie ma albo powstała na innym GPU lub cuBLASLt (jednorazowo, kilka do
+kilkudziesięciu minut). Tabela z repozytorium
+(`reports/rust-cuda-1.5-max/gemm-equiv/gemm-algos-f16-invariant-groups.json`)
+jest dla basal-1.5-max na RTX 6000 Ada z cuBLASLt 12.9.1. Ręcznie:
+`basal gemm-search --model DIR --invariant --out gemm.json`. Serwer odmawia
+startu z tabelą, która nie obejmuje kształtów wag modelu.
 
 ## Polecenia
 
