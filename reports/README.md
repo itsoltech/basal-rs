@@ -19,6 +19,13 @@ Metodyka: [docs/BENCHMARKS.md](../docs/BENCHMARKS.md).
 | [baseline-cuda-1.5-max](baseline-cuda-1.5-max/README.md) | upstream v1.5.0 na tej samej karcie |
 | `reference-1.5-max-fp32`, `-cases`, `-cases2` | referencja upstream FP32: 44 przykłady basal-bench, żądania System One z `multi`, `act`, `facts`, `evidence` |
 
+## basal-1.5-4.5B i basal-1.5-mini
+
+| Katalog | Zawartość |
+|---|---|
+| [compat-1.5-small](compat-1.5-small/README.md) | zgodność z upstream FP32: basal-bench, `/v1/basal`, `multi`, `act`, `facts`, `evidence` |
+| `reference-basal-1.5-{4.5B,mini}-{fp32,bf16}` | referencje upstream FP32 i ścieżka serwowana BF16 |
+
 ## basal-1.0-4.5B
 
 | Katalog | Zawartość |

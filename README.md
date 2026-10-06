@@ -15,6 +15,8 @@ prefiksów, własnymi kernelami i harmonogramem serwera.
 | Model | Status |
 |---|---|
 | `Remek/basal-1.5-max` (11B), rewizja `be1b5ee7` | główny cel, CUDA |
+| `Remek/basal-1.5-4.5B`, rewizja `784a683b` | CUDA, [zgodność](reports/compat-1.5-small/README.md) |
+| `Remek/basal-1.5-mini` (1.5B), rewizja `1978d070` | CUDA, [zgodność](reports/compat-1.5-small/README.md) |
 | `Remek/basal-1.0-4.5B`, rewizja `b9528804` | CUDA i Metal |
 
 Typy pytań: `choice` (2–10 opcji oraz 11–255 strategią grupową), `noul`,

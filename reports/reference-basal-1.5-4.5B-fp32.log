@@ -1,0 +1,80 @@
+Loading weights:   0%|          | 0/963 [00:00<?, ?it/s]Loading weights:  10%|█         | 98/963 [00:00<00:00, 977.21it/s]Loading weights:  20%|██        | 196/963 [00:00<00:00, 975.46it/s]Loading weights:  31%|███       | 297/963 [00:00<00:00, 983.93it/s]Loading weights:  42%|████▏     | 401/963 [00:00<00:00, 1005.77it/s]Loading weights:  52%|█████▏    | 505/963 [00:00<00:00, 1011.41it/s]Loading weights:  64%|██████▎   | 613/963 [00:00<00:00, 1032.20it/s]Loading weights:  75%|███████▌  | 725/963 [00:00<00:00, 1039.21it/s]Loading weights:  87%|████████▋ | 837/963 [00:00<00:00, 1042.41it/s]Loading weights:  98%|█████████▊| 942/963 [00:00<00:00, 1034.92it/s]Loading weights: 100%|██████████| 963/963 [00:00<00:00, 1037.89it/s]
+bench 1/44 noul.jsonl:6 argmax=1 gold=1
+bench 2/44 questions.jsonl:12 argmax=0 gold=0
+bench 3/44 score.jsonl:5 argmax=0 gold=0
+bench 4/44 questions.jsonl:1 argmax=1 gold=1
+bench 5/44 choice.jsonl:4 argmax=2 gold=1
+bench 6/44 choice.jsonl:1 argmax=1 gold=1
+bench 7/44 questions.jsonl:15 argmax=1 gold=1
+bench 8/44 questions.jsonl:8 argmax=1 gold=1
+bench 9/44 questions.jsonl:19 argmax=0 gold=0
+bench 10/44 choice.jsonl:2 argmax=3 gold=1
+bench 11/44 questions.jsonl:13 argmax=2 gold=2
+bench 12/44 questions.jsonl:7 argmax=0 gold=0
+bench 13/44 questions.jsonl:6 argmax=0 gold=1
+bench 14/44 questions.jsonl:2 argmax=1 gold=1
+bench 15/44 noul.jsonl:1 argmax=0 gold=0
+bench 16/44 questions.jsonl:16 argmax=1 gold=1
+bench 17/44 questions.jsonl:11 argmax=0 gold=0
+bench 18/44 score.jsonl:6 argmax=2 gold=2
+bench 19/44 choice.jsonl:8 argmax=1 gold=1
+bench 20/44 noul.jsonl:8 argmax=0 gold=0
+bench 21/44 noul.jsonl:2 argmax=0 gold=1
+bench 22/44 score.jsonl:7 argmax=2 gold=2
+bench 23/44 noul.jsonl:7 argmax=0 gold=0
+bench 24/44 questions.jsonl:18 argmax=1 gold=0
+bench 25/44 score.jsonl:3 argmax=3 gold=3
+bench 26/44 score.jsonl:2 argmax=0 gold=0
+bench 27/44 score.jsonl:1 argmax=3 gold=3
+bench 28/44 questions.jsonl:4 argmax=2 gold=2
+bench 29/44 score.jsonl:8 argmax=0 gold=1
+bench 30/44 questions.jsonl:5 argmax=1 gold=1
+bench 31/44 questions.jsonl:10 argmax=0 gold=1
+bench 32/44 questions.jsonl:9 argmax=2 gold=3
+bench 33/44 score.jsonl:4 argmax=0 gold=0
+bench 34/44 questions.jsonl:14 argmax=0 gold=0
+bench 35/44 choice.jsonl:3 argmax=1 gold=1
+bench 36/44 noul.jsonl:3 argmax=0 gold=0
+bench 37/44 questions.jsonl:20 argmax=0 gold=0
+bench 38/44 choice.jsonl:6 argmax=1 gold=1
+bench 39/44 noul.jsonl:4 argmax=1 gold=1
+bench 40/44 noul.jsonl:5 argmax=0 gold=0
+bench 41/44 questions.jsonl:17 argmax=1 gold=0
+bench 42/44 questions.jsonl:3 argmax=0 gold=0
+bench 43/44 choice.jsonl:7 argmax=1 gold=1
+bench 44/44 choice.jsonl:5 argmax=1 gold=1
+systemone so-structured-state: ok
+systemone so-array-state-en: ok
+systemone so-null-and-missing-instructions: ok
+systemone so-empty-structures: ok
+systemone so-duplicate-descriptions-hide: ok
+systemone so-unicode: ok
+systemone so-polish-from-instructions: ok
+systemone so-ten-options: ok
+systemone so-score-two-levels: ok
+systemone so-score-one-level: error
+systemone so-eleven-options: error
+systemone so-unknown-type: ok
+systemone so-missing-type: ok
+systemone m15-multi-pl: ok
+systemone m15-multi-en-list: ok
+systemone m15-multi-min: ok
+systemone m15-act-short: ok
+systemone m15-act-full: ok
+systemone m15-act-maxerr-005: ok
+systemone m15-act-no-threshold: ok
+systemone m15-mixed: ok
+systemone m15-evidence-noul: ok
+systemone m15-evidence-choice-en: ok
+systemone m15-evidence-score-act: ok
+systemone m15-evidence-long: ok
+systemone m15-facts-dates: ok
+systemone m15-facts-amounts: ok
+systemone m15-facts-euro-evidence: ok
+systemone m15-facts-none: ok
+systemone cx-01-ticket-fan-out: ok
+systemone cx-02-web-agent: ok
+systemone cx-03-deadline-decomposed: ok
+systemone cx-04-loan-triage: ok
+systemone cx-05-guard-check: ok
+done in 57s -> reports/reference-basal-1.5-4.5B-fp32

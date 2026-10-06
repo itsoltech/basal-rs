@@ -1,0 +1,1630 @@
+{
+  "a": "reports/reference-basal-1.5-mini-fp32",
+  "b": "reports/reference-basal-1.5-mini-bf16",
+  "sign": "differences are b - a",
+  "missing": [],
+  "tokens": {
+    "orders_compared": 188,
+    "mismatches": [],
+    "known_deviations": []
+  },
+  "bench": {
+    "items": 44,
+    "letter_logit_diff": {
+      "n": 268,
+      "max": 0.41481590270996094,
+      "p50": 0.032056570053100586,
+      "p95": 0.10622596740722656,
+      "p99": 0.23496341705322266,
+      "mean": 0.0436070943946269
+    },
+    "order_prob_diff": {
+      "n": 268,
+      "max": 0.09542414958295947,
+      "p50": 0.0003811813665879494,
+      "p95": 0.02543776522159047,
+      "p99": 0.056208058374715764,
+      "mean": 0.004544574226119794
+    },
+    "avg_prob_diff": {
+      "n": 134,
+      "max": 0.07151598346354676,
+      "p50": 0.00023304411263614213,
+      "p95": 0.026863853731605714,
+      "p99": 0.06956746434512306,
+      "mean": 0.004052082587605806
+    },
+    "cal_prob_diff": {
+      "n": 134,
+      "max": 0.051205766102717876,
+      "p50": 0.0003912494307250396,
+      "p95": 0.02428790191048741,
+      "p99": 0.04790728570131031,
+      "mean": 0.003681984027913089
+    },
+    "tv_avg": {
+      "n": 44,
+      "max": 0.07151598346354679,
+      "p50": 0.000573348024589378,
+      "p95": 0.0409605594842596,
+      "p99": 0.07151598346354679,
+      "mean": 0.00617021666749066
+    },
+    "tv_cal": {
+      "n": 44,
+      "max": 0.0512057661027179,
+      "p50": 0.0009950381089642957,
+      "p95": 0.03597965702545804,
+      "p99": 0.0512057661027179,
+      "mean": 0.005606657497049476
+    },
+    "argmax_agreement_avg": "44/44",
+    "argmax_agreement_cal": "44/44",
+    "flips_avg": [],
+    "flips_cal": []
+  },
+  "quality": {
+    "a_avg": {
+      "n": 44,
+      "correct": 31,
+      "accuracy": 0.7045454545454546,
+      "nll": 0.9894999362102052,
+      "brier": 0.4364983265492322,
+      "ece_10bin": 0.17576339548209996
+    },
+    "b_avg": {
+      "n": 44,
+      "correct": 31,
+      "accuracy": 0.7045454545454546,
+      "nll": 0.9852953746152644,
+      "brier": 0.4331606259023131,
+      "ece_10bin": 0.1737356773577677
+    },
+    "a_cal": {
+      "n": 44,
+      "correct": 31,
+      "accuracy": 0.7045454545454546,
+      "nll": 0.8988909688956631,
+      "brier": 0.431166455807198,
+      "ece_10bin": 0.15493469468470272
+    },
+    "b_cal": {
+      "n": 44,
+      "correct": 31,
+      "accuracy": 0.7045454545454546,
+      "nll": 0.8958355775501926,
+      "brier": 0.4287452582158667,
+      "ece_10bin": 0.15547196444645128
+    }
+  },
+  "systemone": {
+    "numeric_identical_tokens": {
+      "items": 55,
+      "letter_logit_diff": {
+        "n": 272,
+        "max": 0.20354366302490234,
+        "p50": 0.02923297882080078,
+        "p95": 0.10957145690917969,
+        "p99": 0.16420745849609375,
+        "mean": 0.03940144181251526
+      },
+      "order_prob_diff": {
+        "n": 272,
+        "max": 0.04023841221794072,
+        "p50": 0.0006776362668737268,
+        "p95": 0.020031136332889443,
+        "p99": 0.038098317324536335,
+        "mean": 0.00353626495388181
+      },
+      "avg_prob_diff": {
+        "n": 136,
+        "max": 0.0348683880626004,
+        "p50": 0.00063738356080641,
+        "p95": 0.019588891704729827,
+        "p99": 0.034727921735257405,
+        "mean": 0.0032052700352778888
+      },
+      "cal_prob_diff": {
+        "n": 136,
+        "max": 0.030549495858259945,
+        "p50": 0.0008529395722979352,
+        "p95": 0.014904197381545081,
+        "p99": 0.03033910628863601,
+        "mean": 0.0029518355990059914
+      },
+      "tv_avg": {
+        "n": 55,
+        "max": 0.03486838806260044,
+        "p50": 0.000882719939170302,
+        "p95": 0.020920357746297073,
+        "p99": 0.03486838806260044,
+        "mean": 0.003962879316343572
+      },
+      "tv_cal": {
+        "n": 55,
+        "max": 0.030549495858259907,
+        "p50": 0.001145906379096704,
+        "p95": 0.01798397807675045,
+        "p99": 0.030549495858259907,
+        "mean": 0.0036495421951346797
+      },
+      "argmax_agreement_avg": "54/55",
+      "argmax_agreement_cal": "54/55",
+      "flips_avg": [
+        {
+          "item": "systemone/so-array-state-en/tone",
+          "a": 0,
+          "b": 1,
+          "gold": null,
+          "a_p": [
+            0.5015322689380215,
+            0.4929663408360415,
+            0.0055013902259370435
+          ],
+          "b_p": [
+            0.4668043472027641,
+            0.5278347288986419,
+            0.005360923898593968
+          ]
+        }
+      ],
+      "flips_cal": [
+        {
+          "item": "systemone/so-array-state-en/tone",
+          "a": 0,
+          "b": 1,
+          "gold": null,
+          "a_p": [
+            0.4990024411516656,
+            0.49151057918079577,
+            0.009486979667538522
+          ],
+          "b_p": [
+            0.4686633348630296,
+            0.5220600750390557,
+            0.009276590097914662
+          ]
+        }
+      ]
+    },
+    "cases": [
+      {
+        "id": "so-structured-state",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "kind",
+            "tokens_identical": true,
+            "tv_cal": 0.006933010210650566,
+            "answer": {
+              "type_a": "choice",
+              "type_b": "choice",
+              "max_abs_prob_diff": 0.005864918231964111,
+              "choice_a": "damage",
+              "choice_b": "damage",
+              "choice_same": true,
+              "confidence_a": 0.9496318697929382,
+              "confidence_b": 0.9554967880249023,
+              "confidence_diff": 0.005864918231964111,
+              "fields_same": true,
+              "type_same": true
+            }
+          },
+          {
+            "item": "refund",
+            "tokens_identical": true,
+            "tv_cal": 0.007044709792952242,
+            "answer": {
+              "type_a": "noul",
+              "type_b": "noul",
+              "max_abs_prob_diff": 0.0070397257804870605,
+              "noul_diff": -0.0070397257804870605,
+              "confidence_a": 0.6544882655143738,
+              "confidence_b": 0.6615279912948608,
+              "confidence_diff": 0.0070397257804870605,
+              "fields_same": true,
+              "type_same": true
+            }
+          },
+          {
+            "item": "urgency",
+            "tokens_identical": true,
+            "tv_cal": 0.014904197381545109,
+            "answer": {
+              "type_a": "score",
+              "type_b": "score",
+              "max_abs_prob_diff": 0.01043158769607544,
+              "score_diff": -0.0036135315895080566,
+              "confidence_a": 0.454542338848114,
+              "confidence_b": 0.44751977920532227,
+              "confidence_diff": -0.007022559642791748,
+              "fields_same": true,
+              "legend_same": true,
+              "type_same": true
+            }
+          }
+        ]
+      },
+      {
+        "id": "so-array-state-en",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "billing",
+            "tokens_identical": true,
+            "tv_cal": 0.001189606439968188,
+            "answer": {
+              "type_a": "noul",
+              "type_b": "noul",
+              "max_abs_prob_diff": 0.0007965974509716034,
+              "noul_diff": 0.0007964968681335449,
+              "confidence_a": 0.9814378023147583,
+              "confidence_b": 0.9822342991828918,
+              "confidence_diff": 0.0007964968681335449,
+              "fields_same": true,
+              "type_same": true
+            }
+          },
+          {
+            "item": "tone",
+            "tokens_identical": true,
+            "tv_cal": 0.030549495858259907,
+            "answer": {
+              "type_a": "choice",
+              "type_b": "choice",
+              "max_abs_prob_diff": 0.003143876791000366,
+              "choice_a": "calm",
+              "choice_b": "calm",
+              "choice_same": true,
+              "confidence_a": 0.4990013539791107,
+              "confidence_b": 0.5021452307701111,
+              "confidence_diff": 0.003143876791000366,
+              "fields_same": true,
+              "type_same": true
+            }
+          }
+        ]
+      },
+      {
+        "id": "so-null-and-missing-instructions",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "missing",
+            "tokens_identical": true,
+            "tv_cal": 0.0006416650828963751,
+            "answer": {
+              "type_a": "noul",
+              "type_b": "noul",
+              "max_abs_prob_diff": 0.0013833045959472656,
+              "noul_diff": 0.0013833045959472656,
+              "confidence_a": 0.9730998277664185,
+              "confidence_b": 0.9744831323623657,
+              "confidence_diff": 0.0013833045959472656,
+              "fields_same": true,
+              "type_same": true
+            }
+          },
+          {
+            "item": "explicit_null",
+            "tokens_identical": true,
+            "tv_cal": 0.00011443474825354599,
+            "answer": {
+              "type_a": "noul",
+              "type_b": "noul",
+              "max_abs_prob_diff": 0.0015654638409614563,
+              "noul_diff": 0.001565396785736084,
+              "confidence_a": 0.9489927291870117,
+              "confidence_b": 0.9505581259727478,
+              "confidence_diff": 0.001565396785736084,
+              "fields_same": true,
+              "type_same": true
+            }
+          }
+        ]
+      },
+      {
+        "id": "so-empty-structures",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "empty_true",
+            "tokens_identical": true,
+            "tv_cal": 0.00024585934244896173,
+            "answer": {
+              "type_a": "noul",
+              "type_b": "noul",
+              "max_abs_prob_diff": 0.00003421306610107422,
+              "noul_diff": 0.00003414414823055267,
+              "confidence_a": 0.987817108631134,
+              "confidence_b": 0.987782895565033,
+              "confidence_diff": -0.00003421306610107422,
+              "fields_same": true,
+              "type_same": true
+            }
+          },
+          {
+            "item": "empty_obj_choice",
+            "tokens_identical": true,
+            "tv_cal": 0.006756822841684835,
+            "answer": {
+              "type_a": "choice",
+              "type_b": "choice",
+              "max_abs_prob_diff": 0.001328498125076294,
+              "choice_a": "correct",
+              "choice_b": "correct",
+              "choice_same": true,
+              "confidence_a": 0.514417290687561,
+              "confidence_b": 0.5133420825004578,
+              "confidence_diff": -0.0010752081871032715,
+              "fields_same": true,
+              "type_same": true
+            }
+          },
+          {
+            "item": "criteria_null",
+            "tokens_identical": true,
+            "tv_cal": 0.001145906379096704,
+            "answer": {
+              "type_a": "noul",
+              "type_b": "noul",
+              "max_abs_prob_diff": 0.0017509721219539642,
+              "noul_diff": 0.001750946044921875,
+              "confidence_a": 0.9735323786735535,
+              "confidence_b": 0.9752833247184753,
+              "confidence_diff": 0.001750946044921875,
+              "fields_same": true,
+              "type_same": true
+            }
+          }
+        ]
+      },
+      {
+        "id": "so-duplicate-descriptions-hide",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "dup_show",
+            "tokens_identical": true,
+            "tv_cal": 0.0026940481299434355,
+            "answer": {
+              "type_a": "choice",
+              "type_b": "choice",
+              "max_abs_prob_diff": 0.005302518606185913,
+              "choice_a": "t1",
+              "choice_b": "t1",
+              "choice_same": true,
+              "confidence_a": 0.4695044457912445,
+              "confidence_b": 0.47054561972618103,
+              "confidence_diff": 0.0010411739349365234,
+              "fields_same": true,
+              "type_same": true
+            }
+          },
+          {
+            "item": "dup_hide",
+            "tokens_identical": true,
+            "tv_cal": 0.0024257479844062083,
+            "answer": {
+              "type_a": "choice",
+              "type_b": "choice",
+              "max_abs_prob_diff": 0.0013720989227294922,
+              "choice_a": "t1",
+              "choice_b": "t1",
+              "choice_same": true,
+              "confidence_a": 0.47804394364356995,
+              "confidence_b": 0.4767797589302063,
+              "confidence_diff": -0.0012641847133636475,
+              "fields_same": true,
+              "type_same": true
+            }
+          }
+        ]
+      },
+      {
+        "id": "so-unicode",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "lang",
+            "tokens_identical": true,
+            "tv_cal": 0.011884699580921771,
+            "answer": {
+              "type_a": "choice",
+              "type_b": "choice",
+              "max_abs_prob_diff": 0.013934910297393799,
+              "choice_a": "ja",
+              "choice_b": "ja",
+              "choice_same": true,
+              "confidence_a": 0.8777843117713928,
+              "confidence_b": 0.8917192220687866,
+              "confidence_diff": 0.013934910297393799,
+              "fields_same": true,
+              "type_same": true
+            }
+          },
+          {
+            "item": "ok",
+            "tokens_identical": true,
+            "tv_cal": 0.00030637860012093683,
+            "answer": {
+              "type_a": "noul",
+              "type_b": "noul",
+              "max_abs_prob_diff": 0.00010139774531126022,
+              "noul_diff": -0.00010138750076293945,
+              "confidence_a": 0.990104615688324,
+              "confidence_b": 0.990003228187561,
+              "confidence_diff": -0.00010138750076293945,
+              "fields_same": true,
+              "type_same": true
+            }
+          }
+        ]
+      },
+      {
+        "id": "so-polish-from-instructions",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "pay",
+            "tokens_identical": true,
+            "tv_cal": 0.0007027603104942408,
+            "answer": {
+              "type_a": "noul",
+              "type_b": "noul",
+              "max_abs_prob_diff": 0.000019045546650886536,
+              "noul_diff": 0.00001901388168334961,
+              "confidence_a": 0.9841369390487671,
+              "confidence_b": 0.9841559529304504,
+              "confidence_diff": 0.00001901388168334961,
+              "fields_same": true,
+              "type_same": true
+            }
+          }
+        ]
+      },
+      {
+        "id": "so-ten-options",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "hour",
+            "tokens_identical": true,
+            "tv_cal": 0.017991907796594854,
+            "answer": {
+              "type_a": "choice",
+              "type_b": "choice",
+              "max_abs_prob_diff": 0.014405548572540283,
+              "choice_a": "h17",
+              "choice_b": "h17",
+              "choice_same": true,
+              "confidence_a": 0.4885939061641693,
+              "confidence_b": 0.49802619218826294,
+              "confidence_diff": 0.009432286024093628,
+              "fields_same": true,
+              "type_same": true
+            }
+          }
+        ]
+      },
+      {
+        "id": "so-score-two-levels",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "alarm",
+            "tokens_identical": true,
+            "tv_cal": 0.00005839382812753563,
+            "answer": {
+              "type_a": "score",
+              "type_b": "score",
+              "max_abs_prob_diff": 0.00005835294723510742,
+              "score_diff": 0.00005835294723510742,
+              "confidence_a": 0.9748497009277344,
+              "confidence_b": 0.9749080538749695,
+              "confidence_diff": 0.00005835294723510742,
+              "fields_same": true,
+              "legend_same": true,
+              "type_same": true
+            }
+          }
+        ]
+      },
+      {
+        "id": "so-score-one-level",
+        "error_a": "ValueError: question 'alarm': 1 options (supported: 2..10)",
+        "error_b": "ValueError: question 'alarm': 1 options (supported: 2..10)",
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "so-eleven-options",
+        "error_a": "ValueError: question 'cat': 11 options (supported: 2..10)",
+        "error_b": "ValueError: question 'cat': 11 options (supported: 2..10)",
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "so-unknown-type",
+        "error_a": null,
+        "error_b": null,
+        "deviation": "unknown type is a validation error; upstream treats it as choice",
+        "items": [
+          {
+            "item": "q",
+            "tokens_identical": true,
+            "tv_cal": -0.0,
+            "answer": {
+              "type_a": "multi",
+              "type_b": "multi",
+              "max_abs_prob_diff": 0.012791693210601807,
+              "confidence_a": null,
+              "confidence_b": null,
+              "fields_same": true,
+              "type_same": true,
+              "selected_same": true,
+              "threshold_same": true,
+              "set_confidence_diff": -0.012618544003729859
+            }
+          }
+        ]
+      },
+      {
+        "id": "so-missing-type",
+        "error_a": null,
+        "error_b": null,
+        "deviation": "missing type is a validation error; upstream defaults to choice",
+        "items": [
+          {
+            "item": "q",
+            "tokens_identical": true,
+            "tv_cal": 0.006562706287639081,
+            "answer": {
+              "type_a": "choice",
+              "type_b": "choice",
+              "max_abs_prob_diff": 0.001175224781036377,
+              "choice_a": "a",
+              "choice_b": "a",
+              "choice_same": true,
+              "confidence_a": 0.600693941116333,
+              "confidence_b": 0.6018691658973694,
+              "confidence_diff": 0.001175224781036377,
+              "fields_same": true,
+              "type_same": true
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-multi-pl",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "topics",
+            "tokens_identical": true,
+            "tv_cal": -0.0,
+            "answer": {
+              "type_a": "multi",
+              "type_b": "multi",
+              "max_abs_prob_diff": 0.0005164146423339844,
+              "confidence_a": null,
+              "confidence_b": null,
+              "fields_same": true,
+              "type_same": true,
+              "selected_same": true,
+              "threshold_same": true,
+              "set_confidence_diff": 0.0005706497076091166
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-multi-en-list",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "issues",
+            "tokens_identical": true,
+            "tv_cal": -0.0,
+            "answer": {
+              "type_a": "multi",
+              "type_b": "multi",
+              "max_abs_prob_diff": 0.0015583708882331848,
+              "confidence_a": null,
+              "confidence_b": null,
+              "fields_same": true,
+              "type_same": true,
+              "selected_same": true,
+              "threshold_same": true,
+              "set_confidence_diff": 0.0010606187276501963
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-multi-min",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "t",
+            "tokens_identical": true,
+            "tv_cal": -0.0,
+            "answer": {
+              "type_a": "multi",
+              "type_b": "multi",
+              "max_abs_prob_diff": 0.0007925033569335938,
+              "confidence_a": null,
+              "confidence_b": null,
+              "fields_same": true,
+              "type_same": true,
+              "selected_same": true,
+              "threshold_same": true,
+              "set_confidence_diff": -0.0006338557273993378
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-act-short",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "fraud",
+            "tokens_identical": true,
+            "tv_cal": 0.0008551695162460418,
+            "answer": {
+              "type_a": "act",
+              "type_b": "act",
+              "max_abs_prob_diff": 0.007001757621765137,
+              "confidence_a": 0.9135151505470276,
+              "confidence_b": 0.9205169081687927,
+              "confidence_diff": 0.007001757621765137,
+              "fields_same": true,
+              "type_same": true,
+              "action_same": true,
+              "answer_same": true,
+              "calibration_same": true,
+              "expected_costs_keys_same": true,
+              "expected_costs_max_abs_diff": 0.070017
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-act-full",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "route",
+            "tokens_identical": true,
+            "tv_cal": 0.00555792048577314,
+            "answer": {
+              "type_a": "act",
+              "type_b": "act",
+              "max_abs_prob_diff": 0.0058324337005615234,
+              "confidence_a": 0.8495138883590698,
+              "confidence_b": 0.8553463220596313,
+              "confidence_diff": 0.0058324337005615234,
+              "fields_same": true,
+              "type_same": true,
+              "action_same": true,
+              "refused_same": true,
+              "answer_same": true,
+              "calibration_same": true,
+              "expected_costs_keys_same": true,
+              "expected_costs_max_abs_diff": 0.26974500000000035
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-act-maxerr-005",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "refund",
+            "tokens_identical": true,
+            "tv_cal": 0.0004182297622511008,
+            "answer": {
+              "type_a": "act",
+              "type_b": "act",
+              "max_abs_prob_diff": 0.0009175539016723633,
+              "confidence_a": 0.9565125107765198,
+              "confidence_b": 0.9574300646781921,
+              "confidence_diff": 0.0009175539016723633,
+              "fields_same": true,
+              "type_same": true,
+              "action_same": true,
+              "answer_same": true,
+              "calibration_same": true,
+              "expected_costs_keys_same": true,
+              "expected_costs_max_abs_diff": 0.00458699999999998
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-act-no-threshold",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "fit",
+            "tokens_identical": true,
+            "tv_cal": 0.0032465088509550655,
+            "answer": {
+              "type_a": "act",
+              "type_b": "act",
+              "max_abs_prob_diff": 0.00253903865814209,
+              "confidence_a": 0.6283518671989441,
+              "confidence_b": 0.6308909058570862,
+              "confidence_diff": 0.00253903865814209,
+              "fields_same": true,
+              "type_same": true,
+              "action_same": true,
+              "answer_same": true,
+              "calibration_same": true,
+              "max_error_same": true,
+              "expected_costs_keys_same": true,
+              "expected_costs_max_abs_diff": 0.005077999999999916
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-mixed",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "dept",
+            "tokens_identical": true,
+            "tv_cal": 0.00027916738915192887,
+            "answer": {
+              "type_a": "choice",
+              "type_b": "choice",
+              "max_abs_prob_diff": 0.0014693737030029297,
+              "choice_a": "logistics",
+              "choice_b": "logistics",
+              "choice_same": true,
+              "confidence_a": 0.9732965230941772,
+              "confidence_b": 0.9747658967971802,
+              "confidence_diff": 0.0014693737030029297,
+              "fields_same": true,
+              "type_same": true
+            }
+          },
+          {
+            "item": "refund",
+            "tokens_identical": true,
+            "tv_cal": 0.004200108185773932,
+            "answer": {
+              "type_a": "noul",
+              "type_b": "noul",
+              "max_abs_prob_diff": 0.012708842754364014,
+              "noul_diff": -0.012708842754364014,
+              "confidence_a": 0.8521918058395386,
+              "confidence_b": 0.8394829630851746,
+              "confidence_diff": -0.012708842754364014,
+              "fields_same": true,
+              "type_same": true
+            }
+          },
+          {
+            "item": "urgency",
+            "tokens_identical": true,
+            "tv_cal": 0.000922753085224489,
+            "answer": {
+              "type_a": "score",
+              "type_b": "score",
+              "max_abs_prob_diff": 0.004478394985198975,
+              "score_diff": -0.005462341010570526,
+              "confidence_a": 0.8472858667373657,
+              "confidence_b": 0.8428074717521667,
+              "confidence_diff": -0.004478394985198975,
+              "fields_same": true,
+              "legend_same": true,
+              "type_same": true
+            }
+          },
+          {
+            "item": "tags",
+            "tokens_identical": true,
+            "tv_cal": -0.0,
+            "answer": {
+              "type_a": "multi",
+              "type_b": "multi",
+              "max_abs_prob_diff": 0.017143845558166504,
+              "confidence_a": null,
+              "confidence_b": null,
+              "fields_same": true,
+              "type_same": true,
+              "selected_same": true,
+              "threshold_same": true,
+              "set_confidence_diff": -0.017592202431686466
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-evidence-noul",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "form",
+            "tokens_identical": true,
+            "tv_cal": 0.0000965599927918552,
+            "answer": {
+              "type_a": "noul",
+              "type_b": "noul",
+              "max_abs_prob_diff": 0.0004223603755235672,
+              "noul_diff": 0.0004223603755235672,
+              "confidence_a": 0.9884523749351501,
+              "confidence_b": 0.9880300164222717,
+              "confidence_diff": -0.00042235851287841797,
+              "fields_same": true,
+              "type_same": true,
+              "evidence_spans_same": true,
+              "evidence_first_same": true,
+              "evidence_max_abs_probability_diff": 0.0004088079233980288,
+              "evidence_a": [
+                [
+                  53,
+                  245,
+                  " Najemca może wypowiedzieć umowę z zachowaniem trzymiesięcznego okresu wypowiedzenia ze skutkiem na koniec miesiąca kalendarzowego. Wypowiedzenie wymaga formy pisemnej pod rygorem nieważności."
+                ],
+                [
+                  245,
+                  328,
+                  " Kaucja wynosi 6 000 zł i podlega zwrotowi w terminie 30 dni od dnia zwrotu lokalu."
+                ]
+              ],
+              "evidence_b": [
+                [
+                  53,
+                  245,
+                  " Najemca może wypowiedzieć umowę z zachowaniem trzymiesięcznego okresu wypowiedzenia ze skutkiem na koniec miesiąca kalendarzowego. Wypowiedzenie wymaga formy pisemnej pod rygorem nieważności."
+                ],
+                [
+                  245,
+                  328,
+                  " Kaucja wynosi 6 000 zł i podlega zwrotowi w terminie 30 dni od dnia zwrotu lokalu."
+                ]
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-evidence-choice-en",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "cause",
+            "tokens_identical": true,
+            "tv_cal": 7.585100943669171e-6,
+            "answer": {
+              "type_a": "choice",
+              "type_b": "choice",
+              "max_abs_prob_diff": 0.000013329670764505863,
+              "choice_a": "tls",
+              "choice_b": "tls",
+              "choice_same": true,
+              "confidence_a": 0.9993032217025757,
+              "confidence_b": 0.9993128776550293,
+              "confidence_diff": 9.655952453613281e-6,
+              "fields_same": true,
+              "type_same": true,
+              "evidence_spans_same": false,
+              "evidence_first_same": true,
+              "evidence_max_abs_probability_diff": 0.0003722630620948998,
+              "evidence_a": [
+                [
+                  123,
+                  261,
+                  "er identified an expired TLS certificate on the load balancer and rotated it at 14:37. Traffic recovered fully by 14:41. No data was lost."
+                ],
+                [
+                  1,
+                  68,
+                  "ncident report: At 14:02 the payment API started returning HTTP 503"
+                ],
+                [
+                  68,
+                  104,
+                  " for all merchants in the EU region."
+                ]
+              ],
+              "evidence_b": [
+                [
+                  123,
+                  261,
+                  "er identified an expired TLS certificate on the load balancer and rotated it at 14:37. Traffic recovered fully by 14:41. No data was lost."
+                ],
+                [
+                  1,
+                  68,
+                  "ncident report: At 14:02 the payment API started returning HTTP 503"
+                ]
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-evidence-score-act",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "urgency",
+            "tokens_identical": true,
+            "tv_cal": 0.0022955670450708256,
+            "answer": {
+              "type_a": "score",
+              "type_b": "score",
+              "max_abs_prob_diff": 0.002616286277770996,
+              "score_diff": -0.003235975280404091,
+              "confidence_a": 0.7295835018157959,
+              "confidence_b": 0.7269672155380249,
+              "confidence_diff": -0.002616286277770996,
+              "fields_same": true,
+              "legend_same": true,
+              "type_same": true,
+              "evidence_spans_same": true,
+              "evidence_first_same": true,
+              "evidence_max_abs_probability_diff": 0.0003708000486139368,
+              "evidence_a": [
+                [
+                  19,
+                  99,
+                  " od trzech dni nie działa terminal płatniczy w naszym sklepie, tracimy sprzedaż."
+                ],
+                [
+                  0,
+                  18,
+                  "Zgłoszenie klienta"
+                ]
+              ],
+              "evidence_b": [
+                [
+                  19,
+                  99,
+                  " od trzech dni nie działa terminal płatniczy w naszym sklepie, tracimy sprzedaż."
+                ],
+                [
+                  0,
+                  18,
+                  "Zgłoszenie klienta"
+                ]
+              ]
+            }
+          },
+          {
+            "item": "route",
+            "tokens_identical": true,
+            "tv_cal": 0.0000387900668626681,
+            "answer": {
+              "type_a": "act",
+              "type_b": "act",
+              "max_abs_prob_diff": 0.0005196332931518555,
+              "confidence_a": 0.9759703874588013,
+              "confidence_b": 0.9754507541656494,
+              "confidence_diff": -0.0005196332931518555,
+              "fields_same": true,
+              "type_same": true,
+              "action_same": true,
+              "answer_same": true,
+              "calibration_same": true,
+              "evidence_spans_same": true,
+              "evidence_first_same": true,
+              "evidence_max_abs_probability_diff": 0.00036130406423032224,
+              "evidence_a": [
+                [
+                  19,
+                  99,
+                  " od trzech dni nie działa terminal płatniczy w naszym sklepie, tracimy sprzedaż."
+                ],
+                [
+                  0,
+                  19,
+                  "Zgłoszenie klienta:"
+                ]
+              ],
+              "evidence_b": [
+                [
+                  19,
+                  99,
+                  " od trzech dni nie działa terminal płatniczy w naszym sklepie, tracimy sprzedaż."
+                ],
+                [
+                  0,
+                  19,
+                  "Zgłoszenie klienta:"
+                ]
+              ],
+              "expected_costs_keys_same": true,
+              "expected_costs_max_abs_diff": 0.0015590000000000048
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-evidence-long",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "cards",
+            "tokens_identical": true,
+            "tv_cal": 0.000047743963054522245,
+            "answer": {
+              "type_a": "noul",
+              "type_b": "noul",
+              "max_abs_prob_diff": 0.000013783574104309082,
+              "noul_diff": -0.000013783574104309082,
+              "confidence_a": 0.9928817749023438,
+              "confidence_b": 0.9928955435752869,
+              "confidence_diff": 0.000013768672943115234,
+              "fields_same": true,
+              "type_same": true,
+              "evidence_spans_same": true,
+              "evidence_first_same": true,
+              "evidence_max_abs_probability_diff": 0.0011334742798432378,
+              "evidence_a": [
+                [
+                  338,
+                  483,
+                  " Po tym terminie wygasają bez możliwości przywrócenia. §5. 100 punktów można wymienić na bon o wartości 10 zł. Bonu nie można wymienić na gotówkę"
+                ],
+                [
+                  491,
+                  643,
+                  "lep może zmienić regulamin z 14-dniowym wyprzedzeniem, informując uczestników e-mailem. §7. Reklamacje dotyczące punktów rozpatrywane są w ciągu 30 dni."
+                ],
+                [
+                  39,
+                  282,
+                  " Program prowadzi Sklep XYZ sp. z o.o. §2. Uczestnikiem może zostać osoba pełnoletnia posiadająca konto w sklepie. §3. Za każde wydane 10 zł uczestnik otrzymuje 1 punkt. Punkty nie przysługują za zakup kart podarunkowych ani za koszty dostawy."
+                ]
+              ],
+              "evidence_b": [
+                [
+                  338,
+                  483,
+                  " Po tym terminie wygasają bez możliwości przywrócenia. §5. 100 punktów można wymienić na bon o wartości 10 zł. Bonu nie można wymienić na gotówkę"
+                ],
+                [
+                  491,
+                  643,
+                  "lep może zmienić regulamin z 14-dniowym wyprzedzeniem, informując uczestników e-mailem. §7. Reklamacje dotyczące punktów rozpatrywane są w ciągu 30 dni."
+                ],
+                [
+                  39,
+                  282,
+                  " Program prowadzi Sklep XYZ sp. z o.o. §2. Uczestnikiem może zostać osoba pełnoletnia posiadająca konto w sklepie. §3. Za każde wydane 10 zł uczestnik otrzymuje 1 punkt. Punkty nie przysługują za zakup kart podarunkowych ani za koszty dostawy."
+                ]
+              ]
+            }
+          },
+          {
+            "item": "cash",
+            "tokens_identical": true,
+            "tv_cal": 0.00010507954262777962,
+            "answer": {
+              "type_a": "noul",
+              "type_b": "noul",
+              "max_abs_prob_diff": 0.00010508298873901367,
+              "noul_diff": 0.00010503735393285751,
+              "confidence_a": 0.990885853767395,
+              "confidence_b": 0.990780770778656,
+              "confidence_diff": -0.00010508298873901367,
+              "fields_same": true,
+              "type_same": true,
+              "evidence_spans_same": true,
+              "evidence_first_same": true,
+              "evidence_max_abs_probability_diff": 0.0009125934112692718,
+              "evidence_a": [
+                [
+                  338,
+                  483,
+                  " Po tym terminie wygasają bez możliwości przywrócenia. §5. 100 punktów można wymienić na bon o wartości 10 zł. Bonu nie można wymienić na gotówkę"
+                ],
+                [
+                  491,
+                  643,
+                  "lep może zmienić regulamin z 14-dniowym wyprzedzeniem, informując uczestników e-mailem. §7. Reklamacje dotyczące punktów rozpatrywane są w ciągu 30 dni."
+                ],
+                [
+                  0,
+                  282,
+                  "Regulamin programu lojalnościowego. §1. Program prowadzi Sklep XYZ sp. z o.o. §2. Uczestnikiem może zostać osoba pełnoletnia posiadająca konto w sklepie. §3. Za każde wydane 10 zł uczestnik otrzymuje 1 punkt. Punkty nie przysługują za zakup kart podarunkowych ani za koszty dostawy."
+                ]
+              ],
+              "evidence_b": [
+                [
+                  338,
+                  483,
+                  " Po tym terminie wygasają bez możliwości przywrócenia. §5. 100 punktów można wymienić na bon o wartości 10 zł. Bonu nie można wymienić na gotówkę"
+                ],
+                [
+                  491,
+                  643,
+                  "lep może zmienić regulamin z 14-dniowym wyprzedzeniem, informując uczestników e-mailem. §7. Reklamacje dotyczące punktów rozpatrywane są w ciągu 30 dni."
+                ],
+                [
+                  0,
+                  282,
+                  "Regulamin programu lojalnościowego. §1. Program prowadzi Sklep XYZ sp. z o.o. §2. Uczestnikiem może zostać osoba pełnoletnia posiadająca konto w sklepie. §3. Za każde wydane 10 zł uczestnik otrzymuje 1 punkt. Punkty nie przysługują za zakup kart podarunkowych ani za koszty dostawy."
+                ]
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-facts-dates",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "ontime",
+            "tokens_identical": true,
+            "tv_cal": 0.0036490259473986424,
+            "answer": {
+              "type_a": "noul",
+              "type_b": "noul",
+              "max_abs_prob_diff": 0.0026364922523498535,
+              "noul_diff": 0.0026364922523498535,
+              "confidence_a": 0.943988025188446,
+              "confidence_b": 0.9466245174407959,
+              "confidence_diff": 0.0026364922523498535,
+              "fields_same": true,
+              "type_same": true
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-facts-amounts",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "fits",
+            "tokens_identical": true,
+            "tv_cal": 0.0070651181445579025,
+            "answer": {
+              "type_a": "noul",
+              "type_b": "noul",
+              "max_abs_prob_diff": 0.0022309422492980957,
+              "noul_diff": -0.0022309422492980957,
+              "confidence_a": 0.743332028388977,
+              "confidence_b": 0.741101086139679,
+              "confidence_diff": -0.0022309422492980957,
+              "fields_same": true,
+              "type_same": true
+            }
+          },
+          {
+            "item": "level",
+            "tokens_identical": true,
+            "tv_cal": 0.005898369825507871,
+            "answer": {
+              "type_a": "score",
+              "type_b": "score",
+              "max_abs_prob_diff": 0.0042569637298583984,
+              "score_diff": 0.0016531944274902344,
+              "confidence_a": 0.6299959421157837,
+              "confidence_b": 0.6257389783859253,
+              "confidence_diff": -0.0042569637298583984,
+              "fields_same": true,
+              "legend_same": true,
+              "type_same": true
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-facts-euro-evidence",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "board",
+            "tokens_identical": true,
+            "tv_cal": 0.0004740258217102167,
+            "answer": {
+              "type_a": "noul",
+              "type_b": "noul",
+              "max_abs_prob_diff": 0.0029732584953308105,
+              "noul_diff": -0.002973221242427826,
+              "confidence_a": 0.8918554782867432,
+              "confidence_b": 0.894828736782074,
+              "confidence_diff": 0.0029732584953308105,
+              "fields_same": true,
+              "type_same": true,
+              "evidence_spans_same": true,
+              "evidence_first_same": true,
+              "evidence_max_abs_probability_diff": 0.0038945668097806474,
+              "evidence_a": [
+                [
+                  6,
+                  32,
+                  "kt opiewa na 120 000 euro."
+                ],
+                [
+                  32,
+                  167,
+                  " Kurs rozliczeniowy: 1 EUR = 4,3150 zł. Limit zatwierdzenia przez kierownika wynosi 500 000,00 zł; powyżej wymagana jest zgoda zarządu."
+                ]
+              ],
+              "evidence_b": [
+                [
+                  6,
+                  32,
+                  "kt opiewa na 120 000 euro."
+                ],
+                [
+                  32,
+                  167,
+                  " Kurs rozliczeniowy: 1 EUR = 4,3150 zł. Limit zatwierdzenia przez kierownika wynosi 500 000,00 zł; powyżej wymagana jest zgoda zarządu."
+                ]
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-facts-none",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "t",
+            "tokens_identical": true,
+            "tv_cal": 0.0003526944167701652,
+            "answer": {
+              "type_a": "choice",
+              "type_b": "choice",
+              "max_abs_prob_diff": 0.00007020006887614727,
+              "choice_a": "up",
+              "choice_b": "up",
+              "choice_same": true,
+              "confidence_a": 0.9947671890258789,
+              "confidence_b": 0.9948210716247559,
+              "confidence_diff": 0.000053882598876953125,
+              "fields_same": true,
+              "type_same": true
+            }
+          }
+        ]
+      },
+      {
+        "id": "cx-01-ticket-fan-out",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "category",
+            "tokens_identical": true,
+            "tv_cal": 0.0014870627039166424,
+            "answer": {
+              "type_a": "choice",
+              "type_b": "choice",
+              "max_abs_prob_diff": 0.000255584716796875,
+              "choice_a": "complaint",
+              "choice_b": "complaint",
+              "choice_same": true,
+              "confidence_a": 0.9873048663139343,
+              "confidence_b": 0.9870492815971375,
+              "confidence_diff": -0.000255584716796875,
+              "fields_same": true,
+              "type_same": true
+            }
+          },
+          {
+            "item": "needs_photo",
+            "tokens_identical": true,
+            "tv_cal": 0.0038069042532168917,
+            "answer": {
+              "type_a": "noul",
+              "type_b": "noul",
+              "max_abs_prob_diff": 0.009415626525878906,
+              "noul_diff": -0.009415626525878906,
+              "confidence_a": 0.6957589983940125,
+              "confidence_b": 0.6863433718681335,
+              "confidence_diff": -0.009415626525878906,
+              "fields_same": true,
+              "type_same": true
+            }
+          },
+          {
+            "item": "tone",
+            "tokens_identical": true,
+            "tv_cal": 0.0010134132819682208,
+            "answer": {
+              "type_a": "score",
+              "type_b": "score",
+              "max_abs_prob_diff": 0.0046603381633758545,
+              "score_diff": 0.006366133689880371,
+              "confidence_a": 0.5006774663925171,
+              "confidence_b": 0.49772292375564575,
+              "confidence_diff": -0.002954542636871338,
+              "fields_same": true,
+              "legend_same": true,
+              "type_same": true
+            }
+          }
+        ]
+      },
+      {
+        "id": "cx-02-web-agent",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "operation",
+            "tokens_identical": true,
+            "tv_cal": 0.0008883922928163701,
+            "answer": {
+              "type_a": "choice",
+              "type_b": "choice",
+              "max_abs_prob_diff": 0.0007218308746814728,
+              "choice_a": "BLOCKED",
+              "choice_b": "BLOCKED",
+              "choice_same": true,
+              "confidence_a": 0.9328571557998657,
+              "confidence_b": 0.9324311017990112,
+              "confidence_diff": -0.0004260540008544922,
+              "fields_same": true,
+              "type_same": true
+            }
+          },
+          {
+            "item": "click_target",
+            "tokens_identical": true,
+            "tv_cal": 0.0006391615150934025,
+            "answer": {
+              "type_a": "choice",
+              "type_b": "choice",
+              "max_abs_prob_diff": 0.0009996294975280762,
+              "choice_a": "2",
+              "choice_b": "2",
+              "choice_same": true,
+              "confidence_a": 0.968725860118866,
+              "confidence_b": 0.9677262306213379,
+              "confidence_diff": -0.0009996294975280762,
+              "fields_same": true,
+              "type_same": true
+            }
+          }
+        ]
+      },
+      {
+        "id": "cx-03-deadline-decomposed",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "last_day",
+            "tokens_identical": true,
+            "tv_cal": 0.013549552825655226,
+            "answer": {
+              "type_a": "choice",
+              "type_b": "choice",
+              "max_abs_prob_diff": 0.006772816181182861,
+              "choice_a": "2025-06-23",
+              "choice_b": "2025-06-23",
+              "choice_same": true,
+              "confidence_a": 0.45314550399780273,
+              "confidence_b": 0.44971081614494324,
+              "confidence_diff": -0.003434687852859497,
+              "fields_same": true,
+              "type_same": true
+            }
+          },
+          {
+            "item": "filing_date",
+            "tokens_identical": true,
+            "tv_cal": 0.002112568477788148,
+            "answer": {
+              "type_a": "choice",
+              "type_b": "choice",
+              "max_abs_prob_diff": 0.0002650804817676544,
+              "choice_a": "2025-06-20",
+              "choice_b": "2025-06-20",
+              "choice_same": true,
+              "confidence_a": 0.9599724411964417,
+              "confidence_b": 0.9597074389457703,
+              "confidence_diff": -0.0002650022506713867,
+              "fields_same": true,
+              "type_same": true
+            }
+          },
+          {
+            "item": "in_time",
+            "tokens_identical": true,
+            "tv_cal": 0.01798397807675045,
+            "answer": {
+              "type_a": "noul",
+              "type_b": "noul",
+              "max_abs_prob_diff": 0.006227970123291016,
+              "noul_diff": -0.006227970123291016,
+              "confidence_a": 0.6677559614181519,
+              "confidence_b": 0.6615279912948608,
+              "confidence_diff": -0.006227970123291016,
+              "fields_same": true,
+              "type_same": true
+            }
+          }
+        ]
+      },
+      {
+        "id": "cx-04-loan-triage",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "within_limit",
+            "tokens_identical": true,
+            "tv_cal": 0.0009487949963869757,
+            "answer": {
+              "type_a": "noul",
+              "type_b": "noul",
+              "max_abs_prob_diff": 0.006180524826049805,
+              "noul_diff": -0.006180465221405029,
+              "confidence_a": 0.6477864384651184,
+              "confidence_b": 0.6416059732437134,
+              "confidence_diff": -0.006180465221405029,
+              "fields_same": true,
+              "type_same": true
+            }
+          },
+          {
+            "item": "risk",
+            "tokens_identical": true,
+            "tv_cal": 0.001343513037756934,
+            "answer": {
+              "type_a": "score",
+              "type_b": "score",
+              "max_abs_prob_diff": 0.0015496760606765747,
+              "score_diff": 0.001106157898902893,
+              "confidence_a": 0.7851882576942444,
+              "confidence_b": 0.7854100465774536,
+              "confidence_diff": 0.00022178888320922852,
+              "fields_same": true,
+              "legend_same": true,
+              "type_same": true
+            }
+          },
+          {
+            "item": "decision",
+            "tokens_identical": true,
+            "tv_cal": 0.0016477032707049692,
+            "answer": {
+              "type_a": "choice",
+              "type_b": "choice",
+              "max_abs_prob_diff": 0.0019555315375328064,
+              "choice_a": "approve",
+              "choice_b": "approve",
+              "choice_same": true,
+              "confidence_a": 0.8923457860946655,
+              "confidence_b": 0.8913018703460693,
+              "confidence_diff": -0.0010439157485961914,
+              "fields_same": true,
+              "type_same": true
+            }
+          }
+        ]
+      },
+      {
+        "id": "cx-05-guard-check",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "injection",
+            "tokens_identical": true,
+            "tv_cal": 0.0002814590296429647,
+            "answer": {
+              "type_a": "noul",
+              "type_b": "noul",
+              "max_abs_prob_diff": 0.00028133392333984375,
+              "noul_diff": 0.00028133392333984375,
+              "confidence_a": 0.971734881401062,
+              "confidence_b": 0.9720162153244019,
+              "confidence_diff": 0.00028133392333984375,
+              "fields_same": true,
+              "type_same": true
+            }
+          },
+          {
+            "item": "data_request",
+            "tokens_identical": true,
+            "tv_cal": 0.002632638052785187,
+            "answer": {
+              "type_a": "choice",
+              "type_b": "choice",
+              "max_abs_prob_diff": 0.0020232796669006348,
+              "choice_a": "other",
+              "choice_b": "other",
+              "choice_same": true,
+              "confidence_a": 0.7456702589988708,
+              "confidence_b": 0.7436469793319702,
+              "confidence_diff": -0.0020232796669006348,
+              "fields_same": true,
+              "type_same": true
+            }
+          },
+          {
+            "item": "action",
+            "tokens_identical": true,
+            "tv_cal": 0.004726911179248707,
+            "answer": {
+              "type_a": "choice",
+              "type_b": "choice",
+              "max_abs_prob_diff": 0.0012004077434539795,
+              "choice_a": "refuse",
+              "choice_b": "refuse",
+              "choice_same": true,
+              "confidence_a": 0.9252915382385254,
+              "confidence_b": 0.9250607490539551,
+              "confidence_diff": -0.0002307891845703125,
+              "fields_same": true,
+              "type_same": true
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "upstream_endpoint": []
+}

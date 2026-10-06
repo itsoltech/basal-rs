@@ -1,0 +1,13 @@
+orders compared: 124, mismatches: 8, known deviations: 0
+== basal-1.5-4.5B
+f32          tokens: 8 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.00006904394531304092; max TV avg 0.000020710618187230745
+f16-single   tokens: 8 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.036615499389647255; max TV avg 0.0035468003967499286
+f16-tree     tokens: 8 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.036615499389647255; max TV avg 0.0035468003967499286
+up-bf16      tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.37305450439453125; max TV avg 0.025262130258842587
+orders compared: 124, mismatches: 8, known deviations: 0
+== basal-1.5-mini
+f32          tokens: 8 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.00006906359863201317; max TV avg 0.00001355705924746542
+f16-single   tokens: 8 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.024524793701171888; max TV avg 0.006970583195930957
+f16-tree     tokens: 8 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.024524793701171888; max TV avg 0.006970583195930957
+up-bf16      tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.41481590270996094; max TV avg 0.07151598346354679
+COMPAT-DONE
