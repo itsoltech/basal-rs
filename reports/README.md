@@ -14,6 +14,7 @@ Metodyka: [docs/BENCHMARKS.md](../docs/BENCHMARKS.md).
 | [rust-cuda-1.5-max/gemm-retune](rust-cuda-1.5-max/gemm-retune/README.md) | tabela GEMM niezależna od partii dobrana na M 128–16384 |
 | [rust-cuda-1.5-max/gemm-equiv](rust-cuda-1.5-max/gemm-equiv/README.md) | algorytm GEMM na klasę M z grupy bitowo identycznych algorytmów |
 | [rust-cuda-1.5-max/attn-kernel](rust-cuda-1.5-max/attn-kernel/README.md) | iteracje kernela attention |
+| [rust-cuda-1.5-max/power](rust-cuda-1.5-max/power/README.md) | konfiguracja domyślna przy 250 W i 300 W, ruch mieszany |
 | [baseline-cuda-1.5-max](baseline-cuda-1.5-max/README.md) | upstream v1.5.0 na tej samej karcie |
 | `reference-1.5-max-fp32`, `-cases`, `-cases2` | referencja upstream FP32: 44 przykłady basal-bench, żądania System One z `multi`, `act`, `facts`, `evidence` |
 

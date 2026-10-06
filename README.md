@@ -30,14 +30,15 @@ karcie. Szczegóły i dane:
 | Pomiar | Upstream | basal-rs |
 |---|---:|---:|
 | Pojedyncza decyzja (basal-bench, mediana) | 90,7 ms | 63,4–64,0 ms |
-| Jedno pytanie przez HTTP, p50 | 118 ms | 73 ms |
-| Jedno pytanie przez HTTP, 32 klientów | 6,8 żądania/s | 21,1–21,2 żądania/s |
-| Dokument 16k tokenów, 5 pytań | 49,1 s | 6,4 s |
-| Ruch mieszany (stany 0,1–16k tokenów, 1–14 pytań)¹ | 17 żądań/min | 104 żądania/min |
+| Jedno pytanie przez HTTP, p50 | 118 ms | 72 ms |
+| Jedno pytanie przez HTTP, 32 klientów | 6,8 żądania/s | 21,8 żądania/s |
+| Dokument 16k tokenów, 5 pytań | 49,1 s | 5,9 s |
+| Ruch mieszany (stany 0,1–16k tokenów, 1–14 pytań) | 17 żądań/min | 119 żądań/min |
 
-¹ Zmierzone przed zmianami tabeli GEMM i kernela attention z
-[gemm-equiv](reports/rust-cuda-1.5-max/gemm-equiv/README.md) i
-[attn-kernel](reports/rust-cuda-1.5-max/attn-kernel/README.md).
+Przy domyślnym limicie 300 W (upstream nie był mierzony w tych warunkach)
+basal-rs obsługuje ~20% więcej: 17,3 żądania/s przy jednym kliencie (p50
+56 ms), 26,3 żądania/s przy 32 klientach, ruch mieszany 143 żądania/min
+([pomiar](reports/rust-cuda-1.5-max/power/README.md)).
 
 Zgodność z upstream FP32 na 44 przykładach basal-bench: te same decyzje
 44/44; maksymalna różnica logitu 1,3·10⁻⁴ dla ścieżki FP32 i 0,27 dla
