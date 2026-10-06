@@ -12,3 +12,6 @@ Data: 2026-10-05, limit mocy GPU 250 W, warunki jak w
 - `serve-upstream.log`, `gpu-before.csv`.
 - `long-states-upstream.json`: `tools/reference/bench_requests.py --mode fast`
   na `tools/bench/long_states.jsonl` (stany 1k–16k tokenów, 1 i 5 pytań).
+  Pomiar nieważny: skrypt ładował wtedy kod serwera upstream 1.0, nie
+  v1.5.0. Pomiar v1.5.0 (300 W):
+  [../perf-1.5-small/long-upstream-basal-1.5-max.json](../perf-1.5-small/long-upstream-basal-1.5-max.json).

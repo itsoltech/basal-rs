@@ -34,7 +34,7 @@ karcie. Szczegóły i dane:
 | Pojedyncza decyzja (basal-bench, mediana) | 90,7 ms | 63,4–64,0 ms |
 | Jedno pytanie przez HTTP, p50 | 118 ms | 72 ms |
 | Jedno pytanie przez HTTP, 32 klientów | 6,8 żądania/s | 21,8 żądania/s |
-| Dokument 16k tokenów, 5 pytań | 49,1 s | 5,9 s |
+| Dokument 16k tokenów, 5 pytań (300 W) | 112,2 s | 5,3 s |
 | Ruch mieszany (stany 0,1–16k tokenów, 1–14 pytań) | 17 żądań/min | 119 żądań/min |
 
 Przy domyślnym limicie 300 W (upstream nie był mierzony w tych warunkach)

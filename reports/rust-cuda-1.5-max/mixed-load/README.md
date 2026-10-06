@@ -39,9 +39,9 @@ Czas sekwencyjny (mediana) według klasy:
 | doc-4k-8k | 3,2 s | 14,8 s |
 | doc-16k | 8,3 s | 83,7 s |
 
-Większość różnicy przepustowości to długie dokumenty: upstream dzieli wiersze
-po 3072 tokeny, więc stan długiego dokumentu liczy dla każdego pytania i każdej
-gałęzi multi osobno. Pomiar upstream przerwano po fazie 8 klientów (pozostałe
+Większość różnicy przepustowości to długie dokumenty: upstream v1.5.0 liczy
+stan długiego dokumentu osobno dla każdego pytania (pięć pytań o dokument
+4k–16k trwa ~7× dłużej niż jedno, [pomiar](../../perf-1.5-small/long-upstream-basal-1.5-max.json)). Pomiar upstream przerwano po fazie 8 klientów (pozostałe
 fazy trwałyby ~2,5 h; przy obciążeniach otwartych z fazy Rust jego kolejka
 rosłaby bez ograniczenia), więc jest tylko `upstream.log` bez `upstream.json`.
 

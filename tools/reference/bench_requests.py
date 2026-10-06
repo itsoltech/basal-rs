@@ -3,6 +3,8 @@ Apple Silicon, --mode fast on CUDA).
 
   .baseline/upstream/.venv/bin/python tools/reference/bench_requests.py \
       --model .models/basal-1.0-4.5B --requests tools/reference/requests_fanout.jsonl --reps 10 --out FILE.json
+  # basal-1.5 models: upstream v1.5.0
+  BASAL_UPSTREAM=.baseline/upstream-1.5 .baseline/upstream-1.5/.venv/bin/python tools/reference/bench_requests.py ...
 
 One client, requests one after another; each request is warmed up once, then timed `--reps` times. A timing covers
 Server.decide: prompt rendering, tokenization, the adaptive-batching worker (all questions of the request in one
@@ -11,13 +13,16 @@ run_shared call), the forward and the calibrated answer. The Rust counterpart is
 import argparse
 import asyncio
 import json
+import os
 import statistics
 import sys
 import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / ".baseline" / "upstream"))
+# upstream checkout: BASAL_UPSTREAM (e.g. .baseline/upstream-1.5 for basal-1.5 models), default .baseline/upstream
+UPSTREAM = Path(os.environ.get("BASAL_UPSTREAM", ROOT / ".baseline" / "upstream")).resolve()
+sys.path.insert(0, str(UPSTREAM))
 
 from basal.server import Server, parser  # noqa: E402
 
@@ -56,7 +61,8 @@ def main():
     srv = Server(parser().parse_args(["--model", a.model, "--mode", a.mode, "--name", "basal-1.0-4.5B",
                                        "--dtype", a.dtype]))
     rows = asyncio.run(run(srv, reqs, a.reps))
-    Path(a.out).write_text(json.dumps(dict(tool="tools/reference/bench_requests.py", mode=a.mode, dtype=a.dtype,
+    Path(a.out).write_text(json.dumps(dict(tool="tools/reference/bench_requests.py", upstream=UPSTREAM.name,
+                                           mode=a.mode, dtype=a.dtype,
                                            reps=a.reps, requests=rows), indent=1) + "\n")
 
 

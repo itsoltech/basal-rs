@@ -56,21 +56,42 @@ krótkich decyzjach (`ab-attn-simt-vs-tc/`): szybciej o ~3%.
 
 ## Długie stany (tools/bench/make_long_states.py, mediany z 2 powtórzeń)
 
-| Stan (tokeny) | Upstream, 1 pytanie | Rust, 1 pytanie | Upstream, 5 pytań | Rust, 5 pytań |
+Upstream v1.5.0 (`tools/reference/bench_requests.py --mode fast`,
+[perf-1.5-small/long-upstream-basal-1.5-max.json](../perf-1.5-small/long-upstream-basal-1.5-max.json))
+i basal-rs w konfiguracji domyślnej
+([power/300w/long.json](power/300w/long.json)), oba przy 300 W:
+
+| Stan (tokeny) | Upstream, 1 pytanie | basal-rs, 1 pytanie | Upstream, 5 pytań | basal-rs, 5 pytań |
 |---:|---:|---:|---:|---:|
-| 1 078 | 391 ms | 270 ms | 3 009 ms | 431 ms |
-| 2 146 | 1 045 ms | 552 ms | 5 101 ms | 725 ms |
-| 4 169 | 1 591 ms | 1 144 ms | 7 947 ms | 1 370 ms |
-| 8 221 | 3 722 ms | 2 671 ms | 18 464 ms | 3 030 ms |
-| 16 527 | 9 806 ms | 7 064 ms | 49 112 ms | 7 866 ms |
+| 1 078 | 307 ms | 209 ms | 481 ms | 297 ms |
+| 2 146 | 628 ms | 380 ms | 846 ms | 502 ms |
+| 4 169 | 2 555 ms | 802 ms | 17 888 ms | 958 ms |
+| 8 221 | 6 102 ms | 1 920 ms | 42 391 ms | 2 115 ms |
+| 16 527 | 16 013 ms | 4 816 ms | 112 202 ms | 5 314 ms |
+
+Upstream v1.5.0 przy pięciu pytaniach o dokument 4k–16k potrzebuje ~7×
+więcej czasu niż przy jednym (stan nie jest współdzielony między pytaniami),
+basal-rs ~1,1×.
+
+Pierwsza wersja tej tabeli (`../baseline-cuda-1.5-max/long-states-upstream.json`,
+250 W) była błędna: `bench_requests.py` ładował wtedy kod serwera upstream
+1.0 zamiast v1.5.0 (np. 16k, 5 pytań: 49,1 s zamiast 112,2 s). Kolumny
+basal-rs pochodziły z wersji sprzed zmian kernela attention i tabeli GEMM:
+
+| Stan (tokeny) | basal-rs, 1 pytanie | basal-rs, 5 pytań |
+|---:|---:|---:|
+| 1 078 | 270 ms | 431 ms |
+| 2 146 | 552 ms | 725 ms |
+| 4 169 | 1 144 ms | 1 370 ms |
+| 8 221 | 2 671 ms | 3 030 ms |
+| 16 527 | 7 064 ms | 7 866 ms |
 
 Pierwsza wersja (`long-states-rust-v1.json`) potrzebowała przy 16k tokenach i
 5 pytaniach 110,8 s: limit wiersza 3072 tokenów (jak w upstream) dzielił
 pytania na osobne wiersze, więc stan był liczony 5 razy, a kernel attention
 f32 SIMT skalował się kwadratowo z dużą stałą. Limit wiersza wynosi 32768
 tokenów (przy attention po węzłach drzewa długość wiersza nie zmienia wyniku
-pytania). Upstream przy wielu pytaniach o długi dokument dzieli wiersze po
-3072 tokeny. Przy 16k tokenach attention
+pytania). Przy 16k tokenach attention
 to ~60% czasu GPU (nsys `nsys-long16-tc2`).
 
 ## Pojedyncza decyzja (basal-bench, 44 przykłady)
