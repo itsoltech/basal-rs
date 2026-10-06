@@ -70,6 +70,9 @@ struct Plan {
     c: sys::cublasLtMatrixLayout_t,
 }
 
+/// Algorithms of a weight shape by M class (ascending), all with bitwise identical results.
+type ClassAlgos = Vec<(usize, sys::cublasLtMatmulAlgo_t)>;
+
 pub struct Lt {
     handle: sys::cublasLtHandle_t,
     workspace: CudaSlice<u8>,
@@ -81,7 +84,7 @@ pub struct Lt {
     pub from_table: Mutex<usize>,
     /// Batch-invariant mode: one algorithm per (N, K, dtype) for every M, without split-K, so that a row's result
     /// does not depend on the other rows of the call. A shape listed here never uses another algorithm.
-    invariant: Mutex<HashMap<(usize, usize, DType), Vec<(usize, sys::cublasLtMatmulAlgo_t)>>>,
+    invariant: Mutex<HashMap<(usize, usize, DType), ClassAlgos>>,
 }
 
 // SAFETY: the handle and descriptors are only used under the plan/algo locks on candle's single stream.

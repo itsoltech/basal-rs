@@ -13,6 +13,7 @@ use candle_core::{CpuStorage, CustomOp1, CustomOp2, CustomOp3, DType, Layout, Re
 #[cfg(target_os = "macos")]
 use metal::{launch, pipeline_suffix as suffix};
 
+#[cfg_attr(not(any(feature = "cuda", target_os = "macos")), allow(dead_code))] // GPU kernels only
 fn contiguous(l: &Layout, what: &str) -> Result<usize> {
     match l.contiguous_offsets() {
         Some((start, _)) => Ok(start),
@@ -281,6 +282,7 @@ pub struct HeadDims {
     pub hd: usize,
 }
 
+#[cfg_attr(not(any(feature = "cuda", target_os = "macos")), allow(dead_code))] // GPU kernels only
 struct QkvRope(HeadDims);
 
 impl CustomOp3 for QkvRope {
@@ -368,6 +370,7 @@ pub fn qkv_rope(
     Ok((flat, q, k, v))
 }
 
+#[cfg_attr(not(any(feature = "cuda", target_os = "macos")), allow(dead_code))] // GPU kernels only
 struct MergeHeads(HeadDims, DType);
 
 impl CustomOp1 for MergeHeads {
