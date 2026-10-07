@@ -1,0 +1,111 @@
+# Release packages: on a v* tag, the macOS (Apple Silicon) and Linux x86_64 (CUDA) packages of tools/release/, their
+# SHA256SUMS and install.sh in a GitHub Release, then the Homebrew formula in itsoltech/homebrew-tap (secret
+# HOMEBREW_TAP_TOKEN: a token allowed to push to that repository; without it the step is skipped).
+# workflow_dispatch builds the packages as workflow artifacts without publishing anything. The container images are
+# built by docker.yml for the same tags.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  macos:
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+      - name: Package
+        env:
+          BASAL_GIT_SHA: ${{ github.sha }}
+        run: tools/release/package-macos.sh dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-macos
+          path: dist/*
+
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Free disk space (the CUDA devel image and the build need ~25 GB)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune --all --force
+          df -h /
+      - uses: actions/checkout@v4
+      - name: Package
+        env:
+          BASAL_GIT_SHA: ${{ github.sha }}
+        run: tools/release/package-linux.sh dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-linux
+          path: dist/*
+
+  publish:
+    needs: [macos, linux]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      macos_sha256: ${{ steps.v.outputs.macos_sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Version and checksums
+        id: v
+        run: |
+          version=$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)
+          [ "v$version" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME does not match Cargo.toml $version"; exit 1; }
+          cd dist
+          cat ./*.tar.gz.sha256 > SHA256SUMS
+          cat SHA256SUMS
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "macos_sha256=$(awk '/aarch64-apple-darwin/{print $1}' SHA256SUMS)" >> "$GITHUB_OUTPUT"
+      - name: GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp install.sh dist/
+          gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --title "basal-rs $GITHUB_REF_NAME" \
+            dist/*.tar.gz dist/SHA256SUMS dist/install.sh
+
+  homebrew:
+    needs: publish
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Formula in itsoltech/homebrew-tap
+        env:
+          TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ needs.publish.outputs.version }}
+          SHA256: ${{ needs.publish.outputs.macos_sha256 }}
+        run: |
+          if [ -z "$TOKEN" ]; then echo "HOMEBREW_TAP_TOKEN not set: formula not updated"; exit 0; fi
+          git clone "https://x-access-token:$TOKEN@github.com/itsoltech/homebrew-tap.git" tap
+          mkdir -p tap/Formula
+          sed -e "s/@VERSION@/$VERSION/g" -e "s/@SHA256@/$SHA256/g" tools/release/basal-rs.rb.in > tap/Formula/basal-rs.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/basal-rs.rb
+          git diff --cached --quiet && { echo "formula unchanged"; exit 0; }
+          git commit -m "basal-rs $VERSION"
+          git push

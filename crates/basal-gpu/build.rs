@@ -1,6 +1,7 @@
 //! With the `cuda` feature: compile src/kernels.cu to PTX with nvcc, once per GPU architecture of CUDA_COMPUTE_CAPS
-//! (comma-separated, default 80,89,90: A100 / RTX 30xx, RTX 6000 Ada / L40S / RTX 40xx, H100), or only for
-//! CUDA_COMPUTE_CAP when that is set. At run time the PTX of the highest architecture not above the GPU's is loaded
+//! (comma-separated, default 80,89,90: A100 / RTX 30xx, RTX 6000 Ada / L40S / RTX 40xx, H100), else only for
+//! CUDA_COMPUTE_CAP when that is set (candle's own kernels are compiled for CUDA_COMPUTE_CAP, which candle needs
+//! without a GPU in the build machine; their PTX for 8.0 runs on newer GPUs too). At run time the PTX of the highest architecture not above the GPU's is loaded
 //! (`fused::ptx`); a GPU older than every one of them is refused.
 
 fn main() {
@@ -12,9 +13,9 @@ fn main() {
     if std::env::var_os("CARGO_FEATURE_CUDA").is_none() {
         return;
     }
-    let caps: Vec<u32> = match (std::env::var("CUDA_COMPUTE_CAP"), std::env::var("CUDA_COMPUTE_CAPS")) {
-        (Ok(c), _) if !c.is_empty() => vec![c.trim().parse().expect("CUDA_COMPUTE_CAP")],
-        (_, Ok(cs)) if !cs.is_empty() => cs.split(',').map(|c| c.trim().parse().expect("CUDA_COMPUTE_CAPS")).collect(),
+    let caps: Vec<u32> = match (std::env::var("CUDA_COMPUTE_CAPS"), std::env::var("CUDA_COMPUTE_CAP")) {
+        (Ok(cs), _) if !cs.is_empty() => cs.split(',').map(|c| c.trim().parse().expect("CUDA_COMPUTE_CAPS")).collect(),
+        (_, Ok(c)) if !c.is_empty() => vec![c.trim().parse().expect("CUDA_COMPUTE_CAP")],
         _ => vec![80, 89, 90],
     };
     let mut caps = caps;
