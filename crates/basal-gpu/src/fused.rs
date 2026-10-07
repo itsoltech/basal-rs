@@ -36,7 +36,7 @@ mod metal {
     static LIBRARY: Mutex<Option<Library>> = Mutex::new(None);
     static PIPELINES: OnceLock<Mutex<HashMap<String, ComputePipeline>>> = OnceLock::new();
 
-    fn pipeline(dev: &candle_core::MetalDevice, name: &str) -> Result<ComputePipeline> {
+    pub(super) fn pipeline(dev: &candle_core::MetalDevice, name: &str) -> Result<ComputePipeline> {
         let cache = PIPELINES.get_or_init(Default::default);
         if let Some(p) = cache.lock().unwrap().get(name) {
             return Ok(p.clone());
@@ -777,6 +777,156 @@ pub fn attention_tree(
         Some((k, v, _)) => qkv.apply_op3_no_bwd(k, v, &op),
         None => qkv.apply_op3_no_bwd(qkv, qkv, &op),
     }
+}
+
+/// One work unit of [`attention_tree_metal`]: the queries `q_off..q_off + q_len` (one block of a packed row, compact
+/// token indices) and their keys: the precomputed prefix `past` (an index into the `pasts` of the call) followed by
+/// the token ranges `ranges` (ancestor blocks from the root down, then the own block, causal).
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug)]
+pub struct MetalTreeUnit {
+    pub past: Option<usize>,
+    pub q_off: usize,
+    pub q_len: usize,
+    pub ranges: Vec<(usize, usize)>,
+}
+
+/// `TreeUnit` of kernels.metal.
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct MetalTreeUnitC {
+    np: u32,
+    q_off: u32,
+    q_len: u32,
+    tile0: u32,
+    nr: u32,
+    pad: [u32; 3],
+    r_off: [u32; 8],
+    r_len: [u32; 8],
+}
+
+#[cfg(target_os = "macos")]
+struct AttentionTreeMetal<'a> {
+    units: &'a [MetalTreeUnit],
+    /// prefix K / V of the layer, f32 `[1, NKV, np, HD]`
+    pasts: &'a [(&'a Tensor, &'a Tensor)],
+    total: usize,
+    nh: usize,
+    nkv: usize,
+    scale: f32,
+}
+
+#[cfg(target_os = "macos")]
+impl CustomOp1 for AttentionTreeMetal<'_> {
+    fn name(&self) -> &'static str {
+        "attention-tree"
+    }
+    fn cpu_fwd(&self, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> {
+        no_cpu()
+    }
+    fn metal_fwd(&self, qkv: &MetalStorage, ql: &Layout) -> Result<(MetalStorage, Shape)> {
+        use objc2_metal::MTLSize;
+        const HD: usize = 128;
+        /// Units per dispatch: the table goes through setBytes (at most 4 KiB).
+        const MAXU: usize = 32;
+        let (t, nh, nkv) = (self.total, self.nh, self.nkv);
+        if qkv.dtype() != DType::F32 || ql.shape().elem_count() != (nh + 2 * nkv) * t * HD {
+            candle_core::bail!("attention_tree: expects the f32 qkv_rope output with head_dim {HD}");
+        }
+        let dev = qkv.device();
+        let n = nh * t * HD;
+        let out = dev.new_buffer_builder().with_size_for(n, DType::F32).with_label("attention_tree").build()?;
+        let p = metal::pipeline(dev, "attn_tree_f32")?;
+        let qo = contiguous(ql, "qkv")? * 4;
+        let rep = nh / nkv;
+        // simdgroups (8 query rows each) per threadgroup, at most ATT_SG = 8; the result does not depend on it
+        let nsg: usize = std::env::var("BASAL_ATT_SG").ok().and_then(|v| v.parse().ok()).unwrap_or(8).clamp(1, 8);
+        // one dispatch per prefix (it is bound as a buffer) and per MAXU units
+        let mut groups: Vec<(Option<usize>, Vec<&MetalTreeUnit>)> = Vec::new();
+        for u in self.units {
+            match groups.iter_mut().find(|g| g.0 == u.past) {
+                Some(g) => g.1.push(u),
+                None => groups.push((u.past, vec![u])),
+            }
+        }
+        for (past, us) in &groups {
+            let guards = match past {
+                Some(i) => {
+                    let (k, v) = self.pasts[*i];
+                    Some((k.storage_and_layout(), v.storage_and_layout(), k.dim(2)?))
+                }
+                None => None,
+            };
+            let (pk, pv, np) = match &guards {
+                Some(((ks, kl), (vs, vl), np)) => {
+                    let (candle_core::Storage::Metal(k), candle_core::Storage::Metal(v)) = (&**ks, &**vs) else {
+                        candle_core::bail!("attention_tree: prefix K/V not on Metal")
+                    };
+                    if k.dtype() != DType::F32 || v.dtype() != DType::F32 {
+                        candle_core::bail!("attention_tree: prefix K/V must be f32");
+                    }
+                    ((k.buffer(), contiguous(kl, "prefix K")? * 4), (v.buffer(), contiguous(vl, "prefix V")? * 4), *np)
+                }
+                None => ((qkv.buffer(), qo), (qkv.buffer(), qo), 0),
+            };
+            for chunk in us.chunks(MAXU) {
+                let mut tab = Vec::with_capacity(chunk.len());
+                let mut tiles = 0u32;
+                for u in chunk {
+                    if u.ranges.is_empty() || u.ranges.len() > 8 || u.ranges.last().unwrap().0 != u.q_off {
+                        candle_core::bail!("attention_tree: unit needs 1..=8 ranges ending with its own block");
+                    }
+                    let mut c = MetalTreeUnitC {
+                        np: np as u32,
+                        q_off: u.q_off as u32,
+                        q_len: u.q_len as u32,
+                        tile0: tiles,
+                        nr: u.ranges.len() as u32,
+                        ..Default::default()
+                    };
+                    for (i, &(o, l)) in u.ranges.iter().enumerate() {
+                        c.r_off[i] = o as u32;
+                        c.r_len[i] = l as u32;
+                    }
+                    tab.push(c);
+                    tiles += (rep * u.q_len).div_ceil(8 * nsg) as u32;
+                }
+                let guard = dev.command_encoder()?;
+                let enc: &candle_metal_kernels::metal::ComputeCommandEncoder = guard.as_ref();
+                enc.set_compute_pipeline_state(&p);
+                enc.set_input_buffer(0, Some(qkv.buffer()), qo);
+                enc.set_input_buffer(1, Some(pk.0), pk.1);
+                enc.set_input_buffer(2, Some(pv.0), pv.1);
+                enc.set_output_buffer(3, Some(&out), 0);
+                enc.set_bytes_directly(4, std::mem::size_of_val(tab.as_slice()), tab.as_ptr().cast());
+                let c = [tab.len() as u32, t as u32, nh as u32, nkv as u32];
+                for (i, x) in c.iter().enumerate() {
+                    enc.set_bytes(5 + i, x);
+                }
+                enc.set_bytes(9, &self.scale);
+                enc.dispatch_thread_groups(
+                    MTLSize { width: tiles as usize, height: nkv, depth: 1 },
+                    MTLSize { width: 32 * nsg, height: 1, depth: 1 },
+                );
+            }
+        }
+        Ok((MetalStorage::new(out, dev.clone(), n, DType::F32), Shape::from((1, nh, t, HD))))
+    }
+}
+
+/// f32 attention of all units (blocks of packed rows) of a forward (Metal), invariant to how questions are packed:
+/// `qkv` = the flat [`qkv_rope`] output over `d.l` tokens, `pasts` = the prefix K / V the units refer to. Returns
+/// `[1, NH, total, HD]`.
+#[cfg(target_os = "macos")]
+pub fn attention_tree_metal(
+    qkv: &Tensor,
+    units: &[MetalTreeUnit],
+    pasts: &[(&Tensor, &Tensor)],
+    d: HeadDims,
+    scale: f32,
+) -> Result<Tensor> {
+    qkv.apply_op1_no_bwd(&AttentionTreeMetal { units, pasts, total: d.l, nh: d.nh, nkv: d.nkv, scale })
 }
 
 #[cfg(feature = "cuda")]

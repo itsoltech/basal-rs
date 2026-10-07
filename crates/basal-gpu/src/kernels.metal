@@ -99,3 +99,150 @@ kernel void merge_heads(device const float *in [[buffer(0)]], device T *out [[bu
 INSTANTIATE(float, f32)
 INSTANTIATE(half, f16)
 INSTANTIATE(bfloat, bf16)
+
+// Tree attention (f32, flash style) on simdgroup matrices, invariant to how questions are packed (the work units of
+// attn_tree_f32 in kernels.cu): a unit is one block (node) of a packed row. Its keys are, in this order, the
+// precomputed prefix (np keys, pk/pv = [NKV, np, HD]), the token ranges of its ancestor blocks from the root down and
+// its own range (last range, causal). Keys are tiled by their ordinal in that sequence and every query row is
+// computed from its own Q row and these tiles only, so its result does not depend on what else shares the row or the
+// forward. qkv = the qkv_rope output over T tokens, out = [NH, T, HD]. Threadgroups: x = sum over units of
+// ceil(rep * q_len / (8 * nsg)), y = NKV; nsg <= ATT_SG simdgroups of 8 query rows (any nsg gives the same result).
+// Products and sums are f32 (8x8 simdgroup multiply-accumulate). Softmax works on the fragment elements of each lane:
+// in an 8x8 fragment lane l holds row (l / 16) * 4 + (l / 2) % 4, columns (l / 8 % 2) * 4 + (l % 2) * 2 and + 1, so
+// the lanes of one row differ in bits 0 and 3 (as in MLX's steel attention).
+#include <metal_simdgroup_matrix>
+#define ATT_HD 128
+#define ATT_SG 8
+#define ATT_BK 16
+#define ATT_LD 132
+#define ATT_HLD 68
+#define TREE_MAXR 8
+// masked score: finite, since the library is compiled with fast math (no infinities assumed)
+#define ATT_NEG (-3.0e38f)
+
+struct TreeUnit {
+    uint np, q_off, q_len, tile0, nr, pad0, pad1, pad2;
+    uint r_off[TREE_MAXR], r_len[TREE_MAXR];
+};
+
+// offset of the key / value row of ordinal j: in the [NKV, np, HD] prefix (j < np) or the [NKV, T, HD] current tokens
+static inline ulong tree_kv_off(constant TreeUnit &U, uint g, uint T, uint j) {
+    if (j < U.np) return ((ulong)g * U.np + j) * ATT_HD;
+    uint jr = j - U.np, ri = 0;
+    while (jr >= U.r_len[ri]) jr -= U.r_len[ri++];
+    return ((ulong)g * T + U.r_off[ri] + jr) * ATT_HD;
+}
+
+kernel void attn_tree_f32(device const float *qkv [[buffer(0)]], device const float *pk [[buffer(1)]],
+                          device const float *pv [[buffer(2)]], device float *out [[buffer(3)]],
+                          constant TreeUnit *units [[buffer(4)]], constant uint &n_units [[buffer(5)]],
+                          constant uint &T [[buffer(6)]], constant uint &NH [[buffer(7)]],
+                          constant uint &NKV [[buffer(8)]], constant float &scale [[buffer(9)]],
+                          uint2 tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+                          uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+                          uint nsg [[simdgroups_per_threadgroup]]) {
+    // half of the Q rows ([8 * nsg][ATT_HLD]), then the key and value tiles ([ATT_BK][ATT_LD] each)
+    threadgroup float buf[8 * ATT_SG * ATT_HLD];
+    threadgroup float *Kt = buf, *Vt = buf + ATT_BK * ATT_LD;
+    const uint nthr = 32 * nsg, bq = 8 * nsg, g = tg.y, rep = NH / NKV;
+    uint lo = 0, hi = n_units - 1;  // unit of this threadgroup: the last whose first tile is <= tg.x
+    while (lo < hi) {
+        const uint mid = (lo + hi + 1) / 2;
+        if (units[mid].tile0 <= tg.x) lo = mid;
+        else hi = mid - 1;
+    }
+    constant TreeUnit &U = units[lo];
+    const uint rows = rep * U.q_len, r0 = (tg.x - U.tile0) * bq;
+    uint lk = U.np;
+    for (uint i = 0; i < U.nr; i++) lk += U.r_len[i];
+    const uint base_own = lk - U.r_len[U.nr - 1];  // ordinal of the first key of the own block
+    // keys after the last one visible to any row of this threadgroup contribute exactly 0 and are not visited
+    uint vis_end = 0;
+    for (uint r = r0; r < min(r0 + bq, rows); r++) vis_end = max(vis_end, base_own + r % U.q_len + 1);
+    device const float *q = qkv, *k = qkv + (ulong)NH * T * ATT_HD, *v = k + (ulong)NKV * T * ATT_HD;
+    simdgroup_float8x8 qf[ATT_HD / 8];
+    for (uint h = 0; h < 2; h++) {
+        for (uint i = tid; i < bq * ATT_HD / 8; i += nthr) {
+            uint rr = i / (ATT_HD / 8), d4 = i % (ATT_HD / 8), r = r0 + rr;
+            float4 x = float4(0.f);
+            if (r < rows)
+                x = ((device const float4 *)(q + ((ulong)(g * rep + r / U.q_len) * T + U.q_off + r % U.q_len) *
+                                                     ATT_HD + h * ATT_HD / 2))[d4];
+            ((threadgroup float4 *)(buf + rr * ATT_HLD))[d4] = x;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint c = 0; c < ATT_HD / 16; c++)
+            simdgroup_load(qf[h * ATT_HD / 16 + c], buf + sg * 8 * ATT_HLD + c * 8, ATT_HLD);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    simdgroup_float8x8 of[ATT_HD / 8];
+    for (uint c = 0; c < ATT_HD / 8; c++) of[c] = make_filled_simdgroup_matrix<float, 8, 8>(0.f);
+    // the lane's row of its simdgroup's 8 rows and its first column in each 8x8 fragment
+    const uint fm = (lane / 16) * 4 + (lane / 2) % 4, fn = (lane / 8 % 2) * 4 + (lane % 2) * 2;
+    const uint r = r0 + sg * 8 + fm;
+    const bool ok = r < rows;
+    const uint lim = ok ? base_own + r % U.q_len : 0;  // last visible key ordinal of the row
+    float m = ATT_NEG, l = 0.f;
+    for (uint j0 = 0; j0 < vis_end; j0 += ATT_BK) {
+        for (uint i = tid; i < ATT_BK * ATT_HD / 4; i += nthr) {
+            uint jj = i / (ATT_HD / 4), d4 = i % (ATT_HD / 4), j = j0 + jj;
+            float4 x = float4(0.f), y = float4(0.f);
+            if (j < lk) {
+                const bool pre = j < U.np;
+                const ulong o = tree_kv_off(U, g, T, j);
+                x = ((device const float4 *)((pre ? pk : k) + o))[d4];
+                y = ((device const float4 *)((pre ? pv : v) + o))[d4];
+            }
+            ((threadgroup float4 *)(Kt + jj * ATT_LD))[d4] = x;
+            ((threadgroup float4 *)(Vt + jj * ATT_LD))[d4] = y;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        simdgroup_float8x8 s[ATT_BK / 8];
+        for (uint n = 0; n < ATT_BK / 8; n++) {
+            simdgroup_float8x8 kt;
+            s[n] = make_filled_simdgroup_matrix<float, 8, 8>(0.f);
+            for (uint c = 0; c < ATT_HD / 8; c++) {
+                simdgroup_load(kt, Kt + n * 8 * ATT_LD + c * 8, ATT_LD, ulong2(0, 0), true);
+                simdgroup_multiply_accumulate(s[n], qf[c], kt, s[n]);
+            }
+        }
+        float x[ATT_BK / 4], mt = ATT_NEG;
+        for (uint n = 0; n < ATT_BK / 8; n++)
+            for (uint e = 0; e < 2; e++) {
+                const float sv = s[n].thread_elements()[e];
+                x[2 * n + e] = (ok && j0 + n * 8 + fn + e <= lim) ? sv * scale : ATT_NEG;
+                mt = fmax(mt, x[2 * n + e]);
+            }
+        mt = fmax(mt, simd_shuffle_xor(mt, 1));
+        mt = fmax(mt, simd_shuffle_xor(mt, 8));
+        const float mn = fmax(m, mt);
+        float rs = 0.f;
+        for (uint n = 0; n < ATT_BK / 8; n++)
+            for (uint e = 0; e < 2; e++) {
+                const float p = mn <= ATT_NEG ? 0.f : precise::exp(x[2 * n + e] - mn);
+                s[n].thread_elements()[e] = p;
+                rs += p;
+            }
+        rs += simd_shuffle_xor(rs, 1);
+        rs += simd_shuffle_xor(rs, 8);
+        const float corr = m <= ATT_NEG ? 0.f : precise::exp(m - mn);
+        l = l * corr + rs;
+        m = mn;
+        for (uint c = 0; c < ATT_HD / 8; c++) {
+            of[c].thread_elements()[0] *= corr;
+            of[c].thread_elements()[1] *= corr;
+            simdgroup_float8x8 vf;
+            for (uint n = 0; n < ATT_BK / 8; n++) {
+                simdgroup_load(vf, Vt + n * 8 * ATT_LD + c * 8, ATT_LD);
+                simdgroup_multiply_accumulate(of[c], s[n], vf, of[c]);
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);  // the tiles are read before the next ones are loaded
+    }
+    if (ok) {
+        const float inv = 1.0f / l;
+        device float *dst = out + ((ulong)(g * rep + r / U.q_len) * T + U.q_off + r % U.q_len) * ATT_HD + fn;
+        for (uint c = 0; c < ATT_HD / 8; c++)
+            *(device float2 *)(dst + c * 8) = float2(of[c].thread_elements()[0] * inv, of[c].thread_elements()[1] * inv);
+    }
+}

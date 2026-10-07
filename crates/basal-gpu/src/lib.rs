@@ -120,21 +120,21 @@ struct Layer {
 }
 
 /// One attention segment of a ragged forward: `len` tokens at `off` in the compact token list, optionally after a
-/// precomputed prefix. Metal: additive mask `[len, np + len]` (np = prefix length). CUDA: the blocks of the row as
-/// attention units (`units`, offsets relative to `off`).
+/// precomputed prefix. Tree attention (CUDA; Metal unless `BASAL_ATT=sdpa`): the blocks of the row as attention
+/// units (`units`, offsets relative to `off`). Metal SDPA: additive mask `[len, np + len]` (np = prefix length).
 struct Segment<'a> {
     off: usize,
     len: usize,
     past: Option<&'a PrefixKv>,
     mask: Vec<f32>,
-    #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+    #[cfg_attr(not(any(feature = "cuda", target_os = "macos")), allow(dead_code))]
     units: Vec<Unit>,
 }
 
 /// Queries `q_off..q_off + q_len` (one block of a packed row) and their key ranges: ancestor blocks from the root
 /// down, then the own block. Offsets relative to the segment's first token (after its precomputed prefix).
 #[derive(Clone, Debug)]
-#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+#[cfg_attr(not(any(feature = "cuda", target_os = "macos")), allow(dead_code))]
 struct Unit {
     q_off: usize,
     q_len: usize,
@@ -602,7 +602,17 @@ impl GpuBackend {
         if self.dev.is_cuda() {
             return if self.tc_attention() { fused::tc_kernel() } else { "attn_tree_f32" };
         }
-        "sdpa"
+        if self.tree_attention() {
+            "attn_tree_f32"
+        } else {
+            "sdpa"
+        }
+    }
+
+    /// Attention by tree units, invariant to packing: always on CUDA; on Metal unless `BASAL_ATT=sdpa` (the MLX SDPA
+    /// kernel over each packed row with an additive mask, the earlier path, kept for comparison).
+    fn tree_attention(&self) -> bool {
+        self.dev.is_cuda() || std::env::var("BASAL_ATT").as_deref() != Ok("sdpa")
     }
 
     /// The device for one call (a no-op without a gate).
@@ -786,7 +796,9 @@ impl GpuBackend {
         // CUDA: one attention kernel per layer for all segments, masks in one buffer; also for a prefix capture, so
         // that a cached prefix has bitwise the K/V the same tokens get when computed inside a row.
         let ragged_cuda = cfg!(feature = "cuda") && dev.is_cuda();
-        let masks: Vec<Tensor> = if ragged_cuda {
+        // Metal: the same tree units through attn_tree_f32 of kernels.metal (one dispatch per prefix)
+        let ragged_metal = cfg!(target_os = "macos") && dev.is_metal() && self.tree_attention();
+        let masks: Vec<Tensor> = if ragged_cuda || ragged_metal {
             Vec::new()
         } else {
             segs.iter()
@@ -815,6 +827,29 @@ impl GpuBackend {
                 .collect()
         } else {
             Vec::new()
+        };
+        #[cfg(target_os = "macos")]
+        let (metal_units, metal_pasts) = if ragged_metal {
+            let mut pasts: Vec<&PrefixKv> = Vec::new();
+            let mut units = Vec::new();
+            for sg in segs {
+                let past = sg.past.map(|p| match pasts.iter().position(|q| std::ptr::eq(*q, p)) {
+                    Some(i) => i,
+                    None => {
+                        pasts.push(p);
+                        pasts.len() - 1
+                    }
+                });
+                units.extend(sg.units.iter().map(|u| fused::MetalTreeUnit {
+                    past,
+                    q_off: sg.off + u.q_off,
+                    q_len: u.q_len,
+                    ranges: u.ranges.iter().map(|&(o, l)| (sg.off + o, l)).collect(),
+                }));
+            }
+            (units, pasts)
+        } else {
+            (Vec::new(), Vec::new())
         };
         // (a zero-length device buffer cannot be created on Metal; a captured prefix has no readout)
         let read_t = if read.is_empty() { None } else { Some(Tensor::from_slice(read, (read.len(),), dev)?) };
@@ -861,6 +896,13 @@ impl GpuBackend {
             };
             #[cfg(not(feature = "cuda"))]
             let ragged_o: Option<Tensor> = None;
+            #[cfg(target_os = "macos")]
+            let ragged_o = if ragged_metal {
+                let pasts: Vec<(&Tensor, &Tensor)> = metal_pasts.iter().map(|p| (&p.kv[li].0, &p.kv[li].1)).collect();
+                Some(fused::attention_tree_metal(&_flat, &metal_units, &pasts, dims, scale)?)
+            } else {
+                ragged_o
+            };
             let mut outs = Vec::with_capacity(segs.len());
             for (si, sg) in segs.iter().enumerate() {
                 if ragged_o.is_some() && !capture {
@@ -961,7 +1003,7 @@ impl GpuBackend {
             self.rope_row((np + t) as f64, &mut cos[t * half..(t + 1) * half], &mut sin[t * half..(t + 1) * half]);
         }
         let mut mask = Vec::new();
-        if !self.dev.is_cuda() {
+        if !self.tree_attention() {
             mask = vec![MASKED; l * lk];
             for t in 0..l {
                 mask[t * lk..t * lk + np + t + 1].fill(0.0); // the past prefix and causal
@@ -1166,7 +1208,7 @@ impl Backend for GpuBackend {
         }
         // plain causal forward of the whole prompt (upstream: model.model(input_ids))
         let mut mask = Vec::new();
-        if !self.dev.is_cuda() {
+        if !self.tree_attention() {
             mask = vec![MASKED; n * n];
             for t in 0..n {
                 mask[t * n..t * n + t + 1].fill(0.0);
@@ -1319,13 +1361,13 @@ impl Backend for GpuBackend {
                 let visible: Vec<bool> =
                     (0..nodes * nodes).map(|k| p.is_ancestor_or_self((k / nodes) as u32, (k % nodes) as u32)).collect();
                 let lk = np + n;
-                let cuda = self.dev.is_cuda();
-                let mut mask = if cuda { Vec::new() } else { vec![MASKED; n * lk] };
+                let tree = self.tree_attention();
+                let mut mask = if tree { Vec::new() } else { vec![MASKED; n * lk] };
                 for t in 0..n {
                     let (cos, sin) = cs.split_at_mut(total * half);
                     let c0 = (off + t) * half;
                     self.rope_row(p.pos[np + t] as f64, &mut cos[c0..c0 + half], &mut sin[c0..c0 + half]);
-                    if cuda {
+                    if tree {
                         continue;
                     }
                     let row = &mut mask[t * lk..(t + 1) * lk];
@@ -1339,7 +1381,7 @@ impl Backend for GpuBackend {
                     }
                 }
                 read.extend(p.last.iter().map(|&c| (off + c - np) as u32));
-                let units = if cuda { row_units(p, np)? } else { Vec::new() };
+                let units = if tree { row_units(p, np)? } else { Vec::new() };
                 segs.push(Segment { off, len: n, past: pi.map(|i| &self.prefixes[i]), mask, units });
             }
             let t1 = Instant::now();
