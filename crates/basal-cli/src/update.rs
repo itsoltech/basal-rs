@@ -135,26 +135,26 @@ pub fn run(version: Option<String>, check: bool) -> Result<()> {
             None => bail!("no release published yet"),
         },
     };
-    eprintln!("basal: installed {current}, {} {want}", if check { "available" } else { "target" });
+    crate::note!("installed {current}, {} {want}", if check { "available" } else { "target" });
     if check {
         if newer(&want, current) {
-            eprintln!("basal: update available");
+            crate::warn!("update available");
         }
         return Ok(());
     }
     match install()? {
         Install::Homebrew => {
-            eprintln!("basal: installed with Homebrew: brew update && brew upgrade basal-rs");
+            crate::note!("installed with Homebrew: brew update && brew upgrade basal-rs");
             return Ok(());
         }
         Install::Container => {
-            eprintln!("basal: container image: docker compose pull && docker compose up -d");
+            crate::note!("container image: docker compose pull && docker compose up -d");
             return Ok(());
         }
         Install::Source => bail!("built from the repository: git pull && cargo build --release"),
         Install::Package(prefix) => {
             if want == current {
-                eprintln!("basal: up to date");
+                crate::done!("up to date");
                 return Ok(());
             }
             replace(&prefix, &want)?;
@@ -169,7 +169,7 @@ fn replace(prefix: &Path, version: &str) -> Result<()> {
     let name = format!("basal-{version}-{t}");
     let file = format!("{name}.tar.gz");
     let (rt, c) = client()?;
-    eprintln!("basal: downloading {file}");
+    crate::progress!("downloading {file}");
     let sums = String::from_utf8(fetch(&rt, &c, version, "SHA256SUMS")?)?;
     let want = sums
         .lines()
@@ -205,7 +205,7 @@ fn replace(prefix: &Path, version: &str) -> Result<()> {
         std::fs::rename(&new, &dst)?;
     }
     std::fs::remove_dir_all(&tmp)?;
-    eprintln!("basal: updated to {version} in {}; restart a running server", prefix.display());
+    crate::done!("updated to {version} in {}; restart a running server", prefix.display());
     Ok(())
 }
 

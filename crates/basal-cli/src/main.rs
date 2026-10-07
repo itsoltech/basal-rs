@@ -9,6 +9,7 @@
 //!   basal doctor        [--json]                                       what this machine has / lacks for serve
 //!   basal setup         [--prefetch] [--service]                       CUDA libraries (Linux), configuration
 //!   basal update        [--version X] [--check]                        newest release over this installation
+//!   basal uninstall     [--models] [--dry-run] [--yes]                 remove what basal put on this machine
 //!   basal init          [--model mini|4.5B|max]                        user configuration of `basal serve`
 //!   basal serve         [--config FILE | --model DIR]                  HTTP server (default: user configuration)
 
@@ -23,6 +24,8 @@ mod reference;
 mod serve;
 mod setup;
 mod stats;
+mod term;
+mod uninstall;
 mod update;
 
 use std::io::Read;
@@ -74,14 +77,17 @@ fn delegate_gpu_command() {
     }
     if let Some(bin) = paths::cuda_binary() {
         let err = cuda_command(&bin).args(&args[1..]).exec();
-        eprintln!("basal: running {}: {err} (basal doctor checks the installation)", bin.display());
+        crate::warn!("running {}: {err} (basal doctor checks the installation)", bin.display());
         std::process::exit(1);
     }
 }
 
 #[derive(Parser)]
-#[command(name = "basal", version = version(), about = "Runtime of basal decision models (Rust; CUDA and Metal)")]
+#[command(name = "basal", version = version(), styles = term::help_styles(), about = "Runtime of basal decision models (Rust; CUDA and Metal)")]
 struct Cli {
+    /// Colours in the output: auto (a terminal, without NO_COLOR), always, never
+    #[arg(long, global = true, value_enum, default_value_t = term::ColorMode::Auto)]
+    color: term::ColorMode,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -257,6 +263,19 @@ enum Cmd {
         #[arg(long)]
         check: bool,
     },
+    /// Remove what basal put on this machine: user service, configuration, caches, CUDA libraries, the binaries of a
+    /// package installation; with --models also the basal models in the Hugging Face cache
+    Uninstall {
+        /// Also the basal models (Remek/basal-*) in the Hugging Face cache
+        #[arg(long)]
+        models: bool,
+        /// Do not ask
+        #[arg(long, short)]
+        yes: bool,
+        /// Only list what would be removed
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Write a server configuration for `basal serve` (default: the user configuration file)
     Init {
         /// Served models: mini, 4.5B, max (repeat for several; default: 4.5B)
@@ -404,11 +423,11 @@ fn gpu_engine(m: &ModelArgs, g: &GpuArgs) -> Result<Engine<GpuBackend>> {
         readout,
         Kernels::parse(&g.kernels)?,
     )?;
-    eprintln!("basal: {} loaded on the GPU in {:.1}s", manifest.name, backend.load_s);
+    crate::done!("{} loaded on the GPU in {:.1}s", manifest.name, backend.load_s);
     let mut backend = backend;
     if let Some(p) = &g.gemm_table {
         let n = backend.load_gemm_table(p)?;
-        eprintln!("basal: {n} GEMM classes from {}", p.display());
+        crate::note!("{n} GEMM classes from {}", p.display());
     }
     backend.state_cache_bytes = g.state_cache_mb << 20;
     let mut engine = Engine::new(manifest, backend)?;
@@ -416,7 +435,7 @@ fn gpu_engine(m: &ModelArgs, g: &GpuArgs) -> Result<Engine<GpuBackend>> {
     engine.tree_max_tokens = g.tree_max_tokens;
     if !g.no_prefix_cache {
         let lens = engine.warm_static_prefixes()?;
-        eprintln!("basal: template prefixes precomputed ({lens:?} tokens)");
+        crate::note!("template prefixes precomputed ({lens:?} tokens)");
     }
     Ok(engine)
 }
@@ -438,10 +457,19 @@ fn write_json(path: &Path, v: &Value) -> Result<()> {
     Ok(())
 }
 
-fn main() -> Result<()> {
+fn main() {
+    if let Err(e) = run() {
+        term::error(&e);
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<()> {
     #[cfg(all(target_os = "linux", not(feature = "cuda")))]
     delegate_gpu_command();
-    match Cli::parse().cmd {
+    let cli = Cli::parse();
+    term::set_mode(cli.color);
+    match cli.cmd {
         Cmd::Decide { m, g, request, timing } => {
             let body = read_request(&request)?;
             let mut engine = gpu_engine(&m, &g)?;
@@ -562,6 +590,7 @@ fn main() -> Result<()> {
             setup::run(&setup::Options { force, prefetch, service })?;
         }
         Cmd::Update { version, check } => update::run(version, check)?,
+        Cmd::Uninstall { models, yes, dry_run } => uninstall::run(&uninstall::Options { models, yes, dry_run })?,
         Cmd::Init { models, out, force } => {
             let models: Vec<&config::KnownModel> = if models.is_empty() {
                 vec![config::DEFAULT_MODEL]
@@ -577,7 +606,7 @@ fn main() -> Result<()> {
             }
             std::fs::write(&out, config::template(&models)).with_context(|| format!("writing {}", out.display()))?;
             let gb: f64 = models.iter().map(|m| m.size_gb).sum();
-            eprintln!("wrote {} ({:.1} GB of models to download at the first `basal serve`)", out.display(), gb);
+            crate::done!("wrote {} ({:.1} GB of models to download at the first `basal serve`)", out.display(), gb);
         }
         Cmd::Serve {
             config,
@@ -594,8 +623,8 @@ fn main() -> Result<()> {
             // once a day: is there a newer release (BASAL_NO_UPDATE_CHECK=1 turns it off)
             std::thread::spawn(|| {
                 if let Some(v) = update::notice() {
-                    eprintln!(
-                        "basal: version {v} is available ({} installed): {}",
+                    crate::warn!(
+                        "version {v} is available ({} installed): {}",
                         env!("CARGO_PKG_VERSION"),
                         update::how()
                     );
@@ -609,11 +638,11 @@ fn main() -> Result<()> {
                 (None, None) => {
                     let (path, c) = config::user_config()?;
                     match path {
-                        Some(p) => eprintln!("basal: configuration {}", p.display()),
+                        Some(p) => crate::note!("configuration {}", p.display()),
                         None => {
                             let m = config::DEFAULT_MODEL;
-                            eprintln!(
-                                "basal: no configuration ({} is missing; `basal init` writes one): serving {} ({:.1} \
+                            crate::note!(
+                                "no configuration ({} is missing; `basal init` writes one): serving {} ({:.1} \
                                  GB, downloaded at the first start)",
                                 paths::config_file().display(),
                                 m.repo,

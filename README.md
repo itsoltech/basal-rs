@@ -149,7 +149,8 @@ basal serve       # http://127.0.0.1:8000; bez konfiguracji serwuje basal-1.5-4.
 Na Linuksie `basal setup` (uruchamiany przez skrypt) pobiera biblioteki CUDA
 z serwerów NVIDIA; z hosta potrzebny jest tylko sterownik. `basal init`
 zapisuje konfigurację z wybranymi modelami, `basal update` (albo
-`brew upgrade`) aktualizuje. Szczegóły, wymagania i ścieżki:
+`brew upgrade`) aktualizuje, a `basal uninstall --models` usuwa wszystko, co
+basal zostawił na maszynie. Szczegóły, wymagania i ścieżki:
 [docs/INSTALL.md](docs/INSTALL.md).
 
 ## Uruchomienie w Dockerze

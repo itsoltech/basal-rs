@@ -90,26 +90,37 @@ pub fn run(as_json: bool) -> Result<bool> {
                 .collect();
         println!("{}", serde_json::to_string_pretty(&json!({"ok": worst < Level::Fail, "checks": checks}))?);
     } else {
+        use crate::term::{paint, tilde, Stream::Stdout as O, Style};
+        let mark = |l: Level| match l {
+            Level::Ok => paint(O, Style::Green, "✓"),
+            Level::Info => paint(O, Style::Cyan, "·"),
+            Level::Warn => paint(O, Style::Yellow, "!"),
+            Level::Fail => paint(O, Style::Red, "✗"),
+        };
         let mut area = "";
         for c in &r.0 {
             if c.area != area {
                 area = c.area;
-                println!("{area}");
+                println!("{}", paint(O, Style::Bold, area));
             }
-            println!("  {:<4}  {}", c.level.tag(), c.what);
+            let what = tilde(&c.what);
+            let what = match c.level {
+                Level::Fail => paint(O, Style::Red, &what),
+                Level::Warn => paint(O, Style::Yellow, &what),
+                _ => what,
+            };
+            println!("  {} {what}", mark(c.level));
             if let Some(f) = &c.fix {
-                println!("        -> {f}");
+                println!("    {} {}", paint(O, Style::Dim, "→"), tilde(f));
             }
         }
         println!();
-        println!(
-            "{}",
-            match worst {
-                Level::Fail => "basal serve cannot run here yet: fix the FAIL lines above.",
-                Level::Warn => "basal serve can run; the warnings above may limit it.",
-                _ => "basal serve can run.",
-            }
-        );
+        let (style, line) = match worst {
+            Level::Fail => (Style::Red, "✗ basal serve cannot run here yet: fix the ✗ lines above."),
+            Level::Warn => (Style::Yellow, "! basal serve can run; the ! lines above may limit it."),
+            _ => (Style::Green, "✓ basal serve can run."),
+        };
+        println!("{}", paint(O, style, line));
     }
     Ok(worst < Level::Fail)
 }
@@ -127,7 +138,7 @@ fn build(r: &mut Report) {
         Some(p) if p == "/usr/local/bin/basal" && Path::new("/.dockerenv").exists() => {
             "container image (update: docker compose pull)".to_string()
         }
-        Some(p) if p.contains("/Cellar/") => "Homebrew (update: brew upgrade basal-rs)".to_string(),
+        Some(p) if p.contains("/Cellar/") => "with Homebrew (update: brew upgrade basal-rs)".to_string(),
         Some(p) => p.to_string(),
         None => "unknown location".to_string(),
     };

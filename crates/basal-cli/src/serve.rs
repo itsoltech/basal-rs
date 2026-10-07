@@ -175,7 +175,7 @@ impl Lane {
             }
             Err(e) => {
                 let msg = format!("{e:#}");
-                eprintln!("basal serve: batch of {n} failed: {msg}");
+                crate::warn!("batch of {n} failed: {msg}");
                 for (job, _) in batch {
                     let _ = job.reply.send((Err(DecideError::Internal(anyhow::anyhow!(msg.clone()))), None));
                 }
@@ -381,7 +381,7 @@ async fn shutdown_signal() {
     }
     #[cfg(not(unix))]
     let _ = tokio::signal::ctrl_c().await;
-    eprintln!("basal: shutting down");
+    crate::note!("shutting down");
 }
 
 async fn health(State(app): State<Arc<App>>) -> Json<Value> {
@@ -432,8 +432,8 @@ pub fn serve<B: Backend + Send + 'static>(models: Vec<ServedModel<B>>, opts: Ser
                 .spawn(move || scheduler(engine, rx, main_lane, long))
                 .context("starting a GPU thread")?,
         );
-        eprintln!(
-            "basal: serving {name} (batch {max_batch_tokens} tokens, {schedule:?}{})",
+        crate::note!(
+            "serving {name} (batch {max_batch_tokens} tokens, {schedule:?}{})",
             if long_tokens > 0 { format!(", long lane above {long_tokens} tokens") } else { String::new() }
         );
         routes.insert(name, tx);
@@ -456,7 +456,7 @@ pub fn serve<B: Backend + Send + 'static>(models: Vec<ServedModel<B>>, opts: Ser
     rt.block_on(async move {
         let listener =
             tokio::net::TcpListener::bind(opts.addr).await.with_context(|| format!("binding {}", opts.addr))?;
-        eprintln!("basal: serving on http://{}", opts.addr);
+        crate::done!("serving on http://{}", opts.addr);
         axum::serve(listener, router).with_graceful_shutdown(shutdown_signal()).await.context("HTTP server")
     })?;
     // The router and with it every job queue are gone: the GPU threads finish their batch, return and drop their

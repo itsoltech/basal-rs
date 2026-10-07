@@ -50,7 +50,9 @@ Bez instalacji na hoście: obraz `ghcr.io/itsoltech/basal-rs`
 | `basal init [--model mini\|4.5B\|max] [--force]` | plik konfiguracji z wybranymi modelami |
 | `basal serve` | serwer; bez `--config` i `--model` czyta konfigurację użytkownika, a bez niej serwuje basal-1.5-4.5B |
 | `basal update [--check] [--version X]` | najnowsze wydanie w miejsce tej instalacji (Homebrew: `brew upgrade`, obraz: `docker compose pull`) |
+| `basal uninstall [--models] [--dry-run] [--yes]` | usuwa usługę, konfigurację, cache, biblioteki CUDA, binarki instalacji ze skryptu, z `--models` modele basal |
 | `basal --version` | wersja, commit, backend GPU |
+| `--color auto\|always\|never` | kolory w każdym poleceniu; `auto`: tylko w terminalu i bez `NO_COLOR`, `CLICOLOR_FORCE=1` wymusza |
 
 `basal serve` i `basal doctor` raz na dobę sprawdzają, czy jest nowsze
 wydanie, i piszą o tym w logu (`BASAL_NO_UPDATE_CHECK=1` wyłącza).
@@ -70,9 +72,31 @@ konfiguracji.
 
 ## Odinstalowanie
 
-Homebrew: `brew uninstall basal-rs`. Skrypt: usunąć `~/.local/bin/basal`,
-`~/.local/libexec/basal`, `~/.local/share/doc/basal`, a z danymi także
-katalogi z tabeli wyżej (modele w cache Hugging Face).
+```sh
+basal uninstall --models --dry-run   # lista z rozmiarami, nic nie usuwa
+basal uninstall --models             # usuwa po potwierdzeniu (--yes bez pytania)
+```
+
+`basal uninstall` zatrzymuje i usuwa usługę z `basal setup --service`
+(launchd, systemd), usuwa konfigurację, cache (tabele GEMM, pobrane archiwa),
+dane (biblioteki CUDA) i binarki instalacji ze skryptu (`bin/basal`,
+`libexec/basal`, `share/doc/basal` w prefiksie). Z `--models` także modele
+basal (`models--Remek--basal-*`) z cache Hugging Face; inne repozytoria w tym
+cache zostają. Plik wskazany przez `BASAL_CONFIG` poza katalogami basal
+zostaje. Przy instalacji z Homebrew na końcu:
+
+```sh
+brew services stop basal-rs; brew uninstall basal-rs; brew untap itsoltech/tap
+```
+
+Bez binarki (ręcznie): katalogi z tabeli [Pliki](#pliki),
+`~/.local/bin/basal`, `~/.local/libexec/basal`, `~/.local/share/doc/basal`,
+`~/Library/LaunchAgents/tech.itsol.basal.plist` lub
+`~/.config/systemd/user/basal.service` i katalogi
+`~/.cache/huggingface/hub/models--Remek--basal-*`.
+
+Docker: `docker compose down -v` (kontener i wolumen `basal-data` z modelami
+i tabelami GEMM), potem `docker image rm ghcr.io/itsoltech/basal-rs:<tag>`.
 
 ## Wydanie (dla opiekunów)
 

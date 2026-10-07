@@ -267,7 +267,7 @@ fn download(repo: &str, revision: Option<&str>) -> Result<PathBuf> {
     let r = client.model(owner, name);
     let at = revision.unwrap_or("main");
     let files: Vec<String> = MODEL_FILES.iter().map(|f| f.to_string()).collect();
-    eprintln!("basal: {repo}@{at}: fetching the model files (Hugging Face cache)");
+    crate::progress!("{repo}@{at}: fetching the model files (Hugging Face cache)");
     let t = std::time::Instant::now();
     let progress = std::sync::Arc::new(DownloadLog::new(repo));
     let fetched = r
@@ -279,7 +279,7 @@ fn download(repo: &str, revision: Option<&str>) -> Result<PathBuf> {
     let dir = match fetched {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("basal: {repo}@{at}: Hub not reachable or download failed ({e}); trying the cache");
+            crate::warn!("{repo}@{at}: Hub not reachable or download failed ({e}); trying the cache");
             r.snapshot_download()
                 .maybe_revision(revision.map(str::to_string))
                 .allow_patterns(files)
@@ -291,7 +291,7 @@ fn download(repo: &str, revision: Option<&str>) -> Result<PathBuf> {
     for f in &MODEL_FILES[..7] {
         ensure!(dir.join(f).exists(), "{repo}@{at}: {f} missing in {}", dir.display());
     }
-    eprintln!("basal: {repo}@{at}: {} ({:.0} s)", dir.display(), t.elapsed().as_secs_f64());
+    crate::done!("{repo}@{at}: {} ({:.0} s)", dir.display(), t.elapsed().as_secs_f64());
     Ok(dir)
 }
 
@@ -318,10 +318,10 @@ impl hf_hub::progress::ProgressHandler for DownloadLog {
                 if s.0 == 0 {
                     s.0 = *total_bytes;
                     if *total_bytes == 0 {
-                        eprintln!("basal: {}: all files cached", self.repo);
+                        crate::done!("{}: all files cached", self.repo);
                     } else {
-                        eprintln!(
-                            "basal: {}: {total_files} file(s), {:.2} GB to download",
+                        crate::progress!(
+                            "{}: {total_files} file(s), {:.2} GB to download",
                             self.repo,
                             *total_bytes as f64 / 1e9
                         );
@@ -341,8 +341,8 @@ impl hf_hub::progress::ProgressHandler for DownloadLog {
         if s.2.elapsed().as_secs() >= 15 && s.0 > 0 {
             s.2 = std::time::Instant::now();
             let total = s.0;
-            eprintln!(
-                "basal: {}: {:.2} / {:.2} GB ({:.0}%)",
+            crate::progress!(
+                "{}: {:.2} / {:.2} GB ({:.0}%)",
                 self.repo,
                 done as f64 / 1e9,
                 total as f64 / 1e9,
@@ -390,8 +390,8 @@ pub fn gemm_table(m: &ModelConfig, manifest: &ModelManifest, cache: &Path) -> Re
         }
     };
     if let Some(why) = problem {
-        eprintln!(
-            "basal: {}: generating the batch-invariant GEMM table for {gpu} ({why}; {} classes x {} shapes, one-time) -> {}",
+        crate::progress!(
+            "{}: generating the batch-invariant GEMM table for {gpu} ({why}; {} classes x {} shapes, one-time) -> {}",
             manifest.name,
             INVARIANT_CLASSES.len(),
             shapes.len(),
@@ -403,7 +403,7 @@ pub fn gemm_table(m: &ModelConfig, manifest: &ModelManifest, cache: &Path) -> Re
         let tmp = path.with_extension("json.tmp");
         std::fs::write(&tmp, serde_json::to_string_pretty(&table)? + "\n")?;
         std::fs::rename(&tmp, &path)?;
-        eprintln!("basal: {}: GEMM table done in {:.0} s", manifest.name, t.elapsed().as_secs_f64());
+        crate::done!("{}: GEMM table done in {:.0} s", manifest.name, t.elapsed().as_secs_f64());
     }
     Ok(Some(path))
 }

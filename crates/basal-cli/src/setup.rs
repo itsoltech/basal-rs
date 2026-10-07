@@ -37,14 +37,14 @@ pub fn run(o: &Options) -> Result<()> {
     }
     let cfg = paths::config_file();
     if cfg.exists() {
-        eprintln!("basal: configuration {}", cfg.display());
+        crate::note!("configuration {}", cfg.display());
     } else {
         if let Some(d) = cfg.parent() {
             std::fs::create_dir_all(d).with_context(|| format!("creating {}", d.display()))?;
         }
         std::fs::write(&cfg, config::template(&[config::DEFAULT_MODEL]))?;
-        eprintln!(
-            "basal: wrote {} ({}; `basal init --force --model ...` changes it)",
+        crate::done!(
+            "wrote {} ({}; `basal init --force --model ...` changes it)",
             cfg.display(),
             config::DEFAULT_MODEL.repo
         );
@@ -58,7 +58,7 @@ pub fn run(o: &Options) -> Result<()> {
     if o.service {
         service()?;
     }
-    eprintln!("basal: next: `basal doctor` checks the machine, `basal serve` starts the server");
+    crate::note!("next: `basal doctor` checks the machine, `basal serve` starts the server");
     Ok(())
 }
 
@@ -71,7 +71,7 @@ fn cuda_libraries(force: bool) -> Result<()> {
         unsafe { libloading::Library::new(l) }.is_ok() || dir.join(l).exists()
     };
     if !force && libs.iter().all(|l| found(l)) {
-        eprintln!("basal: CUDA libraries present ({})", libs.join(", "));
+        crate::done!("CUDA libraries present ({})", libs.join(", "));
         return Ok(());
     }
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
@@ -96,8 +96,8 @@ fn cuda_libraries(force: bool) -> Result<()> {
         let sha = e["sha256"].as_str().context("sha256")?;
         let size: u64 = e["size"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0);
         let archive = tmp.join(Path::new(rel).file_name().context("archive name")?);
-        eprintln!(
-            "basal: {comp} {} ({:.0} MB) from NVIDIA",
+        crate::progress!(
+            "{comp} {} ({:.0} MB) from NVIDIA",
             manifest[comp]["version"].as_str().unwrap_or("?"),
             size as f64 / 1e6
         );
@@ -136,7 +136,7 @@ fn cuda_libraries(force: bool) -> Result<()> {
     for l in libs {
         ensure!(dir.join(l).exists() || found(l), "{l} missing after the installation");
     }
-    eprintln!("basal: CUDA {CUDA_RELEASE} libraries in {}", dir.display());
+    crate::done!("CUDA {CUDA_RELEASE} libraries in {}", dir.display());
     Ok(())
 }
 
@@ -149,7 +149,7 @@ async fn download(client: &reqwest::Client, url: &str, to: &Path, size: u64) -> 
         f.write_all(&chunk)?;
         done += chunk.len() as u64;
         if last.elapsed().as_secs() >= 15 && size > 0 {
-            eprintln!("basal:   {:.0} / {:.0} MB", done as f64 / 1e6, size as f64 / 1e6);
+            crate::progress!("  {:.0} / {:.0} MB", done as f64 / 1e6, size as f64 / 1e6);
             last = std::time::Instant::now();
         }
     }
@@ -194,7 +194,7 @@ fn service() -> Result<()> {
                 log = log.display()
             ),
         )?;
-        eprintln!("basal: wrote {}; start: launchctl load -w {0}; log: {}", plist.display(), log.display());
+        crate::done!("wrote {}; start: launchctl load -w {0}; log: {}", plist.display(), log.display());
     } else {
         let unit = home.join(".config/systemd/user/basal.service");
         std::fs::create_dir_all(unit.parent().unwrap())?;
@@ -206,8 +206,8 @@ fn service() -> Result<()> {
                 exe.display()
             ),
         )?;
-        eprintln!(
-            "basal: wrote {}; start: systemctl --user daemon-reload && systemctl --user enable --now basal; log: \
+        crate::done!(
+            "wrote {}; start: systemctl --user daemon-reload && systemctl --user enable --now basal; log: \
              journalctl --user -u basal -f (without a login session: loginctl enable-linger $USER)",
             unit.display()
         );
