@@ -52,6 +52,10 @@ pub enum Style {
     Yellow,
     Red,
     Cyan,
+    /// a path or URL inside a message
+    Path,
+    /// a command inside a message (written `like this` in the text)
+    Command,
 }
 
 /// `text` in `style` when colours are on for `s`.
@@ -66,8 +70,68 @@ pub fn paint(s: Stream, style: Style, text: &str) -> String {
         Style::Yellow => "33",
         Style::Red => "1;31",
         Style::Cyan => "36",
+        Style::Path => "34",
+        Style::Command => "1;36",
     };
     format!("\x1b[{code}m{text}\x1b[0m")
+}
+
+/// `text` in `base` (None: unstyled) with its paths and URLs (`~/...`, `/...`, `http://...`) and `commands` in
+/// backticks highlighted; without colours the text is unchanged (backticks included).
+pub fn rich(s: Stream, base: Option<Style>, text: &str) -> String {
+    if !enabled(s) {
+        return text.to_string();
+    }
+    let plain = |t: &str| match base {
+        Some(b) if !t.is_empty() => paint(s, b, t),
+        _ => t.to_string(),
+    };
+    let mut out = String::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        // the next command or path-like token
+        let cmd = rest.find('`').filter(|&i| rest[i + 1..].contains('`'));
+        let path = path_start(rest);
+        match (cmd, path) {
+            (Some(i), p) if p.is_none_or(|p| i <= p) => {
+                let end = i + 1 + rest[i + 1..].find('`').unwrap();
+                out += &plain(&rest[..i]);
+                out += &paint(s, Style::Command, &rest[i + 1..end]);
+                rest = &rest[end + 1..];
+            }
+            (_, Some(p)) => {
+                let len =
+                    rest[p..].find(|c: char| c.is_whitespace() || "(),;'\"`".contains(c)).unwrap_or(rest.len() - p);
+                // a trailing colon or full stop ends the sentence, not the path
+                let len = rest[p..p + len].trim_end_matches([':', '.']).len();
+                out += &plain(&rest[..p]);
+                out += &paint(s, Style::Path, &rest[p..p + len]);
+                rest = &rest[p + len..];
+            }
+            _ => {
+                out += &plain(rest);
+                rest = "";
+            }
+        }
+    }
+    out
+}
+
+/// Byte offset of the first path or URL in `t`: `~/x`, `/x` or `http(s)://x` at the start of a word.
+fn path_start(t: &str) -> Option<usize> {
+    let b = t.as_bytes();
+    (0..b.len()).find(|&i| {
+        let word_start = i == 0 || matches!(b[i - 1], b' ' | b'(' | b'\t' | b'=' | b'"' | b'\'');
+        if !word_start {
+            return false;
+        }
+        let r = &t[i..];
+        let next_ok = |k: usize| r.as_bytes().get(k).is_some_and(|c| !c.is_ascii_whitespace());
+        (r.starts_with("~/") && next_ok(2))
+            || (r.starts_with('/') && next_ok(1))
+            || r.starts_with("http://")
+            || r.starts_with("https://")
+    })
 }
 
 /// A path for display, with the home directory as `~`.
@@ -104,20 +168,22 @@ pub enum Kind {
 pub fn say(kind: Kind, msg: &str) {
     let msg = tilde(msg);
     let prefix = paint(Stream::Stderr, Style::Dim, "basal:");
-    let body = match kind {
-        Kind::Note => msg,
-        Kind::Done => paint(Stream::Stderr, Style::Green, &msg),
-        Kind::Warn => paint(Stream::Stderr, Style::Yellow, &msg),
-        Kind::Progress => paint(Stream::Stderr, Style::Dim, &msg),
+    let base = match kind {
+        Kind::Note => None,
+        Kind::Done => Some(Style::Green),
+        Kind::Warn => Some(Style::Yellow),
+        Kind::Progress => Some(Style::Dim),
     };
+    let body = rich(Stream::Stderr, base, &msg);
     eprintln!("{prefix} {body}");
 }
 
 /// The error that ends a command, with its causes.
 pub fn error(e: &anyhow::Error) {
-    eprintln!("{} {}", paint(Stream::Stderr, Style::Red, "error:"), tilde(&e.to_string()));
+    let err = Stream::Stderr;
+    eprintln!("{} {}", paint(err, Style::Red, "error:"), rich(err, None, &tilde(&e.to_string())));
     for c in e.chain().skip(1) {
-        eprintln!("  {} {}", paint(Stream::Stderr, Style::Dim, "caused by:"), tilde(&c.to_string()));
+        eprintln!("  {} {}", paint(err, Style::Dim, "caused by:"), rich(err, None, &tilde(&c.to_string())));
     }
 }
 

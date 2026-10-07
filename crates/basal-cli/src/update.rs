@@ -144,14 +144,14 @@ pub fn run(version: Option<String>, check: bool) -> Result<()> {
     }
     match install()? {
         Install::Homebrew => {
-            crate::note!("installed with Homebrew: brew update && brew upgrade basal-rs");
+            crate::note!("installed with Homebrew: `brew update && brew upgrade basal-rs`");
             return Ok(());
         }
         Install::Container => {
-            crate::note!("container image: docker compose pull && docker compose up -d");
+            crate::note!("container image: `docker compose pull && docker compose up -d`");
             return Ok(());
         }
-        Install::Source => bail!("built from the repository: git pull && cargo build --release"),
+        Install::Source => bail!("built from the repository: `git pull && cargo build --release`"),
         Install::Package(prefix) => {
             if want == current {
                 crate::done!("up to date");
@@ -238,9 +238,9 @@ pub fn notice() -> Option<String> {
 /// How to update this installation.
 pub fn how() -> &'static str {
     match install() {
-        Ok(Install::Homebrew) => "brew upgrade basal-rs",
-        Ok(Install::Container) => "docker compose pull",
-        Ok(Install::Source) => "git pull && cargo build --release",
-        _ => "basal update",
+        Ok(Install::Homebrew) => "`brew upgrade basal-rs`",
+        Ok(Install::Container) => "`docker compose pull`",
+        Ok(Install::Source) => "`git pull && cargo build --release`",
+        _ => "`basal update`",
     }
 }

@@ -90,7 +90,7 @@ pub fn run(as_json: bool) -> Result<bool> {
                 .collect();
         println!("{}", serde_json::to_string_pretty(&json!({"ok": worst < Level::Fail, "checks": checks}))?);
     } else {
-        use crate::term::{paint, tilde, Stream::Stdout as O, Style};
+        use crate::term::{paint, rich, tilde, Stream::Stdout as O, Style};
         let mark = |l: Level| match l {
             Level::Ok => paint(O, Style::Green, "✓"),
             Level::Info => paint(O, Style::Cyan, "·"),
@@ -103,24 +103,23 @@ pub fn run(as_json: bool) -> Result<bool> {
                 area = c.area;
                 println!("{}", paint(O, Style::Bold, area));
             }
-            let what = tilde(&c.what);
-            let what = match c.level {
-                Level::Fail => paint(O, Style::Red, &what),
-                Level::Warn => paint(O, Style::Yellow, &what),
-                _ => what,
+            let base = match c.level {
+                Level::Fail => Some(Style::Red),
+                Level::Warn => Some(Style::Yellow),
+                _ => None,
             };
-            println!("  {} {what}", mark(c.level));
+            println!("  {} {}", mark(c.level), rich(O, base, &tilde(&c.what)));
             if let Some(f) = &c.fix {
-                println!("    {} {}", paint(O, Style::Dim, "→"), tilde(f));
+                println!("    {} {}", paint(O, Style::Dim, "→"), rich(O, None, &tilde(f)));
             }
         }
         println!();
         let (style, line) = match worst {
-            Level::Fail => (Style::Red, "✗ basal serve cannot run here yet: fix the ✗ lines above."),
-            Level::Warn => (Style::Yellow, "! basal serve can run; the ! lines above may limit it."),
-            _ => (Style::Green, "✓ basal serve can run."),
+            Level::Fail => (Style::Red, "✗ `basal serve` cannot run here yet: fix the ✗ lines above."),
+            Level::Warn => (Style::Yellow, "! `basal serve` can run; the ! lines above may limit it."),
+            _ => (Style::Green, "✓ `basal serve` can run."),
         };
-        println!("{}", paint(O, style, line));
+        println!("{}", rich(O, Some(style), line));
     }
     Ok(worst < Level::Fail)
 }
@@ -136,9 +135,9 @@ fn build(r: &mut Report) {
     let exe = std::env::current_exe().ok().map(|e| e.canonicalize().unwrap_or(e));
     let how = match exe.as_deref().map(Path::to_string_lossy) {
         Some(p) if p == "/usr/local/bin/basal" && Path::new("/.dockerenv").exists() => {
-            "container image (update: docker compose pull)".to_string()
+            "container image (update: `docker compose pull`)".to_string()
         }
-        Some(p) if p.contains("/Cellar/") => "with Homebrew (update: brew upgrade basal-rs)".to_string(),
+        Some(p) if p.contains("/Cellar/") => "with Homebrew (update: `brew upgrade basal-rs`)".to_string(),
         Some(p) => p.to_string(),
         None => "unknown location".to_string(),
     };
@@ -291,7 +290,7 @@ fn cuda_libs(r: &mut Report) {
         r.fail(
             "cuda",
             format!("not found: {}", missing.join(", ")),
-            "basal setup (downloads the CUDA 12.9 libraries from NVIDIA, ~1 GB, into the user data directory)",
+            "`basal setup` (downloads the CUDA 12.9 libraries from NVIDIA, ~1 GB, into the user data directory)",
         );
         return;
     }
@@ -303,7 +302,7 @@ fn cuda_libs(r: &mut Report) {
             Ok(o) => r.fail(
                 "cuda",
                 format!("CUDA build does not start: {}", String::from_utf8_lossy(&o.stderr).trim()),
-                "basal setup --force; check that the package matches this system (glibc 2.28 or newer)",
+                "`basal setup --force`; check that the package matches this system (glibc 2.28 or newer)",
             ),
             Err(e) => r.fail("cuda", format!("{}: {e}", b.display()), "reinstall basal"),
         }
@@ -321,7 +320,7 @@ fn configuration(r: &mut Report) -> Option<ServeConfig> {
             r.info(
                 "config",
                 format!(
-                    "no configuration file ({}): basal serve serves {} (`basal init` writes one)",
+                    "no configuration file ({}): `basal serve` serves {} (`basal init` writes one)",
                     crate::paths::config_file().display(),
                     config::DEFAULT_MODEL.repo
                 ),
@@ -329,7 +328,7 @@ fn configuration(r: &mut Report) -> Option<ServeConfig> {
             Some(c)
         }
         Err(e) => {
-            r.fail("config", format!("{e:#}"), "fix the file or write a new one: basal init --force");
+            r.fail("config", format!("{e:#}"), "fix the file or write a new one: `basal init --force`");
             None
         }
     }
@@ -388,7 +387,7 @@ fn models(r: &mut Report, c: &ServeConfig, gpu_budget: Option<u64>) {
             r.warn(
                 "models",
                 format!("models need ~{:.1} GiB of GPU memory, {:.1} GiB available", need / GIB, b as f64 / GIB),
-                "serve fewer or smaller models (basal init --model mini)",
+                "serve fewer or smaller models (`basal init --model mini`)",
             );
         } else if resident > 0 {
             r.ok("models", format!("GPU memory: ~{:.1} of {:.1} GiB", need / GIB, b as f64 / GIB));
@@ -405,7 +404,7 @@ fn models(r: &mut Report, c: &ServeConfig, gpu_budget: Option<u64>) {
                     free as f64 / GB,
                     download as f64 / GB
                 ),
-                "free disk space or set HF_HOME to a larger disk",
+                "free disk space or set `HF_HOME` to a larger disk",
             ),
             Some(free) => r.ok("disk", format!("{}: {:.1} GB free", dir.display(), free as f64 / GB)),
             None => {}
@@ -473,7 +472,7 @@ fn hub(r: &mut Report, repos: &[(String, String)]) {
             Ok(resp) if resp.status().as_u16() == 401 || resp.status().as_u16() == 403 => r.fail(
                 "network",
                 format!("{repo}: access refused ({})", resp.status()),
-                "set HF_TOKEN to a token with access to the repository",
+                "set `HF_TOKEN` to a token with access to the repository",
             ),
             Ok(resp) => {
                 r.fail("network", format!("{repo}@{at}: {}", resp.status()), "check the repository and revision")
@@ -481,7 +480,7 @@ fn hub(r: &mut Report, repos: &[(String, String)]) {
             Err(e) => r.fail(
                 "network",
                 format!("huggingface.co not reachable ({e})"),
-                "check the network or proxy (HTTPS_PROXY); models can also be given as local paths",
+                "check the network or proxy (`HTTPS_PROXY`); models can also be given as local paths",
             ),
         }
     }
@@ -495,7 +494,7 @@ fn port(r: &mut Report, c: &ServeConfig) {
         Err(e) => r.warn(
             "server",
             format!("{addr}: {e}"),
-            "another process listens there (basal serve already running?); set addr in the configuration or BASAL_ADDR",
+            "another process listens there (`basal serve` already running?); set `addr` in the configuration or `BASAL_ADDR`",
         ),
     }
 }

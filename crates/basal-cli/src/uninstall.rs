@@ -94,7 +94,7 @@ pub fn run(o: &Options) -> Result<()> {
         for t in &targets {
             let b = size(t);
             total += b;
-            eprintln!("  {} {:>8}  {}", paint(E, Style::Red, "-"), human(b), path(t));
+            eprintln!("  {} {:>8}  {}", paint(E, Style::Red, "-"), human(b), paint(E, Style::Path, &path(t)));
         }
         eprintln!("  {:>10}  total", human(total));
     }
@@ -106,7 +106,7 @@ pub fn run(o: &Options) -> Result<()> {
         if !n.is_empty() {
             let b: u64 = n.iter().map(|d| size(d)).sum();
             crate::note!(
-                "kept {} basal model(s) in the Hugging Face cache ({}); --models removes them",
+                "kept {} basal model(s) in the Hugging Face cache ({}); `--models` removes them",
                 n.len(),
                 human(b)
             );
@@ -114,7 +114,7 @@ pub fn run(o: &Options) -> Result<()> {
     }
     if homebrew {
         crate::note!(
-            "installed with Homebrew: brew services stop basal-rs; brew uninstall basal-rs; brew untap itsoltech/tap"
+            "installed with Homebrew: `brew services stop basal-rs; brew uninstall basal-rs; brew untap itsoltech/tap`"
         );
     }
     if source {
@@ -128,7 +128,7 @@ pub fn run(o: &Options) -> Result<()> {
     }
     if !o.yes {
         if !std::io::stdin().is_terminal() {
-            bail!("not a terminal: confirm with --yes");
+            bail!("not a terminal: confirm with `--yes`");
         }
         eprint!("Remove these? [y/N] ");
         std::io::stderr().flush()?;

@@ -194,7 +194,7 @@ fn service() -> Result<()> {
                 log = log.display()
             ),
         )?;
-        crate::done!("wrote {}; start: launchctl load -w {0}; log: {}", plist.display(), log.display());
+        crate::done!("wrote {}; start: `launchctl load -w {0}`; log: {}", plist.display(), log.display());
     } else {
         let unit = home.join(".config/systemd/user/basal.service");
         std::fs::create_dir_all(unit.parent().unwrap())?;
@@ -207,8 +207,8 @@ fn service() -> Result<()> {
             ),
         )?;
         crate::done!(
-            "wrote {}; start: systemctl --user daemon-reload && systemctl --user enable --now basal; log: \
-             journalctl --user -u basal -f (without a login session: loginctl enable-linger $USER)",
+            "wrote {}; start: `systemctl --user daemon-reload && systemctl --user enable --now basal`; log: \
+             `journalctl --user -u basal -f` (without a login session: `loginctl enable-linger $USER`)",
             unit.display()
         );
     }

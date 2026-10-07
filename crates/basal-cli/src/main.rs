@@ -77,7 +77,7 @@ fn delegate_gpu_command() {
     }
     if let Some(bin) = paths::cuda_binary() {
         let err = cuda_command(&bin).args(&args[1..]).exec();
-        crate::warn!("running {}: {err} (basal doctor checks the installation)", bin.display());
+        crate::warn!("running {}: {err} (`basal doctor` checks the installation)", bin.display());
         std::process::exit(1);
     }
 }
@@ -599,7 +599,7 @@ fn run() -> Result<()> {
             };
             let out = out.unwrap_or_else(paths::config_file);
             if out.exists() && !force {
-                bail!("{} exists (--force replaces it)", out.display());
+                bail!("{} exists (`--force` replaces it)", out.display());
             }
             if let Some(dir) = out.parent().filter(|d| !d.as_os_str().is_empty()) {
                 std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
