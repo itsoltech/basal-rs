@@ -1,14 +1,61 @@
-# basal-rs
+<p align="center">
+  <img src="docs/assets/basal-rs-banner.svg" alt="basal-rs: silnik inferencji w Rust zespołu IT SOL. Modele Basal: Remek Kinas. Backend CUDA i Metal." width="100%">
+</p>
 
-Runtime w Rust dla modeli decyzyjnych [basal](https://github.com/rkinas/basal)
-(Remek Kinas). Serwuje API TypeSafe System One oraz endpoint zgodny z
-serwerem upstream. Backend CUDA (NVIDIA, sprawdzony na RTX 6000 Ada) i Metal
-(Apple Silicon, sprawdzony na M1 Pro i M2 Max).
+<h1 align="center">basal-rs</h1>
 
-Runtime liczy te same decyzje co upstream w FP32: ten sam prompt, te same
+<p align="center">
+  <strong>Silnik inferencji w Rust dla modeli Basal autorstwa Remka Kinasa.</strong>
+</p>
+
+<p align="center">
+  <a href="https://github.com/itsoltech/basal-rs/actions/workflows/lint.yml"><img src="https://github.com/itsoltech/basal-rs/actions/workflows/lint.yml/badge.svg" alt="Formatowanie i Clippy"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-818cf8?style=flat-square" alt="Licencja Apache-2.0"></a>
+  <a href="#budowanie"><img src="https://img.shields.io/badge/backend-CUDA-76b900?style=flat-square" alt="Backend CUDA"></a>
+  <a href="#budowanie"><img src="https://img.shields.io/badge/backend-Metal-a7b4c8?style=flat-square" alt="Backend Metal"></a>
+</p>
+
+<p align="center">
+  <a href="#uruchomienie-w-dockerze">Szybki start</a> ·
+  <a href="#wyniki">Wyniki</a> ·
+  <a href="#serwer">API</a> ·
+  <a href="#dokumentacja">Dokumentacja</a> ·
+  <a href="https://github.com/rkinas/basal">Basal upstream</a>
+</p>
+
+[Basal](https://github.com/rkinas/basal) — modele, ich trening, wagi i protokół
+decyzyjny — jest dziełem **Remka Kinasa**, rozwijanym na bazie modeli Bielik.
+Zdolności decyzyjne i jakość odpowiedzi pochodzą z tych modeli.
+
+**Nasz wkład to silnik inferencji i serwer w Rust**, rozwijane przez
+[IT SOL](https://github.com/itsoltech): wykonanie obliczeń na GPU, optymalizacja
+pakowania żądań, kernele i harmonogram serwera. Backend CUDA (NVIDIA,
+sprawdzony na RTX 6000 Ada) i Metal (Apple Silicon, sprawdzony na M1 Pro i M2 Max).
+Serwer implementuje istniejący kontrakt API **TypeSafe System One** oraz
+endpoint zgodny z serwerem upstream. Atrybucję portowanych elementów Basala
+i modeli bazowych zawiera [NOTICE](NOTICE).
+
+Rozwijamy ten silnik, by ułatwiać korzystanie z polskich modeli na NVIDIA
+i Apple Silicon oraz wspierać rozwój polskiego AI.
+
+Runtime odtwarza protokół decyzyjny upstream: ten sam prompt, te same
 token IDs, oba porządki opcji, uśrednienie i kalibracja z `CALIBRATION.json`.
 Różni się sposobem wykonania: pakowaniem promptów w drzewo wspólnych
-prefiksów, własnymi kernelami i harmonogramem serwera.
+prefiksów, własnymi kernelami i harmonogramem serwera. Zgodność decyzji
+z referencją FP32 oraz różnice numeryczne opisują [pomiary poniżej](#wyniki).
+
+> „Nie będę implementował swojej wersji – Wasza/Twoja jest bardzo dobra i wskażę
+> na nią w swoim repo jeśli pozwolicie. Bardzo dobrze zrobione.”
+>
+> — **Remek Kinas**, autor Basala, po przeglądzie silnika basal-rs.
+> [Wpis na X](https://x.com/KinasRemek/status/2107539877839384742)
+
+## Co wnosi silnik basal-rs
+
+- **Wspólny stan liczony raz** — drzewo prefiksów współdzieli obliczenia między pytaniami i żądaniami w partii.
+- **Dwa backendy GPU** — własne kernele CUDA i Metal, bez środowiska Pythona w runtime.
+- **Serwowanie istniejących API** — kontrakt TypeSafe System One i konwencje serwera Basal; kilka modeli w jednym procesie.
+- **Jawne pomiary** — porównania z upstream FP32, opóźnienia i przepustowość wraz z danymi w [reports/](reports/README.md).
 
 ## Modele
 
@@ -19,10 +66,16 @@ prefiksów, własnymi kernelami i harmonogramem serwera.
 | `Remek/basal-1.5-mini` (1.5B), rewizja `1978d070` | CUDA ([zgodność](reports/compat-1.5-small/README.md), [wydajność](reports/perf-1.5-small/README.md)), Metal ([M2 Max](reports/metal-m2-max-1.5/README.md), [M1 Pro](reports/metal-m1-pro-1.5/README.md)) |
 | `Remek/basal-1.0-4.5B`, rewizja `b9528804` | CUDA, Metal ([M1 Pro](reports/metal-m1-pro/README.md)) |
 
-Typy pytań: `choice` (2–10 opcji oraz 11–255 strategią grupową), `noul`,
+Typy pytań: `choice` (2–10 opcji oraz 11–255 przybliżoną strategią grupową), `noul`,
 `score`, a z basal-1.5 także `multi`, `act`, `facts: "auto"` i `evidence`.
+Strategia dla ponad 10 opcji jest rozszerzeniem runtime'u;
+[jej ewaluacja](reports/large-choice/README.md) jest osobna od zgodności z upstream.
 
 ## Wyniki
+
+Porównujemy wykonanie tych samych modeli Basal przez dwa silniki inferencji.
+Poniższe wyniki opisują wydajność runtime'u i zgodność z upstream;
+zdolności modeli do podejmowania decyzji są zasługą ich autora.
 
 basal-1.5-max na RTX 6000 Ada z limitem mocy 250 W; upstream v1.5.0
 `basal-serve --mode fast` (BF16, torch.compile, CUDA graphs) na tej samej
@@ -53,13 +106,14 @@ Mniejsze modele przy 300 W, ten sam klient, upstream v1.5.0 `fast`
 
 ¹ Dla mini bez dokumentów ~8k i ~16k tokenów (limit 8192 pozycji modelu).
 
-Zgodność z upstream FP32 na 44 przykładach basal-bench: te same decyzje
+Zgodność basal-1.5-max na CUDA z upstream FP32 na 44 przykładach basal-bench: te same decyzje
 44/44; maksymalna różnica logitu 1,3·10⁻⁴ dla ścieżki FP32 i 0,27 dla
 domyślnej FP16 (mediana 0,013, maks. różnica prawdopodobieństwa po
 kalibracji 0,0008). `multi`, `act`, `facts` i `evidence` dają te same pola
 odpowiedzi co upstream; `facts` jest zgodne co do bajtu na 432 stanach.
-Wynik pytania nie zależy od tego, z czym trafi do partii (bitowo te same
-logity pojedynczo, w partii i pod obciążeniem HTTP).
+W opisanych pomiarach CUDA z tabelą GEMM niezależną od partii wynik pytania
+nie zależy od tego, z czym trafi do partii (bitowo te same logity
+pojedynczo, w partii i pod obciążeniem HTTP).
 
 Apple Silicon (Metal), pojedyncza decyzja (mediana, metodyka basal-bench)
 wobec upstream v1.5.0 z MLX: ścieżka serwowana (bf16) i ten sam backend w
@@ -82,6 +136,8 @@ pakowania partii przy tym samym czasie pełnej decyzji
 ([pomiar](reports/metal-m2-max-tree/README.md)).
 
 ## Uruchomienie w Dockerze
+
+Najszybszy start na NVIDIA. Na Apple Silicon przejdź do [budowania z Metal](#budowanie).
 
 Wymagane: sterownik NVIDIA i NVIDIA Container Toolkit. Modele wpisane w
 [serve.yml](serve.yml) (repozytorium Hugging Face i rewizja):
