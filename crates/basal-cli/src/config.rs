@@ -48,6 +48,10 @@ pub struct ServeConfig {
     /// Least time a long-request lane works between two hand-overs of the GPU to short batches (any model).
     #[serde(default = "default_long_slice_ms")]
     pub long_slice_ms: u64,
+    /// One log line per HTTP request (method, status, path, time); also `basal serve --access-log` or
+    /// `BASAL_ACCESS_LOG=1`.
+    #[serde(default)]
+    pub access_log: bool,
     /// Directory of the GEMM tables of `gemm_table: auto`.
     #[serde(default = "default_gemm_cache")]
     pub gemm_cache: PathBuf,
@@ -293,7 +297,18 @@ fn download(repo: &str, revision: Option<&str>) -> Result<PathBuf> {
     for f in &MODEL_FILES[..7] {
         ensure!(dir.join(f).exists(), "{repo}@{at}: {f} missing in {}", crate::term::P(&dir));
     }
-    crate::done!("{repo}@{at}: {} ({:.0} s)", crate::term::P(&dir), t.elapsed().as_secs_f64());
+    let s = t.elapsed().as_secs_f64();
+    let bytes = progress.state.lock().unwrap().0;
+    if bytes > 0 {
+        crate::done!(
+            "{repo}@{at}: downloaded {:.2} GB in {s:.0} s ({:.0} MB/s) into {}",
+            bytes as f64 / 1e9,
+            bytes as f64 / 1e6 / s.max(1e-3),
+            crate::term::P(&dir)
+        );
+    } else {
+        crate::done!("{repo}@{at}: from the Hugging Face cache in {s:.1} s ({})", crate::term::P(&dir));
+    }
     Ok(dir)
 }
 

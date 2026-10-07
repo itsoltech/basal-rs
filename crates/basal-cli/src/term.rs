@@ -205,6 +205,34 @@ pub fn say(kind: Kind, msg: &str) {
     eprintln!("{prefix} {body}");
 }
 
+/// One access-log line of `basal serve --access-log`: `[POST] 200 /v1/systemone 31 ms (queue 2 ms, ...)`.
+pub fn access(method: &str, status: u16, path: &str, ms: f64, detail: &str) {
+    let e = Stream::Stderr;
+    let st = match status {
+        200..=299 => Style::Green,
+        400..=499 => Style::Yellow,
+        _ => Style::Red,
+    };
+    let detail = if detail.is_empty() { String::new() } else { paint(e, Style::Dim, &format!(" ({detail})")) };
+    eprintln!(
+        "{} {} {} {} {} ms{detail}",
+        paint(e, Style::Dim, "basal:"),
+        paint(e, Style::Bold, &format!("[{method}]")),
+        paint(e, st, &status.to_string()),
+        paint(e, Style::Path, path),
+        self::ms(ms)
+    );
+}
+
+/// Milliseconds for a log line: one decimal below 10 ms, whole above.
+pub fn ms(x: f64) -> String {
+    if x < 10.0 {
+        format!("{x:.1}")
+    } else {
+        format!("{x:.0}")
+    }
+}
+
 /// The error that ends a command, with its causes.
 pub fn error(e: &anyhow::Error) {
     let err = Stream::Stderr;

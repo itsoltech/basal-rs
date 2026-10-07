@@ -318,6 +318,10 @@ enum Cmd {
         /// Least time the long lane works between two hand-overs to the main lane
         #[arg(long, default_value_t = 100)]
         long_slice_ms: u64,
+        /// One log line per HTTP request: method, status, path, time, queue and compute time (also `access_log: true`
+        /// in the configuration or BASAL_ACCESS_LOG=1)
+        #[arg(long)]
+        access_log: bool,
         /// `release_date` reported by GET /v1/models (default: the release date upstream basal v1.5.0 reports)
         #[arg(long, default_value = "2026-10-05")]
         release_date: String,
@@ -464,7 +468,14 @@ fn main() {
     }
 }
 
+/// When this process started (serve logs the time to the first request it can take).
+pub fn started() -> std::time::Instant {
+    static T: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    *T.get_or_init(std::time::Instant::now)
+}
+
 fn run() -> Result<()> {
+    started();
     #[cfg(all(target_os = "linux", not(feature = "cuda")))]
     delegate_gpu_command();
     let cli = Cli::parse();
@@ -623,8 +634,10 @@ fn run() -> Result<()> {
             schedule,
             long_tokens,
             long_slice_ms,
+            access_log,
             release_date,
         } => {
+            let access_log = access_log || std::env::var("BASAL_ACCESS_LOG").is_ok_and(|v| !v.is_empty() && v != "0");
             // once a day: is there a newer release (BASAL_NO_UPDATE_CHECK=1 turns it off)
             std::thread::spawn(|| {
                 if let Some(v) = update::notice() {
@@ -700,6 +713,7 @@ fn run() -> Result<()> {
                     max_inflight: c.max_inflight,
                     default_model: c.default_model,
                     long_slice_ms: c.long_slice_ms,
+                    access_log: access_log || c.access_log,
                 };
                 serve::serve(models, opts)?;
             } else {
@@ -708,7 +722,14 @@ fn run() -> Result<()> {
                     config::check_gemm_coverage(&engine.manifest.name, &engine.backend.gemm_table_missing(), t)?;
                 }
                 let model = serve::ServedModel { engine, max_batch_tokens, schedule, long_tokens };
-                let opts = serve::ServeOptions { addr, release_date, max_inflight, default_model: None, long_slice_ms };
+                let opts = serve::ServeOptions {
+                    addr,
+                    release_date,
+                    max_inflight,
+                    default_model: None,
+                    long_slice_ms,
+                    access_log,
+                };
                 serve::serve(vec![model], opts)?;
             }
         }

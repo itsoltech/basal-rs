@@ -30,8 +30,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use axum::extract::State;
+use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -53,6 +54,8 @@ pub struct ServeOptions {
     pub default_model: Option<String>,
     /// Least work of a long lane between two hand-overs of the GPU.
     pub long_slice_ms: u64,
+    /// One log line per HTTP request.
+    pub access_log: bool,
 }
 
 /// One served model: its engine and admission options.
@@ -452,11 +455,17 @@ pub fn serve<B: Backend + Send + 'static>(models: Vec<ServedModel<B>>, opts: Ser
         .route("/v1/models", get(models_list))
         .route("/health", get(health))
         .with_state(app);
+    let router = if opts.access_log { router.layer(axum::middleware::from_fn(access_log)) } else { router };
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     rt.block_on(async move {
         let listener =
             tokio::net::TcpListener::bind(opts.addr).await.with_context(|| format!("binding {}", opts.addr))?;
-        crate::done!("serving on http://{}", opts.addr);
+        crate::done!(
+            "serving on http://{} (ready {:.1} s after the start{})",
+            opts.addr,
+            crate::started().elapsed().as_secs_f64(),
+            if opts.access_log { "; access log on" } else { "" }
+        );
         axum::serve(listener, router).with_graceful_shutdown(shutdown_signal()).await.context("HTTP server")
     })?;
     // The router and with it every job queue are gone: the GPU threads finish their batch, return and drop their
@@ -466,4 +475,28 @@ pub fn serve<B: Backend + Send + 'static>(models: Vec<ServedModel<B>>, opts: Ser
         let _ = t.join();
     }
     Ok(())
+}
+
+/// `[POST] 200 /v1/systemone 31 ms (queue 2 ms, compute 28 ms, batch 3)` per request (`--access-log`).
+async fn access_log(req: Request, next: Next) -> Response {
+    let (method, path) = (req.method().clone(), req.uri().path().to_string());
+    let t = Instant::now();
+    let resp = next.run(req).await;
+    let ms = t.elapsed().as_secs_f64() * 1e3;
+    let h = |k: &str| resp.headers().get(k).and_then(|v| v.to_str().ok()).map(str::to_string);
+    let detail: Vec<String> = [
+        ("queue", "x-basal-queue-ms", " ms"),
+        ("compute", "x-basal-compute-ms", " ms"),
+        ("batch", "x-basal-batch-requests", ""),
+    ]
+    .iter()
+    .filter_map(|(name, key, unit)| {
+        h(key).map(|v| match v.parse::<f64>() {
+            Ok(x) if !unit.is_empty() => format!("{name} {}{unit}", crate::term::ms(x)),
+            _ => format!("{name} {v}{unit}"),
+        })
+    })
+    .collect();
+    crate::term::access(method.as_str(), resp.status().as_u16(), &path, ms, &detail.join(", "));
+    resp
 }

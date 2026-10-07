@@ -48,7 +48,7 @@ Bez instalacji na hoście: obraz `ghcr.io/itsoltech/basal-rs`
 | `basal doctor [--json]` | system, GPU, sterownik i biblioteki CUDA, konfiguracja, modele w cache lub do pobrania, pamięć GPU i dysk, dostęp do Hugging Face, port; przy każdym problemie sposób naprawy |
 | `basal setup [--prefetch] [--service] [--force]` | biblioteki CUDA (Linux), plik konfiguracji, opcjonalnie pobranie modeli i usługa użytkownika (systemd, launchd) |
 | `basal init [--model mini\|4.5B\|max] [--force]` | plik konfiguracji z wybranymi modelami |
-| `basal serve` | serwer; bez `--config` i `--model` czyta konfigurację użytkownika, a bez niej serwuje basal-1.5-4.5B |
+| `basal serve [--access-log]` | serwer; bez `--config` i `--model` czyta konfigurację użytkownika, a bez niej serwuje basal-1.5-4.5B; log podaje czas pobrania lub odczytu modelu z cache, ładowania na GPU i gotowości; `--access-log` (albo `access_log: true`, `BASAL_ACCESS_LOG=1`) dopisuje linię na żądanie: `[POST] 200 /v1/systemone 31 ms (queue 0.5 ms, compute 30 ms, batch 1)` |
 | `basal update [--check] [--version X]` | najnowsze wydanie w miejsce tej instalacji (Homebrew: `brew upgrade`, obraz: `docker compose pull`) |
 | `basal uninstall [--models] [--dry-run] [--yes]` | usuwa usługę, konfigurację, cache, biblioteki CUDA, binarki instalacji ze skryptu, z `--models` modele basal |
 | `basal --version` | wersja, commit, backend GPU |
