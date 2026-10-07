@@ -73,7 +73,9 @@ rozszerza je przed użyciem (dokładny forward FP32, punkt odniesienia).
   jego przodków oraz własnego bloku, kafelkowane według pozycji klucza w
   prompcie. CUDA: `attn_tree_tc` na tensor cores (mma.sync, operandy f16
   rozbite na część wysoką i niską, czyli dokładność bliska f32) dla f16/bf16,
-  `attn_tree_f32` dla ścieżki f32. Metal: SDPA w f32 z maską.
+  `attn_tree_f32` dla ścieżki f32. Metal: `attn_tree_f32` z `kernels.metal`
+  na macierzach `simdgroup_float8x8` w f32 (`BASAL_ATT=sdpa`: poprzednie SDPA
+  z MLX po całym wierszu z maską, wynik zależny od pakowania).
 - W ostatniej warstwie o_proj i MLP liczą się tylko dla pozycji odczytu, a
   logity tylko dla wierszy `lm_head` odpowiadających literom, w f32.
 - CUDA GEMM przez cuBLASLt z tabelą algorytmów z pełnego przeszukania
@@ -87,7 +89,11 @@ Z tabelą `--invariant` (dla każdego kształtu wag algorytmy bez split-K z
 jednej grupy dającej bitowo te same wyniki, najszybszy w każdej klasie M), attention kafelkowanym według pozycji klucza i odczytem liter
 własnym kernelem wynik pytania jest bitowo ten sam pojedynczo, w dowolnej
 partii, w drzewie z innymi pytaniami i z cache prefiksu. Odpowiedź serwera nie
-zależy więc od ruchu w tej samej chwili.
+zależy więc od ruchu w tej samej chwili. Na Metal (GEMM MLX niezależny od
+liczby wierszy, attention po jednostkach drzewa) wynik jest bitowo ten sam
+pojedynczo, w partii i w drzewie
+([pomiar](../reports/metal-m2-max-tree/README.md)); z cache stanu tego nie
+mierzono.
 
 ## Rozszerzenia basal-1.5
 
@@ -151,7 +157,6 @@ sterownika.
 
 - Score powyżej 10 poziomów i pytania z jedną opcją kończą się jawnym błędem.
 - Tabela GEMM jest specyficzna dla karty i wersji cuBLASLt.
-- Metal sprawdzony na M1 Pro (32 GB) z basal-1.0-4.5B i trzema modelami
-  basal-1.5 ([pomiar](../reports/metal-m1-pro-1.5/README.md)); wynik na Metal
-  zależy od pakowania partii (różnice logitu do 0,17, te same decyzje), bez
-  tabeli GEMM niezależnej od partii jak na CUDA.
+- Metal sprawdzony na M1 Pro i M2 Max (32 GB) z basal-1.0-4.5B i trzema
+  modelami basal-1.5 ([M1 Pro](../reports/metal-m1-pro-1.5/README.md),
+  [M2 Max](../reports/metal-m2-max-tree/README.md)).

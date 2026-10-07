@@ -1,0 +1,3 @@
+basal: basal-1.5-4.5B loaded on the GPU in 1.5s
+basal: template prefixes precomputed ([53, 66] tokens)
+lat2 median 234.8 ms, p95 304.1 ms, lat1 167.3 ms, 5.261 dec/s, acc 0.7954545454545454, GEMM probe {"before":7.079351074463519,"after":8.628607362719714}

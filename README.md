@@ -73,9 +73,11 @@ f16, w tej samej precyzji co basal-rs (M1 nie ma sprzętowego bf16)
 | basal-1.5-mini | 318–323 ms | 274–276 ms | 170–174 ms |
 
 basal-rs f16 daje na M1 Pro decyzje FP32 na 44/44 przykładach dla trzech
-modeli; upstream MLX bf16 na basal-1.5-max zmienia jedną. Na Metal wynik
-zależy od pakowania partii (te same decyzje, różnice prawdopodobieństw do
-0,008).
+modeli; upstream MLX bf16 na basal-1.5-max zmienia jedną. Tabela pochodzi z
+wersji, w której attention na Metal liczyło SDPA z MLX i wynik zależał od
+pakowania partii. Attention po jednostkach drzewa usuwa tę zależność przy tym
+samym czasie pełnej decyzji i o 6–9% wyższej przepustowości
+([pomiar na M2 Max](reports/metal-m2-max-tree/README.md)).
 
 ## Uruchomienie w Dockerze
 
