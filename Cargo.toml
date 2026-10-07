@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/basal-core", "crates/basal-gpu", "crates/basal-cli"]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 license = "Apache-2.0"
 publish = false
