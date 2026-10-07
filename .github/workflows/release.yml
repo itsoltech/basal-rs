@@ -1,8 +1,8 @@
 # Release packages: on a v* tag, the macOS (Apple Silicon) and Linux x86_64 (CUDA) packages of tools/release/, their
-# SHA256SUMS and install.sh in a GitHub Release, then the Homebrew formula in itsoltech/homebrew-tap (secret
-# HOMEBREW_TAP_TOKEN: a token allowed to push to that repository; without it the step is skipped).
-# workflow_dispatch builds the packages as workflow artifacts without publishing anything. The container images are
-# built by docker.yml for the same tags.
+# SHA256SUMS and install.sh in a GitHub Release, then the container image (docker.yml: vX.Y.Z, vX.Y, vX, latest) and
+# the Homebrew formula in itsoltech/homebrew-tap (secret HOMEBREW_TAP_TOKEN: a token allowed to push to that
+# repository; without it the step is skipped). Nothing is published unless both packages build.
+# workflow_dispatch builds the packages as workflow artifacts without publishing anything.
 name: release
 
 on:
@@ -111,6 +111,16 @@ jobs:
             gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --title "basal-rs $GITHUB_REF_NAME" \
               dist/*.tar.gz dist/SHA256SUMS dist/install.sh
           fi
+
+  # the container image of the release (docker.yml): vX.Y.Z, vX.Y, vX, latest
+  image:
+    needs: publish
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/docker.yml
+    with:
+      tag: ${{ github.ref_name }}
 
   homebrew:
     needs: publish

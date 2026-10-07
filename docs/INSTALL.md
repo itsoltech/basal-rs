@@ -77,9 +77,12 @@ katalogi z tabeli wyżej (modele w cache Hugging Face).
 ## Wydanie (dla opiekunów)
 
 1. Wersja w `Cargo.toml` (`workspace.package.version`), commit.
-2. `git tag vX.Y.Z && git push origin vX.Y.Z`: paczki, `SHA256SUMS`,
-   `install.sh` w GitHub Release, obrazy GHCR, formuła w
-   `itsoltech/homebrew-tap` (sekret `HOMEBREW_TAP_TOKEN`).
+2. `git tag -a vX.Y.Z -m ... && git push origin vX.Y.Z`: paczki,
+   `SHA256SUMS`, `install.sh` w GitHub Release, potem obraz GHCR (`vX.Y.Z`,
+   `vX.Y`, `vX`, `latest` i warianty `-sm80` / `-sm90`) i formuła w
+   `itsoltech/homebrew-tap` (sekret `HOMEBREW_TAP_TOKEN`). Bez udanego builda
+   obu paczek nic nie jest publikowane. Obraz wydania można opublikować
+   ponownie: workflow `docker`, `workflow_dispatch` z tagiem.
 3. Bez publikacji: `workflow_dispatch` workflow `release` buduje paczki jako
    artefakty; lokalnie `tools/release/package-macos.sh`,
    `tools/release/package-linux.sh`, a `install.sh` i `basal update`

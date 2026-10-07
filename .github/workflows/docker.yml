@@ -1,21 +1,28 @@
-# Container image of the server on GitHub Container Registry (ghcr.io/<owner>/<repo>), one image for every supported
-# GPU architecture (kernels for compute capability 8.0, 8.9 and 9.0, chosen at start):
-#   :latest, :main, :sha-<commit>, :<version> from v* tags
-#   the same tags with -sm80 / -sm90: aliases of the same image (the per-architecture images of earlier releases)
-# Pull requests build the image without pushing it. The build needs no GPU; the Docker layer cache (Rust toolchain,
-# dependencies with the CUDA kernels of candle) is kept in the registry under :buildcache.
+# Container image of the server on GitHub Container Registry (ghcr.io/<owner>/<repo>), published only for releases:
+# release.yml calls this workflow after the release packages are published (input `tag`, e.g. v0.1.0); workflow_dispatch
+# with a release tag publishes the image of that release again. Pull requests build the image without pushing it; a
+# push to main publishes nothing.
+#
+# One image for every supported GPU architecture (kernels for compute capability 8.0, 8.9 and 9.0, chosen at start).
+# Tags of release vX.Y.Z:  vX.Y.Z; vX.Y and vX when it is the newest release of that series; latest when it is the
+# newest release; each also with -sm80 and -sm90 (aliases, the names of the per-architecture images of earlier
+# builds). A pre-release (vX.Y.Z-rc.1) gets only its own tag. The Docker layer cache (Rust toolchain, dependencies with
+# the CUDA kernels of candle) is kept in the registry under :buildcache.
 name: docker
 
 on:
-  push:
-    branches: [main]
-    tags: ["v*"]
-    paths:
-      - "crates/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "docker/**"
-      - ".github/workflows/docker.yml"
+  workflow_call:
+    inputs:
+      tag:
+        description: release tag (vX.Y.Z)
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: release tag to publish the image of again (vX.Y.Z)
+        type: string
+        required: true
   pull_request:
     paths:
       - "crates/**"
@@ -23,15 +30,14 @@ on:
       - "Cargo.lock"
       - "docker/**"
       - ".github/workflows/docker.yml"
-  workflow_dispatch:
 
 permissions:
   contents: read
   packages: write
 
 concurrency:
-  group: docker-${{ github.ref }}
-  cancel-in-progress: true
+  group: docker-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
 
 jobs:
   image:
@@ -39,7 +45,8 @@ jobs:
     timeout-minutes: 120
     env:
       IMAGE: ghcr.io/${{ github.repository }}
-      PUSH: ${{ github.event_name != 'pull_request' }}
+      TAG: ${{ inputs.tag }}
+      PUSH: ${{ inputs.tag != '' }}
     steps:
       - name: Free disk space (the CUDA devel image and the build need ~25 GB)
         run: |
@@ -48,6 +55,37 @@ jobs:
           df -h /
 
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0  # every release tag, to find the newest of each series
+
+      - name: Tags
+        id: tags
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"  # the tagged commit, also when dispatched from main
+          if [ "$PUSH" != true ]; then
+            echo "tags=basal-rs:pr-check" >> "$GITHUB_OUTPUT"; echo "version=pr" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          [[ "$TAG" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)(-.+)?$ ]] || { echo "not a release tag: $TAG"; exit 1; }
+          major=${BASH_REMATCH[1]} minor=${BASH_REMATCH[2]} pre=${BASH_REMATCH[4]}
+          version=$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)
+          [ "v$version" = "$TAG" ] || { echo "tag $TAG does not match Cargo.toml $version"; exit 1; }
+          git rev-parse -q --verify "refs/tags/$TAG" > /dev/null || { echo "no tag $TAG"; exit 1; }
+          # newest release (no pre-release) among the tags matching a pattern
+          newest() { git tag -l "$1" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1; }
+          names=("$TAG")
+          if [ -z "$pre" ]; then
+            [ "$(newest "v$major.$minor.*")" = "$TAG" ] && names+=("v$major.$minor")
+            [ "$(newest "v$major.*")" = "$TAG" ] && names+=("v$major")
+            [ "$(newest 'v*')" = "$TAG" ] && names+=(latest)
+          fi
+          {
+            echo "tags<<EOF"
+            for n in "${names[@]}"; do for s in "" -sm80 -sm90; do echo "$IMAGE:$n$s"; done; done
+            echo "EOF"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+          echo "tags: ${names[*]} (each also -sm80, -sm90)"
 
       - uses: docker/setup-buildx-action@v3
 
@@ -59,44 +97,20 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Tags
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.IMAGE }}
-          flavor: |
-            latest=false
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha,prefix=sha-,format=short
-          labels: |
-            org.opencontainers.image.title=basal-rs
-            ai.basal.cuda-compute-caps=80,89,90
-
-      - name: Aliases -sm80 and -sm90
-        id: tags
-        env:
-          TAGS: ${{ steps.meta.outputs.tags }}
-        run: |
-          {
-            echo "tags<<EOF"
-            for t in $TAGS; do echo "$t"; echo "$t-sm80"; echo "$t-sm90"; done
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
           file: docker/Dockerfile
           build-args: |
-            BASAL_GIT_SHA=${{ github.sha }}
+            BASAL_GIT_SHA=${{ steps.tags.outputs.sha }}
           push: ${{ env.PUSH == 'true' }}
           tags: ${{ steps.tags.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          labels: |
+            org.opencontainers.image.title=basal-rs
+            org.opencontainers.image.version=${{ steps.tags.outputs.version }}
+            org.opencontainers.image.revision=${{ steps.tags.outputs.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            ai.basal.cuda-compute-caps=80,89,90
           cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache
           cache-to: ${{ env.PUSH == 'true' && format('type=registry,ref={0}:buildcache,mode=max', env.IMAGE) || '' }}

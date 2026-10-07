@@ -165,12 +165,15 @@ docker compose logs -f        # pobieranie modeli, tabele GEMM, start serwera
 curl localhost:8000/health
 ```
 
-Obraz buduje [.github/workflows/docker.yml](.github/workflows/docker.yml)
-przy każdej zmianie kodu na `main` i przy tagach `v*` (`latest`, `main`,
-`sha-<commit>`, `<wersja>`). Jeden obraz zawiera kernele dla compute
+Obraz publikuje tylko wydanie ([release.yml](.github/workflows/release.yml)
+wywołuje [docker.yml](.github/workflows/docker.yml) po opublikowaniu paczek).
+Tagi wydania `vX.Y.Z`: `vX.Y.Z`, `vX.Y` i `vX` (najnowsze wydanie danej serii)
+oraz `latest` (najnowsze wydanie), np. `ghcr.io/itsoltech/basal-rs:v0.1`
+przypina serię 0.1 z poprawkami. Push na `main` niczego nie publikuje. Jeden obraz zawiera kernele dla compute
 capability 8.0, 8.9 i 9.0 (A100, RTX 30xx/40xx, RTX 6000 Ada, L40S, H100) i
-przy starcie wybiera właściwe dla karty. Tagi z `-sm80` i `-sm90` z
-wcześniejszych obrazów per architektura wskazują teraz ten sam obraz. Na RTX
+przy starcie wybiera właściwe dla karty. Każdy tag ma też warianty `-sm80` i
+`-sm90` (np. `v0-sm80`), nazwy dawnych obrazów per architektura, wskazujące
+ten sam obraz. Na RTX
 6000 Ada wynik jest bitowo ten sam co z obrazów per architektura
 ([pomiar](reports/cuda-multi-ptx/README.md),
 [obrazy per architektura](reports/docker-images/README.md)).
