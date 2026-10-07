@@ -91,10 +91,26 @@ mod metal {
 }
 
 #[cfg(feature = "cuda")]
-mod cu {
+pub(crate) mod cu {
     use candle_core::cuda_backend::cudarc::driver::LaunchConfig;
 
-    pub const PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/kernels.ptx"));
+    // PTX: [(compute capability, PTX)], ascending (build.rs)
+    include!(concat!(env!("OUT_DIR"), "/kernels_ptx.rs"));
+
+    static SELECTED: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+
+    /// Choose the PTX for a GPU of compute capability `cap` (major * 10 + minor): the highest architecture not
+    /// above it. None when the GPU is older than every compiled architecture.
+    pub fn select(cap: u32) -> Option<u32> {
+        let &(c, p) = PTX.iter().rev().find(|(c, _)| *c <= cap)?;
+        let _ = SELECTED.set(p);
+        Some(c)
+    }
+
+    /// The PTX chosen by [`select`] (the lowest architecture when nothing was selected).
+    pub fn ptx() -> &'static str {
+        SELECTED.get().copied().unwrap_or(PTX[0].1)
+    }
 
     /// One thread per element of `n`.
     pub fn cfg(n: usize) -> LaunchConfig {
@@ -160,7 +176,7 @@ impl CustomOp2 for BiasSiluMul {
             let (g, bb) = (view!(gu, T, go), view!(b, T, bo));
             // SAFETY: every element is written by the kernel.
             let out = unsafe { dev.alloc::<T>(total)? };
-            let f = dev.get_or_load_custom_func(&format!("bias_silu_mul_{S}"), "basal_fused", cu::PTX)?;
+            let f = dev.get_or_load_custom_func(&format!("bias_silu_mul_{S}"), "basal_fused", cu::ptx())?;
             let mut a = f.builder();
             let (i_, n_) = (i as u32, total as u32);
             a.arg(&g).arg(&bb).arg(&out).arg(&i_).arg(&n_);
@@ -237,7 +253,7 @@ impl CustomOp3 for BiasResidual {
             let (xv, yv, bv) = (view!(x, T, xo), view!(y, T, yo), view!(b, T, bo));
             // SAFETY: every element is written by the kernel.
             let out = unsafe { dev.alloc::<T>(total)? };
-            let f = dev.get_or_load_custom_func(&format!("bias_residual_{S}"), "basal_fused", cu::PTX)?;
+            let f = dev.get_or_load_custom_func(&format!("bias_residual_{S}"), "basal_fused", cu::ptx())?;
             let mut a = f.builder();
             let (h_, n_) = (h as u32, total as u32);
             a.arg(&xv).arg(&yv).arg(&bv).arg(&out).arg(&h_).arg(&n_);
@@ -320,7 +336,7 @@ impl CustomOp3 for QkvRope {
         let out = unsafe { dev.alloc::<f32>(n)? };
         by_dtype!(qkv.dtype(), |T, S| {
             let (qv, bv) = (view!(qkv, T, qo), view!(b, T, bo));
-            let f = dev.get_or_load_custom_func(&format!("qkv_rope_{S}"), "basal_fused", cu::PTX)?;
+            let f = dev.get_or_load_custom_func(&format!("qkv_rope_{S}"), "basal_fused", cu::ptx())?;
             let mut a = f.builder();
             let c = [d.b as u32, d.l as u32, d.nh as u32, d.nkv as u32, d.hd as u32];
             a.arg(&qv).arg(&bv).arg(&csv).arg(&out).arg(&c[0]).arg(&c[1]).arg(&c[2]).arg(&c[3]).arg(&c[4]);
@@ -390,7 +406,7 @@ impl CustomOp1 for MergeHeads {
         let st = by_dtype!(dt, |T, S| {
             // SAFETY: every element is written by the kernel.
             let out = unsafe { dev.alloc::<T>(n)? };
-            let f = dev.get_or_load_custom_func(&format!("merge_heads_{S}"), "basal_fused", cu::PTX)?;
+            let f = dev.get_or_load_custom_func(&format!("merge_heads_{S}"), "basal_fused", cu::ptx())?;
             let mut a = f.builder();
             let c = [d.b as u32, d.l as u32, d.nh as u32, d.hd as u32];
             a.arg(&xv).arg(&out).arg(&c[0]).arg(&c[1]).arg(&c[2]).arg(&c[3]);
@@ -451,7 +467,7 @@ impl CustomOp2 for MaskedSoftmax {
         let (sv, mv) = (view!(s, f32, contiguous(sl, "scores")?), view!(m, f32, contiguous(ml, "mask")?));
         // SAFETY: every element is written by the kernel.
         let out = unsafe { dev.alloc::<f32>(n)? };
-        let f = dev.get_or_load_custom_func("masked_softmax_f32", "basal_fused", cu::PTX)?;
+        let f = dev.get_or_load_custom_func("masked_softmax_f32", "basal_fused", cu::ptx())?;
         let mut a = f.builder();
         let (l_, lk_) = (self.l as u32, lk as u32);
         a.arg(&sv).arg(&mv).arg(&out).arg(&l_).arg(&lk_).arg(&self.scale);
@@ -526,7 +542,7 @@ impl CustomOp3 for LetterLogits {
         let out = unsafe { dev.alloc::<f32>(r * u)? };
         by_dtype!(h.dtype(), |T, S| {
             let hv = view!(h, T, ho);
-            let f = dev.get_or_load_custom_func(&format!("letter_logits_{S}"), "basal_fused", cu::PTX)?;
+            let f = dev.get_or_load_custom_func(&format!("letter_logits_{S}"), "basal_fused", cu::ptx())?;
             let mut a = f.builder();
             let c = [r as u32, u as u32, hd as u32];
             a.arg(&hv).arg(&wv).arg(&iv).arg(&out).arg(&c[0]).arg(&c[1]).arg(&c[2]);
@@ -660,7 +676,7 @@ impl CustomOp3 for AttentionTree<'_> {
         // rows per block and threads: attn_tree_tc* TC_BM / TC_THREADS, attn_tree_f32 ATT_BM / ATT_THREADS
         let (name, bm, threads, smem) =
             if self.tc { (self.tc_kernel, 128, 256, TC_SMEM) } else { ("attn_tree_f32", 16, 128, 0) };
-        let f = dev.get_or_load_custom_func(name, "basal_fused", cu::PTX)?;
+        let f = dev.get_or_load_custom_func(name, "basal_fused", cu::ptx())?;
         if smem > 0 {
             use candle_core::cuda_backend::cudarc::driver::sys::CUfunction_attribute;
             f.set_attribute(CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, smem as i32).w()?;
@@ -951,7 +967,7 @@ impl CustomOp1 for SplitHiLo {
         let xv = view!(x, f32, contiguous(xl, "x")?);
         // SAFETY: both planes are written by the kernel.
         let out = unsafe { dev.alloc::<half::f16>(2 * n)? };
-        let f = dev.get_or_load_custom_func("split_hilo_f32", "basal_fused", cu::PTX)?;
+        let f = dev.get_or_load_custom_func("split_hilo_f32", "basal_fused", cu::ptx())?;
         let mut a = f.builder();
         let n64 = n as u64;
         a.arg(&xv).arg(&out).arg(&n64);

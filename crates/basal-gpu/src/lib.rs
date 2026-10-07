@@ -37,7 +37,7 @@ use fused::HeadDims;
 
 /// GPU backend of this build (`basal --version`).
 #[cfg(feature = "cuda")]
-pub const BUILD_BACKEND: &str = concat!("CUDA, kernels for compute capability ", env!("BASAL_CUDA_COMPUTE_CAP"));
+pub const BUILD_BACKEND: &str = concat!("CUDA, kernels for compute capability ", env!("BASAL_CUDA_COMPUTE_CAPS"));
 #[cfg(all(not(feature = "cuda"), target_os = "macos"))]
 pub const BUILD_BACKEND: &str = "Metal";
 #[cfg(all(not(feature = "cuda"), not(target_os = "macos")))]
@@ -265,14 +265,14 @@ pub fn gpu_device() -> Result<Device> {
             let ctx = d.cuda_stream().context().clone();
             let major = ctx.attribute(A::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)?;
             let minor = ctx.attribute(A::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)?;
-            let built: i32 = env!("BASAL_CUDA_COMPUTE_CAP").parse().unwrap_or(0);
+            let cap = (major * 10 + minor) as u32;
+            // the PTX of the highest compiled architecture not above the GPU's (build.rs, CUDA_COMPUTE_CAPS)
             ensure!(
-                major * 10 + minor >= built,
-                "this build targets CUDA compute capability {}.{} and newer, but {} is {major}.{minor}: use a build \
-                 for {major}{minor} or lower (CUDA_COMPUTE_CAP; container image tags: latest = 8.9, -sm80 = 8.0, \
-                 -sm90 = 9.0)",
-                built / 10,
-                built % 10,
+                fused::cu::select(cap).is_some(),
+                "this build has kernels for CUDA compute capability {} and newer, but {} is {major}.{minor}: use a \
+                 build for {major}{minor} or lower (CUDA_COMPUTE_CAPS; container image tags: latest = 8.9, -sm80 = \
+                 8.0, -sm90 = 9.0)",
+                env!("BASAL_CUDA_COMPUTE_CAPS"),
                 ctx.name()?
             );
         }

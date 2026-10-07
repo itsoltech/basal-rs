@@ -194,7 +194,9 @@ docker exec basal-dev cargo build --release --features basal-cli/cuda
 ```
 
 Kernele CUDA są kompilowane do PTX przez `nvcc` w `crates/basal-gpu/build.rs`
-(`CUDA_COMPUTE_CAP`, domyślnie 89).
+dla architektur z `CUDA_COMPUTE_CAPS` (domyślnie 80, 89 i 90; `CUDA_COMPUTE_CAP`
+wybiera jedną). Przy starcie runtime ładuje PTX najwyższej architektury nie
+wyższej niż karta. Obraz `basal-dev:cuda` ustawia `CUDA_COMPUTE_CAP=89`.
 
 ## Model
 
