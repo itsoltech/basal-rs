@@ -43,6 +43,14 @@ pub const BUILD_BACKEND: &str = "Metal";
 #[cfg(all(not(feature = "cuda"), not(target_os = "macos")))]
 pub const BUILD_BACKEND: &str = "no GPU backend";
 
+/// Apple GPU of this machine: name and the memory Metal recommends as one process's working set (bytes).
+#[cfg(target_os = "macos")]
+pub fn metal_info() -> Option<(String, u64)> {
+    use objc2_metal::MTLDevice;
+    let d = objc2_metal::MTLCreateSystemDefaultDevice()?;
+    Some((d.name().to_string(), d.recommendedMaxWorkingSetSize()))
+}
+
 /// Token id written into padding columns (never attended to by real tokens). Matches the upstream pad token `</s>`.
 const PAD_ID: u32 = 2;
 /// Additive mask value of a blocked (query, key) pair. Finite so that a key block that is fully masked for a query in

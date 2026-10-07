@@ -220,6 +220,33 @@ const MODEL_FILES: [&str; 8] = [
     "evidence_head.pt",
 ];
 
+/// The configuration of `basal serve` without `--config` / `--model`: the user file (its path) when it exists, else
+/// the built-in one.
+pub fn user_config() -> Result<(Option<PathBuf>, ServeConfig)> {
+    let path = crate::paths::config_file();
+    if path.exists() {
+        Ok((Some(path.clone()), ServeConfig::load(&path)?))
+    } else {
+        Ok((None, ServeConfig::builtin()))
+    }
+}
+
+/// Snapshot of `repo` at `revision` in the Hugging Face cache, without contacting the Hub.
+pub fn cached_model_dir(repo: &str, revision: Option<&str>) -> Option<PathBuf> {
+    let (owner, name) = repo.split_once('/')?;
+    let client = hf_hub::HFClientSync::new().ok()?;
+    let files: Vec<String> = MODEL_FILES.iter().map(|f| f.to_string()).collect();
+    let dir = client
+        .model(owner, name)
+        .snapshot_download()
+        .maybe_revision(revision.map(str::to_string))
+        .allow_patterns(files)
+        .local_files_only(true)
+        .send()
+        .ok()?;
+    MODEL_FILES[..7].iter().all(|f| dir.join(f).exists()).then_some(dir)
+}
+
 /// Directory of a configured model: `path`, or the Hugging Face snapshot of `repo` at `revision` (downloaded when
 /// missing; a cached snapshot is used when the Hub cannot be reached).
 pub fn model_dir(m: &ModelConfig) -> Result<PathBuf> {

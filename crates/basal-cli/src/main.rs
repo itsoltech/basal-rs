@@ -6,12 +6,14 @@
 //!   basal export        --model DIR --inputs DIR --out DIR             per-item results in the reference format (Metal)
 //!   basal compare       --a DIR --b DIR --out FILE                     tokens, numerics, decisions, quality
 //!   basal bench         --model DIR --reference DIR --out FILE         latency / throughput (Metal)
+//!   basal doctor        [--json]                                       what this machine has / lacks for serve
 //!   basal init          [--model mini|4.5B|max]                        user configuration of `basal serve`
 //!   basal serve         [--config FILE | --model DIR]                  HTTP server (default: user configuration)
 
 mod bench;
 mod compare;
 mod config;
+mod doctor;
 mod export;
 mod large_eval;
 mod paths;
@@ -30,7 +32,7 @@ use clap::{Args, Parser, Subcommand};
 use serde_json::{json, Value};
 
 /// `basal --version`: release, commit and GPU backend of the build.
-fn version() -> &'static str {
+pub fn version() -> &'static str {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     V.get_or_init(|| format!("{} ({}, {})", env!("CARGO_PKG_VERSION"), env!("BASAL_GIT_SHA"), basal_gpu::BUILD_BACKEND))
 }
@@ -183,6 +185,12 @@ enum Cmd {
         m: Vec<usize>,
         #[arg(long, default_value_t = 20)]
         reps: usize,
+    },
+    /// Check this machine for `basal serve`: GPU, driver and libraries, configuration, models, disk, network, port
+    Doctor {
+        /// Machine-readable report
+        #[arg(long)]
+        json: bool,
     },
     /// Write a server configuration for `basal serve` (default: the user configuration file)
     Init {
@@ -478,6 +486,11 @@ fn main() -> Result<()> {
             #[cfg(not(target_os = "macos"))]
             anyhow::bail!("gemm-tune tunes the Metal GEMM kernels ({dtype}, {m:?}, {reps}, {shapes:?})");
         }
+        Cmd::Doctor { json } => {
+            if !doctor::run(json)? {
+                std::process::exit(1);
+            }
+        }
         Cmd::Init { models, out, force } => {
             let models: Vec<&config::KnownModel> = if models.is_empty() {
                 vec![config::DEFAULT_MODEL]
@@ -513,21 +526,21 @@ fn main() -> Result<()> {
                 (Some(path), _) => Some(config::ServeConfig::load(&path)?),
                 (None, Some(_)) => None,
                 (None, None) => {
-                    let path = paths::config_file();
-                    if path.exists() {
-                        eprintln!("basal: configuration {}", path.display());
-                        Some(config::ServeConfig::load(&path)?)
-                    } else {
-                        let m = config::DEFAULT_MODEL;
-                        eprintln!(
-                            "basal: no configuration ({} is missing; `basal init` writes one): serving {} ({:.1} GB, \
-                             downloaded at the first start)",
-                            path.display(),
-                            m.repo,
-                            m.size_gb
-                        );
-                        Some(config::ServeConfig::builtin())
+                    let (path, c) = config::user_config()?;
+                    match path {
+                        Some(p) => eprintln!("basal: configuration {}", p.display()),
+                        None => {
+                            let m = config::DEFAULT_MODEL;
+                            eprintln!(
+                                "basal: no configuration ({} is missing; `basal init` writes one): serving {} ({:.1} \
+                                 GB, downloaded at the first start)",
+                                paths::config_file().display(),
+                                m.repo,
+                                m.size_gb
+                            );
+                        }
                     }
+                    Some(c)
                 }
             };
             if let Some(c) = c {
