@@ -317,7 +317,15 @@ impl hf_hub::progress::ProgressHandler for DownloadLog {
             DownloadEvent::Start { total_files, total_bytes } => {
                 if s.0 == 0 {
                     s.0 = *total_bytes;
-                    eprintln!("basal: {}: {total_files} file(s), {:.2} GB", self.repo, *total_bytes as f64 / 1e9);
+                    if *total_bytes == 0 {
+                        eprintln!("basal: {}: all files cached", self.repo);
+                    } else {
+                        eprintln!(
+                            "basal: {}: {total_files} file(s), {:.2} GB to download",
+                            self.repo,
+                            *total_bytes as f64 / 1e9
+                        );
+                    }
                 }
                 return;
             }

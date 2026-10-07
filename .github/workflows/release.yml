@@ -100,12 +100,14 @@ jobs:
         run: |
           if [ -z "$TOKEN" ]; then echo "HOMEBREW_TAP_TOKEN not set: formula not updated"; exit 0; fi
           git clone "https://x-access-token:$TOKEN@github.com/itsoltech/homebrew-tap.git" tap
-          mkdir -p tap/Formula
-          sed -e "s/@VERSION@/$VERSION/g" -e "s/@SHA256@/$SHA256/g" tools/release/basal-rs.rb.in > tap/Formula/basal-rs.rb
           cd tap
+          git checkout -B main  # also for the first push into an empty repository
+          mkdir -p Formula
+          sed -e "s/@VERSION@/$VERSION/g" -e "s/@SHA256@/$SHA256/g" ../tools/release/basal-rs.rb.in > Formula/basal-rs.rb
+          [ -f README.md ] || cp ../tools/release/tap-README.md README.md
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Formula/basal-rs.rb
+          git add Formula/basal-rs.rb README.md
           git diff --cached --quiet && { echo "formula unchanged"; exit 0; }
           git commit -m "basal-rs $VERSION"
-          git push
+          git push origin main
