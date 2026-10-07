@@ -5,8 +5,8 @@ on:
   push:
     branches: [main]
     paths: ["crates/**", "Cargo.toml", "Cargo.lock", "rustfmt.toml", ".github/workflows/lint.yml"]
+  # every pull request: `lint` is a required check of the main branch ruleset, a skipped one would block the merge
   pull_request:
-    paths: ["crates/**", "Cargo.toml", "Cargo.lock", "rustfmt.toml", ".github/workflows/lint.yml"]
 
 permissions:
   contents: read

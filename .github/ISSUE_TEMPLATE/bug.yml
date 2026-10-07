@@ -1,0 +1,58 @@
+name: "Błąd / Bug"
+description: "basal się wyłącza, nie startuje albo zwraca błąd / basal crashes, does not start or returns an error"
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Można pisać po polsku albo po angielsku. / Write in Polish or English.
+        Inna decyzja modelu niż w upstream: formularz „Zgodność z upstream”. Luka bezpieczeństwa: nie zgłaszaj jej tutaj, zobacz [SECURITY.md](https://github.com/itsoltech/basal-rs/blob/main/SECURITY.md).
+        A different model decision than upstream: use the "Upstream agreement" form. Security issues: not here, see [SECURITY.md](https://github.com/itsoltech/basal-rs/blob/main/SECURITY.md).
+  - type: input
+    id: version
+    attributes:
+      label: "`basal --version`"
+      placeholder: "basal 0.1.3 (e140be92, Metal)"
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: "Instalacja / Installed with"
+      options:
+        - Homebrew
+        - install.sh
+        - "obraz Docker / Docker image"
+        - "build ze źródeł / built from source"
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`basal doctor --json`"
+      description: "System, GPU, sterownik, modele. Usuń to, czego nie chcesz publikować. / System, GPU, driver, models. Remove what you do not want public."
+      render: json
+  - type: input
+    id: command
+    attributes:
+      label: "Polecenie / Command"
+      placeholder: "basal serve --model max --access-log"
+  - type: textarea
+    id: what
+    attributes:
+      label: "Co się stało i czego oczekiwano / What happened and what you expected"
+      description: "Przy odpowiedzi serwera dołącz żądanie (JSON). / For a server answer include the request (JSON)."
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: "Log"
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: "Przed wysłaniem / Before sending"
+      options:
+        - label: "Bez tokenów (HF_TOKEN), adresów i danych prywatnych / No tokens (HF_TOKEN), addresses or private data"
+          required: true

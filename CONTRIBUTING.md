@@ -1,0 +1,64 @@
+# Contributing to basal-rs
+
+[Polski](CONTRIBUTING.pl.md)
+
+basal-rs runs the Basal decision models with the answers of the upstream FP32 model, faster. A change is accepted
+when it keeps those answers and its effect is measured. Issues and pull requests may be written in Polish or English.
+
+## Before you start
+
+- Bugs, upstream disagreements, performance and ideas: the [issue forms](https://github.com/itsoltech/basal-rs/issues/new/choose).
+  Questions: [Discussions](https://github.com/itsoltech/basal-rs/discussions).
+- Security vulnerabilities: privately, see [SECURITY.md](SECURITY.md).
+- For a larger change (a new kernel, scheduler, API) open an issue first, so the approach and the measurement can be
+  agreed before the work.
+
+## Building
+
+Rust stable (checked with 1.95).
+
+```sh
+# Metal (macOS, Apple Silicon)
+cargo build --release
+
+# CUDA (Linux; image with the toolkit: tools/cuda/Dockerfile)
+docker build -t basal-dev:cuda tools/cuda
+docker run -d --name basal-dev --gpus all --ipc=host -v "$PWD":/work -w /work basal-dev:cuda sleep infinity
+docker exec basal-dev cargo build --release --features basal-cli/cuda
+```
+
+Layout of the code: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## How changes are verified
+
+The project has no unit, integration or end-to-end tests, and pull requests should not add test frameworks, snapshots
+or CI test gates. Correctness is checked by comparing the runtime's outputs with the upstream reference, and speed by
+measurements ([docs/BENCHMARKS.md](docs/BENCHMARKS.md)):
+
+- A change that should not change the computation (packing, caches, scheduling, refactoring) gives output
+  bit-identical to `main`: `basal export` with both versions, `basal compare` reports 0.0.
+- A change of the numerics (kernels, precision, reductions) is compared with the upstream FP32 reference: the
+  decisions stay the same and the logit and probability differences are recorded.
+- A performance claim comes with a measurement before and after on the same hardware and precision. Compared with
+  upstream, at the same precision too (e.g. basal-rs f16 against MLX f16). Laptops are measured on AC power; the
+  conditions (GPU, power limit, model revision) go into the report.
+
+Measurements go into a new directory under [reports/](reports/README.md) with a `README.md` and the data the numbers
+come from; existing reports are not overwritten. Reports and code contain no data identifying the machines they were
+made on (hostnames, IP addresses, home paths). Upstream checkouts in `.baseline/` are not modified.
+
+`cargo fmt --all --check` and `cargo clippy --all-targets -- -D warnings` pass (CI runs them without the CUDA feature;
+CUDA code also with `--features basal-cli/cuda`).
+
+## Pull requests
+
+- One coherent change per pull request; the [template](.github/pull_request_template.md) lists what to state.
+- Title in the Angular convention (`feat(cli): …`, `fix(gpu): …`, `perf(metal): …`, `docs: …`): pull requests are
+  squash-merged and the title becomes the commit message.
+- Documentation (README, `docs/`, `serve.example.yml`) changes together with the behaviour or options it describes.
+- A pull request needs one approving review of a maintainer (`@itsoltech/basal`) and a passing `lint` check.
+
+## Licence
+
+Contributions are accepted under the [Apache License 2.0](LICENSE) of the project. This project follows the
+[Code of Conduct](CODE_OF_CONDUCT.md).

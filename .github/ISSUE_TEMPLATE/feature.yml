@@ -1,0 +1,21 @@
+name: "Pomysł / Feature request"
+description: "Nowa funkcja albo zmiana zachowania / A new feature or a change in behaviour"
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: "Problem"
+      description: "Co chcesz zrobić i co dziś przeszkadza / What you want to do and what stops you today"
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: "Propozycja / Proposal"
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: "Rozważone alternatywy / Alternatives considered"

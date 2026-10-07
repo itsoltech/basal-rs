@@ -1,0 +1,13 @@
+# GitHub Actions only: a dependency update of the runtime (candle, cudarc, metal) needs a comparison with the upstream
+# reference, so cargo updates are made by hand.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci

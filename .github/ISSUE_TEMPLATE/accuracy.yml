@@ -1,0 +1,56 @@
+name: "Zgodność z upstream / Upstream agreement"
+description: "basal-rs daje inną decyzję lub prawdopodobieństwa niż model upstream / basal-rs gives a different decision or probabilities than upstream"
+labels: [accuracy]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Referencją jest forward FP32 upstream ([docs/BENCHMARKS.md](https://github.com/itsoltech/basal-rs/blob/main/docs/BENCHMARKS.md)). Różnica względem upstream w bf16 albo 8-bit nie musi być błędem: te warianty same różnią się od FP32.
+        The reference is the upstream FP32 forward ([docs/BENCHMARKS.md](https://github.com/itsoltech/basal-rs/blob/main/docs/BENCHMARKS.md)). A difference from upstream in bf16 or 8-bit is not necessarily a bug: those differ from FP32 themselves.
+  - type: input
+    id: version
+    attributes:
+      label: "`basal --version`"
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: "Model i rewizja / Model and revision"
+      placeholder: "Remek/basal-1.5-max@be1b5ee7"
+    validations:
+      required: true
+  - type: dropdown
+    id: dtype
+    attributes:
+      label: "dtype basal-rs"
+      options: [f16, bf16, f32]
+    validations:
+      required: true
+  - type: textarea
+    id: request
+    attributes:
+      label: "Żądanie / Request"
+      description: "JSON wysłany do /v1/systemone albo /v1/basal / JSON sent to /v1/systemone or /v1/basal"
+      render: json
+    validations:
+      required: true
+  - type: textarea
+    id: ours
+    attributes:
+      label: "Odpowiedź basal-rs / basal-rs answer"
+      render: json
+    validations:
+      required: true
+  - type: textarea
+    id: upstream
+    attributes:
+      label: "Odpowiedź upstream / Upstream answer"
+      description: "Backend (PyTorch, MLX), precyzja (FP32, bf16, 8-bit), rewizja / backend, precision, revision"
+    validations:
+      required: true
+  - type: textarea
+    id: compare
+    attributes:
+      label: "`basal compare` (opcjonalnie / optional)"
+      render: text

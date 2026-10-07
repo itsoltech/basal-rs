@@ -350,6 +350,7 @@ referencją upstream), `bench` i `bench-requests` (pomiary), `gemm-search`.
 - [Zgodność API](docs/SYSTEM_ONE.md): TypeSafe System One, endpoint upstream, rozszerzenia basal-1.5.
 - [Pomiary](docs/BENCHMARKS.md): metodyka, narzędzia, odtwarzanie wyników.
 - [Raporty](reports/README.md).
+- [Udział w rozwoju](CONTRIBUTING.pl.md) ([English](CONTRIBUTING.md)): budowanie, sprawdzanie zmian, pull requesty; [bezpieczeństwo](SECURITY.md).
 
 ## Licencja
 

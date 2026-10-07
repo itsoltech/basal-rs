@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: "Pytania / Questions"
+    url: https://github.com/itsoltech/basal-rs/discussions
+    about: "Instalacja, konfiguracja, użycie / Installation, configuration, usage"
+  - name: "Luka bezpieczeństwa / Security vulnerability"
+    url: https://github.com/itsoltech/basal-rs/security/advisories/new
+    about: "Zgłoszenie prywatne, nie publiczne issue / A private report, not a public issue"
+  - name: "Instalacja / Installation"
+    url: https://github.com/itsoltech/basal-rs/blob/main/docs/INSTALL.md
+    about: "docs/INSTALL.md"

@@ -1,0 +1,44 @@
+name: "Wydajność / Performance"
+description: "Wolniej niż oczekiwano, regresja szybkości albo pomiar do porównania / Slower than expected, a speed regression or a measurement to compare"
+labels: [performance]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Porównanie z upstream ma sens przy tej samej precyzji (np. basal-rs f16 i MLX f16). Laptop mierz na zasilaczu.
+        Compare with upstream at the same precision (e.g. basal-rs f16 and MLX f16). Measure laptops on AC power.
+  - type: input
+    id: version
+    attributes:
+      label: "`basal --version`"
+    validations:
+      required: true
+  - type: input
+    id: hardware
+    attributes:
+      label: "Sprzęt / Hardware"
+      description: "Chip albo GPU, pamięć, limit mocy GPU, zasilacz czy bateria / chip or GPU, memory, GPU power limit, AC or battery"
+      placeholder: "Apple M2 Max 64 GB, AC / RTX 6000 Ada, 300 W"
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: "Model, dtype"
+      placeholder: "basal-1.5-4.5B, f16"
+    validations:
+      required: true
+  - type: textarea
+    id: workload
+    attributes:
+      label: "Obciążenie / Workload"
+      description: "Liczba pytań i tokenów w żądaniu, równoległość, ciągłe czy pojedyncze żądania / questions and tokens per request, concurrency, steady or sporadic requests"
+    validations:
+      required: true
+  - type: textarea
+    id: results
+    attributes:
+      label: "Wyniki i sposób pomiaru / Results and method"
+      description: "Opóźnienia (p50, p95), przepustowość, wersje przed i po, upstream przy tej samej precyzji / latency, throughput, before and after, upstream at the same precision"
+    validations:
+      required: true
