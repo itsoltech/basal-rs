@@ -260,7 +260,7 @@ pub fn gpu_device() -> Result<Device> {
                 ctx.name()?
             );
         }
-        return Ok(dev);
+        Ok(dev)
     }
     #[cfg(all(not(feature = "cuda"), target_os = "macos"))]
     return Device::new_metal(0).context("Metal device");
