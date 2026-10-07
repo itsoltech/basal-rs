@@ -1,0 +1,52 @@
+{
+ "tool": "tools/bench/loadtest.py",
+ "url": "http://127.0.0.1:8130/v1/systemone",
+ "source": "reports/reference-basal-1.5-mini-fp32/bench.jsonl",
+ "distinct_requests": 44,
+ "phases": [
+  {
+   "phase": "sequential",
+   "concurrency": 1,
+   "offered_requests_per_s": null,
+   "requests": 88,
+   "errors": 0,
+   "p50_ms": 96.47695849707816,
+   "p95_ms": 119.83183299889788,
+   "p99_ms": 120.7629170094151,
+   "requests_per_s": 10.471617194347415,
+   "decisions_per_s": 10.471617194347415,
+   "max_prob_diff_vs_first_answer": 0.0,
+   "mean_batch_requests": 1,
+   "classes": {
+    "bench": {
+     "n": 88,
+     "p50_ms": 96.47695849707816,
+     "p95_ms": 119.83183299889788,
+     "max_ms": 120.7629170094151
+    }
+   }
+  },
+  {
+   "phase": "concurrent",
+   "concurrency": 32,
+   "offered_requests_per_s": null,
+   "requests": 400,
+   "errors": 0,
+   "p50_ms": 2306.21947900363,
+   "p95_ms": 2341.7559590016026,
+   "p99_ms": 2388.5113330034073,
+   "requests_per_s": 13.863553045444716,
+   "decisions_per_s": 13.863553045444716,
+   "max_prob_diff_vs_first_answer": 0.0,
+   "mean_batch_requests": 19.975,
+   "classes": {
+    "bench": {
+     "n": 400,
+     "p50_ms": 2306.21947900363,
+     "p95_ms": 2341.7559590016026,
+     "max_ms": 2390.881375002209
+    }
+   }
+  }
+ ]
+}

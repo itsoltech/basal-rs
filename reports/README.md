@@ -33,6 +33,14 @@ Metodyka: [docs/BENCHMARKS.md](../docs/BENCHMARKS.md).
 | [perf-1.5-small](perf-1.5-small/README.md) | wydajność wobec upstream v1.5.0: pojedyncza decyzja, HTTP, długie stany, ruch mieszany |
 | `reference-basal-1.5-{4.5B,mini}-{fp32,bf16}` | referencje upstream FP32 i ścieżka serwowana BF16 |
 
+## Instalacja i buildy
+
+| Katalog | Zawartość |
+|---|---|
+| [install-packages](install-packages/README.md) | paczki macOS i Linux zainstalowane `install.sh` bez publikacji: `doctor`, `setup`, `serve`, `update` |
+| [release-builds](release-builds/README.md) | profil `dist` (LTO): wyniki bitowo równe, szybkość bez zmian; czasy buildów w GitHub Actions z cache |
+| [cuda-multi-ptx](cuda-multi-ptx/README.md) | kernele CUDA dla 8.0, 8.9 i 9.0 w jednej binarce: wyniki bitowo równe |
+
 ## Apple Silicon (Metal)
 
 | Katalog | Zawartość |
