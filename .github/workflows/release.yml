@@ -64,10 +64,10 @@ jobs:
       - name: Package
         env:
           BASAL_GIT_SHA: ${{ github.sha }}
-          # builder layers (toolkit, Rust, the cargo-chef dependency layer) in the registry, next to the image cache
+          # builder layers (toolkit, Rust, the cargo-chef dependency layer) in the cache package, apart from the image
           BASAL_BUILD_CACHE: >-
-            --cache-from type=registry,ref=ghcr.io/${{ github.repository }}:buildcache-release-linux
-            --cache-to type=registry,ref=ghcr.io/${{ github.repository }}:buildcache-release-linux,mode=max
+            --cache-from type=registry,ref=ghcr.io/${{ github.repository }}-cache:release-linux
+            --cache-to type=registry,ref=ghcr.io/${{ github.repository }}-cache:release-linux,mode=max
         run: tools/release/package-linux.sh dist
       - uses: actions/upload-artifact@v4
         with:

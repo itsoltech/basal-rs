@@ -7,7 +7,7 @@
 # Tags of release vX.Y.Z:  vX.Y.Z; vX.Y and vX when it is the newest release of that series; latest when it is the
 # newest release; each also with -sm80 and -sm90 (aliases, the names of the per-architecture images of earlier
 # builds). A pre-release (vX.Y.Z-rc.1) gets only its own tag. The Docker layer cache (Rust toolchain, dependencies with
-# the CUDA kernels of candle) is kept in the registry under :buildcache.
+# the CUDA kernels of candle) is kept in the package ghcr.io/<owner>/<repo>-cache (tag docker), apart from the image.
 name: docker
 
 on:
@@ -45,6 +45,8 @@ jobs:
     timeout-minutes: 120
     env:
       IMAGE: ghcr.io/${{ github.repository }}
+      # layer cache in a package of its own, so the image package lists only release tags
+      CACHE: ghcr.io/${{ github.repository }}-cache
       TAG: ${{ inputs.tag }}
       PUSH: ${{ inputs.tag != '' }}
     steps:
@@ -112,5 +114,5 @@ jobs:
             org.opencontainers.image.revision=${{ steps.tags.outputs.sha }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             ai.basal.cuda-compute-caps=80,89,90
-          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache
-          cache-to: ${{ env.PUSH == 'true' && format('type=registry,ref={0}:buildcache,mode=max', env.IMAGE) || '' }}
+          cache-from: type=registry,ref=${{ env.CACHE }}:docker
+          cache-to: ${{ env.PUSH == 'true' && format('type=registry,ref={0}:docker,mode=max', env.CACHE) || '' }}
