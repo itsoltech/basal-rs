@@ -364,6 +364,65 @@ impl EvidenceHead {
     }
 }
 
+/// Tensor data of a safetensors file read with plain reads. With the file mapped, page faults on the 22 GB of
+/// basal-1.5-max on a 32 GB Mac, under memory pressure from the weights on the GPU, made loading 2-3 times slower
+/// (M2 Max: 80-123 s mapped, 37-39 s read; reads past the page cache, F_NOCACHE: 59-65 s).
+struct TensorReader {
+    file: std::fs::File,
+    /// first byte of the data section
+    base: u64,
+    /// byte range of each tensor in the data section
+    ranges: std::collections::HashMap<String, (u64, u64)>,
+}
+
+impl TensorReader {
+    fn open(path: &Path) -> Result<Self> {
+        use std::io::Read;
+        let mut file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+        let mut n = [0u8; 8];
+        file.read_exact(&mut n)?;
+        let n = u64::from_le_bytes(n);
+        let mut header = vec![0u8; usize::try_from(n)?];
+        file.read_exact(&mut header)?;
+        let header: Value = serde_json::from_slice(&header).context("safetensors header")?;
+        let mut ranges = std::collections::HashMap::new();
+        for (name, t) in header.as_object().context("safetensors header")? {
+            if name == "__metadata__" {
+                continue;
+            }
+            let r = t["data_offsets"].as_array().context("data_offsets")?;
+            let (s, e) = (r[0].as_u64().context("data_offsets")?, r[1].as_u64().context("data_offsets")?);
+            ranges.insert(name.clone(), (s, e));
+        }
+        Ok(Self { file, base: 8 + n, ranges })
+    }
+
+    /// Append the bytes of tensor `name` to `out`.
+    fn read(&self, name: &str, out: &mut Vec<u8>) -> Result<()> {
+        use std::os::unix::fs::FileExt;
+        let &(s, e) = self.ranges.get(name).with_context(|| format!("tensor {name} not in the checkpoint"))?;
+        let at = out.len();
+        out.resize(at + usize::try_from(e - s)?, 0);
+        self.file.read_exact_at(&mut out[at..], self.base + s)?;
+        Ok(())
+    }
+}
+
+/// Little-endian bf16 bytes -> f16 (through f32, round to nearest even), split over the available cores.
+fn bf16_to_f16(src: &[u8], dst: &mut [half::f16]) {
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let chunk = dst.len().div_ceil(threads).max(1 << 16);
+    std::thread::scope(|s| {
+        for (d, b) in dst.chunks_mut(chunk).zip(src.chunks(2 * chunk)) {
+            s.spawn(move || {
+                for (o, c) in d.iter_mut().zip(b.chunks_exact(2)) {
+                    *o = half::f16::from_f32(half::bf16::from_le_bytes([c[0], c[1]]).to_f32());
+                }
+            });
+        }
+    });
+}
+
 fn check(st: &MmapedSafetensors, name: &str, shape: &[usize]) -> Result<()> {
     let v = st.get(name).with_context(|| format!("checkpoint tensor {name} missing"))?;
     ensure!(v.shape() == shape, "{name}: shape {:?}, expected {:?}", v.shape(), shape);
@@ -430,21 +489,22 @@ impl GpuBackend {
         // GPU never holds a second copy of a weight (concatenating on the device kept the parts in candle's buffer
         // pool and raised the peak footprint by the size of all gate/up weights).
         let dt = precision.storage();
+        // the mapping above gives names and shapes; the data is read (see TensorReader)
+        let reader = TensorReader::open(&path)?;
         let load_cat = |names: &[String]| -> Result<Tensor> {
             let views = names.iter().map(|n| st.get(n)).collect::<candle_core::Result<Vec<_>>>()?;
             let mut shape = views[0].shape().to_vec();
             shape[0] = views.iter().map(|v| v.shape()[0]).sum();
-            let mut bytes = Vec::with_capacity(views.iter().map(|v| v.data().len()).sum());
-            for v in &views {
-                bytes.extend_from_slice(v.data());
+            let mut bytes = Vec::new();
+            for n in names {
+                reader.read(n, &mut bytes)?;
             }
             Ok(match dt {
                 DType::BF16 => Tensor::from_raw_buffer(&bytes, DType::BF16, &shape, &dev)?,
                 DType::F16 => {
-                    let h: Vec<half::f16> = bytes
-                        .chunks_exact(2)
-                        .map(|c| half::f16::from_f32(half::bf16::from_le_bytes([c[0], c[1]]).to_f32()))
-                        .collect();
+                    // on every core (the 11B checkpoint: ~11e9 values)
+                    let mut h = vec![half::f16::ZERO; bytes.len() / 2];
+                    bf16_to_f16(&bytes, &mut h);
                     Tensor::from_vec(h, shape, &dev)?
                 }
                 d => bail!("unsupported storage dtype {d:?}"),
@@ -490,7 +550,9 @@ impl GpuBackend {
         // lm_head stays in the checkpoint dtype; only the letter rows are gathered and converted to f32 per call.
         let lm_head = {
             let v = st.get("lm_head.weight")?;
-            Tensor::from_raw_buffer(v.data(), DType::BF16, v.shape(), &dev)?
+            let mut bytes = Vec::new();
+            reader.read("lm_head.weight", &mut bytes)?;
+            Tensor::from_raw_buffer(&bytes, DType::BF16, v.shape(), &dev)?
         };
         dev.synchronize()?;
         let d = cfg.head_dim;
