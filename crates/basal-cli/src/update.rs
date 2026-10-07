@@ -121,7 +121,7 @@ fn install() -> Result<Install> {
         return Ok(Install::Source);
     }
     let prefix = exe.parent().and_then(Path::parent).context("installation prefix")?;
-    ensure!(exe.parent().is_some_and(|b| b.ends_with("bin")), "{} is not PREFIX/bin/basal", exe.display());
+    ensure!(exe.parent().is_some_and(|b| b.ends_with("bin")), "{} is not PREFIX/bin/basal", crate::term::P(&exe));
     Ok(Install::Package(prefix.to_path_buf()))
 }
 
@@ -201,11 +201,11 @@ fn replace(prefix: &Path, version: &str) -> Result<()> {
         let dst = prefix.join(rel);
         std::fs::create_dir_all(dst.parent().unwrap())?;
         let new = dst.with_extension("new");
-        std::fs::copy(&src, &new).with_context(|| format!("writing {}", new.display()))?;
+        std::fs::copy(&src, &new).with_context(|| format!("writing {}", crate::term::P(&new)))?;
         std::fs::rename(&new, &dst)?;
     }
     std::fs::remove_dir_all(&tmp)?;
-    crate::done!("updated to {version} in {}; restart a running server", prefix.display());
+    crate::done!("updated to {version} in {}; restart a running server", crate::term::P(&prefix));
     Ok(())
 }
 

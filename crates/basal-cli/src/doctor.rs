@@ -86,7 +86,10 @@ pub fn run(as_json: bool) -> Result<bool> {
     if as_json {
         let checks: Vec<Value> =
             r.0.iter()
-                .map(|c| json!({"area": c.area, "level": c.level.tag().to_lowercase(), "what": c.what, "fix": c.fix}))
+                .map(|c| {
+                    let fix = c.fix.as_deref().map(crate::term::plain);
+                    json!({"area": c.area, "level": c.level.tag().to_lowercase(), "what": crate::term::plain(&c.what), "fix": fix})
+                })
                 .collect();
         println!("{}", serde_json::to_string_pretty(&json!({"ok": worst < Level::Fail, "checks": checks}))?);
     } else {
@@ -146,7 +149,7 @@ fn build(r: &mut Report) {
         r.warn("basal", format!("version {v} is available"), crate::update::how());
     }
     if let Some(b) = crate::paths::cuda_binary() {
-        r.info("basal", format!("GPU commands run the CUDA build {}", b.display()));
+        r.info("basal", format!("GPU commands run the CUDA build {}", crate::term::P(&b)));
     } else if basal_gpu::BUILD_BACKEND == "no GPU backend" {
         r.fail(
             "basal",
@@ -279,7 +282,7 @@ fn cuda_libs(r: &mut Report) {
     let mut missing = Vec::new();
     for lib in CUDA_RUNTIME_LIBS {
         if managed.join(lib).exists() {
-            r.ok("cuda", format!("{lib} ({})", managed.display()));
+            r.ok("cuda", format!("{lib} ({})", crate::term::P(&managed)));
         } else if unsafe { libloading::Library::new(lib) }.is_ok() {
             r.ok("cuda", format!("{lib} (system)"));
         } else {
@@ -304,7 +307,7 @@ fn cuda_libs(r: &mut Report) {
                 format!("CUDA build does not start: {}", String::from_utf8_lossy(&o.stderr).trim()),
                 "`basal setup --force`; check that the package matches this system (glibc 2.28 or newer)",
             ),
-            Err(e) => r.fail("cuda", format!("{}: {e}", b.display()), "reinstall basal"),
+            Err(e) => r.fail("cuda", format!("{}: {e}", crate::term::P(&b)), "reinstall basal"),
         }
     }
 }
@@ -313,7 +316,7 @@ fn cuda_libs(r: &mut Report) {
 fn configuration(r: &mut Report) -> Option<ServeConfig> {
     match config::user_config() {
         Ok((Some(path), c)) => {
-            r.ok("config", format!("{} ({} model(s))", path.display(), c.models.len()));
+            r.ok("config", format!("{} ({} model(s))", crate::term::P(&path), c.models.len()));
             Some(c)
         }
         Ok((None, c)) => {
@@ -321,7 +324,7 @@ fn configuration(r: &mut Report) -> Option<ServeConfig> {
                 "config",
                 format!(
                     "no configuration file ({}): `basal serve` serves {} (`basal init` writes one)",
-                    crate::paths::config_file().display(),
+                    crate::term::P(&crate::paths::config_file()),
                     config::DEFAULT_MODEL.repo
                 ),
             );
@@ -342,11 +345,11 @@ fn models(r: &mut Report, c: &ServeConfig, gpu_budget: Option<u64>) {
             (Some(p), _) => match std::fs::metadata(p.join("model.safetensors")) {
                 Ok(md) => {
                     resident += md.len();
-                    r.ok("models", format!("{}: local, {:.1} GB", p.display(), md.len() as f64 / GB));
+                    r.ok("models", format!("{}: local, {:.1} GB", crate::term::P(&p), md.len() as f64 / GB));
                 }
                 Err(_) => r.fail(
                     "models",
-                    format!("{}: no model.safetensors", p.display()),
+                    format!("{}: no model.safetensors", crate::term::P(&p)),
                     "point `path` at a model directory or use `repo`",
                 ),
             },
@@ -400,19 +403,19 @@ fn models(r: &mut Report, c: &ServeConfig, gpu_budget: Option<u64>) {
                 "disk",
                 format!(
                     "{}: {:.1} GB free, {:.1} GB to download",
-                    dir.display(),
+                    crate::term::P(&dir),
                     free as f64 / GB,
                     download as f64 / GB
                 ),
                 "free disk space or set `HF_HOME` to a larger disk",
             ),
-            Some(free) => r.ok("disk", format!("{}: {:.1} GB free", dir.display(), free as f64 / GB)),
+            Some(free) => r.ok("disk", format!("{}: {:.1} GB free", crate::term::P(&dir), free as f64 / GB)),
             None => {}
         }
         hub(r, &repos);
     }
     if let Some(gc) = Some(&c.gemm_cache).filter(|_| cfg!(feature = "cuda")) {
-        r.info("models", format!("GEMM tables: {}", gc.display()));
+        r.info("models", format!("GEMM tables: {}", crate::term::P(&gc)));
     }
 }
 

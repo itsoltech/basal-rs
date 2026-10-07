@@ -76,11 +76,29 @@ pub fn paint(s: Stream, style: Style, text: &str) -> String {
     format!("\x1b[{code}m{text}\x1b[0m")
 }
 
+/// A path in a message: shown whole in the path colour (also with spaces, e.g. `~/Library/Application Support`),
+/// marked by [`rich`]'s delimiters; the home directory as `~`.
+pub struct P<'a, T: AsRef<Path> + ?Sized>(pub &'a T);
+
+impl<T: AsRef<Path> + ?Sized> std::fmt::Display for P<'_, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{PATH_START}{}{PATH_END}", path(self.0.as_ref()))
+    }
+}
+
+const PATH_START: char = '\u{1}';
+const PATH_END: char = '\u{2}';
+
+/// `text` without the path delimiters of [`P`] (JSON, files).
+pub fn plain(text: &str) -> String {
+    text.replace([PATH_START, PATH_END], "")
+}
+
 /// `text` in `base` (None: unstyled) with its paths and URLs (`~/...`, `/...`, `http://...`) and `commands` in
 /// backticks highlighted; without colours the text is unchanged (backticks included).
 pub fn rich(s: Stream, base: Option<Style>, text: &str) -> String {
     if !enabled(s) {
-        return text.to_string();
+        return plain(text);
     }
     let plain = |t: &str| match base {
         Some(b) if !t.is_empty() => paint(s, b, t),
@@ -89,9 +107,18 @@ pub fn rich(s: Stream, base: Option<Style>, text: &str) -> String {
     let mut out = String::new();
     let mut rest = text;
     while !rest.is_empty() {
-        // the next command or path-like token
+        // a marked path (P) first, then the next command or path-like token
+        let marked = rest.find(PATH_START).filter(|&i| rest[i..].contains(PATH_END));
         let cmd = rest.find('`').filter(|&i| rest[i + 1..].contains('`'));
         let path = path_start(rest);
+        let first = [marked, cmd, path].into_iter().flatten().min();
+        if let Some(i) = marked.filter(|&i| Some(i) == first) {
+            let end = i + rest[i..].find(PATH_END).unwrap();
+            out += &plain(&rest[..i]);
+            out += &paint(s, Style::Path, &rest[i + PATH_START.len_utf8()..end]);
+            rest = &rest[end + PATH_END.len_utf8()..];
+            continue;
+        }
         match (cmd, path) {
             (Some(i), p) if p.is_none_or(|p| i <= p) => {
                 let end = i + 1 + rest[i + 1..].find('`').unwrap();

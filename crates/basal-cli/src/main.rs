@@ -77,7 +77,7 @@ fn delegate_gpu_command() {
     }
     if let Some(bin) = paths::cuda_binary() {
         let err = cuda_command(&bin).args(&args[1..]).exec();
-        crate::warn!("running {}: {err} (`basal doctor` checks the installation)", bin.display());
+        crate::warn!("running {}: {err} (`basal doctor` checks the installation)", crate::term::P(&bin));
         std::process::exit(1);
     }
 }
@@ -427,7 +427,7 @@ fn gpu_engine(m: &ModelArgs, g: &GpuArgs) -> Result<Engine<GpuBackend>> {
     let mut backend = backend;
     if let Some(p) = &g.gemm_table {
         let n = backend.load_gemm_table(p)?;
-        crate::note!("{n} GEMM classes from {}", p.display());
+        crate::note!("{n} GEMM classes from {}", crate::term::P(&p));
     }
     backend.state_cache_bytes = g.state_cache_mb << 20;
     let mut engine = Engine::new(manifest, backend)?;
@@ -451,7 +451,7 @@ fn parse_batching(s: &str) -> Result<basal_core::Batching> {
 
 fn write_json(path: &Path, v: &Value) -> Result<()> {
     if path.exists() {
-        bail!("{} exists; choose a new output path", path.display());
+        bail!("{} exists; choose a new output path", crate::term::P(&path));
     }
     std::fs::write(path, serde_json::to_string_pretty(v)? + "\n")?;
     Ok(())
@@ -599,14 +599,19 @@ fn run() -> Result<()> {
             };
             let out = out.unwrap_or_else(paths::config_file);
             if out.exists() && !force {
-                bail!("{} exists (`--force` replaces it)", out.display());
+                bail!("{} exists (`--force` replaces it)", crate::term::P(&out));
             }
             if let Some(dir) = out.parent().filter(|d| !d.as_os_str().is_empty()) {
-                std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+                std::fs::create_dir_all(dir).with_context(|| format!("creating {}", crate::term::P(&dir)))?;
             }
-            std::fs::write(&out, config::template(&models)).with_context(|| format!("writing {}", out.display()))?;
+            std::fs::write(&out, config::template(&models))
+                .with_context(|| format!("writing {}", crate::term::P(&out)))?;
             let gb: f64 = models.iter().map(|m| m.size_gb).sum();
-            crate::done!("wrote {} ({:.1} GB of models to download at the first `basal serve`)", out.display(), gb);
+            crate::done!(
+                "wrote {} ({:.1} GB of models to download at the first `basal serve`)",
+                crate::term::P(&out),
+                gb
+            );
         }
         Cmd::Serve {
             config,
@@ -638,13 +643,13 @@ fn run() -> Result<()> {
                 (None, None) => {
                     let (path, c) = config::user_config()?;
                     match path {
-                        Some(p) => crate::note!("configuration {}", p.display()),
+                        Some(p) => crate::note!("configuration {}", crate::term::P(&p)),
                         None => {
                             let m = config::DEFAULT_MODEL;
                             crate::note!(
                                 "no configuration ({} is missing; `basal init` writes one): serving {} ({:.1} \
                                  GB, downloaded at the first start)",
-                                paths::config_file().display(),
+                                crate::term::P(&paths::config_file()),
                                 m.repo,
                                 m.size_gb
                             );
@@ -749,13 +754,13 @@ fn run() -> Result<()> {
         }
         Cmd::Facts { input, out } => {
             if out.exists() {
-                bail!("{} exists; choose a new output path", out.display());
+                bail!("{} exists; choose a new output path", crate::term::P(&out));
             }
-            let src = std::fs::read_to_string(&input).with_context(|| format!("reading {}", input.display()))?;
+            let src = std::fs::read_to_string(&input).with_context(|| format!("reading {}", crate::term::P(&input)))?;
             let (mut lines, mut n) = (String::new(), 0usize);
             for (i, line) in src.lines().enumerate().filter(|(_, l)| !l.trim().is_empty()) {
                 let rec: Value =
-                    serde_json::from_str(line).with_context(|| format!("{}:{}", input.display(), i + 1))?;
+                    serde_json::from_str(line).with_context(|| format!("{}:{}", crate::term::P(&input), i + 1))?;
                 let state = basal_core::pyjson::text(&rec["state"]);
                 let r = match basal_core::facts::try_inject(&state) {
                     Ok(s) => json!({"id": rec["id"], "out": s}),

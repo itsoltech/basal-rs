@@ -127,8 +127,8 @@ fn default_tree_max_tokens() -> usize {
 
 impl ServeConfig {
     pub fn load(path: &Path) -> Result<Self> {
-        let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        Self::parse(&text).with_context(|| format!("parsing {}", path.display()))
+        let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", crate::term::P(&path)))?;
+        Self::parse(&text).with_context(|| format!("parsing {}", crate::term::P(&path)))
     }
 
     fn parse(text: &str) -> Result<Self> {
@@ -252,7 +252,7 @@ pub fn cached_model_dir(repo: &str, revision: Option<&str>) -> Option<PathBuf> {
 pub fn model_dir(m: &ModelConfig) -> Result<PathBuf> {
     match (&m.path, &m.repo) {
         (Some(p), None) => {
-            ensure!(m.revision.is_none(), "model {}: revision needs repo", p.display());
+            ensure!(m.revision.is_none(), "model {}: revision needs repo", crate::term::P(&p));
             Ok(p.clone())
         }
         (None, Some(repo)) => download(repo, m.revision.as_deref()),
@@ -266,6 +266,8 @@ fn download(repo: &str, revision: Option<&str>) -> Result<PathBuf> {
     let client = hf_hub::HFClientSync::new().context("Hugging Face client")?;
     let r = client.model(owner, name);
     let at = revision.unwrap_or("main");
+    // a commit as its first 8 characters in the messages
+    let at = if at.len() == 40 && at.bytes().all(|b| b.is_ascii_hexdigit()) { &at[..8] } else { at };
     let files: Vec<String> = MODEL_FILES.iter().map(|f| f.to_string()).collect();
     crate::progress!("{repo}@{at}: fetching the model files (Hugging Face cache)");
     let t = std::time::Instant::now();
@@ -289,9 +291,9 @@ fn download(repo: &str, revision: Option<&str>) -> Result<PathBuf> {
         }
     };
     for f in &MODEL_FILES[..7] {
-        ensure!(dir.join(f).exists(), "{repo}@{at}: {f} missing in {}", dir.display());
+        ensure!(dir.join(f).exists(), "{repo}@{at}: {f} missing in {}", crate::term::P(&dir));
     }
-    crate::done!("{repo}@{at}: {} ({:.0} s)", dir.display(), t.elapsed().as_secs_f64());
+    crate::done!("{repo}@{at}: {} ({:.0} s)", crate::term::P(&dir), t.elapsed().as_secs_f64());
     Ok(dir)
 }
 
@@ -395,11 +397,11 @@ pub fn gemm_table(m: &ModelConfig, manifest: &ModelManifest, cache: &Path) -> Re
             manifest.name,
             INVARIANT_CLASSES.len(),
             shapes.len(),
-            path.display()
+            crate::term::P(&path)
         );
         let t = std::time::Instant::now();
         let table = search(&shapes, &m.dtype)?;
-        std::fs::create_dir_all(cache).with_context(|| format!("creating {}", cache.display()))?;
+        std::fs::create_dir_all(cache).with_context(|| format!("creating {}", crate::term::P(&cache)))?;
         let tmp = path.with_extension("json.tmp");
         std::fs::write(&tmp, serde_json::to_string_pretty(&table)? + "\n")?;
         std::fs::rename(&tmp, &path)?;
@@ -421,7 +423,7 @@ pub fn check_gemm_coverage(name: &str, missing: &[(usize, usize)], table: &Path)
         bail!(
             "{name}: GEMM table {} has no entries for the weight shapes {missing:?} (generate one with `basal \
              gemm-search --model ... --invariant` or use gemm_table: auto)",
-            table.display()
+            crate::term::P(&table)
         );
     }
     Ok(())

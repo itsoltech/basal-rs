@@ -37,15 +37,15 @@ pub fn run(o: &Options) -> Result<()> {
     }
     let cfg = paths::config_file();
     if cfg.exists() {
-        crate::note!("configuration {}", cfg.display());
+        crate::note!("configuration {}", crate::term::P(&cfg));
     } else {
         if let Some(d) = cfg.parent() {
-            std::fs::create_dir_all(d).with_context(|| format!("creating {}", d.display()))?;
+            std::fs::create_dir_all(d).with_context(|| format!("creating {}", crate::term::P(&d)))?;
         }
         std::fs::write(&cfg, config::template(&[config::DEFAULT_MODEL]))?;
         crate::done!(
             "wrote {} ({}; `basal init --force --model ...` changes it)",
-            cfg.display(),
+            crate::term::P(&cfg),
             config::DEFAULT_MODEL.repo
         );
     }
@@ -89,7 +89,7 @@ fn cuda_libraries(force: bool) -> Result<()> {
     };
     let tmp = paths::cache_dir().join("cuda-download");
     std::fs::create_dir_all(&tmp)?;
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", crate::term::P(&dir)))?;
     for comp in COMPONENTS {
         let e = &manifest[comp][arch];
         let rel = e["relative_path"].as_str().with_context(|| format!("{comp}: not in the manifest for {arch}"))?;
@@ -103,7 +103,7 @@ fn cuda_libraries(force: bool) -> Result<()> {
         );
         rt.block_on(download(&client, &format!("{REDIST}/{rel}"), &archive, size))?;
         let got = sha256(&archive)?;
-        ensure!(got == sha, "{}: SHA-256 {got}, the manifest has {sha}", archive.display());
+        ensure!(got == sha, "{}: SHA-256 {got}, the manifest has {sha}", crate::term::P(&archive));
         // the shared libraries and their symlinks only (the archives also hold headers and static libraries)
         let out = tmp.join(comp);
         let _ = std::fs::remove_dir_all(&out);
@@ -116,10 +116,10 @@ fn cuda_libraries(force: bool) -> Result<()> {
             .args(["--wildcards", "*/lib/*.so*"])
             .status()
             .context("running tar (xz support needed)")?;
-        ensure!(st.success(), "tar failed on {}", archive.display());
+        ensure!(st.success(), "tar failed on {}", crate::term::P(&archive));
         for entry in std::fs::read_dir(&out)? {
             let lib = entry?.path().join("lib");
-            for f in std::fs::read_dir(&lib).with_context(|| format!("{}", lib.display()))? {
+            for f in std::fs::read_dir(&lib).with_context(|| format!("{}", crate::term::P(&lib)))? {
                 let f = f?;
                 // libraries and their symlinks; not lib/stubs (link-time stubs, e.g. of libcuda.so)
                 if f.file_type()?.is_dir() {
@@ -136,14 +136,14 @@ fn cuda_libraries(force: bool) -> Result<()> {
     for l in libs {
         ensure!(dir.join(l).exists() || found(l), "{l} missing after the installation");
     }
-    crate::done!("CUDA {CUDA_RELEASE} libraries in {}", dir.display());
+    crate::done!("CUDA {CUDA_RELEASE} libraries in {}", crate::term::P(&dir));
     Ok(())
 }
 
 async fn download(client: &reqwest::Client, url: &str, to: &Path, size: u64) -> Result<()> {
     use std::io::Write;
     let mut resp = client.get(url).send().await?.error_for_status()?;
-    let mut f = std::fs::File::create(to).with_context(|| format!("creating {}", to.display()))?;
+    let mut f = std::fs::File::create(to).with_context(|| format!("creating {}", crate::term::P(&to)))?;
     let (mut done, mut last) = (0u64, std::time::Instant::now());
     while let Some(chunk) = resp.chunk().await? {
         f.write_all(&chunk)?;
@@ -194,7 +194,7 @@ fn service() -> Result<()> {
                 log = log.display()
             ),
         )?;
-        crate::done!("wrote {}; start: `launchctl load -w {0}`; log: {}", plist.display(), log.display());
+        crate::done!("wrote {}; start: `launchctl load -w {0}`; log: {}", crate::term::P(&plist), crate::term::P(&log));
     } else {
         let unit = home.join(".config/systemd/user/basal.service");
         std::fs::create_dir_all(unit.parent().unwrap())?;
@@ -209,7 +209,7 @@ fn service() -> Result<()> {
         crate::done!(
             "wrote {}; start: `systemctl --user daemon-reload && systemctl --user enable --now basal`; log: \
              `journalctl --user -u basal -f` (without a login session: `loginctl enable-linger $USER`)",
-            unit.display()
+            crate::term::P(&unit)
         );
     }
     Ok(())
