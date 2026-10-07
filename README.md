@@ -50,6 +50,24 @@ z referencją FP32 oraz różnice numeryczne opisują [pomiary poniżej](#wyniki
 > — **Remek Kinas**, autor Basala, po przeglądzie silnika basal-rs.
 > [Wpis na X](https://x.com/KinasRemek/status/2107539877839384742)
 
+## Instalacja
+
+```sh
+# macOS, Apple Silicon
+brew install itsoltech/tap/basal-rs
+
+# Linux x86_64 z kartą NVIDIA (pobiera też biblioteki CUDA; z hosta potrzebny tylko sterownik)
+curl -fsSL https://raw.githubusercontent.com/itsoltech/basal-rs/main/install.sh | sh
+
+basal doctor    # co jest na maszynie, czego brakuje i jak to naprawić
+basal serve     # http://127.0.0.1:8000; przy pierwszym starcie pobiera basal-1.5-4.5B
+```
+
+Konfiguracja modeli: `basal init`, aktualizacja: `basal update` (albo
+`brew upgrade`), usunięcie wszystkiego: `basal uninstall --models`. Obraz
+Docker: [niżej](#uruchomienie-w-dockerze). Wymagania, ścieżki i szczegóły:
+[docs/INSTALL.md](docs/INSTALL.md).
+
 ## Co wnosi silnik basal-rs
 
 - **Wspólny stan liczony raz** — drzewo prefiksów współdzieli obliczenia między pytaniami i żądaniami w partii.
@@ -134,24 +152,6 @@ basal-1.5-max zmienia jedną. Na M1 Pro mierzona była wersja z SDPA z MLX w
 attention; obecne attention po jednostkach drzewa daje wynik niezależny od
 pakowania partii przy tym samym czasie pełnej decyzji
 ([pomiar](reports/metal-m2-max-tree/README.md)).
-
-## Instalacja
-
-Paczki z [wydań na GitHubie](https://github.com/itsoltech/basal-rs/releases):
-
-```sh
-brew install itsoltech/tap/basal-rs                     # macOS, Apple Silicon
-curl -fsSL https://raw.githubusercontent.com/itsoltech/basal-rs/main/install.sh | sh   # Linux x86_64 z NVIDIA
-basal doctor      # co jest na maszynie, czego brakuje i jak to naprawić
-basal serve       # http://127.0.0.1:8000; bez konfiguracji serwuje basal-1.5-4.5B
-```
-
-Na Linuksie `basal setup` (uruchamiany przez skrypt) pobiera biblioteki CUDA
-z serwerów NVIDIA; z hosta potrzebny jest tylko sterownik. `basal init`
-zapisuje konfigurację z wybranymi modelami, `basal update` (albo
-`brew upgrade`) aktualizuje, a `basal uninstall --models` usuwa wszystko, co
-basal zostawił na maszynie. Szczegóły, wymagania i ścieżki:
-[docs/INSTALL.md](docs/INSTALL.md).
 
 ## Uruchomienie w Dockerze
 
