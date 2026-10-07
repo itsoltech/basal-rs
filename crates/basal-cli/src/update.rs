@@ -87,12 +87,15 @@ pub fn latest() -> Result<Option<String>> {
         return Ok(vs.pop());
     }
     let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
-    let resp = rt.block_on(c.get(&url).timeout(Duration::from_secs(10)).send())?;
-    if resp.status() == reqwest::StatusCode::NOT_FOUND {
-        return Ok(None);
-    }
-    let v: serde_json::Value = rt.block_on(resp.error_for_status()?.json())?;
-    Ok(v["tag_name"].as_str().map(|t| t.trim_start_matches('v').to_string()))
+    // the request future (its timeout) is created inside the runtime
+    let v: Option<serde_json::Value> = rt.block_on(async {
+        let resp = c.get(&url).timeout(Duration::from_secs(10)).send().await?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok::<_, reqwest::Error>(None);
+        }
+        Ok(Some(resp.error_for_status()?.json().await?))
+    })?;
+    Ok(v.and_then(|v| v["tag_name"].as_str().map(|t| t.trim_start_matches('v').to_string())))
 }
 
 /// How this binary was installed.
