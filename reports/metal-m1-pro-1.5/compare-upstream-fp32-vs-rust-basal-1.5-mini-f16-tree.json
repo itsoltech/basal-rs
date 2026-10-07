@@ -1,0 +1,2638 @@
+{
+  "a": "reports/reference-basal-1.5-mini-fp32",
+  "b": "reports/metal-m1-pro-1.5/export-basal-1.5-mini-f16-tree",
+  "sign": "differences are b - a",
+  "missing": [],
+  "tokens": {
+    "orders_compared": 124,
+    "mismatches": [
+      {
+        "item": "systemone/m15-multi-pl/topics",
+        "differences": [
+          "orders 0 vs 2",
+          "pack.prefix_len",
+          "pack.packed_len",
+          "pack.readout_cols"
+        ],
+        "reason": null
+      },
+      {
+        "item": "systemone/m15-multi-en-list/issues",
+        "differences": [
+          "orders 0 vs 2",
+          "pack.prefix_len",
+          "pack.packed_len",
+          "pack.readout_cols"
+        ],
+        "reason": null
+      },
+      {
+        "item": "systemone/m15-multi-min/t",
+        "differences": [
+          "orders 0 vs 2",
+          "pack.prefix_len",
+          "pack.packed_len",
+          "pack.readout_cols"
+        ],
+        "reason": null
+      },
+      {
+        "item": "systemone/m15-mixed/tags",
+        "differences": [
+          "orders 0 vs 2",
+          "pack.prefix_len",
+          "pack.packed_len",
+          "pack.readout_cols"
+        ],
+        "reason": null
+      },
+      {
+        "item": "systemone/m15-facts-dates/ontime",
+        "differences": [
+          "order 0: prompt",
+          "order 0: input_ids",
+          "order 1: prompt",
+          "order 1: input_ids",
+          "pack.prefix_len",
+          "pack.packed_len",
+          "pack.readout_cols"
+        ],
+        "reason": null
+      },
+      {
+        "item": "systemone/m15-facts-amounts/fits",
+        "differences": [
+          "order 0: prompt",
+          "order 0: input_ids",
+          "order 1: prompt",
+          "order 1: input_ids",
+          "pack.prefix_len",
+          "pack.packed_len",
+          "pack.readout_cols"
+        ],
+        "reason": null
+      },
+      {
+        "item": "systemone/m15-facts-amounts/level",
+        "differences": [
+          "order 0: prompt",
+          "order 0: input_ids",
+          "order 1: prompt",
+          "order 1: input_ids",
+          "pack.prefix_len",
+          "pack.packed_len",
+          "pack.readout_cols"
+        ],
+        "reason": null
+      },
+      {
+        "item": "systemone/m15-facts-euro-evidence/board",
+        "differences": [
+          "order 0: prompt",
+          "order 0: input_ids",
+          "order 1: prompt",
+          "order 1: input_ids",
+          "pack.prefix_len",
+          "pack.packed_len",
+          "pack.readout_cols"
+        ],
+        "reason": null
+      }
+    ],
+    "known_deviations": []
+  },
+  "bench": {
+    "items": 44,
+    "letter_logit_diff": {
+      "n": 268,
+      "max": 0.027522831542968973,
+      "p50": 0.005391703674316517,
+      "p95": 0.014431891113281026,
+      "p99": 0.022318487792968966,
+      "mean": 0.006355150070987532
+    },
+    "order_prob_diff": {
+      "n": 268,
+      "max": 0.005419309196815214,
+      "p50": 0.000034985118669608175,
+      "p95": 0.0021724599251771726,
+      "p99": 0.0037069831985760415,
+      "mean": 0.00037519400577143837
+    },
+    "avg_prob_diff": {
+      "n": 134,
+      "max": 0.0045631461976956,
+      "p50": 0.000035948437543738276,
+      "p95": 0.0017444128265807768,
+      "p99": 0.004168820081606406,
+      "mean": 0.00036377781024458944
+    },
+    "cal_prob_diff": {
+      "n": 134,
+      "max": 0.0039636828182788575,
+      "p50": 0.0000624247765950818,
+      "p95": 0.0015964571900862756,
+      "p99": 0.003616667300741616,
+      "mean": 0.00035467569906340595
+    },
+    "tv_avg": {
+      "n": 44,
+      "max": 0.0045886015077943685,
+      "p50": 0.0001086360028305669,
+      "p95": 0.00200051701076223,
+      "p99": 0.0045886015077943685,
+      "mean": 0.000553934392872443
+    },
+    "tv_cal": {
+      "n": 44,
+      "max": 0.004003391974252557,
+      "p50": 0.00018817675610984658,
+      "p95": 0.0018586112979773403,
+      "p99": 0.004003391974252557,
+      "mean": 0.000540074359937459
+    },
+    "argmax_agreement_avg": "44/44",
+    "argmax_agreement_cal": "44/44",
+    "flips_avg": [],
+    "flips_cal": []
+  },
+  "quality": {
+    "a_avg": {
+      "n": 44,
+      "correct": 31,
+      "accuracy": 0.7045454545454546,
+      "nll": 0.9894999362102052,
+      "brier": 0.4364983265492322,
+      "ece_10bin": 0.17576339548209996
+    },
+    "b_avg": {
+      "n": 44,
+      "correct": 31,
+      "accuracy": 0.7045454545454546,
+      "nll": 0.9886384057229975,
+      "brier": 0.4359228346439213,
+      "ece_10bin": 0.17572326224861806
+    },
+    "a_cal": {
+      "n": 44,
+      "correct": 31,
+      "accuracy": 0.7045454545454546,
+      "nll": 0.8988909688956631,
+      "brier": 0.431166455807198,
+      "ece_10bin": 0.15493469468470272
+    },
+    "b_cal": {
+      "n": 44,
+      "correct": 31,
+      "accuracy": 0.7045454545454546,
+      "nll": 0.8980855879225729,
+      "brier": 0.43063370399606954,
+      "ece_10bin": 0.154700318229088
+    }
+  },
+  "systemone": {
+    "numeric_identical_tokens": {
+      "items": 14,
+      "letter_logit_diff": {
+        "n": 70,
+        "max": 0.016081338256835664,
+        "p50": 0.005443035705567034,
+        "p95": 0.013551590393065638,
+        "p99": 0.016081338256835664,
+        "mean": 0.005772921707327784
+      },
+      "order_prob_diff": {
+        "n": 70,
+        "max": 0.0010353048036993995,
+        "p50": 0.00003098034414218643,
+        "p95": 0.000842679547160774,
+        "p99": 0.0010353048036993995,
+        "mean": 0.00017804591451586757
+      },
+      "avg_prob_diff": {
+        "n": 35,
+        "max": 0.0009627300598449295,
+        "p50": 0.00005579396738819575,
+        "p95": 0.0008381668531391717,
+        "p99": 0.0009627300598449295,
+        "mean": 0.00014107272445839156
+      },
+      "cal_prob_diff": {
+        "n": 35,
+        "max": 0.05096028858626789,
+        "p50": 0.00011140404274576077,
+        "p95": 0.05096028858626787,
+        "p99": 0.05096028858626789,
+        "mean": 0.010333308981209845
+      },
+      "tv_avg": {
+        "n": 14,
+        "max": 0.0009627300598449035,
+        "p50": 0.0000774682609192856,
+        "p95": 0.0009627300598449035,
+        "p99": 0.0009627300598449035,
+        "mean": 0.00017634090557298946
+      },
+      "tv_cal": {
+        "n": 14,
+        "max": 0.050960288586267874,
+        "p50": 0.0002772537128959247,
+        "p95": 0.050960288586267874,
+        "p99": 0.050960288586267874,
+        "mean": 0.012916636226512306
+      },
+      "argmax_agreement_avg": "14/14",
+      "argmax_agreement_cal": "14/14",
+      "flips_avg": [],
+      "flips_cal": []
+    },
+    "cases": [
+      {
+        "id": "so-structured-state",
+        "error_a": null,
+        "error_b": {
+          "detail": [
+            {
+              "loc": [
+                "body",
+                "model"
+              ],
+              "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-mini\"",
+              "type": "unknown_model"
+            }
+          ]
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "so-array-state-en",
+        "error_a": null,
+        "error_b": {
+          "detail": [
+            {
+              "loc": [
+                "body",
+                "model"
+              ],
+              "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-mini\"",
+              "type": "unknown_model"
+            }
+          ]
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "so-null-and-missing-instructions",
+        "error_a": null,
+        "error_b": {
+          "detail": [
+            {
+              "loc": [
+                "body",
+                "model"
+              ],
+              "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-mini\"",
+              "type": "unknown_model"
+            }
+          ]
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "so-empty-structures",
+        "error_a": null,
+        "error_b": {
+          "detail": [
+            {
+              "loc": [
+                "body",
+                "model"
+              ],
+              "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-mini\"",
+              "type": "unknown_model"
+            }
+          ]
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "so-duplicate-descriptions-hide",
+        "error_a": null,
+        "error_b": {
+          "detail": [
+            {
+              "loc": [
+                "body",
+                "model"
+              ],
+              "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-mini\"",
+              "type": "unknown_model"
+            }
+          ]
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "so-unicode",
+        "error_a": null,
+        "error_b": {
+          "detail": [
+            {
+              "loc": [
+                "body",
+                "model"
+              ],
+              "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-mini\"",
+              "type": "unknown_model"
+            }
+          ]
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "so-polish-from-instructions",
+        "error_a": null,
+        "error_b": {
+          "detail": [
+            {
+              "loc": [
+                "body",
+                "model"
+              ],
+              "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-mini\"",
+              "type": "unknown_model"
+            }
+          ]
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "so-ten-options",
+        "error_a": null,
+        "error_b": {
+          "detail": [
+            {
+              "loc": [
+                "body",
+                "model"
+              ],
+              "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-mini\"",
+              "type": "unknown_model"
+            }
+          ]
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "so-score-two-levels",
+        "error_a": null,
+        "error_b": {
+          "detail": [
+            {
+              "loc": [
+                "body",
+                "model"
+              ],
+              "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-mini\"",
+              "type": "unknown_model"
+            }
+          ]
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "so-score-one-level",
+        "error_a": "ValueError: question 'alarm': 1 options (supported: 2..10)",
+        "error_b": {
+          "detail": [
+            {
+              "loc": [
+                "body",
+                "model"
+              ],
+              "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-mini\"",
+              "type": "unknown_model"
+            }
+          ]
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "so-eleven-options",
+        "error_a": "ValueError: question 'cat': 11 options (supported: 2..10)",
+        "error_b": {
+          "detail": [
+            {
+              "loc": [
+                "body",
+                "model"
+              ],
+              "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-mini\"",
+              "type": "unknown_model"
+            }
+          ]
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "so-unknown-type",
+        "error_a": null,
+        "error_b": {
+          "detail": [
+            {
+              "loc": [
+                "body",
+                "model"
+              ],
+              "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-mini\"",
+              "type": "unknown_model"
+            }
+          ]
+        },
+        "deviation": "unknown type is a validation error; upstream treats it as choice",
+        "items": []
+      },
+      {
+        "id": "so-missing-type",
+        "error_a": null,
+        "error_b": {
+          "detail": [
+            {
+              "loc": [
+                "body",
+                "questions",
+                "q",
+                "type"
+              ],
+              "msg": "Field required (choice, noul or score)",
+              "type": "union_tag_not_found"
+            }
+          ]
+        },
+        "deviation": "missing type is a validation error; upstream defaults to choice",
+        "items": []
+      },
+      {
+        "id": "m15-multi-pl",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "topics",
+            "tokens_identical": false,
+            "tv_cal": -0.0,
+            "answer": {
+              "type_a": "multi",
+              "type_b": "multi",
+              "max_abs_prob_diff": 0.00019110197482918867,
+              "confidence_a": null,
+              "confidence_b": null,
+              "fields_same": true,
+              "type_same": true,
+              "selected_same": true,
+              "threshold_same": true,
+              "set_confidence_diff": 0.0002230691648082983
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-multi-en-list",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "issues",
+            "tokens_identical": false,
+            "tv_cal": -0.0,
+            "answer": {
+              "type_a": "multi",
+              "type_b": "multi",
+              "max_abs_prob_diff": 0.00008494552458145066,
+              "confidence_a": null,
+              "confidence_b": null,
+              "fields_same": true,
+              "type_same": true,
+              "selected_same": true,
+              "threshold_same": true,
+              "set_confidence_diff": -0.00006518458916850156
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-multi-min",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "t",
+            "tokens_identical": false,
+            "tv_cal": -0.0,
+            "answer": {
+              "type_a": "multi",
+              "type_b": "multi",
+              "max_abs_prob_diff": 0.00029668069999259916,
+              "confidence_a": null,
+              "confidence_b": null,
+              "fields_same": true,
+              "type_same": true,
+              "selected_same": true,
+              "threshold_same": true,
+              "set_confidence_diff": 0.00028678936768287977
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-act-short",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "fraud",
+            "tokens_identical": true,
+            "tv_cal": 0.050960288586267874,
+            "answer": {
+              "type_a": "act",
+              "type_b": "act",
+              "max_abs_prob_diff": 0.0005323046991436153,
+              "confidence_a": 0.9135151505470276,
+              "confidence_b": 0.9129829203536899,
+              "confidence_diff": -0.0005322301933377016,
+              "fields_same": true,
+              "type_same": true,
+              "action_same": true,
+              "answer_same": true,
+              "calibration_same": true,
+              "expected_costs_keys_same": true,
+              "expected_costs_max_abs_diff": 0.005323000000000078
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-act-full",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "route",
+            "tokens_identical": true,
+            "tv_cal": 0.03305035321837513,
+            "answer": {
+              "type_a": "act",
+              "type_b": "act",
+              "max_abs_prob_diff": 0.0010525895523368911,
+              "confidence_a": 0.8495138883590698,
+              "confidence_b": 0.8505664779114067,
+              "confidence_diff": 0.0010525895523368911,
+              "fields_same": true,
+              "type_same": true,
+              "action_same": true,
+              "refused_same": true,
+              "answer_same": true,
+              "calibration_same": true,
+              "expected_costs_keys_same": true,
+              "expected_costs_max_abs_diff": 0.048204000000005465
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-act-maxerr-005",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "refund",
+            "tokens_identical": true,
+            "tv_cal": 0.030035935282696682,
+            "answer": {
+              "type_a": "act",
+              "type_b": "act",
+              "max_abs_prob_diff": 0.00017541870515708213,
+              "confidence_a": 0.9565125107765198,
+              "confidence_b": 0.9566879257563865,
+              "confidence_diff": 0.00017541497986672816,
+              "fields_same": true,
+              "type_same": true,
+              "action_same": true,
+              "answer_same": true,
+              "calibration_same": true,
+              "expected_costs_keys_same": true,
+              "expected_costs_max_abs_diff": 0.0008770000000000167
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-act-no-threshold",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "fit",
+            "tokens_identical": true,
+            "tv_cal": 0.04698603157466433,
+            "answer": {
+              "type_a": "act",
+              "type_b": "act",
+              "max_abs_prob_diff": 0.00009296602225822292,
+              "confidence_a": 0.6283518671989441,
+              "confidence_b": 0.6282589011766859,
+              "confidence_diff": -0.00009296602225816741,
+              "fields_same": true,
+              "type_same": true,
+              "action_same": true,
+              "answer_same": true,
+              "calibration_same": true,
+              "max_error_same": true,
+              "expected_costs_keys_same": true,
+              "expected_costs_max_abs_diff": 0.00018600000000001948
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-mixed",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "dept",
+            "tokens_identical": true,
+            "tv_cal": 0.00014581288349386047,
+            "answer": {
+              "type_a": "choice",
+              "type_b": "choice",
+              "max_abs_prob_diff": 0.0001458719917237193,
+              "choice_a": "logistics",
+              "choice_b": "logistics",
+              "choice_same": true,
+              "confidence_a": 0.9732965230941772,
+              "confidence_b": 0.9601613211193637,
+              "confidence_diff": -0.013135201974813548,
+              "fields_same": true,
+              "type_same": true
+            }
+          },
+          {
+            "item": "refund",
+            "tokens_identical": true,
+            "tv_cal": 0.0006979682337195786,
+            "answer": {
+              "type_a": "noul",
+              "type_b": "noul",
+              "max_abs_prob_diff": 0.0,
+              "noul_diff": 0.00015740565684951857,
+              "confidence_a": 0.8521918058395386,
+              "confidence_b": null,
+              "fields_same": false,
+              "type_same": true
+            }
+          },
+          {
+            "item": "urgency",
+            "tokens_identical": true,
+            "tv_cal": 0.0004086945422979889,
+            "answer": {
+              "type_a": "score",
+              "type_b": "score",
+              "max_abs_prob_diff": 0.00011863954696765544,
+              "score_diff": 0.00002704610814618924,
+              "confidence_a": 0.8472858667373657,
+              "confidence_b": 0.6872744120715553,
+              "confidence_diff": -0.16001145466581046,
+              "fields_same": true,
+              "legend_same": true,
+              "type_same": true
+            }
+          },
+          {
+            "item": "tags",
+            "tokens_identical": false,
+            "tv_cal": -0.0,
+            "answer": {
+              "type_a": "multi",
+              "type_b": "multi",
+              "max_abs_prob_diff": 0.0013208416707911619,
+              "confidence_a": null,
+              "confidence_b": null,
+              "fields_same": true,
+              "type_same": true,
+              "selected_same": true,
+              "threshold_same": true,
+              "set_confidence_diff": 0.0022989014787073714
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-evidence-noul",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "form",
+            "tokens_identical": true,
+            "tv_cal": 9.035684293430199e-6,
+            "answer": {
+              "type_a": "noul",
+              "type_b": "noul",
+              "max_abs_prob_diff": 0.0,
+              "noul_diff": 9.129382940063421e-6,
+              "confidence_a": 0.9884523749351501,
+              "confidence_b": null,
+              "fields_same": false,
+              "type_same": true,
+              "evidence_spans_same": true,
+              "evidence_first_same": true,
+              "evidence_max_abs_probability_diff": 0.00019098572787273893,
+              "evidence_a": [
+                [
+                  53,
+                  245,
+                  " Najemca może wypowiedzieć umowę z zachowaniem trzymiesięcznego okresu wypowiedzenia ze skutkiem na koniec miesiąca kalendarzowego. Wypowiedzenie wymaga formy pisemnej pod rygorem nieważności."
+                ],
+                [
+                  245,
+                  328,
+                  " Kaucja wynosi 6 000 zł i podlega zwrotowi w terminie 30 dni od dnia zwrotu lokalu."
+                ]
+              ],
+              "evidence_b": [
+                [
+                  53,
+                  245,
+                  " Najemca może wypowiedzieć umowę z zachowaniem trzymiesięcznego okresu wypowiedzenia ze skutkiem na koniec miesiąca kalendarzowego. Wypowiedzenie wymaga formy pisemnej pod rygorem nieważności."
+                ],
+                [
+                  245,
+                  328,
+                  " Kaucja wynosi 6 000 zł i podlega zwrotowi w terminie 30 dni od dnia zwrotu lokalu."
+                ]
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-evidence-choice-en",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "cause",
+            "tokens_identical": true,
+            "tv_cal": 1.5731284489694988e-6,
+            "answer": {
+              "type_a": "choice",
+              "type_b": "choice",
+              "max_abs_prob_diff": 1.5840387266319311e-6,
+              "choice_a": "tls",
+              "choice_b": "tls",
+              "choice_same": true,
+              "confidence_a": 0.9993032217025757,
+              "confidence_b": 0.9989572086119535,
+              "confidence_diff": -0.0003460130906222103,
+              "fields_same": true,
+              "type_same": true,
+              "evidence_spans_same": true,
+              "evidence_first_same": true,
+              "evidence_max_abs_probability_diff": 0.00010358891403741168,
+              "evidence_a": [
+                [
+                  123,
+                  261,
+                  "er identified an expired TLS certificate on the load balancer and rotated it at 14:37. Traffic recovered fully by 14:41. No data was lost."
+                ],
+                [
+                  1,
+                  68,
+                  "ncident report: At 14:02 the payment API started returning HTTP 503"
+                ],
+                [
+                  68,
+                  104,
+                  " for all merchants in the EU region."
+                ]
+              ],
+              "evidence_b": [
+                [
+                  123,
+                  261,
+                  "er identified an expired TLS certificate on the load balancer and rotated it at 14:37. Traffic recovered fully by 14:41. No data was lost."
+                ],
+                [
+                  1,
+                  68,
+                  "ncident report: At 14:02 the payment API started returning HTTP 503"
+                ],
+                [
+                  68,
+                  104,
+                  " for all merchants in the EU region."
+                ]
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-evidence-score-act",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "urgency",
+            "tokens_identical": true,
+            "tv_cal": 0.00008971103891331888,
+            "answer": {
+              "type_a": "score",
+              "type_b": "score",
+              "max_abs_prob_diff": 0.0000888625127861975,
+              "score_diff": 0.0001159412910674007,
+              "confidence_a": 0.7295835018157959,
+              "confidence_b": 0.6804193100085,
+              "confidence_diff": -0.04916419180729592,
+              "fields_same": true,
+              "legend_same": true,
+              "type_same": true,
+              "evidence_spans_same": true,
+              "evidence_first_same": true,
+              "evidence_max_abs_probability_diff": 0.0003820473583400069,
+              "evidence_a": [
+                [
+                  19,
+                  99,
+                  " od trzech dni nie działa terminal płatniczy w naszym sklepie, tracimy sprzedaż."
+                ],
+                [
+                  0,
+                  18,
+                  "Zgłoszenie klienta"
+                ]
+              ],
+              "evidence_b": [
+                [
+                  19,
+                  99,
+                  " od trzech dni nie działa terminal płatniczy w naszym sklepie, tracimy sprzedaż."
+                ],
+                [
+                  0,
+                  18,
+                  "Zgłoszenie klienta"
+                ]
+              ]
+            }
+          },
+          {
+            "item": "route",
+            "tokens_identical": true,
+            "tv_cal": 0.01841005892551488,
+            "answer": {
+              "type_a": "act",
+              "type_b": "act",
+              "max_abs_prob_diff": 0.0001355252766773729,
+              "confidence_a": 0.9759703874588013,
+              "confidence_b": 0.9758348621821239,
+              "confidence_diff": -0.0001355252766773729,
+              "fields_same": true,
+              "type_same": true,
+              "action_same": true,
+              "answer_same": true,
+              "calibration_same": true,
+              "evidence_spans_same": true,
+              "evidence_first_same": true,
+              "evidence_max_abs_probability_diff": 0.000482710153348595,
+              "evidence_a": [
+                [
+                  19,
+                  99,
+                  " od trzech dni nie działa terminal płatniczy w naszym sklepie, tracimy sprzedaż."
+                ],
+                [
+                  0,
+                  19,
+                  "Zgłoszenie klienta:"
+                ]
+              ],
+              "evidence_b": [
+                [
+                  19,
+                  99,
+                  " od trzech dni nie działa terminal płatniczy w naszym sklepie, tracimy sprzedaż."
+                ],
+                [
+                  0,
+                  19,
+                  "Zgłoszenie klienta:"
+                ]
+              ],
+              "expected_costs_keys_same": true,
+              "expected_costs_max_abs_diff": 0.0004060000000000036
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-evidence-long",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "cards",
+            "tokens_identical": true,
+            "tv_cal": 0.00001101717178285562,
+            "answer": {
+              "type_a": "noul",
+              "type_b": "noul",
+              "max_abs_prob_diff": 0.0,
+              "noul_diff": 0.000011053342152236682,
+              "confidence_a": 0.9928817749023438,
+              "confidence_b": null,
+              "fields_same": false,
+              "type_same": true,
+              "evidence_spans_same": true,
+              "evidence_first_same": true,
+              "evidence_max_abs_probability_diff": 0.0001865981485333762,
+              "evidence_a": [
+                [
+                  338,
+                  483,
+                  " Po tym terminie wygasają bez możliwości przywrócenia. §5. 100 punktów można wymienić na bon o wartości 10 zł. Bonu nie można wymienić na gotówkę"
+                ],
+                [
+                  491,
+                  643,
+                  "lep może zmienić regulamin z 14-dniowym wyprzedzeniem, informując uczestników e-mailem. §7. Reklamacje dotyczące punktów rozpatrywane są w ciągu 30 dni."
+                ],
+                [
+                  39,
+                  282,
+                  " Program prowadzi Sklep XYZ sp. z o.o. §2. Uczestnikiem może zostać osoba pełnoletnia posiadająca konto w sklepie. §3. Za każde wydane 10 zł uczestnik otrzymuje 1 punkt. Punkty nie przysługują za zakup kart podarunkowych ani za koszty dostawy."
+                ]
+              ],
+              "evidence_b": [
+                [
+                  338,
+                  483,
+                  " Po tym terminie wygasają bez możliwości przywrócenia. §5. 100 punktów można wymienić na bon o wartości 10 zł. Bonu nie można wymienić na gotówkę"
+                ],
+                [
+                  491,
+                  643,
+                  "lep może zmienić regulamin z 14-dniowym wyprzedzeniem, informując uczestników e-mailem. §7. Reklamacje dotyczące punktów rozpatrywane są w ciągu 30 dni."
+                ],
+                [
+                  39,
+                  282,
+                  " Program prowadzi Sklep XYZ sp. z o.o. §2. Uczestnikiem może zostać osoba pełnoletnia posiadająca konto w sklepie. §3. Za każde wydane 10 zł uczestnik otrzymuje 1 punkt. Punkty nie przysługują za zakup kart podarunkowych ani za koszty dostawy."
+                ]
+              ]
+            }
+          },
+          {
+            "item": "cash",
+            "tokens_identical": true,
+            "tv_cal": 5.60834672458637e-6,
+            "answer": {
+              "type_a": "noul",
+              "type_b": "noul",
+              "max_abs_prob_diff": 0.0,
+              "noul_diff": 0.0000475345616078298,
+              "confidence_a": 0.990885853767395,
+              "confidence_b": null,
+              "fields_same": false,
+              "type_same": true,
+              "evidence_spans_same": true,
+              "evidence_first_same": true,
+              "evidence_max_abs_probability_diff": 0.00006343665245348365,
+              "evidence_a": [
+                [
+                  338,
+                  483,
+                  " Po tym terminie wygasają bez możliwości przywrócenia. §5. 100 punktów można wymienić na bon o wartości 10 zł. Bonu nie można wymienić na gotówkę"
+                ],
+                [
+                  491,
+                  643,
+                  "lep może zmienić regulamin z 14-dniowym wyprzedzeniem, informując uczestników e-mailem. §7. Reklamacje dotyczące punktów rozpatrywane są w ciągu 30 dni."
+                ],
+                [
+                  0,
+                  282,
+                  "Regulamin programu lojalnościowego. §1. Program prowadzi Sklep XYZ sp. z o.o. §2. Uczestnikiem może zostać osoba pełnoletnia posiadająca konto w sklepie. §3. Za każde wydane 10 zł uczestnik otrzymuje 1 punkt. Punkty nie przysługują za zakup kart podarunkowych ani za koszty dostawy."
+                ]
+              ],
+              "evidence_b": [
+                [
+                  338,
+                  483,
+                  " Po tym terminie wygasają bez możliwości przywrócenia. §5. 100 punktów można wymienić na bon o wartości 10 zł. Bonu nie można wymienić na gotówkę"
+                ],
+                [
+                  491,
+                  643,
+                  "lep może zmienić regulamin z 14-dniowym wyprzedzeniem, informując uczestników e-mailem. §7. Reklamacje dotyczące punktów rozpatrywane są w ciągu 30 dni."
+                ],
+                [
+                  0,
+                  282,
+                  "Regulamin programu lojalnościowego. §1. Program prowadzi Sklep XYZ sp. z o.o. §2. Uczestnikiem może zostać osoba pełnoletnia posiadająca konto w sklepie. §3. Za każde wydane 10 zł uczestnik otrzymuje 1 punkt. Punkty nie przysługują za zakup kart podarunkowych ani za koszty dostawy."
+                ]
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-facts-dates",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "ontime",
+            "tokens_identical": false,
+            "tv_cal": 0.005858021098642641,
+            "answer": {
+              "type_a": "noul",
+              "type_b": "noul",
+              "max_abs_prob_diff": 0.0,
+              "noul_diff": -0.000019570791110146146,
+              "confidence_a": 0.943988025188446,
+              "confidence_b": null,
+              "fields_same": false,
+              "type_same": true
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-facts-amounts",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "fits",
+            "tokens_identical": false,
+            "tv_cal": 0.2588273708884057,
+            "answer": {
+              "type_a": "noul",
+              "type_b": "noul",
+              "max_abs_prob_diff": 0.0,
+              "noul_diff": 0.0028272027782827447,
+              "confidence_a": 0.743332028388977,
+              "confidence_b": null,
+              "fields_same": false,
+              "type_same": true
+            }
+          },
+          {
+            "item": "level",
+            "tokens_identical": false,
+            "tv_cal": 0.21040650407219147,
+            "answer": {
+              "type_a": "score",
+              "type_b": "score",
+              "max_abs_prob_diff": 0.0012372374659889163,
+              "score_diff": 0.0007318580854939194,
+              "confidence_a": 0.6299959421157837,
+              "confidence_b": 0.44684976937265897,
+              "confidence_diff": -0.18314617274312472,
+              "fields_same": true,
+              "legend_same": true,
+              "type_same": true
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-facts-euro-evidence",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "board",
+            "tokens_identical": false,
+            "tv_cal": 0.28907185267301444,
+            "answer": {
+              "type_a": "noul",
+              "type_b": "noul",
+              "max_abs_prob_diff": 0.0,
+              "noul_diff": -0.001624691174464954,
+              "confidence_a": 0.8918554782867432,
+              "confidence_b": null,
+              "fields_same": false,
+              "type_same": true,
+              "evidence_spans_same": true,
+              "evidence_first_same": true,
+              "evidence_max_abs_probability_diff": 0.0007618517599004421,
+              "evidence_a": [
+                [
+                  6,
+                  32,
+                  "kt opiewa na 120 000 euro."
+                ],
+                [
+                  32,
+                  167,
+                  " Kurs rozliczeniowy: 1 EUR = 4,3150 zł. Limit zatwierdzenia przez kierownika wynosi 500 000,00 zł; powyżej wymagana jest zgoda zarządu."
+                ]
+              ],
+              "evidence_b": [
+                [
+                  6,
+                  32,
+                  "kt opiewa na 120 000 euro."
+                ],
+                [
+                  32,
+                  167,
+                  " Kurs rozliczeniowy: 1 EUR = 4,3150 zł. Limit zatwierdzenia przez kierownika wynosi 500 000,00 zł; powyżej wymagana jest zgoda zarządu."
+                ]
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-facts-none",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "t",
+            "tokens_identical": true,
+            "tv_cal": 0.000020818553978801555,
+            "answer": {
+              "type_a": "choice",
+              "type_b": "choice",
+              "max_abs_prob_diff": 0.000020633529344782353,
+              "choice_a": "up",
+              "choice_b": "up",
+              "choice_same": true,
+              "confidence_a": 0.9947671890258789,
+              "confidence_b": 0.9921817338328354,
+              "confidence_diff": -0.00258545519304354,
+              "fields_same": true,
+              "type_same": true
+            }
+          }
+        ]
+      },
+      {
+        "id": "cx-01-ticket-fan-out",
+        "error_a": null,
+        "error_b": {
+          "detail": [
+            {
+              "loc": [
+                "body",
+                "model"
+              ],
+              "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-mini\"",
+              "type": "unknown_model"
+            }
+          ]
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "cx-02-web-agent",
+        "error_a": null,
+        "error_b": {
+          "detail": [
+            {
+              "loc": [
+                "body",
+                "model"
+              ],
+              "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-mini\"",
+              "type": "unknown_model"
+            }
+          ]
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "cx-03-deadline-decomposed",
+        "error_a": null,
+        "error_b": {
+          "detail": [
+            {
+              "loc": [
+                "body",
+                "model"
+              ],
+              "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-mini\"",
+              "type": "unknown_model"
+            }
+          ]
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "cx-04-loan-triage",
+        "error_a": null,
+        "error_b": {
+          "detail": [
+            {
+              "loc": [
+                "body",
+                "model"
+              ],
+              "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-mini\"",
+              "type": "unknown_model"
+            }
+          ]
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "cx-05-guard-check",
+        "error_a": null,
+        "error_b": {
+          "detail": [
+            {
+              "loc": [
+                "body",
+                "model"
+              ],
+              "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-mini\"",
+              "type": "unknown_model"
+            }
+          ]
+        },
+        "deviation": null,
+        "items": []
+      }
+    ]
+  },
+  "upstream_endpoint": [
+    {
+      "id": "so-structured-state",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "kind",
+          "diff": {
+            "type_a": "choice",
+            "type_b": "choice",
+            "max_abs_prob_diff": 0.0004628322306350352,
+            "choice_a": "damage",
+            "choice_b": "damage",
+            "choice_same": true,
+            "confidence_a": 0.9496318697929382,
+            "confidence_b": 0.9500947020235733,
+            "confidence_diff": 0.0004628322306350352,
+            "fields_same": true,
+            "type_same": true
+          }
+        },
+        {
+          "question": "refund",
+          "diff": {
+            "type_a": "noul",
+            "type_b": "noul",
+            "max_abs_prob_diff": 0.00007742669713917127,
+            "noul_diff": 0.00007739689481678358,
+            "confidence_a": 0.6544882655143738,
+            "confidence_b": 0.6544108388172346,
+            "confidence_diff": -0.00007742669713917127,
+            "fields_same": true,
+            "type_same": true
+          }
+        },
+        {
+          "question": "urgency",
+          "diff": {
+            "type_a": "score",
+            "type_b": "score",
+            "max_abs_prob_diff": 0.0007748964399755254,
+            "score_diff": -0.0010543960997704271,
+            "confidence_a": 0.454542338848114,
+            "confidence_b": 0.45426277958367434,
+            "confidence_diff": -0.00027955926443967716,
+            "fields_same": true,
+            "legend_same": true,
+            "type_same": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "so-array-state-en",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "billing",
+          "diff": {
+            "type_a": "noul",
+            "type_b": "noul",
+            "max_abs_prob_diff": 0.000034488645234920234,
+            "noul_diff": -0.000034488645234920234,
+            "confidence_a": 0.9814378023147583,
+            "confidence_b": 0.9814033136695234,
+            "confidence_diff": -0.000034488645234920234,
+            "fields_same": true,
+            "type_same": true
+          }
+        },
+        {
+          "question": "tone",
+          "diff": {
+            "type_a": "choice",
+            "type_b": "choice",
+            "max_abs_prob_diff": 0.0015355602429366622,
+            "choice_a": "calm",
+            "choice_b": "calm",
+            "choice_same": true,
+            "confidence_a": 0.4990013539791107,
+            "confidence_b": 0.5005369142220474,
+            "confidence_diff": 0.0015355602429366622,
+            "fields_same": true,
+            "type_same": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "so-null-and-missing-instructions",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "explicit_null",
+          "diff": {
+            "type_a": "noul",
+            "type_b": "noul",
+            "max_abs_prob_diff": 1.5919958529300726e-6,
+            "noul_diff": 1.5733694014308242e-6,
+            "confidence_a": 0.9489927291870117,
+            "confidence_b": 0.9489943025564131,
+            "confidence_diff": 1.5733694014308242e-6,
+            "fields_same": true,
+            "type_same": true
+          }
+        },
+        {
+          "question": "missing",
+          "diff": {
+            "type_a": "noul",
+            "type_b": "noul",
+            "max_abs_prob_diff": 0.0000622347102121612,
+            "noul_diff": 0.0000622347102121612,
+            "confidence_a": 0.9730998277664185,
+            "confidence_b": 0.9731620624766306,
+            "confidence_diff": 0.0000622347102121612,
+            "fields_same": true,
+            "type_same": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "so-empty-structures",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "criteria_null",
+          "diff": {
+            "type_a": "noul",
+            "type_b": "noul",
+            "max_abs_prob_diff": 0.00008812653506773752,
+            "noul_diff": 0.00008809300745515891,
+            "confidence_a": 0.9735323786735535,
+            "confidence_b": 0.9736204716810086,
+            "confidence_diff": 0.00008809300745515891,
+            "fields_same": true,
+            "type_same": true
+          }
+        },
+        {
+          "question": "empty_obj_choice",
+          "diff": {
+            "type_a": "choice",
+            "type_b": "choice",
+            "max_abs_prob_diff": 0.0004771859598461381,
+            "choice_a": "correct",
+            "choice_b": "correct",
+            "choice_same": true,
+            "confidence_a": 0.514417290687561,
+            "confidence_b": 0.514092527103361,
+            "confidence_diff": -0.0003247635842000829,
+            "fields_same": true,
+            "type_same": true
+          }
+        },
+        {
+          "question": "empty_true",
+          "diff": {
+            "type_a": "noul",
+            "type_b": "noul",
+            "max_abs_prob_diff": 7.334366477818044e-6,
+            "noul_diff": 7.327847219868594e-6,
+            "confidence_a": 0.987817108631134,
+            "confidence_b": 0.9878097742646562,
+            "confidence_diff": -7.334366477818044e-6,
+            "fields_same": true,
+            "type_same": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "so-duplicate-descriptions-hide",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "dup_hide",
+          "diff": {
+            "type_a": "choice",
+            "type_b": "choice",
+            "max_abs_prob_diff": 0.0012000085441863928,
+            "choice_a": "t1",
+            "choice_b": "t1",
+            "choice_same": true,
+            "confidence_a": 0.47804394364356995,
+            "confidence_b": 0.47924395218775634,
+            "confidence_diff": 0.0012000085441863928,
+            "fields_same": true,
+            "type_same": true
+          }
+        },
+        {
+          "question": "dup_show",
+          "diff": {
+            "type_a": "choice",
+            "type_b": "choice",
+            "max_abs_prob_diff": 0.0007505887404853362,
+            "choice_a": "t1",
+            "choice_b": "t1",
+            "choice_same": true,
+            "confidence_a": 0.4695044457912445,
+            "confidence_b": 0.47025503453172984,
+            "confidence_diff": 0.0007505887404853362,
+            "fields_same": true,
+            "type_same": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "so-unicode",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "lang",
+          "diff": {
+            "type_a": "choice",
+            "type_b": "choice",
+            "max_abs_prob_diff": 0.0001480030674619881,
+            "choice_a": "ja",
+            "choice_b": "ja",
+            "choice_same": true,
+            "confidence_a": 0.8777843117713928,
+            "confidence_b": 0.8776363087039308,
+            "confidence_diff": -0.0001480030674619881,
+            "fields_same": true,
+            "type_same": true
+          }
+        },
+        {
+          "question": "ok",
+          "diff": {
+            "type_a": "noul",
+            "type_b": "noul",
+            "max_abs_prob_diff": 0.000022465034401730755,
+            "noul_diff": -0.000022465034401730755,
+            "confidence_a": 0.990104615688324,
+            "confidence_b": 0.9900821506539222,
+            "confidence_diff": -0.000022465034401730755,
+            "fields_same": true,
+            "type_same": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "so-polish-from-instructions",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "pay",
+          "diff": {
+            "type_a": "noul",
+            "type_b": "noul",
+            "max_abs_prob_diff": 0.0001660750521683685,
+            "noul_diff": -0.0001660750521683685,
+            "confidence_a": 0.9841369390487671,
+            "confidence_b": 0.9839708639965987,
+            "confidence_diff": -0.0001660750521683685,
+            "fields_same": true,
+            "type_same": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "so-ten-options",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "hour",
+          "diff": {
+            "type_a": "choice",
+            "type_b": "choice",
+            "max_abs_prob_diff": 0.0011342766050745356,
+            "choice_a": "h17",
+            "choice_b": "h17",
+            "choice_same": true,
+            "confidence_a": 0.4885939061641693,
+            "confidence_b": 0.48814728829687126,
+            "confidence_diff": -0.0004466178672980492,
+            "fields_same": true,
+            "type_same": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "so-score-two-levels",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "alarm",
+          "diff": {
+            "type_a": "score",
+            "type_b": "score",
+            "max_abs_prob_diff": 0.00003250462597514936,
+            "score_diff": 0.00003250462597514936,
+            "confidence_a": 0.9748497009277344,
+            "confidence_b": 0.9748822055537095,
+            "confidence_diff": 0.00003250462597514936,
+            "fields_same": true,
+            "legend_same": true,
+            "type_same": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "so-score-one-level",
+      "error_upstream": "ValueError: question 'alarm': 1 options (supported: 2..10)",
+      "error_ours": "question \"alarm\": 1 options (supported: 2..10)",
+      "errors_agree": true,
+      "questions": []
+    },
+    {
+      "id": "so-eleven-options",
+      "error_upstream": "ValueError: question 'cat': 11 options (supported: 2..10)",
+      "error_ours": "question \"cat\": 11 options (supported: 2..10)",
+      "errors_agree": true,
+      "questions": []
+    },
+    {
+      "id": "so-unknown-type",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "q",
+          "diff": {
+            "type_a": "multi",
+            "type_b": "multi",
+            "max_abs_prob_diff": 0.004001582399616177,
+            "confidence_a": null,
+            "confidence_b": null,
+            "fields_same": true,
+            "type_same": true,
+            "selected_same": true,
+            "threshold_same": true,
+            "set_confidence_diff": -0.0051838802414090335
+          }
+        }
+      ]
+    },
+    {
+      "id": "so-missing-type",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "q",
+          "diff": {
+            "type_a": "choice",
+            "type_b": "choice",
+            "max_abs_prob_diff": 0.000049459456848199856,
+            "choice_a": "a",
+            "choice_b": "a",
+            "choice_same": true,
+            "confidence_a": 0.600693941116333,
+            "confidence_b": 0.6007434005731812,
+            "confidence_diff": 0.000049459456848199856,
+            "fields_same": true,
+            "type_same": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "m15-multi-pl",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "topics",
+          "diff": {
+            "type_a": "multi",
+            "type_b": "multi",
+            "max_abs_prob_diff": 0.00019110197482918867,
+            "confidence_a": null,
+            "confidence_b": null,
+            "fields_same": true,
+            "type_same": true,
+            "selected_same": true,
+            "threshold_same": true,
+            "set_confidence_diff": 0.0002230691648082983
+          }
+        }
+      ]
+    },
+    {
+      "id": "m15-multi-en-list",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "issues",
+          "diff": {
+            "type_a": "multi",
+            "type_b": "multi",
+            "max_abs_prob_diff": 0.00008494552458145066,
+            "confidence_a": null,
+            "confidence_b": null,
+            "fields_same": true,
+            "type_same": true,
+            "selected_same": true,
+            "threshold_same": true,
+            "set_confidence_diff": -0.00006518458916850156
+          }
+        }
+      ]
+    },
+    {
+      "id": "m15-multi-min",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "t",
+          "diff": {
+            "type_a": "multi",
+            "type_b": "multi",
+            "max_abs_prob_diff": 0.00029668069999259916,
+            "confidence_a": null,
+            "confidence_b": null,
+            "fields_same": true,
+            "type_same": true,
+            "selected_same": true,
+            "threshold_same": true,
+            "set_confidence_diff": 0.00028678936768287977
+          }
+        }
+      ]
+    },
+    {
+      "id": "m15-act-short",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "fraud",
+          "diff": {
+            "type_a": "act",
+            "type_b": "act",
+            "max_abs_prob_diff": 0.0005323046991436153,
+            "confidence_a": 0.9135151505470276,
+            "confidence_b": 0.9129829203536899,
+            "confidence_diff": -0.0005322301933377016,
+            "fields_same": true,
+            "type_same": true,
+            "action_same": true,
+            "answer_same": true,
+            "calibration_same": true,
+            "expected_costs_keys_same": true,
+            "expected_costs_max_abs_diff": 0.005323000000000078
+          }
+        }
+      ]
+    },
+    {
+      "id": "m15-act-full",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "route",
+          "diff": {
+            "type_a": "act",
+            "type_b": "act",
+            "max_abs_prob_diff": 0.0010525895523368911,
+            "confidence_a": 0.8495138883590698,
+            "confidence_b": 0.8505664779114067,
+            "confidence_diff": 0.0010525895523368911,
+            "fields_same": true,
+            "type_same": true,
+            "action_same": true,
+            "refused_same": true,
+            "answer_same": true,
+            "calibration_same": true,
+            "expected_costs_keys_same": true,
+            "expected_costs_max_abs_diff": 0.048204000000005465
+          }
+        }
+      ]
+    },
+    {
+      "id": "m15-act-maxerr-005",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "refund",
+          "diff": {
+            "type_a": "act",
+            "type_b": "act",
+            "max_abs_prob_diff": 0.00017541870515708213,
+            "confidence_a": 0.9565125107765198,
+            "confidence_b": 0.9566879257563865,
+            "confidence_diff": 0.00017541497986672816,
+            "fields_same": true,
+            "type_same": true,
+            "action_same": true,
+            "answer_same": true,
+            "calibration_same": true,
+            "expected_costs_keys_same": true,
+            "expected_costs_max_abs_diff": 0.0008770000000000167
+          }
+        }
+      ]
+    },
+    {
+      "id": "m15-act-no-threshold",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "fit",
+          "diff": {
+            "type_a": "act",
+            "type_b": "act",
+            "max_abs_prob_diff": 0.00009296602225822292,
+            "confidence_a": 0.6283518671989441,
+            "confidence_b": 0.6282589011766859,
+            "confidence_diff": -0.00009296602225816741,
+            "fields_same": true,
+            "type_same": true,
+            "action_same": true,
+            "answer_same": true,
+            "calibration_same": true,
+            "max_error_same": true,
+            "expected_costs_keys_same": true,
+            "expected_costs_max_abs_diff": 0.00018600000000001948
+          }
+        }
+      ]
+    },
+    {
+      "id": "m15-mixed",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "dept",
+          "diff": {
+            "type_a": "choice",
+            "type_b": "choice",
+            "max_abs_prob_diff": 0.0001458719917237193,
+            "choice_a": "logistics",
+            "choice_b": "logistics",
+            "choice_same": true,
+            "confidence_a": 0.9732965230941772,
+            "confidence_b": 0.9734408807462425,
+            "confidence_diff": 0.000144357652065219,
+            "fields_same": true,
+            "type_same": true
+          }
+        },
+        {
+          "question": "refund",
+          "diff": {
+            "type_a": "noul",
+            "type_b": "noul",
+            "max_abs_prob_diff": 0.00015743545917185076,
+            "noul_diff": 0.00015740565684951857,
+            "confidence_a": 0.8521918058395386,
+            "confidence_b": 0.8523492114963881,
+            "confidence_diff": 0.00015740565684951857,
+            "fields_same": true,
+            "type_same": true
+          }
+        },
+        {
+          "question": "tags",
+          "diff": {
+            "type_a": "multi",
+            "type_b": "multi",
+            "max_abs_prob_diff": 0.0013208416707911619,
+            "confidence_a": null,
+            "confidence_b": null,
+            "fields_same": true,
+            "type_same": true,
+            "selected_same": true,
+            "threshold_same": true,
+            "set_confidence_diff": 0.0022989014787073714
+          }
+        },
+        {
+          "question": "urgency",
+          "diff": {
+            "type_a": "score",
+            "type_b": "score",
+            "max_abs_prob_diff": 0.00011863954696765544,
+            "score_diff": 0.00002704610814618924,
+            "confidence_a": 0.8472858667373657,
+            "confidence_b": 0.847240070017955,
+            "confidence_diff": -0.00004579671941074004,
+            "fields_same": true,
+            "legend_same": true,
+            "type_same": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "m15-evidence-noul",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "form",
+          "diff": {
+            "type_a": "noul",
+            "type_b": "noul",
+            "max_abs_prob_diff": 9.149872036706697e-6,
+            "noul_diff": 9.129382940063421e-6,
+            "confidence_a": 0.9884523749351501,
+            "confidence_b": 0.9884432250631134,
+            "confidence_diff": -9.149872036706697e-6,
+            "fields_same": true,
+            "type_same": true,
+            "evidence_spans_same": true,
+            "evidence_first_same": true,
+            "evidence_max_abs_probability_diff": 0.00019098572787273893,
+            "evidence_a": [
+              [
+                53,
+                245,
+                " Najemca może wypowiedzieć umowę z zachowaniem trzymiesięcznego okresu wypowiedzenia ze skutkiem na koniec miesiąca kalendarzowego. Wypowiedzenie wymaga formy pisemnej pod rygorem nieważności."
+              ],
+              [
+                245,
+                328,
+                " Kaucja wynosi 6 000 zł i podlega zwrotowi w terminie 30 dni od dnia zwrotu lokalu."
+              ]
+            ],
+            "evidence_b": [
+              [
+                53,
+                245,
+                " Najemca może wypowiedzieć umowę z zachowaniem trzymiesięcznego okresu wypowiedzenia ze skutkiem na koniec miesiąca kalendarzowego. Wypowiedzenie wymaga formy pisemnej pod rygorem nieważności."
+              ],
+              [
+                245,
+                328,
+                " Kaucja wynosi 6 000 zł i podlega zwrotowi w terminie 30 dni od dnia zwrotu lokalu."
+              ]
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "m15-evidence-choice-en",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "cause",
+          "diff": {
+            "type_a": "choice",
+            "type_b": "choice",
+            "max_abs_prob_diff": 1.5840387266319311e-6,
+            "choice_a": "tls",
+            "choice_b": "tls",
+            "choice_same": true,
+            "confidence_a": 0.9993032217025757,
+            "confidence_b": 0.9993048057413023,
+            "confidence_diff": 1.5840387266319311e-6,
+            "fields_same": true,
+            "type_same": true,
+            "evidence_spans_same": true,
+            "evidence_first_same": true,
+            "evidence_max_abs_probability_diff": 0.00010358891403741168,
+            "evidence_a": [
+              [
+                123,
+                261,
+                "er identified an expired TLS certificate on the load balancer and rotated it at 14:37. Traffic recovered fully by 14:41. No data was lost."
+              ],
+              [
+                1,
+                68,
+                "ncident report: At 14:02 the payment API started returning HTTP 503"
+              ],
+              [
+                68,
+                104,
+                " for all merchants in the EU region."
+              ]
+            ],
+            "evidence_b": [
+              [
+                123,
+                261,
+                "er identified an expired TLS certificate on the load balancer and rotated it at 14:37. Traffic recovered fully by 14:41. No data was lost."
+              ],
+              [
+                1,
+                68,
+                "ncident report: At 14:02 the payment API started returning HTTP 503"
+              ],
+              [
+                68,
+                104,
+                " for all merchants in the EU region."
+              ]
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "m15-evidence-score-act",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "route",
+          "diff": {
+            "type_a": "act",
+            "type_b": "act",
+            "max_abs_prob_diff": 0.0001355252766773729,
+            "confidence_a": 0.9759703874588013,
+            "confidence_b": 0.9758348621821239,
+            "confidence_diff": -0.0001355252766773729,
+            "fields_same": true,
+            "type_same": true,
+            "action_same": true,
+            "answer_same": true,
+            "calibration_same": true,
+            "evidence_spans_same": true,
+            "evidence_first_same": true,
+            "evidence_max_abs_probability_diff": 0.000482710153348595,
+            "evidence_a": [
+              [
+                19,
+                99,
+                " od trzech dni nie działa terminal płatniczy w naszym sklepie, tracimy sprzedaż."
+              ],
+              [
+                0,
+                19,
+                "Zgłoszenie klienta:"
+              ]
+            ],
+            "evidence_b": [
+              [
+                19,
+                99,
+                " od trzech dni nie działa terminal płatniczy w naszym sklepie, tracimy sprzedaż."
+              ],
+              [
+                0,
+                19,
+                "Zgłoszenie klienta:"
+              ]
+            ],
+            "expected_costs_keys_same": true,
+            "expected_costs_max_abs_diff": 0.0004060000000000036
+          }
+        },
+        {
+          "question": "urgency",
+          "diff": {
+            "type_a": "score",
+            "type_b": "score",
+            "max_abs_prob_diff": 0.0000888625127861975,
+            "score_diff": 0.0001159412910674007,
+            "confidence_a": 0.7295835018157959,
+            "confidence_b": 0.7295804311322589,
+            "confidence_diff": -3.0706835369986862e-6,
+            "fields_same": true,
+            "legend_same": true,
+            "type_same": true,
+            "evidence_spans_same": true,
+            "evidence_first_same": true,
+            "evidence_max_abs_probability_diff": 0.0003820473583400069,
+            "evidence_a": [
+              [
+                19,
+                99,
+                " od trzech dni nie działa terminal płatniczy w naszym sklepie, tracimy sprzedaż."
+              ],
+              [
+                0,
+                18,
+                "Zgłoszenie klienta"
+              ]
+            ],
+            "evidence_b": [
+              [
+                19,
+                99,
+                " od trzech dni nie działa terminal płatniczy w naszym sklepie, tracimy sprzedaż."
+              ],
+              [
+                0,
+                18,
+                "Zgłoszenie klienta"
+              ]
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "m15-evidence-long",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "cards",
+          "diff": {
+            "type_a": "noul",
+            "type_b": "noul",
+            "max_abs_prob_diff": 0.000011071502942550104,
+            "noul_diff": 0.000011053342152236682,
+            "confidence_a": 0.9928817749023438,
+            "confidence_b": 0.9928707033994012,
+            "confidence_diff": -0.000011071502942550104,
+            "fields_same": true,
+            "type_same": true,
+            "evidence_spans_same": true,
+            "evidence_first_same": true,
+            "evidence_max_abs_probability_diff": 0.0001865981485333762,
+            "evidence_a": [
+              [
+                338,
+                483,
+                " Po tym terminie wygasają bez możliwości przywrócenia. §5. 100 punktów można wymienić na bon o wartości 10 zł. Bonu nie można wymienić na gotówkę"
+              ],
+              [
+                491,
+                643,
+                "lep może zmienić regulamin z 14-dniowym wyprzedzeniem, informując uczestników e-mailem. §7. Reklamacje dotyczące punktów rozpatrywane są w ciągu 30 dni."
+              ],
+              [
+                39,
+                282,
+                " Program prowadzi Sklep XYZ sp. z o.o. §2. Uczestnikiem może zostać osoba pełnoletnia posiadająca konto w sklepie. §3. Za każde wydane 10 zł uczestnik otrzymuje 1 punkt. Punkty nie przysługują za zakup kart podarunkowych ani za koszty dostawy."
+              ]
+            ],
+            "evidence_b": [
+              [
+                338,
+                483,
+                " Po tym terminie wygasają bez możliwości przywrócenia. §5. 100 punktów można wymienić na bon o wartości 10 zł. Bonu nie można wymienić na gotówkę"
+              ],
+              [
+                491,
+                643,
+                "lep może zmienić regulamin z 14-dniowym wyprzedzeniem, informując uczestników e-mailem. §7. Reklamacje dotyczące punktów rozpatrywane są w ciągu 30 dni."
+              ],
+              [
+                39,
+                282,
+                " Program prowadzi Sklep XYZ sp. z o.o. §2. Uczestnikiem może zostać osoba pełnoletnia posiadająca konto w sklepie. §3. Za każde wydane 10 zł uczestnik otrzymuje 1 punkt. Punkty nie przysługują za zakup kart podarunkowych ani za koszty dostawy."
+              ]
+            ]
+          }
+        },
+        {
+          "question": "cash",
+          "diff": {
+            "type_a": "noul",
+            "type_b": "noul",
+            "max_abs_prob_diff": 0.00004755039409154449,
+            "noul_diff": 0.0000475345616078298,
+            "confidence_a": 0.990885853767395,
+            "confidence_b": 0.9908383033733035,
+            "confidence_diff": -0.00004755039409154449,
+            "fields_same": true,
+            "type_same": true,
+            "evidence_spans_same": true,
+            "evidence_first_same": true,
+            "evidence_max_abs_probability_diff": 0.00006343665245348365,
+            "evidence_a": [
+              [
+                338,
+                483,
+                " Po tym terminie wygasają bez możliwości przywrócenia. §5. 100 punktów można wymienić na bon o wartości 10 zł. Bonu nie można wymienić na gotówkę"
+              ],
+              [
+                491,
+                643,
+                "lep może zmienić regulamin z 14-dniowym wyprzedzeniem, informując uczestników e-mailem. §7. Reklamacje dotyczące punktów rozpatrywane są w ciągu 30 dni."
+              ],
+              [
+                0,
+                282,
+                "Regulamin programu lojalnościowego. §1. Program prowadzi Sklep XYZ sp. z o.o. §2. Uczestnikiem może zostać osoba pełnoletnia posiadająca konto w sklepie. §3. Za każde wydane 10 zł uczestnik otrzymuje 1 punkt. Punkty nie przysługują za zakup kart podarunkowych ani za koszty dostawy."
+              ]
+            ],
+            "evidence_b": [
+              [
+                338,
+                483,
+                " Po tym terminie wygasają bez możliwości przywrócenia. §5. 100 punktów można wymienić na bon o wartości 10 zł. Bonu nie można wymienić na gotówkę"
+              ],
+              [
+                491,
+                643,
+                "lep może zmienić regulamin z 14-dniowym wyprzedzeniem, informując uczestników e-mailem. §7. Reklamacje dotyczące punktów rozpatrywane są w ciągu 30 dni."
+              ],
+              [
+                0,
+                282,
+                "Regulamin programu lojalnościowego. §1. Program prowadzi Sklep XYZ sp. z o.o. §2. Uczestnikiem może zostać osoba pełnoletnia posiadająca konto w sklepie. §3. Za każde wydane 10 zł uczestnik otrzymuje 1 punkt. Punkty nie przysługują za zakup kart podarunkowych ani za koszty dostawy."
+              ]
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "m15-facts-dates",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "ontime",
+          "diff": {
+            "type_a": "noul",
+            "type_b": "noul",
+            "max_abs_prob_diff": 0.000019585692271388566,
+            "noul_diff": -0.000019570791110146146,
+            "confidence_a": 0.943988025188446,
+            "confidence_b": 0.9439684543973359,
+            "confidence_diff": -0.000019570791110146146,
+            "fields_same": true,
+            "type_same": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "m15-facts-amounts",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "fits",
+          "diff": {
+            "type_a": "noul",
+            "type_b": "noul",
+            "max_abs_prob_diff": 0.002827232580605077,
+            "noul_diff": 0.0028272027782827447,
+            "confidence_a": 0.743332028388977,
+            "confidence_b": 0.7461592311672598,
+            "confidence_diff": 0.0028272027782827447,
+            "fields_same": true,
+            "type_same": true
+          }
+        },
+        {
+          "question": "level",
+          "diff": {
+            "type_a": "score",
+            "type_b": "score",
+            "max_abs_prob_diff": 0.0012372374659889163,
+            "score_diff": 0.0007318580854939194,
+            "confidence_a": 0.6299959421157837,
+            "confidence_b": 0.6312331795817726,
+            "confidence_diff": 0.0012372374659889163,
+            "fields_same": true,
+            "legend_same": true,
+            "type_same": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "m15-facts-euro-evidence",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "board",
+          "diff": {
+            "type_a": "noul",
+            "type_b": "noul",
+            "max_abs_prob_diff": 0.0016246986250454398,
+            "noul_diff": -0.001624691174464954,
+            "confidence_a": 0.8918554782867432,
+            "confidence_b": 0.8934801769117886,
+            "confidence_diff": 0.0016246986250454398,
+            "fields_same": true,
+            "type_same": true,
+            "evidence_spans_same": true,
+            "evidence_first_same": true,
+            "evidence_max_abs_probability_diff": 0.0007618517599004421,
+            "evidence_a": [
+              [
+                6,
+                32,
+                "kt opiewa na 120 000 euro."
+              ],
+              [
+                32,
+                167,
+                " Kurs rozliczeniowy: 1 EUR = 4,3150 zł. Limit zatwierdzenia przez kierownika wynosi 500 000,00 zł; powyżej wymagana jest zgoda zarządu."
+              ]
+            ],
+            "evidence_b": [
+              [
+                6,
+                32,
+                "kt opiewa na 120 000 euro."
+              ],
+              [
+                32,
+                167,
+                " Kurs rozliczeniowy: 1 EUR = 4,3150 zł. Limit zatwierdzenia przez kierownika wynosi 500 000,00 zł; powyżej wymagana jest zgoda zarządu."
+              ]
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "m15-facts-none",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "t",
+          "diff": {
+            "type_a": "choice",
+            "type_b": "choice",
+            "max_abs_prob_diff": 0.000020633529344782353,
+            "choice_a": "up",
+            "choice_b": "up",
+            "choice_same": true,
+            "confidence_a": 0.9947671890258789,
+            "confidence_b": 0.9947878225552237,
+            "confidence_diff": 0.000020633529344782353,
+            "fields_same": true,
+            "type_same": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "cx-01-ticket-fan-out",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "category",
+          "diff": {
+            "type_a": "choice",
+            "type_b": "choice",
+            "max_abs_prob_diff": 0.000051211487049451776,
+            "choice_a": "complaint",
+            "choice_b": "complaint",
+            "choice_same": true,
+            "confidence_a": 0.9873048663139343,
+            "confidence_b": 0.9873560778009838,
+            "confidence_diff": 0.000051211487049451776,
+            "fields_same": true,
+            "type_same": true
+          }
+        },
+        {
+          "question": "needs_photo",
+          "diff": {
+            "type_a": "noul",
+            "type_b": "noul",
+            "max_abs_prob_diff": 0.0005855835435987222,
+            "noul_diff": -0.0005855835435987222,
+            "confidence_a": 0.6957589983940125,
+            "confidence_b": 0.6951734148504137,
+            "confidence_diff": -0.0005855835435987222,
+            "fields_same": true,
+            "type_same": true
+          }
+        },
+        {
+          "question": "tone",
+          "diff": {
+            "type_a": "score",
+            "type_b": "score",
+            "max_abs_prob_diff": 0.0004490017689629533,
+            "score_diff": -0.0007119205415708763,
+            "confidence_a": 0.5006774663925171,
+            "confidence_b": 0.5008635493888722,
+            "confidence_diff": 0.00018608299635514136,
+            "fields_same": true,
+            "legend_same": true,
+            "type_same": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "cx-02-web-agent",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "click_target",
+          "diff": {
+            "type_a": "choice",
+            "type_b": "choice",
+            "max_abs_prob_diff": 0.00021597805009498927,
+            "choice_a": "2",
+            "choice_b": "2",
+            "choice_same": true,
+            "confidence_a": 0.968725860118866,
+            "confidence_b": 0.968509882068771,
+            "confidence_diff": -0.00021597805009498927,
+            "fields_same": true,
+            "type_same": true
+          }
+        },
+        {
+          "question": "operation",
+          "diff": {
+            "type_a": "choice",
+            "type_b": "choice",
+            "max_abs_prob_diff": 0.0004775987433108808,
+            "choice_a": "BLOCKED",
+            "choice_b": "BLOCKED",
+            "choice_same": true,
+            "confidence_a": 0.9328571557998657,
+            "confidence_b": 0.9323795570565548,
+            "confidence_diff": -0.0004775987433108808,
+            "fields_same": true,
+            "type_same": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "cx-03-deadline-decomposed",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "filing_date",
+          "diff": {
+            "type_a": "choice",
+            "type_b": "choice",
+            "max_abs_prob_diff": 0.00020096816863346412,
+            "choice_a": "2025-06-20",
+            "choice_b": "2025-06-20",
+            "choice_same": true,
+            "confidence_a": 0.9599724411964417,
+            "confidence_b": 0.9601734093650751,
+            "confidence_diff": 0.00020096816863346412,
+            "fields_same": true,
+            "type_same": true
+          }
+        },
+        {
+          "question": "in_time",
+          "diff": {
+            "type_a": "noul",
+            "type_b": "noul",
+            "max_abs_prob_diff": 0.0017478106525303794,
+            "noul_diff": -0.0017478106525303794,
+            "confidence_a": 0.6677559614181519,
+            "confidence_b": 0.6660081507656215,
+            "confidence_diff": -0.0017478106525303794,
+            "fields_same": true,
+            "type_same": true
+          }
+        },
+        {
+          "question": "last_day",
+          "diff": {
+            "type_a": "choice",
+            "type_b": "choice",
+            "max_abs_prob_diff": 0.001811444823854591,
+            "choice_a": "2025-06-23",
+            "choice_b": "2025-06-23",
+            "choice_same": true,
+            "confidence_a": 0.45314550399780273,
+            "confidence_b": 0.45316805603166455,
+            "confidence_diff": 0.00002255203386181126,
+            "fields_same": true,
+            "type_same": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "cx-04-loan-triage",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "decision",
+          "diff": {
+            "type_a": "choice",
+            "type_b": "choice",
+            "max_abs_prob_diff": 0.0005014163185023957,
+            "choice_a": "approve",
+            "choice_b": "approve",
+            "choice_same": true,
+            "confidence_a": 0.8923457860946655,
+            "confidence_b": 0.8928186597752072,
+            "confidence_diff": 0.00047287368054171885,
+            "fields_same": true,
+            "type_same": true
+          }
+        },
+        {
+          "question": "risk",
+          "diff": {
+            "type_a": "score",
+            "type_b": "score",
+            "max_abs_prob_diff": 0.00017783878798882657,
+            "score_diff": 0.00021524708491998945,
+            "confidence_a": 0.7851882576942444,
+            "confidence_b": 0.7850104189062556,
+            "confidence_diff": -0.00017783878798882657,
+            "fields_same": true,
+            "legend_same": true,
+            "type_same": true
+          }
+        },
+        {
+          "question": "within_limit",
+          "diff": {
+            "type_a": "noul",
+            "type_b": "noul",
+            "max_abs_prob_diff": 0.0002561112356962991,
+            "noul_diff": -0.00025602182872919155,
+            "confidence_a": 0.6477864384651184,
+            "confidence_b": 0.6475304166363892,
+            "confidence_diff": -0.00025602182872919155,
+            "fields_same": true,
+            "type_same": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "cx-05-guard-check",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "action",
+          "diff": {
+            "type_a": "choice",
+            "type_b": "choice",
+            "max_abs_prob_diff": 0.00013181161699564806,
+            "choice_a": "refuse",
+            "choice_b": "refuse",
+            "choice_same": true,
+            "confidence_a": 0.9252915382385254,
+            "confidence_b": 0.9251743641477772,
+            "confidence_diff": -0.00011717409074818441,
+            "fields_same": true,
+            "type_same": true
+          }
+        },
+        {
+          "question": "data_request",
+          "diff": {
+            "type_a": "choice",
+            "type_b": "choice",
+            "max_abs_prob_diff": 0.0011401858314447066,
+            "choice_a": "other",
+            "choice_b": "other",
+            "choice_same": true,
+            "confidence_a": 0.7456702589988708,
+            "confidence_b": 0.7445300731674261,
+            "confidence_diff": -0.0011401858314447066,
+            "fields_same": true,
+            "type_same": true
+          }
+        },
+        {
+          "question": "injection",
+          "diff": {
+            "type_a": "noul",
+            "type_b": "noul",
+            "max_abs_prob_diff": 0.000027806416517228705,
+            "noul_diff": 0.000027806416517228705,
+            "confidence_a": 0.971734881401062,
+            "confidence_b": 0.9717626878175792,
+            "confidence_diff": 0.000027806416517228705,
+            "fields_same": true,
+            "type_same": true
+          }
+        }
+      ]
+    }
+  ]
+}

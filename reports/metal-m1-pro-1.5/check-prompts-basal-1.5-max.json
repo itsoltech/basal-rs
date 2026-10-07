@@ -1,0 +1,335 @@
+{
+  "tokens": {
+    "orders_compared": 88,
+    "mismatches": [],
+    "known_deviations": []
+  },
+  "systemone_cases": [
+    {
+      "id": "so-structured-state",
+      "ours_error": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "model"
+            ],
+            "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-max\"",
+            "type": "unknown_model"
+          }
+        ]
+      },
+      "reference_error": null,
+      "deviation": null,
+      "items": []
+    },
+    {
+      "id": "so-array-state-en",
+      "ours_error": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "model"
+            ],
+            "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-max\"",
+            "type": "unknown_model"
+          }
+        ]
+      },
+      "reference_error": null,
+      "deviation": null,
+      "items": []
+    },
+    {
+      "id": "so-null-and-missing-instructions",
+      "ours_error": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "model"
+            ],
+            "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-max\"",
+            "type": "unknown_model"
+          }
+        ]
+      },
+      "reference_error": null,
+      "deviation": null,
+      "items": []
+    },
+    {
+      "id": "so-empty-structures",
+      "ours_error": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "model"
+            ],
+            "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-max\"",
+            "type": "unknown_model"
+          }
+        ]
+      },
+      "reference_error": null,
+      "deviation": null,
+      "items": []
+    },
+    {
+      "id": "so-duplicate-descriptions-hide",
+      "ours_error": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "model"
+            ],
+            "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-max\"",
+            "type": "unknown_model"
+          }
+        ]
+      },
+      "reference_error": null,
+      "deviation": null,
+      "items": []
+    },
+    {
+      "id": "so-unicode",
+      "ours_error": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "model"
+            ],
+            "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-max\"",
+            "type": "unknown_model"
+          }
+        ]
+      },
+      "reference_error": null,
+      "deviation": null,
+      "items": []
+    },
+    {
+      "id": "so-polish-from-instructions",
+      "ours_error": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "model"
+            ],
+            "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-max\"",
+            "type": "unknown_model"
+          }
+        ]
+      },
+      "reference_error": null,
+      "deviation": null,
+      "items": []
+    },
+    {
+      "id": "so-ten-options",
+      "ours_error": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "model"
+            ],
+            "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-max\"",
+            "type": "unknown_model"
+          }
+        ]
+      },
+      "reference_error": null,
+      "deviation": null,
+      "items": []
+    },
+    {
+      "id": "so-score-two-levels",
+      "ours_error": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "model"
+            ],
+            "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-max\"",
+            "type": "unknown_model"
+          }
+        ]
+      },
+      "reference_error": null,
+      "deviation": null,
+      "items": []
+    },
+    {
+      "id": "so-score-one-level",
+      "ours_error": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "model"
+            ],
+            "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-max\"",
+            "type": "unknown_model"
+          }
+        ]
+      },
+      "reference_error": "ValueError: question 'alarm': 1 options (supported: 2..10)",
+      "deviation": null,
+      "items": []
+    },
+    {
+      "id": "so-eleven-options",
+      "ours_error": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "model"
+            ],
+            "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-max\"",
+            "type": "unknown_model"
+          }
+        ]
+      },
+      "reference_error": "ValueError: question 'cat': 11 options (supported: 2..10)",
+      "deviation": null,
+      "items": []
+    },
+    {
+      "id": "so-unknown-type",
+      "ours_error": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "model"
+            ],
+            "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-max\"",
+            "type": "unknown_model"
+          }
+        ]
+      },
+      "reference_error": null,
+      "deviation": "unknown type is a validation error; upstream treats it as choice",
+      "items": []
+    },
+    {
+      "id": "so-missing-type",
+      "ours_error": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "questions",
+              "q",
+              "type"
+            ],
+            "msg": "Field required (choice, noul or score)",
+            "type": "union_tag_not_found"
+          }
+        ]
+      },
+      "reference_error": null,
+      "deviation": "missing type is a validation error; upstream defaults to choice",
+      "items": []
+    },
+    {
+      "id": "cx-01-ticket-fan-out",
+      "ours_error": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "model"
+            ],
+            "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-max\"",
+            "type": "unknown_model"
+          }
+        ]
+      },
+      "reference_error": null,
+      "deviation": null,
+      "items": []
+    },
+    {
+      "id": "cx-02-web-agent",
+      "ours_error": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "model"
+            ],
+            "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-max\"",
+            "type": "unknown_model"
+          }
+        ]
+      },
+      "reference_error": null,
+      "deviation": null,
+      "items": []
+    },
+    {
+      "id": "cx-03-deadline-decomposed",
+      "ours_error": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "model"
+            ],
+            "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-max\"",
+            "type": "unknown_model"
+          }
+        ]
+      },
+      "reference_error": null,
+      "deviation": null,
+      "items": []
+    },
+    {
+      "id": "cx-04-loan-triage",
+      "ours_error": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "model"
+            ],
+            "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-max\"",
+            "type": "unknown_model"
+          }
+        ]
+      },
+      "reference_error": null,
+      "deviation": null,
+      "items": []
+    },
+    {
+      "id": "cx-05-guard-check",
+      "ours_error": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "model"
+            ],
+            "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-max\"",
+            "type": "unknown_model"
+          }
+        ]
+      },
+      "reference_error": null,
+      "deviation": null,
+      "items": []
+    }
+  ]
+}

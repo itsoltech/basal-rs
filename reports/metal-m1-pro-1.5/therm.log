@@ -1,0 +1,37 @@
+20:03:29 export basal-1.5-4.5B f16-single: Note: No CPU power status has been recorded
+20:06:24 export basal-1.5-4.5B f16-tree: Note: No CPU power status has been recorded
+20:09:07 export basal-1.5-4.5B f32: Note: No CPU power status has been recorded
+20:13:15 upstream export basal-1.5-4.5B mlx: Note: No CPU power status has been recorded
+20:18:22 upstream export basal-1.5-4.5B mlx-q8: Note: No CPU power status has been recorded
+20:24:30 export basal-1.5-max f16-single: Note: No CPU power status has been recorded
+20:29:14 export basal-1.5-max f16-tree: Note: No CPU power status has been recorded
+20:42:18 upstream export basal-1.5-max mlx: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been recorded 
+20:53:11 upstream export basal-1.5-max mlx-q8: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been recorded 
+20:59:03 upstream export basal-1.5-max mlx-q8: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been recorded 
+21:11:02 bench rust basal-1.5-mini 1: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been recorded 
+21:13:08 bench upstream basal-1.5-mini 1: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been recorded 
+21:17:08 bench upstream basal-1.5-mini 2: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been recorded 
+21:21:06 bench rust basal-1.5-mini 2: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been recorded 
+21:23:07 bench rust basal-1.5-4.5B 1: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been recorded 
+21:27:23 bench upstream basal-1.5-4.5B 1: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been recorded 
+21:37:10 bench upstream basal-1.5-4.5B 2: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been recorded 
+21:46:56 bench rust basal-1.5-4.5B 2: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been recorded 
+21:50:55 bench rust basal-1.5-max 1: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been recorded 
+22:00:45 bench upstream basal-1.5-max 1: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been recorded 
+22:22:12 bench upstream basal-1.5-max 2: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been recorded 
+22:43:41 bench rust basal-1.5-max 2: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been recorded 
+22:52:54 upstream export basal-1.5-mini mlx-f16: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been recorded 
+22:55:08 bench rust basal-1.5-mini 3: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been recorded 
+22:57:09 bench upstream f16 basal-1.5-mini 1: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been recorded 
+22:59:20 bench upstream f16 basal-1.5-mini 2: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been recorded 
+23:01:31 bench rust basal-1.5-mini 4: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been recorded 
+23:03:31 upstream export basal-1.5-4.5B mlx-f16: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been recorded 
+23:08:03 bench rust basal-1.5-4.5B 3: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been recorded 
+23:12:01 bench upstream f16 basal-1.5-4.5B 1: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been recorded 
+23:16:30 bench upstream f16 basal-1.5-4.5B 2: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been recorded 
+23:21:01 bench rust basal-1.5-4.5B 4: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been recorded 
+23:24:56 upstream export basal-1.5-max mlx-f16: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been recorded 
+23:34:39 bench rust basal-1.5-max 3: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been recorded 
+23:43:30 bench upstream f16 basal-1.5-max 1: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been recorded 
+23:52:59 bench upstream f16 basal-1.5-max 2: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been recorded 
+00:02:27 bench rust basal-1.5-max 4: Note: No thermal warning level has been recorded Note: No performance warning level has been recorded Note: No CPU power status has been recorded 

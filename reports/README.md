@@ -33,6 +33,13 @@ Metodyka: [docs/BENCHMARKS.md](../docs/BENCHMARKS.md).
 | [perf-1.5-small](perf-1.5-small/README.md) | wydajność wobec upstream v1.5.0: pojedyncza decyzja, HTTP, długie stany, ruch mieszany |
 | `reference-basal-1.5-{4.5B,mini}-{fp32,bf16}` | referencje upstream FP32 i ścieżka serwowana BF16 |
 
+## Apple M1 Pro (Metal)
+
+| Katalog | Zawartość |
+|---|---|
+| [metal-m1-pro-1.5](metal-m1-pro-1.5/README.md) | basal-1.5-max, 4.5B i mini: zgodność z FP32 upstream, pojedyncza decyzja wobec upstream MLX bf16, f16 i 8-bit |
+| `reference-basal-1.5-{max,4.5B,mini}-{mlx,mlx-q8,mlx-f16}` | eksporty upstream v1.5.0 MLX na M1 Pro |
+
 ## basal-1.0-4.5B
 
 | Katalog | Zawartość |

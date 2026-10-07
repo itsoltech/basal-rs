@@ -1,0 +1,47 @@
+{
+ "date": "2026-10-06 20:17:17 +0200",
+ "tool": "tools/reference/export_reference.py",
+ "upstream": {
+  "repository": "https://github.com/rkinas/basal",
+  "revision": "cd63c083636f94ce492ec1e6cc1e02144723b9b5",
+  "worktree_clean": true
+ },
+ "model": {
+  "path": ".models/basal-1.5-4.5B",
+  "repository": "Remek/basal-1.5-4.5B",
+  "revision": "784a683bfadcc8865238fc0fc74a83b4000269bc",
+  "safetensors_sha256": "77a592cfe07832d7162a01707c21a53b089e9861290e50d379fb24616f9a6e27",
+  "tokenizer_json_sha256": "20f059c5ba108cc6e4d59df55be30e73c30b86ff7aab314362bfa4eff1e21657",
+  "config_json_sha256": "2ac96f2e6b9731382bee55320062498d06272542b7fd2faa4bef04065ba1e2c3",
+  "calibration_json_sha256": "9c65d5c8daab7982c71ed90807f6cebc36e7822206fecf459c1e6322ed02e5ea"
+ },
+ "backend": {
+  "mode": "mlx",
+  "dtype": "bfloat16",
+  "batch": 1,
+  "letters": "ABCDEFGHIJ",
+  "note": "letter logits computed by the mlx backend forward (bfloat16) and lm_head, cast to float32; softmax, average and calibration in float64 here; upstream_answer comes from Server.decide (float32 torch, batched as served, confidence = max(p))"
+ },
+ "calibration": {
+  "temperatures": {
+   "choice": 1.2782470235604306,
+   "noul": 1.7817974362806785,
+   "score": 1.7562521603732995
+  }
+ },
+ "n_bench": 44,
+ "load_s": 2.73,
+ "export_s": 240.21,
+ "platform": {
+  "machine": "arm64",
+  "mac_ver": "27.0.1"
+ },
+ "versions": {
+  "python": "3.12.12",
+  "torch": "2.14.1",
+  "transformers": "5.17.0",
+  "tokenizers": "0.23.2",
+  "mlx": "0.32.3",
+  "mlx_lm": "0.32.0"
+ }
+}

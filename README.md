@@ -14,9 +14,9 @@ prefiksów, własnymi kernelami i harmonogramem serwera.
 
 | Model | Status |
 |---|---|
-| `Remek/basal-1.5-max` (11B), rewizja `be1b5ee7` | główny cel, CUDA |
-| `Remek/basal-1.5-4.5B`, rewizja `784a683b` | CUDA, [zgodność](reports/compat-1.5-small/README.md), [wydajność](reports/perf-1.5-small/README.md) |
-| `Remek/basal-1.5-mini` (1.5B), rewizja `1978d070` | CUDA, [zgodność](reports/compat-1.5-small/README.md), [wydajność](reports/perf-1.5-small/README.md) |
+| `Remek/basal-1.5-max` (11B), rewizja `be1b5ee7` | główny cel, CUDA i Metal |
+| `Remek/basal-1.5-4.5B`, rewizja `784a683b` | CUDA i Metal, [zgodność](reports/compat-1.5-small/README.md), [wydajność](reports/perf-1.5-small/README.md) |
+| `Remek/basal-1.5-mini` (1.5B), rewizja `1978d070` | CUDA i Metal, [zgodność](reports/compat-1.5-small/README.md), [wydajność](reports/perf-1.5-small/README.md) |
 | `Remek/basal-1.0-4.5B`, rewizja `b9528804` | CUDA i Metal |
 
 Typy pytań: `choice` (2–10 opcji oraz 11–255 strategią grupową), `noul`,
@@ -60,6 +60,22 @@ kalibracji 0,0008). `multi`, `act`, `facts` i `evidence` dają te same pola
 odpowiedzi co upstream; `facts` jest zgodne co do bajtu na 432 stanach.
 Wynik pytania nie zależy od tego, z czym trafi do partii (bitowo te same
 logity pojedynczo, w partii i pod obciążeniem HTTP).
+
+Apple M1 Pro (Metal), pojedyncza decyzja (mediana, metodyka basal-bench)
+wobec upstream v1.5.0 z MLX: ścieżka serwowana (bf16) i ten sam backend w
+f16, w tej samej precyzji co basal-rs (M1 nie ma sprzętowego bf16)
+([pomiar](reports/metal-m1-pro-1.5/README.md)):
+
+| Model | Upstream MLX bf16 | Upstream MLX f16 | basal-rs f16 |
+|---|---:|---:|---:|
+| basal-1.5-max | 2265 ms | 1969 ms | 1197–1323 ms |
+| basal-1.5-4.5B | 955 ms | 823 ms | 495–502 ms |
+| basal-1.5-mini | 318–323 ms | 274–276 ms | 170–174 ms |
+
+basal-rs f16 daje na M1 Pro decyzje FP32 na 44/44 przykładach dla trzech
+modeli; upstream MLX bf16 na basal-1.5-max zmienia jedną. Na Metal wynik
+zależy od pakowania partii (te same decyzje, różnice prawdopodobieństw do
+0,008).
 
 ## Uruchomienie w Dockerze
 

@@ -151,5 +151,7 @@ sterownika.
 
 - Score powyżej 10 poziomów i pytania z jedną opcją kończą się jawnym błędem.
 - Tabela GEMM jest specyficzna dla karty i wersji cuBLASLt.
-- Metal sprawdzony tylko z basal-1.0-4.5B (basal-1.5-max wymaga ~23 GB na
-  same wagi).
+- Metal sprawdzony na M1 Pro (32 GB) z basal-1.0-4.5B i trzema modelami
+  basal-1.5 ([pomiar](../reports/metal-m1-pro-1.5/README.md)); wynik na Metal
+  zależy od pakowania partii (różnice logitu do 0,17, te same decyzje), bez
+  tabeli GEMM niezależnej od partii jak na CUDA.
