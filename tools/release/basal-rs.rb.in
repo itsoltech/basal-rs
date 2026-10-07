@@ -1,5 +1,5 @@
 # Homebrew formula of basal-rs (tap itsoltech/homebrew-tap, Formula/basal-rs.rb), rendered by
-# .github/workflows/release.yml from tools/release/basal-rs.rb.in (@VERSION@, @SHA256@).
+# .github/workflows/release.yml from tools/release/basal-rs.rb.in (version and checksum of the release package).
 class BasalRs < Formula
   desc "Rust runtime of the Basal decision models (TypeSafe System One API, Metal)"
   homepage "https://github.com/itsoltech/basal-rs"

@@ -121,7 +121,8 @@ fn command(cmd: &str, args: &[&str]) -> Option<String> {
 
 fn build(r: &mut Report) {
     r.ok("basal", format!("basal {}", crate::version()));
-    let exe = std::env::current_exe().ok();
+    // the binary itself (Homebrew links bin/basal to Cellar/basal-rs/<version>/bin/basal)
+    let exe = std::env::current_exe().ok().map(|e| e.canonicalize().unwrap_or(e));
     let how = match exe.as_deref().map(Path::to_string_lossy) {
         Some(p) if p == "/usr/local/bin/basal" && Path::new("/.dockerenv").exists() => {
             "container image (update: docker compose pull)".to_string()
