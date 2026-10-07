@@ -54,7 +54,8 @@ COPY --from=build /usr/local/bin/basal /usr/local/bin/basal
 # BASAL_HOME: GEMM tables of `gemm_table: auto` in /data/.cache/gemm (src/paths.rs)
 ENV HF_HOME=/data/hf BASAL_HOME=/data BASAL_ADDR=0.0.0.0:8000
 LABEL org.opencontainers.image.title="basal-rs" \
-      org.opencontainers.image.description="Rust runtime of the basal decision models (TypeSafe System One API), CUDA" \
+      org.opencontainers.image.description="Rust inference engine and HTTP server for the Basal decision models (TypeSafe System One API), CUDA" \
+      org.opencontainers.image.source="https://github.com/itsoltech/basal-rs" \
       org.opencontainers.image.licenses="Apache-2.0" \
       ai.basal.cuda-compute-caps="${CUDA_COMPUTE_CAPS}"
 WORKDIR /data

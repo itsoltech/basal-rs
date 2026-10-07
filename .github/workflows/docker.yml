@@ -48,6 +48,9 @@ jobs:
       # layer cache in a package of its own, so the image package lists only release tags
       CACHE: ghcr.io/${{ github.repository }}-cache
       TAG: ${{ inputs.tag }}
+      # shown by GHCR on the package page (OCI annotation of the image index; at most 512 characters)
+      DESCRIPTION: >-
+        Rust inference engine and HTTP server for the Basal decision models by Remek Kinas: TypeSafe System One API and the upstream /v1/basal endpoint, CUDA kernels for compute capability 8.0, 8.9 and 9.0 (A100, RTX 30xx/40xx, RTX 6000 Ada, L40S, H100). Run: docker run --gpus all -p 8000:8000 -v basal-data:/data ghcr.io/itsoltech/basal-rs; docs: https://github.com/itsoltech/basal-rs
       PUSH: ${{ inputs.tag != '' }}
     steps:
       - name: Free disk space (the CUDA devel image and the build need ~25 GB)
@@ -110,9 +113,23 @@ jobs:
           tags: ${{ steps.tags.outputs.tags }}
           labels: |
             org.opencontainers.image.title=basal-rs
+            org.opencontainers.image.description=${{ env.DESCRIPTION }}
             org.opencontainers.image.version=${{ steps.tags.outputs.version }}
             org.opencontainers.image.revision=${{ steps.tags.outputs.sha }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.url=https://github.com/${{ github.repository }}
+            org.opencontainers.image.documentation=https://github.com/${{ github.repository }}/blob/main/docs/INSTALL.md
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.vendor=IT SOL
             ai.basal.cuda-compute-caps=80,89,90
+          # the image is an index (image + provenance attestation): GHCR reads the description from the index
+          annotations: |
+            index:org.opencontainers.image.title=basal-rs
+            index:org.opencontainers.image.description=${{ env.DESCRIPTION }}
+            index:org.opencontainers.image.version=${{ steps.tags.outputs.version }}
+            index:org.opencontainers.image.revision=${{ steps.tags.outputs.sha }}
+            index:org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            index:org.opencontainers.image.licenses=Apache-2.0
+            manifest:org.opencontainers.image.description=${{ env.DESCRIPTION }}
           cache-from: type=registry,ref=${{ env.CACHE }}:docker
           cache-to: ${{ env.PUSH == 'true' && format('type=registry,ref={0}:docker,mode=max', env.CACHE) || '' }}
