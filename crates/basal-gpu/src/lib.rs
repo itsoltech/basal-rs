@@ -269,9 +269,9 @@ pub fn gpu_device() -> Result<Device> {
             // the PTX of the highest compiled architecture not above the GPU's (build.rs, CUDA_COMPUTE_CAPS)
             ensure!(
                 fused::cu::select(cap).is_some(),
-                "this build has kernels for CUDA compute capability {} and newer, but {} is {major}.{minor}: use a \
-                 build for {major}{minor} or lower (CUDA_COMPUTE_CAPS; container image tags: latest = 8.9, -sm80 = \
-                 8.0, -sm90 = 9.0)",
+                "this build has kernels for CUDA compute capability {} and newer, but {} is {major}.{minor} (a \
+                 build with CUDA_COMPUTE_CAPS={major}{minor} may run if the kernels support it; the release packages \
+                 and images need 8.0 or newer)",
                 env!("BASAL_CUDA_COMPUTE_CAPS"),
                 ctx.name()?
             );

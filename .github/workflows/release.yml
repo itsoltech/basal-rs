@@ -26,6 +26,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.95.0
+      # dependencies of the dist profile from earlier runs (a tag run reads the cache of the default branch)
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: dist
       - name: Package
         env:
           BASAL_GIT_SHA: ${{ github.sha }}
@@ -38,6 +42,9 @@ jobs:
   linux:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Free disk space (the CUDA devel image and the build need ~25 GB)
         run: |
@@ -45,9 +52,19 @@ jobs:
           sudo docker image prune --all --force
           df -h /
       - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Package
         env:
           BASAL_GIT_SHA: ${{ github.sha }}
+          # builder layers (toolkit, Rust, the cargo-chef dependency layer) in the registry, next to the image cache
+          BASAL_BUILD_CACHE: >-
+            --cache-from type=registry,ref=ghcr.io/${{ github.repository }}:buildcache-release-linux
+            --cache-to type=registry,ref=ghcr.io/${{ github.repository }}:buildcache-release-linux,mode=max
         run: tools/release/package-linux.sh dist
       - uses: actions/upload-artifact@v4
         with:

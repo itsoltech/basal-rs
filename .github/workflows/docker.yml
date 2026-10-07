@@ -1,8 +1,9 @@
-# Container images of the server on GitHub Container Registry (ghcr.io/<owner>/<repo>), one per GPU architecture:
-#   :latest, :main, :sha-<commit>, :<version> from v* tags          CUDA_COMPUTE_CAP 89 (RTX 6000 Ada, L40S, RTX 40xx)
-#   the same tags with -sm80 / -sm90                                  A100, RTX 30xx / H100
-# Pull requests build the images without pushing them. The build needs no GPU; the Docker layer cache (Rust toolchain,
-# dependencies with the CUDA kernels of candle) is kept in the registry under :buildcache-sm<cap>.
+# Container image of the server on GitHub Container Registry (ghcr.io/<owner>/<repo>), one image for every supported
+# GPU architecture (kernels for compute capability 8.0, 8.9 and 9.0, chosen at start):
+#   :latest, :main, :sha-<commit>, :<version> from v* tags
+#   the same tags with -sm80 / -sm90: aliases of the same image (the per-architecture images of earlier releases)
+# Pull requests build the image without pushing it. The build needs no GPU; the Docker layer cache (Rust toolchain,
+# dependencies with the CUDA kernels of candle) is kept in the registry under :buildcache.
 name: docker
 
 on:
@@ -36,16 +37,6 @@ jobs:
   image:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - cap: "89"
-            suffix: ""
-          - cap: "80"
-            suffix: "-sm80"
-          - cap: "90"
-            suffix: "-sm90"
     env:
       IMAGE: ghcr.io/${{ github.repository }}
       PUSH: ${{ github.event_name != 'pull_request' }}
@@ -75,7 +66,6 @@ jobs:
           images: ${{ env.IMAGE }}
           flavor: |
             latest=false
-            suffix=${{ matrix.suffix }},onlatest=true
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=branch
@@ -85,7 +75,18 @@ jobs:
             type=sha,prefix=sha-,format=short
           labels: |
             org.opencontainers.image.title=basal-rs
-            ai.basal.cuda-compute-cap=${{ matrix.cap }}
+            ai.basal.cuda-compute-caps=80,89,90
+
+      - name: Aliases -sm80 and -sm90
+        id: tags
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          {
+            echo "tags<<EOF"
+            for t in $TAGS; do echo "$t"; echo "$t-sm80"; echo "$t-sm90"; done
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -93,10 +94,9 @@ jobs:
           context: .
           file: docker/Dockerfile
           build-args: |
-            CUDA_COMPUTE_CAP=${{ matrix.cap }}
             BASAL_GIT_SHA=${{ github.sha }}
           push: ${{ env.PUSH == 'true' }}
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: ${{ steps.tags.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache-sm${{ matrix.cap }}
-          cache-to: ${{ env.PUSH == 'true' && format('type=registry,ref={0}:buildcache-sm{1},mode=max', env.IMAGE, matrix.cap) || '' }}
+          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache
+          cache-to: ${{ env.PUSH == 'true' && format('type=registry,ref={0}:buildcache,mode=max', env.IMAGE) || '' }}

@@ -165,20 +165,15 @@ docker compose logs -f        # pobieranie modeli, tabele GEMM, start serwera
 curl localhost:8000/health
 ```
 
-Obrazy buduje [.github/workflows/docker.yml](.github/workflows/docker.yml)
-przy każdej zmianie kodu na `main` i przy tagach `v*`, osobno dla
-architektury GPU:
-
-| Tag | `CUDA_COMPUTE_CAP` | GPU |
-|---|---|---|
-| `latest`, `main`, `sha-<commit>`, `<wersja>` | 89 | RTX 6000 Ada, L40S, RTX 40xx |
-| ten sam z `-sm80` | 80 | A100, RTX 30xx |
-| ten sam z `-sm90` | 90 | H100 |
-
-Obraz działa na karcie o tej samej lub nowszej architekturze, nie starszej
-(na starszej przy starcie jest błąd z nazwą właściwego tagu). Na RTX 6000
-Ada `-sm80` i `latest` dają bitowo te same wyniki i tę samą wydajność
-([pomiar](reports/docker-images/README.md)).
+Obraz buduje [.github/workflows/docker.yml](.github/workflows/docker.yml)
+przy każdej zmianie kodu na `main` i przy tagach `v*` (`latest`, `main`,
+`sha-<commit>`, `<wersja>`). Jeden obraz zawiera kernele dla compute
+capability 8.0, 8.9 i 9.0 (A100, RTX 30xx/40xx, RTX 6000 Ada, L40S, H100) i
+przy starcie wybiera właściwe dla karty. Tagi z `-sm80` i `-sm90` z
+wcześniejszych obrazów per architektura wskazują teraz ten sam obraz. Na RTX
+6000 Ada wynik jest bitowo ten sam co z obrazów per architektura
+([pomiar](reports/cuda-multi-ptx/README.md),
+[obrazy per architektura](reports/docker-images/README.md)).
 
 Przy pierwszym starcie serwer pobiera modele z Hugging Face i generuje dla
 nich tabele GEMM (jednorazowo; basal-1.5-mini: ~35 s pobierania i ~150 s
@@ -191,7 +186,7 @@ Własny build (wieloetapowy: toolkit CUDA i Rust, zależności w osobnej
 warstwie przez cargo-chef, obraz wynikowy z samym runtime CUDA):
 
 ```sh
-docker build -t basal-rs -f docker/Dockerfile --build-arg CUDA_COMPUTE_CAP=89 .
+docker build -t basal-rs -f docker/Dockerfile .
 docker run -d --gpus all -p 8000:8000 -v "$PWD/serve.yml:/config/serve.yml:ro" \
   -v basal-data:/data -e HF_TOKEN basal-rs
 ```
