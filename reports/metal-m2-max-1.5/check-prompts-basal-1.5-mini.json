@@ -1,0 +1,644 @@
+{
+  "tokens": {
+    "orders_compared": 124,
+    "mismatches": [
+      {
+        "item": "systemone/m15-multi-pl/topics",
+        "differences": [
+          "orders 0 vs 2",
+          "pack.prefix_len",
+          "pack.packed_len",
+          "pack.readout_cols"
+        ],
+        "reason": null
+      },
+      {
+        "item": "systemone/m15-multi-en-list/issues",
+        "differences": [
+          "orders 0 vs 2",
+          "pack.prefix_len",
+          "pack.packed_len",
+          "pack.readout_cols"
+        ],
+        "reason": null
+      },
+      {
+        "item": "systemone/m15-multi-min/t",
+        "differences": [
+          "orders 0 vs 2",
+          "pack.prefix_len",
+          "pack.packed_len",
+          "pack.readout_cols"
+        ],
+        "reason": null
+      },
+      {
+        "item": "systemone/m15-mixed/tags",
+        "differences": [
+          "orders 0 vs 2",
+          "pack.prefix_len",
+          "pack.packed_len",
+          "pack.readout_cols"
+        ],
+        "reason": null
+      },
+      {
+        "item": "systemone/m15-facts-dates/ontime",
+        "differences": [
+          "order 0: prompt",
+          "order 0: input_ids",
+          "order 1: prompt",
+          "order 1: input_ids",
+          "pack.prefix_len",
+          "pack.packed_len",
+          "pack.readout_cols"
+        ],
+        "reason": null
+      },
+      {
+        "item": "systemone/m15-facts-amounts/fits",
+        "differences": [
+          "order 0: prompt",
+          "order 0: input_ids",
+          "order 1: prompt",
+          "order 1: input_ids",
+          "pack.prefix_len",
+          "pack.packed_len",
+          "pack.readout_cols"
+        ],
+        "reason": null
+      },
+      {
+        "item": "systemone/m15-facts-amounts/level",
+        "differences": [
+          "order 0: prompt",
+          "order 0: input_ids",
+          "order 1: prompt",
+          "order 1: input_ids",
+          "pack.prefix_len",
+          "pack.packed_len",
+          "pack.readout_cols"
+        ],
+        "reason": null
+      },
+      {
+        "item": "systemone/m15-facts-euro-evidence/board",
+        "differences": [
+          "order 0: prompt",
+          "order 0: input_ids",
+          "order 1: prompt",
+          "order 1: input_ids",
+          "pack.prefix_len",
+          "pack.packed_len",
+          "pack.readout_cols"
+        ],
+        "reason": null
+      }
+    ],
+    "known_deviations": []
+  },
+  "systemone_cases": [
+    {
+      "id": "so-structured-state",
+      "ours_error": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "model"
+            ],
+            "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-mini\"",
+            "type": "unknown_model"
+          }
+        ]
+      },
+      "reference_error": null,
+      "deviation": null,
+      "items": []
+    },
+    {
+      "id": "so-array-state-en",
+      "ours_error": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "model"
+            ],
+            "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-mini\"",
+            "type": "unknown_model"
+          }
+        ]
+      },
+      "reference_error": null,
+      "deviation": null,
+      "items": []
+    },
+    {
+      "id": "so-null-and-missing-instructions",
+      "ours_error": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "model"
+            ],
+            "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-mini\"",
+            "type": "unknown_model"
+          }
+        ]
+      },
+      "reference_error": null,
+      "deviation": null,
+      "items": []
+    },
+    {
+      "id": "so-empty-structures",
+      "ours_error": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "model"
+            ],
+            "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-mini\"",
+            "type": "unknown_model"
+          }
+        ]
+      },
+      "reference_error": null,
+      "deviation": null,
+      "items": []
+    },
+    {
+      "id": "so-duplicate-descriptions-hide",
+      "ours_error": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "model"
+            ],
+            "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-mini\"",
+            "type": "unknown_model"
+          }
+        ]
+      },
+      "reference_error": null,
+      "deviation": null,
+      "items": []
+    },
+    {
+      "id": "so-unicode",
+      "ours_error": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "model"
+            ],
+            "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-mini\"",
+            "type": "unknown_model"
+          }
+        ]
+      },
+      "reference_error": null,
+      "deviation": null,
+      "items": []
+    },
+    {
+      "id": "so-polish-from-instructions",
+      "ours_error": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "model"
+            ],
+            "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-mini\"",
+            "type": "unknown_model"
+          }
+        ]
+      },
+      "reference_error": null,
+      "deviation": null,
+      "items": []
+    },
+    {
+      "id": "so-ten-options",
+      "ours_error": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "model"
+            ],
+            "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-mini\"",
+            "type": "unknown_model"
+          }
+        ]
+      },
+      "reference_error": null,
+      "deviation": null,
+      "items": []
+    },
+    {
+      "id": "so-score-two-levels",
+      "ours_error": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "model"
+            ],
+            "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-mini\"",
+            "type": "unknown_model"
+          }
+        ]
+      },
+      "reference_error": null,
+      "deviation": null,
+      "items": []
+    },
+    {
+      "id": "so-score-one-level",
+      "ours_error": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "model"
+            ],
+            "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-mini\"",
+            "type": "unknown_model"
+          }
+        ]
+      },
+      "reference_error": "ValueError: question 'alarm': 1 options (supported: 2..10)",
+      "deviation": null,
+      "items": []
+    },
+    {
+      "id": "so-eleven-options",
+      "ours_error": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "model"
+            ],
+            "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-mini\"",
+            "type": "unknown_model"
+          }
+        ]
+      },
+      "reference_error": "ValueError: question 'cat': 11 options (supported: 2..10)",
+      "deviation": null,
+      "items": []
+    },
+    {
+      "id": "so-unknown-type",
+      "ours_error": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "model"
+            ],
+            "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-mini\"",
+            "type": "unknown_model"
+          }
+        ]
+      },
+      "reference_error": null,
+      "deviation": "unknown type is a validation error; upstream treats it as choice",
+      "items": []
+    },
+    {
+      "id": "so-missing-type",
+      "ours_error": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "questions",
+              "q",
+              "type"
+            ],
+            "msg": "Field required (choice, noul or score)",
+            "type": "union_tag_not_found"
+          }
+        ]
+      },
+      "reference_error": null,
+      "deviation": "missing type is a validation error; upstream defaults to choice",
+      "items": []
+    },
+    {
+      "id": "m15-multi-pl",
+      "ours_error": null,
+      "reference_error": null,
+      "deviation": null,
+      "items": [
+        {
+          "item": "topics",
+          "tokens_identical": false
+        }
+      ]
+    },
+    {
+      "id": "m15-multi-en-list",
+      "ours_error": null,
+      "reference_error": null,
+      "deviation": null,
+      "items": [
+        {
+          "item": "issues",
+          "tokens_identical": false
+        }
+      ]
+    },
+    {
+      "id": "m15-multi-min",
+      "ours_error": null,
+      "reference_error": null,
+      "deviation": null,
+      "items": [
+        {
+          "item": "t",
+          "tokens_identical": false
+        }
+      ]
+    },
+    {
+      "id": "m15-act-short",
+      "ours_error": null,
+      "reference_error": null,
+      "deviation": null,
+      "items": [
+        {
+          "item": "fraud",
+          "tokens_identical": true
+        }
+      ]
+    },
+    {
+      "id": "m15-act-full",
+      "ours_error": null,
+      "reference_error": null,
+      "deviation": null,
+      "items": [
+        {
+          "item": "route",
+          "tokens_identical": true
+        }
+      ]
+    },
+    {
+      "id": "m15-act-maxerr-005",
+      "ours_error": null,
+      "reference_error": null,
+      "deviation": null,
+      "items": [
+        {
+          "item": "refund",
+          "tokens_identical": true
+        }
+      ]
+    },
+    {
+      "id": "m15-act-no-threshold",
+      "ours_error": null,
+      "reference_error": null,
+      "deviation": null,
+      "items": [
+        {
+          "item": "fit",
+          "tokens_identical": true
+        }
+      ]
+    },
+    {
+      "id": "m15-mixed",
+      "ours_error": null,
+      "reference_error": null,
+      "deviation": null,
+      "items": [
+        {
+          "item": "dept",
+          "tokens_identical": true
+        },
+        {
+          "item": "refund",
+          "tokens_identical": true
+        },
+        {
+          "item": "urgency",
+          "tokens_identical": true
+        },
+        {
+          "item": "tags",
+          "tokens_identical": false
+        }
+      ]
+    },
+    {
+      "id": "m15-evidence-noul",
+      "ours_error": null,
+      "reference_error": null,
+      "deviation": null,
+      "items": [
+        {
+          "item": "form",
+          "tokens_identical": true
+        }
+      ]
+    },
+    {
+      "id": "m15-evidence-choice-en",
+      "ours_error": null,
+      "reference_error": null,
+      "deviation": null,
+      "items": [
+        {
+          "item": "cause",
+          "tokens_identical": true
+        }
+      ]
+    },
+    {
+      "id": "m15-evidence-score-act",
+      "ours_error": null,
+      "reference_error": null,
+      "deviation": null,
+      "items": [
+        {
+          "item": "urgency",
+          "tokens_identical": true
+        },
+        {
+          "item": "route",
+          "tokens_identical": true
+        }
+      ]
+    },
+    {
+      "id": "m15-evidence-long",
+      "ours_error": null,
+      "reference_error": null,
+      "deviation": null,
+      "items": [
+        {
+          "item": "cards",
+          "tokens_identical": true
+        },
+        {
+          "item": "cash",
+          "tokens_identical": true
+        }
+      ]
+    },
+    {
+      "id": "m15-facts-dates",
+      "ours_error": null,
+      "reference_error": null,
+      "deviation": null,
+      "items": [
+        {
+          "item": "ontime",
+          "tokens_identical": false
+        }
+      ]
+    },
+    {
+      "id": "m15-facts-amounts",
+      "ours_error": null,
+      "reference_error": null,
+      "deviation": null,
+      "items": [
+        {
+          "item": "fits",
+          "tokens_identical": false
+        },
+        {
+          "item": "level",
+          "tokens_identical": false
+        }
+      ]
+    },
+    {
+      "id": "m15-facts-euro-evidence",
+      "ours_error": null,
+      "reference_error": null,
+      "deviation": null,
+      "items": [
+        {
+          "item": "board",
+          "tokens_identical": false
+        }
+      ]
+    },
+    {
+      "id": "m15-facts-none",
+      "ours_error": null,
+      "reference_error": null,
+      "deviation": null,
+      "items": [
+        {
+          "item": "t",
+          "tokens_identical": true
+        }
+      ]
+    },
+    {
+      "id": "cx-01-ticket-fan-out",
+      "ours_error": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "model"
+            ],
+            "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-mini\"",
+            "type": "unknown_model"
+          }
+        ]
+      },
+      "reference_error": null,
+      "deviation": null,
+      "items": []
+    },
+    {
+      "id": "cx-02-web-agent",
+      "ours_error": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "model"
+            ],
+            "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-mini\"",
+            "type": "unknown_model"
+          }
+        ]
+      },
+      "reference_error": null,
+      "deviation": null,
+      "items": []
+    },
+    {
+      "id": "cx-03-deadline-decomposed",
+      "ours_error": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "model"
+            ],
+            "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-mini\"",
+            "type": "unknown_model"
+          }
+        ]
+      },
+      "reference_error": null,
+      "deviation": null,
+      "items": []
+    },
+    {
+      "id": "cx-04-loan-triage",
+      "ours_error": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "model"
+            ],
+            "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-mini\"",
+            "type": "unknown_model"
+          }
+        ]
+      },
+      "reference_error": null,
+      "deviation": null,
+      "items": []
+    },
+    {
+      "id": "cx-05-guard-check",
+      "ours_error": {
+        "detail": [
+          {
+            "loc": [
+              "body",
+              "model"
+            ],
+            "msg": "unknown model \"basal-1.0-4.5B\"; served: \"basal-1.5-mini\"",
+            "type": "unknown_model"
+          }
+        ]
+      },
+      "reference_error": null,
+      "deviation": null,
+      "items": []
+    }
+  ]
+}

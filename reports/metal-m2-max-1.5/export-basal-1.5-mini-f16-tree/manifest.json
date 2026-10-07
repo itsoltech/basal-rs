@@ -1,0 +1,44 @@
+{
+  "tool": "basal export",
+  "inputs": "reports/reference-basal-1.5-mini-fp32",
+  "model": "basal-1.5-mini",
+  "model_dir": ".models/basal-1.5-mini",
+  "backend": {
+    "backend": "metal",
+    "device": "Apple GPU through candle Device::new_metal(0)",
+    "tensor_library": "candle-core 0.11.0 (Metal; matmul = MLX steel GEMM port)",
+    "weights": "f16 (converted from bf16, experiment)",
+    "activations": "f16 residual stream, norms and MLP",
+    "attention": "f32 q/k/v (bias + rotate-half RoPE fused kernel, cos/sin from f64 on host); candle sdpa (MLX steel attention) in f32 with additive block mask; GQA in-kernel",
+    "kernels": "fused: q/k/v and gate/up projections as single GEMMs without bias; bias added in fused kernels (bias+RoPE+head split, bias+SiLU*up, bias+residual)",
+    "readout": "letter rows of lm_head only, f32",
+    "padding": "none: compact token list for GEMM/norm/MLP, attention per packed row (segment)",
+    "attention_kernel": "attn_tree_f32",
+    "gemm": "MLX steel GEMM (candle); 32-row tiles when M mod 64 is in 1..=32 and M <= 600",
+    "prefix_kv": [
+      53,
+      66
+    ],
+    "state_cache_bytes": 0,
+    "last_layer": "o_proj and MLP of the last layer only at the readout positions"
+  },
+  "bench_batching": "Tree",
+  "host_math": "softmax, order average and calibration in f64",
+  "calibration": {
+    "temperatures": {
+      "score": 1.5422108254079405,
+      "noul": 1.3939382634489992,
+      "choice": 1.1387886347566916
+    }
+  },
+  "request_batching": "Tree",
+  "bench_s": 2.830157917,
+  "total_s": 13.150216,
+  "run": {
+    "dtype": "f16",
+    "readout": "f32",
+    "kernels": "fused",
+    "prefix_cache": true,
+    "load_s": 0.956552083
+  }
+}

@@ -61,23 +61,25 @@ odpowiedzi co upstream; `facts` jest zgodne co do bajtu na 432 stanach.
 Wynik pytania nie zależy od tego, z czym trafi do partii (bitowo te same
 logity pojedynczo, w partii i pod obciążeniem HTTP).
 
-Apple M1 Pro (Metal), pojedyncza decyzja (mediana, metodyka basal-bench)
+Apple Silicon (Metal), pojedyncza decyzja (mediana, metodyka basal-bench)
 wobec upstream v1.5.0 z MLX: ścieżka serwowana (bf16) i ten sam backend w
-f16, w tej samej precyzji co basal-rs (M1 nie ma sprzętowego bf16)
-([pomiar](reports/metal-m1-pro-1.5/README.md)):
+f16, w tej samej precyzji co basal-rs:
 
-| Model | Upstream MLX bf16 | Upstream MLX f16 | basal-rs f16 |
-|---|---:|---:|---:|
-| basal-1.5-max | 2265 ms | 1969 ms | 1197–1323 ms |
-| basal-1.5-4.5B | 955 ms | 823 ms | 495–502 ms |
-| basal-1.5-mini | 318–323 ms | 274–276 ms | 170–174 ms |
+| Model | M2 Max: MLX bf16 | M2 Max: MLX f16 | M2 Max: basal-rs | M1 Pro: MLX bf16 | M1 Pro: MLX f16 | M1 Pro: basal-rs |
+|---|---:|---:|---:|---:|---:|---:|
+| basal-1.5-max | 992 ms | 886 ms | 526 ms | 2265 ms | 1969 ms | 1197–1323 ms |
+| basal-1.5-4.5B | 427 ms | 372 ms | 235 ms | 955 ms | 823 ms | 495–502 ms |
+| basal-1.5-mini | 151 ms | 130 ms | 80 ms | 318–323 ms | 274–276 ms | 170–174 ms |
 
-basal-rs f16 daje na M1 Pro decyzje FP32 na 44/44 przykładach dla trzech
-modeli; upstream MLX bf16 na basal-1.5-max zmienia jedną. Tabela pochodzi z
-wersji, w której attention na Metal liczyło SDPA z MLX i wynik zależał od
-pakowania partii. Attention po jednostkach drzewa usuwa tę zależność przy tym
-samym czasie pełnej decyzji i o 6–9% wyższej przepustowości
-([pomiar na M2 Max](reports/metal-m2-max-tree/README.md)).
+Na M2 Max basal-rs obsługuje 1,9–2,0 raza więcej decyzji na sekundę niż MLX
+f16 i 2,2–2,35 raza więcej niż MLX bf16
+([M2 Max](reports/metal-m2-max-1.5/README.md),
+[M1 Pro](reports/metal-m1-pro-1.5/README.md)). basal-rs f16 daje decyzje
+FP32 na 44/44 przykładach dla trzech modeli; upstream MLX bf16 na
+basal-1.5-max zmienia jedną. Na M1 Pro mierzona była wersja z SDPA z MLX w
+attention; obecne attention po jednostkach drzewa daje wynik niezależny od
+pakowania partii przy tym samym czasie pełnej decyzji
+([pomiar](reports/metal-m2-max-tree/README.md)).
 
 ## Uruchomienie w Dockerze
 

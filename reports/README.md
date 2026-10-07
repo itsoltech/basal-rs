@@ -38,6 +38,7 @@ Metodyka: [docs/BENCHMARKS.md](../docs/BENCHMARKS.md).
 | Katalog | Zawartość |
 |---|---|
 | [metal-m1-pro-1.5](metal-m1-pro-1.5/README.md) | M1 Pro, basal-1.5-max, 4.5B i mini: zgodność z FP32 upstream, pojedyncza decyzja wobec upstream MLX bf16, f16 i 8-bit |
+| [metal-m2-max-1.5](metal-m2-max-1.5/README.md) | M2 Max, basal-1.5-max, 4.5B i mini: zgodność z FP32 upstream, pojedyncza decyzja wobec upstream MLX bf16, f16 i 8-bit |
 | [metal-m2-max-tree](metal-m2-max-tree/README.md) | M2 Max: attention po jednostkach drzewa (wynik niezależny od pakowania) wobec SDPA, wczytywanie basal-1.5-max; CUDA bez zmian |
 | `reference-basal-1.5-{max,4.5B,mini}-{mlx,mlx-q8,mlx-f16}` | eksporty upstream v1.5.0 MLX na M1 Pro |
 
