@@ -22,8 +22,8 @@ Writes (into --out, which must not exist yet):
   manifest.json    revisions, versions, precision and parameters
 
 The script only reads upstream; it does not modify it. Logits are taken from the same functions the backend uses:
-MLX (_pack, _host_rows, _forward_mlx, lm_head) or PyTorch (_pack, _mask_from_seg, _forward_masked, lm_head; the
-uncompiled forward, as GraphBackend._eager_shared). run_shared() of the backend is called as well and its probabilities
+MLX (_pack, _host_rows, _forward_mlx, lm_head; 1.5: _prefix, _forward, _head) or PyTorch (_pack, _mask_from_seg,
+_forward_masked, lm_head; the uncompiled forward, as GraphBackend._eager_shared). run_shared() of the backend is called as well and its probabilities
 are stored next to ours so a mismatch of this exporter with the served path would be visible.
 """
 import argparse
@@ -89,7 +89,15 @@ def readout(be, prompts, lids):
     """One packed group at batch 1 -> (pack, letter logits per order, logsumexp of the full vocabulary per order)."""
     toks = [be.tok(p, add_special_tokens=False).input_ids for p in prompts]
     pack = GraphBackend._pack(toks)  # 1.0: (ids, pos, seg, last); 1.5: + block parents (prefix trie)
-    if hasattr(be, "mx"):
+    if hasattr(be, "mx") and not hasattr(be, "_host_rows"):  # 1.5 MLX: shared prefix in a KV cache, as MLXBackend._group
+        mx = be.mx
+
+        def run():
+            P = min(len(os.path.commonprefix(toks)), min(map(len, toks)) - 1)
+            prefix = be._prefix(toks[0][:P]) if P > 0 else None
+            return np.array(be._head(be._forward([t[P:] for t in toks], prefix)).astype(mx.float32))
+        lg = be.pool.submit(run).result()
+    elif hasattr(be, "mx"):
         mx = be.mx
         ids, pos, seg, rows, cols = be._host_rows([pack], [0], 1, len(pack[0]))
         h = be._forward_mlx(mx.array(ids.numpy(), dtype=mx.int32), mx.array(pos.numpy(), dtype=mx.int32),
@@ -251,6 +259,11 @@ def main():
     if a.device:
         args += ["--device", a.device]
     srv = Server(parser().parse_args(args))
+    be = srv.backend
+    if hasattr(be, "mx") and not hasattr(be, "_host_rows") and a.dtype != "bfloat16":
+        # 1.5 MLX loads the checkpoint dtype (bf16); cast the whole model (as the 1.0 MLXBackend dtype argument)
+        mx = be.mx
+        be.pool.submit(lambda: (be.model.set_dtype(getattr(mx, a.dtype)), mx.eval(be.model.parameters()))).result()
     load_s = time.time() - t0
     t1 = time.time()
     export_bench(srv.backend, srv.temps, a.n, out)
