@@ -31,7 +31,9 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS build
 ARG CUDA_COMPUTE_CAP=89
-ENV CUDA_COMPUTE_CAP=${CUDA_COMPUTE_CAP}
+# commit shown by `basal --version` (the build context has no .git)
+ARG BASAL_GIT_SHA=unknown
+ENV CUDA_COMPUTE_CAP=${CUDA_COMPUTE_CAP} BASAL_GIT_SHA=${BASAL_GIT_SHA}
 COPY --from=planner /src/recipe.json recipe.json
 RUN cargo chef cook --release --features basal-cli/cuda --recipe-path recipe.json
 COPY Cargo.toml Cargo.lock rustfmt.toml ./
@@ -45,7 +47,8 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=build /usr/local/bin/basal /usr/local/bin/basal
-ENV HF_HOME=/data/hf BASAL_ADDR=0.0.0.0:8000
+# BASAL_HOME: GEMM tables of `gemm_table: auto` in /data/.cache/gemm (src/paths.rs)
+ENV HF_HOME=/data/hf BASAL_HOME=/data BASAL_ADDR=0.0.0.0:8000
 LABEL org.opencontainers.image.title="basal-rs" \
       org.opencontainers.image.description="Rust runtime of the basal decision models (TypeSafe System One API), CUDA" \
       org.opencontainers.image.licenses="Apache-2.0" \

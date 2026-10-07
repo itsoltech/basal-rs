@@ -92,7 +92,9 @@ jobs:
         with:
           context: .
           file: docker/Dockerfile
-          build-args: CUDA_COMPUTE_CAP=${{ matrix.cap }}
+          build-args: |
+            CUDA_COMPUTE_CAP=${{ matrix.cap }}
+            BASAL_GIT_SHA=${{ github.sha }}
           push: ${{ env.PUSH == 'true' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

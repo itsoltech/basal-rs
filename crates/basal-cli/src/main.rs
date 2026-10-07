@@ -6,12 +6,15 @@
 //!   basal export        --model DIR --inputs DIR --out DIR             per-item results in the reference format (Metal)
 //!   basal compare       --a DIR --b DIR --out FILE                     tokens, numerics, decisions, quality
 //!   basal bench         --model DIR --reference DIR --out FILE         latency / throughput (Metal)
+//!   basal init          [--model mini|4.5B|max]                        user configuration of `basal serve`
+//!   basal serve         [--config FILE | --model DIR]                  HTTP server (default: user configuration)
 
 mod bench;
 mod compare;
 mod config;
 mod export;
 mod large_eval;
+mod paths;
 mod reference;
 mod serve;
 mod stats;
@@ -26,8 +29,14 @@ use basal_gpu::{GpuBackend, Kernels, Precision, Readout};
 use clap::{Args, Parser, Subcommand};
 use serde_json::{json, Value};
 
+/// `basal --version`: release, commit and GPU backend of the build.
+fn version() -> &'static str {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    V.get_or_init(|| format!("{} ({}, {})", env!("CARGO_PKG_VERSION"), env!("BASAL_GIT_SHA"), basal_gpu::BUILD_BACKEND))
+}
+
 #[derive(Parser)]
-#[command(name = "basal", about = "Runtime of basal decision models (Rust; CUDA and Metal)")]
+#[command(name = "basal", version = version(), about = "Runtime of basal decision models (Rust; CUDA and Metal)")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -175,14 +184,28 @@ enum Cmd {
         #[arg(long, default_value_t = 20)]
         reps: usize,
     },
-    /// System One HTTP server: POST /v1/systemone, POST /v1/basal, GET /v1/models, GET /health
+    /// Write a server configuration for `basal serve` (default: the user configuration file)
+    Init {
+        /// Served models: mini, 4.5B, max (repeat for several; default: 4.5B)
+        #[arg(long = "model")]
+        models: Vec<String>,
+        /// Configuration file to write (default: BASAL_CONFIG or serve.yml in the user configuration directory)
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Replace an existing file
+        #[arg(long)]
+        force: bool,
+    },
+    /// System One HTTP server: POST /v1/systemone, POST /v1/basal, GET /v1/models, GET /health. Without --config and
+    /// --model: the user configuration (`basal init`), else basal-1.5-4.5B from Hugging Face
     Serve {
         /// YAML file with the served models and their options (see crates/basal-cli/src/config.rs); replaces the
         /// model, GPU and admission options below
         #[arg(long, conflicts_with_all = ["model", "gemm_table"])]
         config: Option<PathBuf>,
-        #[command(flatten)]
-        m: ModelArgs,
+        /// Local model directory (one model; the options below apply to it)
+        #[arg(long)]
+        model: Option<PathBuf>,
         #[command(flatten)]
         g: GpuArgs,
         #[arg(long, default_value = "127.0.0.1:8000")]
@@ -455,9 +478,26 @@ fn main() -> Result<()> {
             #[cfg(not(target_os = "macos"))]
             anyhow::bail!("gemm-tune tunes the Metal GEMM kernels ({dtype}, {m:?}, {reps}, {shapes:?})");
         }
+        Cmd::Init { models, out, force } => {
+            let models: Vec<&config::KnownModel> = if models.is_empty() {
+                vec![config::DEFAULT_MODEL]
+            } else {
+                models.iter().map(|m| config::known_model(m)).collect::<Result<_>>()?
+            };
+            let out = out.unwrap_or_else(paths::config_file);
+            if out.exists() && !force {
+                bail!("{} exists (--force replaces it)", out.display());
+            }
+            if let Some(dir) = out.parent().filter(|d| !d.as_os_str().is_empty()) {
+                std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+            }
+            std::fs::write(&out, config::template(&models)).with_context(|| format!("writing {}", out.display()))?;
+            let gb: f64 = models.iter().map(|m| m.size_gb).sum();
+            eprintln!("wrote {} ({:.1} GB of models to download at the first `basal serve`)", out.display(), gb);
+        }
         Cmd::Serve {
             config,
-            m,
+            model,
             g,
             addr,
             max_batch_tokens,
@@ -467,8 +507,30 @@ fn main() -> Result<()> {
             long_slice_ms,
             release_date,
         } => {
-            if let Some(path) = config {
-                let c = config::ServeConfig::load(&path)?;
+            // --config, else --model (one model, options from the command line), else the user configuration, else
+            // the built-in one
+            let c = match (config, &model) {
+                (Some(path), _) => Some(config::ServeConfig::load(&path)?),
+                (None, Some(_)) => None,
+                (None, None) => {
+                    let path = paths::config_file();
+                    if path.exists() {
+                        eprintln!("basal: configuration {}", path.display());
+                        Some(config::ServeConfig::load(&path)?)
+                    } else {
+                        let m = config::DEFAULT_MODEL;
+                        eprintln!(
+                            "basal: no configuration ({} is missing; `basal init` writes one): serving {} ({:.1} GB, \
+                             downloaded at the first start)",
+                            path.display(),
+                            m.repo,
+                            m.size_gb
+                        );
+                        Some(config::ServeConfig::builtin())
+                    }
+                }
+            };
+            if let Some(c) = c {
                 // model files (local or downloaded), then GEMM tables (a search needs no model weights in GPU
                 // memory), then the models
                 let dirs: Vec<PathBuf> = c.models.iter().map(config::model_dir).collect::<Result<_>>()?;
@@ -513,7 +575,7 @@ fn main() -> Result<()> {
                 };
                 serve::serve(models, opts)?;
             } else {
-                let engine = gpu_engine(&m, &g)?;
+                let engine = gpu_engine(&ModelArgs { model: model.expect("--model") }, &g)?;
                 if let Some(t) = &g.gemm_table {
                     config::check_gemm_coverage(&engine.manifest.name, &engine.backend.gemm_table_missing(), t)?;
                 }

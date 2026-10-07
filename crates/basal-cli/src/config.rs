@@ -3,7 +3,7 @@
 //! ```yaml
 //! addr: 0.0.0.0:8000
 //! default_model: basal-1.5-max     # /v1/basal requests without "model" (default: the first model)
-//! gemm_cache: .cache/gemm          # tables written by `gemm_table: auto`
+//! gemm_cache: .cache/gemm          # tables written by `gemm_table: auto` (default: the user cache, paths.rs)
 //! models:
 //!   - repo: Remek/basal-1.5-max    # downloaded from Hugging Face at start (HF_HOME cache, HF_TOKEN)
 //!     revision: be1b5ee7e7a9755a931262fa7fab4f59be0fd03c
@@ -104,7 +104,7 @@ fn default_long_slice_ms() -> u64 {
     100
 }
 fn default_gemm_cache() -> PathBuf {
-    ".cache/gemm".into()
+    crate::paths::cache_dir().join("gemm")
 }
 fn default_dtype() -> String {
     "f16".into()
@@ -128,10 +128,84 @@ fn default_tree_max_tokens() -> usize {
 impl ServeConfig {
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        let c: Self = serde_yaml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-        ensure!(!c.models.is_empty(), "{}: no models", path.display());
+        Self::parse(&text).with_context(|| format!("parsing {}", path.display()))
+    }
+
+    fn parse(text: &str) -> Result<Self> {
+        let c: Self = serde_yaml::from_str(text)?;
+        ensure!(!c.models.is_empty(), "no models");
         Ok(c)
     }
+
+    /// Configuration of `basal serve` without `--config` / `--model` when the user has none: [`DEFAULT_MODEL`].
+    pub fn builtin() -> Self {
+        Self::parse(&template(&[DEFAULT_MODEL])).expect("built-in configuration")
+    }
+}
+
+/// A basal model published by its author, with the revision this runtime was checked with.
+pub struct KnownModel {
+    /// short name for `basal init --model`
+    pub short: &'static str,
+    pub repo: &'static str,
+    pub revision: &'static str,
+    /// checkpoint size (download), GB
+    pub size_gb: f64,
+}
+
+pub const KNOWN_MODELS: [KnownModel; 3] = [
+    KnownModel {
+        short: "mini",
+        repo: "Remek/basal-1.5-mini",
+        revision: "1978d0705ce09cd2d7d8d3e87b304468121e7255",
+        size_gb: 3.1,
+    },
+    KnownModel {
+        short: "4.5B",
+        repo: "Remek/basal-1.5-4.5B",
+        revision: "784a683bfadcc8865238fc0fc74a83b4000269bc",
+        size_gb: 9.1,
+    },
+    KnownModel {
+        short: "max",
+        repo: "Remek/basal-1.5-max",
+        revision: "be1b5ee7e7a9755a931262fa7fab4f59be0fd03c",
+        size_gb: 22.3,
+    },
+];
+
+/// Model of the built-in configuration: the main basal-1.5 model (fits a 16 GB Mac and a 12 GB GPU).
+pub const DEFAULT_MODEL: &KnownModel = &KNOWN_MODELS[1];
+
+/// `basal init --model mini|4.5B|max` (also the repository name).
+pub fn known_model(name: &str) -> Result<&'static KnownModel> {
+    KNOWN_MODELS
+        .iter()
+        .find(|m| {
+            m.short.eq_ignore_ascii_case(name)
+                || m.repo.eq_ignore_ascii_case(name)
+                || m.repo.ends_with(&format!("/{name}"))
+        })
+        .with_context(|| {
+            let names: Vec<&str> = KNOWN_MODELS.iter().map(|m| m.short).collect();
+            format!("unknown model {name:?} (known: {})", names.join(", "))
+        })
+}
+
+/// Configuration file written by `basal init`, also the built-in configuration.
+pub fn template(models: &[&KnownModel]) -> String {
+    let mut s = String::from(
+        "# basal serve configuration (every option: serve.example.yml in the basal-rs repository).\n\
+         # Models are downloaded from Hugging Face at the first start (HF_HOME, HF_TOKEN for private ones).\n\n\
+         addr: 127.0.0.1:8000             # 0.0.0.0:8000 to serve other machines\n\
+         # default_model: basal-1.5-4.5B  # /v1/basal requests without \"model\" (default: the first model)\n\
+         # gemm_cache: ...                # CUDA GEMM tables (default: the user cache)\n\n\
+         models:\n",
+    );
+    for m in models {
+        s += &format!("  - repo: {}\n    revision: {}\n", m.repo, m.revision);
+    }
+    s
 }
 
 /// Files of a model directory the runtime reads (`evidence_head.pt` is optional: without it `evidence` is refused).

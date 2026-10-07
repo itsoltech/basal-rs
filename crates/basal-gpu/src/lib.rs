@@ -35,6 +35,14 @@ mod fused;
 pub mod gemm;
 use fused::HeadDims;
 
+/// GPU backend of this build (`basal --version`).
+#[cfg(feature = "cuda")]
+pub const BUILD_BACKEND: &str = concat!("CUDA, kernels for compute capability ", env!("BASAL_CUDA_COMPUTE_CAP"));
+#[cfg(all(not(feature = "cuda"), target_os = "macos"))]
+pub const BUILD_BACKEND: &str = "Metal";
+#[cfg(all(not(feature = "cuda"), not(target_os = "macos")))]
+pub const BUILD_BACKEND: &str = "no GPU backend";
+
 /// Token id written into padding columns (never attended to by real tokens). Matches the upstream pad token `</s>`.
 const PAD_ID: u32 = 2;
 /// Additive mask value of a blocked (query, key) pair. Finite so that a key block that is fully masked for a query in
