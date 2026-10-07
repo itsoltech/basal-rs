@@ -3,7 +3,7 @@
 Runtime w Rust dla modeli decyzyjnych [basal](https://github.com/rkinas/basal)
 (Remek Kinas). Serwuje API TypeSafe System One oraz endpoint zgodny z
 serwerem upstream. Backend CUDA (NVIDIA, sprawdzony na RTX 6000 Ada) i Metal
-(Apple Silicon, sprawdzony na M1 Pro).
+(Apple Silicon, sprawdzony na M1 Pro i M2 Max).
 
 Runtime liczy te same decyzje co upstream w FP32: ten sam prompt, te same
 token IDs, oba porządki opcji, uśrednienie i kalibracja z `CALIBRATION.json`.
@@ -14,10 +14,10 @@ prefiksów, własnymi kernelami i harmonogramem serwera.
 
 | Model | Status |
 |---|---|
-| `Remek/basal-1.5-max` (11B), rewizja `be1b5ee7` | główny cel, CUDA i Metal |
-| `Remek/basal-1.5-4.5B`, rewizja `784a683b` | CUDA i Metal, [zgodność](reports/compat-1.5-small/README.md), [wydajność](reports/perf-1.5-small/README.md) |
-| `Remek/basal-1.5-mini` (1.5B), rewizja `1978d070` | CUDA i Metal, [zgodność](reports/compat-1.5-small/README.md), [wydajność](reports/perf-1.5-small/README.md) |
-| `Remek/basal-1.0-4.5B`, rewizja `b9528804` | CUDA i Metal |
+| `Remek/basal-1.5-max` (11B), rewizja `be1b5ee7` | główny cel, CUDA, Metal ([M2 Max](reports/metal-m2-max-1.5/README.md), [M1 Pro](reports/metal-m1-pro-1.5/README.md)) |
+| `Remek/basal-1.5-4.5B`, rewizja `784a683b` | CUDA ([zgodność](reports/compat-1.5-small/README.md), [wydajność](reports/perf-1.5-small/README.md)), Metal ([M2 Max](reports/metal-m2-max-1.5/README.md), [M1 Pro](reports/metal-m1-pro-1.5/README.md)) |
+| `Remek/basal-1.5-mini` (1.5B), rewizja `1978d070` | CUDA ([zgodność](reports/compat-1.5-small/README.md), [wydajność](reports/perf-1.5-small/README.md)), Metal ([M2 Max](reports/metal-m2-max-1.5/README.md), [M1 Pro](reports/metal-m1-pro-1.5/README.md)) |
+| `Remek/basal-1.0-4.5B`, rewizja `b9528804` | CUDA, Metal ([M1 Pro](reports/metal-m1-pro/README.md)) |
 
 Typy pytań: `choice` (2–10 opcji oraz 11–255 strategią grupową), `noul`,
 `score`, a z basal-1.5 także `multi`, `act`, `facts: "auto"` i `evidence`.

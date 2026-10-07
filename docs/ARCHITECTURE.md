@@ -157,6 +157,8 @@ sterownika.
 
 - Score powyżej 10 poziomów i pytania z jedną opcją kończą się jawnym błędem.
 - Tabela GEMM jest specyficzna dla karty i wersji cuBLASLt.
-- Metal sprawdzony na M1 Pro i M2 Max (32 GB) z basal-1.0-4.5B i trzema
-  modelami basal-1.5 ([M1 Pro](../reports/metal-m1-pro-1.5/README.md),
-  [M2 Max](../reports/metal-m2-max-tree/README.md)).
+- Metal sprawdzony na M1 Pro (32 GB) z basal-1.0-4.5B i trzema modelami
+  basal-1.5 ([pomiar](../reports/metal-m1-pro-1.5/README.md)) oraz na M2 Max
+  (32 GB) z trzema modelami basal-1.5
+  ([pomiar](../reports/metal-m2-max-1.5/README.md),
+  [attention](../reports/metal-m2-max-tree/README.md)).
