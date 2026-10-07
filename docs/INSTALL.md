@@ -14,10 +14,21 @@ basal serve                     # http://127.0.0.1:8000, basal-1.5-4.5B pobieran
 brew services start basal-rs    # albo jako usługa w tle (log: $(brew --prefix)/var/log/basal.log)
 ```
 
-Aktualizacja: `brew upgrade basal-rs`. Binarka nie jest podpisana
-certyfikatem Apple; instalacja przez Homebrew i skrypt jej nie wymaga.
+Aktualizacja: `brew upgrade basal-rs`.
 
-## Linux (x86_64, NVIDIA)
+Bez Homebrew: ten sam skrypt co na Linuksie
+(`curl -fsSL https://raw.githubusercontent.com/itsoltech/basal-rs/main/install.sh | sh`)
+instaluje paczkę macOS do `~/.local/bin` (`--prefix DIR`), zapisuje
+konfigurację i uruchamia `basal doctor`; aktualizacja: `basal update` albo
+ponowne uruchomienie skryptu, usługa w tle: `basal setup --service`
+(launchd). Wybrać jeden sposób: przy obu w `PATH` są dwie binarki.
+
+Binarka nie jest podpisana certyfikatem Apple. Homebrew i skrypt pobierają
+ją bez atrybutu kwarantanny, więc macOS ją uruchamia; plik pobrany ręcznie
+przeglądarką z GitHub Releases trzeba odblokować
+(`xattr -d com.apple.quarantine basal`).
+
+## Linux (x86_64, NVIDIA) i macOS bez Homebrew
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/itsoltech/basal-rs/main/install.sh | sh
@@ -26,8 +37,9 @@ curl -fsSL https://raw.githubusercontent.com/itsoltech/basal-rs/main/install.sh 
 Skrypt pobiera paczkę z GitHub Releases, sprawdza SHA-256 z `SHA256SUMS`,
 instaluje do `~/.local` (`--prefix DIR`), a potem uruchamia `basal setup` i
 `basal doctor`. Ponowne uruchomienie aktualizuje instalację; `--version X.Y.Z`
-instaluje wybrane wydanie, `--dry-run` tylko pokazuje kroki. Skrypt działa
-też na macOS.
+instaluje wybrane wydanie, `--dry-run` tylko pokazuje kroki. Skrypt sam
+wybiera paczkę: macOS na Apple Silicon albo Linux x86_64; dalsza część
+dotyczy Linuksa.
 
 Wymagania: glibc 2.28 lub nowsza (Debian 10, Ubuntu 20.04, RHEL 8 i
 nowsze), sterownik NVIDIA 575.51 lub nowszy, karta o compute capability 8.0

@@ -56,7 +56,8 @@ z referencją FP32 oraz różnice numeryczne opisują [pomiary poniżej](#wyniki
 # macOS, Apple Silicon
 brew install itsoltech/tap/basal-rs
 
-# Linux x86_64 z kartą NVIDIA (pobiera też biblioteki CUDA; z hosta potrzebny tylko sterownik)
+# Linux x86_64 z kartą NVIDIA (pobiera też biblioteki CUDA; z hosta potrzebny tylko sterownik),
+# także macOS bez Homebrew
 curl -fsSL https://raw.githubusercontent.com/itsoltech/basal-rs/main/install.sh | sh
 
 basal doctor    # co jest na maszynie, czego brakuje i jak to naprawić
