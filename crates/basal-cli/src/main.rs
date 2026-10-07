@@ -7,6 +7,8 @@
 //!   basal compare       --a DIR --b DIR --out FILE                     tokens, numerics, decisions, quality
 //!   basal bench         --model DIR --reference DIR --out FILE         latency / throughput (Metal)
 //!   basal doctor        [--json]                                       what this machine has / lacks for serve
+//!   basal setup         [--prefetch] [--service]                       CUDA libraries (Linux), configuration
+//!   basal update        [--version X] [--check]                        newest release over this installation
 //!   basal init          [--model mini|4.5B|max]                        user configuration of `basal serve`
 //!   basal serve         [--config FILE | --model DIR]                  HTTP server (default: user configuration)
 
@@ -19,7 +21,9 @@ mod large_eval;
 mod paths;
 mod reference;
 mod serve;
+mod setup;
 mod stats;
+mod update;
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -34,7 +38,45 @@ use serde_json::{json, Value};
 /// `basal --version`: release, commit and GPU backend of the build.
 pub fn version() -> &'static str {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    V.get_or_init(|| format!("{} ({}, {})", env!("CARGO_PKG_VERSION"), env!("BASAL_GIT_SHA"), basal_gpu::BUILD_BACKEND))
+    V.get_or_init(|| {
+        let backend = match paths::cuda_binary() {
+            Some(_) if !cfg!(feature = "cuda") => "CUDA through libexec/basal/basal-cuda",
+            _ => basal_gpu::BUILD_BACKEND,
+        };
+        format!("{} ({}, {backend})", env!("CARGO_PKG_VERSION"), env!("BASAL_GIT_SHA"))
+    })
+}
+
+/// The CUDA build of the Linux package with the CUDA libraries of `basal setup` on `LD_LIBRARY_PATH`.
+pub fn cuda_command(bin: &Path) -> std::process::Command {
+    let mut c = std::process::Command::new(bin);
+    let lib = setup::cuda_lib_dir();
+    if lib.exists() {
+        let mut p = lib.into_os_string();
+        if let Some(old) = std::env::var_os("LD_LIBRARY_PATH").filter(|v| !v.is_empty()) {
+            p.push(":");
+            p.push(old);
+        }
+        c.env("LD_LIBRARY_PATH", p);
+    }
+    c
+}
+
+/// Linux package: this binary (no CUDA) runs the GPU commands through the CUDA build next to it.
+#[cfg(all(target_os = "linux", not(feature = "cuda")))]
+fn delegate_gpu_command() {
+    use std::os::unix::process::CommandExt;
+    const GPU: [&str; 9] =
+        ["decide", "export", "bench-requests", "eval-large-choice", "profile", "serve", "gemm-search", "gemm", "bench"];
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    if !args.get(1).and_then(|a| a.to_str()).is_some_and(|c| GPU.contains(&c)) {
+        return;
+    }
+    if let Some(bin) = paths::cuda_binary() {
+        let err = cuda_command(&bin).args(&args[1..]).exec();
+        eprintln!("basal: running {}: {err} (basal doctor checks the installation)", bin.display());
+        std::process::exit(1);
+    }
 }
 
 #[derive(Parser)]
@@ -191,6 +233,29 @@ enum Cmd {
         /// Machine-readable report
         #[arg(long)]
         json: bool,
+    },
+    /// Prepare this machine for `basal serve`: on Linux the CUDA libraries (from NVIDIA), the user configuration;
+    /// optionally the models and a user service
+    Setup {
+        /// Download the CUDA libraries again
+        #[arg(long)]
+        force: bool,
+        /// Download the configured models now (otherwise at the first `basal serve`)
+        #[arg(long)]
+        prefetch: bool,
+        /// Write a user service running `basal serve` (systemd on Linux, launchd on macOS)
+        #[arg(long)]
+        service: bool,
+    },
+    /// Install the newest release (or --version) over this installation; Homebrew and container installations
+    /// are updated by their own tools
+    Update {
+        /// Release to install (default: the newest)
+        #[arg(long)]
+        version: Option<String>,
+        /// Only report whether a newer release exists
+        #[arg(long)]
+        check: bool,
     },
     /// Write a server configuration for `basal serve` (default: the user configuration file)
     Init {
@@ -374,6 +439,8 @@ fn write_json(path: &Path, v: &Value) -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    #[cfg(all(target_os = "linux", not(feature = "cuda")))]
+    delegate_gpu_command();
     match Cli::parse().cmd {
         Cmd::Decide { m, g, request, timing } => {
             let body = read_request(&request)?;
@@ -491,6 +558,10 @@ fn main() -> Result<()> {
                 std::process::exit(1);
             }
         }
+        Cmd::Setup { force, prefetch, service } => {
+            setup::run(&setup::Options { force, prefetch, service })?;
+        }
+        Cmd::Update { version, check } => update::run(version, check)?,
         Cmd::Init { models, out, force } => {
             let models: Vec<&config::KnownModel> = if models.is_empty() {
                 vec![config::DEFAULT_MODEL]
@@ -520,6 +591,16 @@ fn main() -> Result<()> {
             long_slice_ms,
             release_date,
         } => {
+            // once a day: is there a newer release (BASAL_NO_UPDATE_CHECK=1 turns it off)
+            std::thread::spawn(|| {
+                if let Some(v) = update::notice() {
+                    eprintln!(
+                        "basal: version {v} is available ({} installed): {}",
+                        env!("CARGO_PKG_VERSION"),
+                        update::how()
+                    );
+                }
+            });
             // --config, else --model (one model, options from the command line), else the user configuration, else
             // the built-in one
             let c = match (config, &model) {

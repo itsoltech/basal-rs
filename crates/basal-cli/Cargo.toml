@@ -23,6 +23,7 @@ axum.workspace = true
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 libc = "0.2"
 libloading = "0.8"
+sha2 = "0.10"
 basal-core = { path = "../basal-core" }
 basal-gpu = { path = "../basal-gpu" }
 

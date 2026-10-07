@@ -63,9 +63,9 @@ impl Report {
 const MIN_DRIVER: (u32, u32) = (575, 51);
 /// Lowest compute capability of the kernels (mma.sync m16n8k16 with f16 operands, cp.async).
 const MIN_COMPUTE_CAP: (u32, u32) = (8, 0);
-/// Libraries the CUDA build links (cuBLAS and cuBLASLt for GEMM, cuRAND and the runtime through candle).
-const CUDA_LIBS: [&str; 5] =
-    ["libcuda.so.1", "libcudart.so.12", "libcublas.so.12", "libcublasLt.so.12", "libcurand.so.10"];
+/// Libraries the CUDA build links besides the driver's libcuda.so.1 (cuBLAS and cuBLASLt for GEMM, cuRAND and the
+/// runtime through candle); `basal setup` installs them.
+pub const CUDA_RUNTIME_LIBS: [&str; 4] = ["libcudart.so.12", "libcublas.so.12", "libcublasLt.so.12", "libcurand.so.10"];
 
 const GB: f64 = 1e9;
 /// memory sizes (RAM, GPU) in GiB, as the systems report them
@@ -131,7 +131,12 @@ fn build(r: &mut Report) {
         None => "unknown location".to_string(),
     };
     r.info("basal", format!("installed: {how}"));
-    if basal_gpu::BUILD_BACKEND == "no GPU backend" {
+    if let Some(v) = crate::update::notice() {
+        r.warn("basal", format!("version {v} is available"), crate::update::how());
+    }
+    if let Some(b) = crate::paths::cuda_binary() {
+        r.info("basal", format!("GPU commands run the CUDA build {}", b.display()));
+    } else if basal_gpu::BUILD_BACKEND == "no GPU backend" {
         r.fail(
             "basal",
             "this build has no GPU backend",
@@ -250,24 +255,46 @@ fn version_pair(v: &str) -> Option<(u32, u32)> {
     Some((it.next()?.parse().ok()?, it.next().unwrap_or("0").parse().ok()?))
 }
 
-/// Linux: the shared libraries the CUDA build needs, found as the dynamic loader would find them.
+/// Linux: the shared libraries the CUDA build needs, found as the dynamic loader would find them or installed by
+/// `basal setup`; then whether the CUDA build of the package starts with them.
 fn cuda_libs(r: &mut Report) {
+    // SAFETY (both loads): loading a CUDA library runs its initialisers only; nothing is called.
+    if unsafe { libloading::Library::new("libcuda.so.1") }.is_ok() {
+        r.ok("cuda", "libcuda.so.1 (driver)");
+    } else {
+        r.fail("cuda", "libcuda.so.1 not found", "part of the NVIDIA driver: install the driver");
+    }
+    let managed = crate::setup::cuda_lib_dir();
     let mut missing = Vec::new();
-    for lib in CUDA_LIBS {
-        // SAFETY: loading a CUDA library runs its initialisers only; nothing is called.
-        if unsafe { libloading::Library::new(lib) }.is_ok() {
-            r.ok("cuda", lib);
+    for lib in CUDA_RUNTIME_LIBS {
+        if managed.join(lib).exists() {
+            r.ok("cuda", format!("{lib} ({})", managed.display()));
+        } else if unsafe { libloading::Library::new(lib) }.is_ok() {
+            r.ok("cuda", format!("{lib} (system)"));
         } else {
             missing.push(lib);
         }
     }
-    for lib in missing {
-        let fix = if lib == "libcuda.so.1" {
-            "part of the NVIDIA driver: install the driver".to_string()
-        } else {
-            "install the CUDA 12 runtime libraries (cudart, cuBLAS, cuRAND) or use the container image".to_string()
-        };
-        r.fail("cuda", format!("{lib} not found"), fix);
+    if !missing.is_empty() {
+        r.fail(
+            "cuda",
+            format!("not found: {}", missing.join(", ")),
+            "basal setup (downloads the CUDA 12.9 libraries from NVIDIA, ~1 GB, into the user data directory)",
+        );
+        return;
+    }
+    if let Some(b) = crate::paths::cuda_binary() {
+        match crate::cuda_command(&b).arg("--version").output() {
+            Ok(o) if o.status.success() => {
+                r.ok("cuda", format!("CUDA build starts: {}", String::from_utf8_lossy(&o.stdout).trim()))
+            }
+            Ok(o) => r.fail(
+                "cuda",
+                format!("CUDA build does not start: {}", String::from_utf8_lossy(&o.stderr).trim()),
+                "basal setup --force; check that the package matches this system (glibc 2.28 or newer)",
+            ),
+            Err(e) => r.fail("cuda", format!("{}: {e}", b.display()), "reinstall basal"),
+        }
     }
 }
 
