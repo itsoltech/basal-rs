@@ -1,9 +1,9 @@
 # Instalacja i aktualizacja
 
-Paczki wydań powstają z tagów `v*` ([release.yml](../.github/workflows/release.yml)):
-macOS na Apple Silicon (Metal) i Linux x86_64 z kartą NVIDIA (CUDA). Do
-pierwszego wydania (`v0.1.0`) zostaje budowanie ze źródeł albo obraz Docker
-([README](../README.md#uruchomienie-w-dockerze)).
+Paczki [wydań](https://github.com/itsoltech/basal-rs/releases) powstają z
+tagów `v*` ([release.yml](../.github/workflows/release.yml)): macOS na Apple
+Silicon (Metal) i Linux x86_64 z kartą NVIDIA (CUDA). Bez instalacji na
+hoście: obraz Docker ([README](../README.md#uruchomienie-w-dockerze)).
 
 ## macOS (Apple Silicon)
 

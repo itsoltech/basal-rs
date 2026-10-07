@@ -137,7 +137,7 @@ pakowania partii przy tym samym czasie pełnej decyzji
 
 ## Instalacja
 
-Od pierwszego wydania (`v0.1.0`, jeszcze nieopublikowane):
+Paczki z [wydań na GitHubie](https://github.com/itsoltech/basal-rs/releases):
 
 ```sh
 brew install itsoltech/tap/basal-rs                     # macOS, Apple Silicon
