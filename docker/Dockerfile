@@ -1,7 +1,9 @@
-# Runtime image of basal-rs (CUDA): `basal serve --config /config/serve.yml`.
+# Runtime image of basal-rs (CUDA): `basal serve --config /config/serve.yml`; arguments after the image replace
+# `--config /config/serve.yml` (e.g. `--model mini` for a quick start without a file).
 #
 #   docker build -t basal-rs -f docker/Dockerfile .
 #   docker run --gpus all -p 8000:8000 -v "$PWD/serve.yml:/config/serve.yml:ro" -v basal-data:/data basal-rs
+#   docker run --gpus all -p 8000:8000 -v basal-data:/data basal-rs --model mini
 #
 # Models given by `repo` in serve.yml are downloaded into /data/hf (HF_TOKEN for gated or private repositories),
 # GEMM tables of `gemm_table: auto` are generated into /data/.cache/gemm on the first start; keep /data on a volume.
@@ -62,4 +64,5 @@ WORKDIR /data
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=2h \
   CMD curl --fail-with-body --silent http://127.0.0.1:8000/health > /dev/null || exit 1
-ENTRYPOINT ["basal", "serve", "--config", "/config/serve.yml"]
+ENTRYPOINT ["basal", "serve"]
+CMD ["--config", "/config/serve.yml"]

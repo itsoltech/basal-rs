@@ -19,15 +19,21 @@ class BasalRs < Formula
     <<~EOS
       Check the machine and start the server (basal-1.5-4.5B is downloaded at the first start):
         basal doctor
-        basal serve
+        basal serve                  # or: basal serve --model mini|4.5B|max|owner/name@revision
       As a background service:
         brew services start basal-rs
-      Configuration: basal init --model mini|4.5B|max
+      The service reads #{etc}/basal/basal-serve.yml when it exists:
+        cd #{etc}/basal && basal init --model mini
     EOS
+  end
+
+  def post_install
+    (etc/"basal").mkpath
   end
 
   service do
     run [opt_bin/"basal", "serve"]
+    working_dir etc/"basal"
     keep_alive true
     log_path var/"log/basal.log"
     error_log_path var/"log/basal.log"

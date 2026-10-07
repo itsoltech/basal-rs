@@ -72,12 +72,12 @@ const GB: f64 = 1e9;
 const GIB: f64 = (1u64 << 30) as f64;
 
 /// Run the checks; prints the report (text or `--json`) and returns false when something blocks `basal serve`.
-pub fn run(as_json: bool) -> Result<bool> {
+pub fn run(file: Option<PathBuf>, model_refs: &[String], as_json: bool) -> Result<bool> {
     let mut r = Report::default();
     build(&mut r);
     system(&mut r);
     let gpu_budget = gpu(&mut r);
-    let config = configuration(&mut r);
+    let config = configuration(&mut r, file, model_refs);
     if let Some(c) = &config {
         models(&mut r, c, gpu_budget);
         port(&mut r, c);
@@ -312,26 +312,36 @@ fn cuda_libs(r: &mut Report) {
     }
 }
 
-/// The configuration `basal serve` would use without arguments.
-fn configuration(r: &mut Report) -> Option<ServeConfig> {
-    match config::user_config() {
-        Ok((Some(path), c)) => {
-            r.ok("config", format!("{} ({} model(s))", crate::term::P(&path), c.models.len()));
+/// The configuration `basal serve` would use with the same `--config` / `--model`.
+fn configuration(r: &mut Report, file: Option<PathBuf>, model_refs: &[String]) -> Option<ServeConfig> {
+    match config::select(file, model_refs) {
+        Ok((config::Source::File(p), c)) => {
+            r.ok("config", format!("{} ({} model(s))", crate::term::P(&p), c.models.len()));
             Some(c)
         }
-        Ok((None, c)) => {
+        Ok((config::Source::Models, c)) => {
+            let ms: Vec<String> = c.models.iter().map(config::describe).collect();
+            r.ok("config", format!("--model {}", ms.join(", ")));
+            Some(c)
+        }
+        Ok((config::Source::Builtin, c)) => {
             r.info(
                 "config",
                 format!(
-                    "no configuration file ({}): `basal serve` serves {} (`basal init` writes one)",
-                    crate::term::P(&crate::paths::config_file()),
+                    "no `--model` and no {} here: `basal serve` serves {} (`basal init` writes {0})",
+                    crate::paths::CONFIG_NAME,
                     config::DEFAULT_MODEL.repo
                 ),
             );
             Some(c)
         }
         Err(e) => {
-            r.fail("config", format!("{e:#}"), "fix the file or write a new one: `basal init --force`");
+            let fix = if model_refs.is_empty() {
+                "fix the file, write a new one (`basal init --force`) or give the model: `basal serve --model 4.5B`"
+            } else {
+                "`--model` takes mini, 4.5B, max, a name (owner Remek), owner/name, each with @revision, or a model directory"
+            };
+            r.fail("config", format!("{e:#}"), fix);
             None
         }
     }
@@ -350,11 +360,11 @@ fn models(r: &mut Report, c: &ServeConfig, gpu_budget: Option<u64>) {
                 Err(_) => r.fail(
                     "models",
                     format!("{}: no model.safetensors", crate::term::P(&p)),
-                    "point `path` at a model directory or use `repo`",
+                    "a model directory holds config.json, basal.json, tokenizer.json and model.safetensors; or use a repository",
                 ),
             },
             (None, Some(repo)) => {
-                let size = config::KNOWN_MODELS.iter().find(|k| k.repo == repo).map(|k| (k.size_gb * GB) as u64);
+                let size = config::known_size_gb(m).map(|g| (g * GB) as u64);
                 let at = m.revision.as_deref().unwrap_or("main");
                 match config::cached_model_dir(repo, m.revision.as_deref()) {
                     Some(dir) => {
@@ -390,7 +400,7 @@ fn models(r: &mut Report, c: &ServeConfig, gpu_budget: Option<u64>) {
             r.warn(
                 "models",
                 format!("models need ~{:.1} GiB of GPU memory, {:.1} GiB available", need / GIB, b as f64 / GIB),
-                "serve fewer or smaller models (`basal init --model mini`)",
+                "serve fewer or smaller models (`basal serve --model mini`)",
             );
         } else if resident > 0 {
             r.ok("models", format!("GPU memory: ~{:.1} of {:.1} GiB", need / GIB, b as f64 / GIB));

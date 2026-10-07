@@ -1,4 +1,5 @@
 # basal serve --config serve.example.yml
+# (`basal serve` reads basal-serve.yml from the working directory without --config; `basal init` writes a short one)
 #
 # Models served by one process. A request goes to the model named in its "model" field (the name in the model's
 # basal.json); /v1/basal requests without the field go to default_model.

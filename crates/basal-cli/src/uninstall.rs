@@ -1,10 +1,10 @@
 //! `basal uninstall`: remove what basal put on this machine, after listing it (and asking, unless `--yes`).
 //!
-//! The user service (`basal setup --service`, stopped first), the configuration, the caches (GEMM tables, downloads,
-//! update check), the data (CUDA libraries of `basal setup`), with `--models` the basal models in the Hugging Face
-//! cache (other repositories there are kept), and last the binaries of a package installation (`install.sh`). A
-//! Homebrew installation is removed by `brew uninstall`, which is printed instead. A configuration file given by
-//! `BASAL_CONFIG` outside these directories is kept.
+//! The user service (`basal setup --service`, stopped first), the caches (GEMM tables, downloads, update check), the
+//! data (CUDA libraries of `basal setup`), with `--models` the basal models in the Hugging Face cache (other
+//! repositories there are kept), and last the binaries of a package installation (`install.sh`). A Homebrew
+//! installation is removed by `brew uninstall`, which is printed instead. Configuration files of `basal serve`
+//! (basal-serve.yml, `BASAL_CONFIG`) are the user's and kept.
 
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -57,18 +57,12 @@ pub fn run(o: &Options) -> Result<()> {
     let systemd = home.join(".config/systemd/user/basal.service");
     add(&mut targets, launchd.clone());
     add(&mut targets, systemd.clone());
-    // configuration, caches, data: the basal directories; with BASAL_HOME only what basal writes there
-    if std::env::var_os("BASAL_HOME").is_some_and(|v| !v.is_empty()) {
-        add(&mut targets, paths::config_dir().join("serve.yml"));
-        add(&mut targets, paths::cache_dir());
-        add(&mut targets, paths::data_dir());
-    } else {
-        add(&mut targets, paths::config_dir());
-        add(&mut targets, paths::cache_dir());
-        add(&mut targets, paths::data_dir());
-    }
-    let config = paths::config_file();
-    let config_kept = config.exists() && !targets.iter().any(|t| config.starts_with(t));
+    // caches and data: the basal directories (with BASAL_HOME its .cache and .local)
+    add(&mut targets, paths::cache_dir());
+    add(&mut targets, paths::data_dir());
+    // a configuration file of `basal serve` (BASAL_CONFIG, basal-serve.yml here) is the user's: kept
+    let config = paths::config_file().filter(|c| c.exists());
+    let config_kept = config.as_ref().filter(|c| !targets.iter().any(|t| c.starts_with(t)));
     if o.models {
         for dir in hf_model_dirs() {
             add(&mut targets, dir);
@@ -98,8 +92,8 @@ pub fn run(o: &Options) -> Result<()> {
         }
         eprintln!("  {:>10}  total", human(total));
     }
-    if config_kept {
-        crate::note!("kept {} (BASAL_CONFIG, outside the basal directories)", path(&config));
+    if let Some(c) = config_kept {
+        crate::note!("kept {} (configuration of `basal serve`, outside the basal directories)", path(c));
     }
     if !o.models {
         let n = hf_model_dirs();

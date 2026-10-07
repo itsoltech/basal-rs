@@ -1,4 +1,5 @@
-# basal-rs server: edit serve.yml (models, options), then `docker compose up -d`.
+# basal-rs server: edit serve.yml (models, options), then `docker compose up -d`. Without a file:
+# `command: ["--model", "mini"]` (arguments of `basal serve`).
 # The first start downloads the models and generates their GEMM tables (minutes to an hour, see `docker compose
 # logs -f`); later starts reuse them from the basal-data volume.
 #

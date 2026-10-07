@@ -1,4 +1,5 @@
-//! `basal serve --config FILE`: the models one server process serves and their options (YAML).
+//! `basal serve --config FILE` (or basal-serve.yml in the working directory): the models one server process serves
+//! and their options (YAML). `basal serve --model` takes the models from the command line instead (model_ref).
 //!
 //! ```yaml
 //! addr: 0.0.0.0:8000
@@ -141,9 +142,11 @@ impl ServeConfig {
         Ok(c)
     }
 
-    /// Configuration of `basal serve` without `--config` / `--model` when the user has none: [`DEFAULT_MODEL`].
-    pub fn builtin() -> Self {
-        Self::parse(&template(&[DEFAULT_MODEL])).expect("built-in configuration")
+    /// Configuration with default options for the given models (`basal serve --model`, the built-in one).
+    pub fn for_models(models: Vec<ModelConfig>) -> Self {
+        let mut c = Self::parse("models: [{path: x}]").expect("default configuration");
+        c.models = models;
+        c
     }
 }
 
@@ -181,33 +184,89 @@ pub const KNOWN_MODELS: [KnownModel; 3] = [
 /// Model of the built-in configuration: the main basal-1.5 model (fits a 16 GB Mac and a 12 GB GPU).
 pub const DEFAULT_MODEL: &KnownModel = &KNOWN_MODELS[1];
 
-/// `basal init --model mini|4.5B|max` (also the repository name).
-pub fn known_model(name: &str) -> Result<&'static KnownModel> {
-    KNOWN_MODELS
-        .iter()
-        .find(|m| {
+/// Owner of a repository given without one (`--model basal-1.5-max` is `Remek/basal-1.5-max`).
+pub const DEFAULT_OWNER: &str = "Remek";
+
+/// A model on the command line (`basal serve --model`, `basal init --model`, the `--model` of the other commands):
+/// a local model directory (an existing path, or one starting with `/`, `.` or `~`), else a Hugging Face repository
+/// `owner/name` or `name` (owner Remek; mini, 4.5B and max for the basal-1.5 models), each with an optional
+/// `@revision` (branch, tag or commit). Without a revision a model of [`KNOWN_MODELS`] is the revision this runtime
+/// was checked with, any other repository its main branch.
+pub fn model_ref(s: &str) -> Result<ModelConfig> {
+    let s = s.trim();
+    ensure!(!s.is_empty(), "empty model");
+    let expanded = match s.strip_prefix("~/") {
+        Some(rest) => PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(rest),
+        None => PathBuf::from(s),
+    };
+    let entry = if expanded.exists() || s.starts_with(['/', '.', '~']) {
+        serde_json::json!({ "path": expanded })
+    } else {
+        let (name, rev) = match s.split_once('@') {
+            Some((n, r)) => {
+                ensure!(!r.is_empty(), "model {s:?}: empty revision after @");
+                (n, Some(r))
+            }
+            None => (s, None),
+        };
+        let known = KNOWN_MODELS.iter().find(|m| {
             m.short.eq_ignore_ascii_case(name)
                 || m.repo.eq_ignore_ascii_case(name)
-                || m.repo.ends_with(&format!("/{name}"))
-        })
-        .with_context(|| {
-            let names: Vec<&str> = KNOWN_MODELS.iter().map(|m| m.short).collect();
-            format!("unknown model {name:?} (known: {})", names.join(", "))
-        })
+                || m.repo.rsplit('/').next().is_some_and(|n| n.eq_ignore_ascii_case(name))
+        });
+        let repo = match known {
+            Some(k) => k.repo.to_string(),
+            None if name.contains('/') => name.to_string(),
+            None => format!("{DEFAULT_OWNER}/{name}"),
+        };
+        ensure!(repo.split('/').count() == 2, "model {s:?}: expected name, owner/name or a local directory");
+        let rev = rev.map(str::to_string).or_else(|| known.map(|k| k.revision.to_string()));
+        serde_json::json!({ "repo": repo, "revision": rev })
+    };
+    Ok(serde_json::from_value(entry)?)
 }
 
-/// Configuration file written by `basal init`, also the built-in configuration.
-pub fn template(models: &[&KnownModel]) -> String {
+/// Checkpoint size (GB) of a model of [`KNOWN_MODELS`].
+pub fn known_size_gb(m: &ModelConfig) -> Option<f64> {
+    let repo = m.repo.as_deref()?;
+    KNOWN_MODELS.iter().find(|k| k.repo == repo).map(|k| k.size_gb)
+}
+
+/// `owner/name@revision` (commit shortened) or the directory of a model, for messages.
+pub fn describe(m: &ModelConfig) -> String {
+    match (&m.repo, &m.path) {
+        (Some(r), _) => match m.revision.as_deref() {
+            Some(v) if v.len() == 40 => format!("{r}@{}", &v[..8]),
+            Some(v) => format!("{r}@{v}"),
+            None => r.clone(),
+        },
+        (None, Some(p)) => crate::term::path(p),
+        _ => "?".into(),
+    }
+}
+
+/// Configuration file written by `basal init`.
+pub fn template(models: &[ModelConfig]) -> String {
     let mut s = String::from(
-        "# basal serve configuration (every option: serve.example.yml in the basal-rs repository).\n\
+        "# basal serve configuration: `basal serve` in this directory reads basal-serve.yml, elsewhere\n\
+         # `basal serve --config FILE` (every option: serve.example.yml in the basal-rs repository).\n\
          # Models are downloaded from Hugging Face at the first start (HF_HOME, HF_TOKEN for private ones).\n\n\
          addr: 127.0.0.1:8000             # 0.0.0.0:8000 to serve other machines\n\
          # default_model: basal-1.5-4.5B  # /v1/basal requests without \"model\" (default: the first model)\n\
-         # gemm_cache: ...                # CUDA GEMM tables (default: the user cache)\n\n\
+         # access_log: true               # one log line per request\n\n\
          models:\n",
     );
     for m in models {
-        s += &format!("  - repo: {}\n    revision: {}\n", m.repo, m.revision);
+        match (&m.repo, &m.path) {
+            (Some(r), _) => {
+                s += &format!("  - repo: {r}\n");
+                if let Some(v) = &m.revision {
+                    s += &format!("    revision: {v}\n");
+                }
+            }
+            (None, Some(p)) => s += &format!("  - path: {}\n", p.display()),
+            _ => {}
+        }
     }
     s
 }
@@ -224,15 +283,32 @@ const MODEL_FILES: [&str; 8] = [
     "evidence_head.pt",
 ];
 
-/// The configuration of `basal serve` without `--config` / `--model`: the user file (its path) when it exists, else
-/// the built-in one.
-pub fn user_config() -> Result<(Option<PathBuf>, ServeConfig)> {
-    let path = crate::paths::config_file();
-    if path.exists() {
-        Ok((Some(path.clone()), ServeConfig::load(&path)?))
-    } else {
-        Ok((None, ServeConfig::builtin()))
+/// Where the configuration of `basal serve` (and `basal doctor`) comes from.
+pub enum Source {
+    /// a file: `--config`, `BASAL_CONFIG` or `basal-serve.yml` in the working directory
+    File(PathBuf),
+    /// `--model` on the command line
+    Models,
+    /// none of them: [`DEFAULT_MODEL`] with default options
+    Builtin,
+}
+
+/// The configuration: `--config FILE`, else the `--model`s, else `BASAL_CONFIG` or `basal-serve.yml` in the working
+/// directory, else [`DEFAULT_MODEL`].
+pub fn select(config: Option<PathBuf>, models: &[String]) -> Result<(Source, ServeConfig)> {
+    if let Some(p) = config {
+        let c = ServeConfig::load(&p)?;
+        return Ok((Source::File(p), c));
     }
+    if !models.is_empty() {
+        let ms = models.iter().map(|m| model_ref(m)).collect::<Result<Vec<_>>>()?;
+        return Ok((Source::Models, ServeConfig::for_models(ms)));
+    }
+    if let Some(p) = crate::paths::config_file() {
+        let c = ServeConfig::load(&p)?;
+        return Ok((Source::File(p), c));
+    }
+    Ok((Source::Builtin, ServeConfig::for_models(vec![model_ref(DEFAULT_MODEL.short)?])))
 }
 
 /// Snapshot of `repo` at `revision` in the Hugging Face cache, without contacting the Hub.

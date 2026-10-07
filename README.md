@@ -60,11 +60,14 @@ brew install itsoltech/tap/basal-rs
 # także macOS bez Homebrew
 curl -fsSL https://raw.githubusercontent.com/itsoltech/basal-rs/main/install.sh | sh
 
-basal doctor    # co jest na maszynie, czego brakuje i jak to naprawić
-basal serve     # http://127.0.0.1:8000; przy pierwszym starcie pobiera basal-1.5-4.5B
+basal doctor                # co jest na maszynie, czego brakuje i jak to naprawić
+basal serve                 # http://127.0.0.1:8000; przy pierwszym starcie pobiera basal-1.5-4.5B
+basal serve --model mini    # inny model: mini, 4.5B, max, owner/nazwa@rewizja albo katalog
 ```
 
-Konfiguracja modeli: `basal init`, aktualizacja: `basal update` (albo
+Plik konfiguracji jest opcjonalny: `basal serve` czyta `basal-serve.yml` z
+bieżącego katalogu (`basal init` go zapisuje) albo plik z `--config`.
+Aktualizacja: `basal update` (albo
 `brew upgrade`), usunięcie wszystkiego: `basal uninstall --models`. Obraz
 Docker: [niżej](#uruchomienie-w-dockerze). Wymagania, ścieżki i szczegóły:
 [docs/INSTALL.md](docs/INSTALL.md).
@@ -159,7 +162,8 @@ pakowania partii przy tym samym czasie pełnej decyzji
 Na NVIDIA bez instalacji na hoście. Na Apple Silicon: [instalacja](#instalacja) albo [budowanie z Metal](#budowanie).
 
 Wymagane: sterownik NVIDIA i NVIDIA Container Toolkit. Modele wpisane w
-[serve.yml](serve.yml) (repozytorium Hugging Face i rewizja):
+[serve.yml](serve.yml) (repozytorium Hugging Face i rewizja); argumenty po
+nazwie obrazu zastępują plik (`docker run ... ghcr.io/itsoltech/basal-rs --model mini`):
 
 ```sh
 docker compose up -d          # obraz ghcr.io/itsoltech/basal-rs:latest i start

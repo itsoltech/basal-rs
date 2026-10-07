@@ -4,9 +4,12 @@
 //!   NVIDIA's redistributable archives (`developer.download.nvidia.com/compute/cuda/redist`, SHA-256 from NVIDIA's
 //!   manifest) into the user data directory, unless the system already has them. Only the NVIDIA driver has to be
 //!   installed by the administrator. `basal` runs the CUDA build with that directory on `LD_LIBRARY_PATH`.
-//! - The user configuration (`basal init`) when there is none.
-//! - `--prefetch`: the models of the configuration into the Hugging Face cache.
-//! - `--service`: a user service that runs `basal serve` (systemd on Linux, launchd on macOS).
+//! - `--prefetch`: the models `basal serve` would use (`--model`, `--config`, basal-serve.yml in the working
+//!   directory, else basal-1.5-4.5B) into the Hugging Face cache.
+//! - `--service`: a user service that runs `basal serve` with the same models or configuration (systemd on Linux,
+//!   launchd on macOS).
+//!
+//! No configuration file is written: `basal serve` runs without one (`basal init` writes basal-serve.yml).
 
 use std::path::{Path, PathBuf};
 
@@ -26,6 +29,8 @@ pub fn cuda_lib_dir() -> PathBuf {
 }
 
 pub struct Options {
+    pub config: Option<PathBuf>,
+    pub models: Vec<String>,
     pub force: bool,
     pub prefetch: bool,
     pub service: bool,
@@ -35,30 +40,19 @@ pub fn run(o: &Options) -> Result<()> {
     if cfg!(target_os = "linux") {
         cuda_libraries(o.force)?;
     }
-    let cfg = paths::config_file();
-    if cfg.exists() {
-        crate::note!("configuration {}", crate::term::P(&cfg));
-    } else {
-        if let Some(d) = cfg.parent() {
-            std::fs::create_dir_all(d).with_context(|| format!("creating {}", crate::term::P(&d)))?;
-        }
-        std::fs::write(&cfg, config::template(&[config::DEFAULT_MODEL]))?;
-        crate::done!(
-            "wrote {} ({}; `basal init --force --model ...` changes it)",
-            crate::term::P(&cfg),
-            config::DEFAULT_MODEL.repo
-        );
-    }
     if o.prefetch {
-        let (_, c) = config::user_config()?;
+        let (_, c) = config::select(o.config.clone(), &o.models)?;
         for m in &c.models {
             config::model_dir(m)?;
         }
     }
     if o.service {
-        service()?;
+        service(&serve_args(o)?)?;
     }
-    crate::note!("next: `basal doctor` checks the machine, `basal serve` starts the server");
+    crate::note!(
+        "next: `basal doctor` checks the machine, `basal serve` starts the server (`basal serve --model mini|4.5B|max` \
+         picks the model)"
+    );
     Ok(())
 }
 
@@ -173,8 +167,36 @@ fn sha256(p: &Path) -> Result<String> {
 }
 
 /// A user service running `basal serve` with the user configuration.
-fn service() -> Result<()> {
+/// Arguments of `basal serve` in the service: the configuration file or the models as absolute paths (a service
+/// does not start in this directory); none for the built-in default.
+fn serve_args(o: &Options) -> Result<Vec<String>> {
+    let abs = |p: &Path| std::path::absolute(p).map(|p| p.display().to_string());
+    if let Some(c) = o.config.clone().or_else(|| if o.models.is_empty() { paths::config_file() } else { None }) {
+        config::ServeConfig::load(&c)?;
+        return Ok(vec!["--config".into(), abs(&c)?]);
+    }
+    let mut args = Vec::new();
+    for m in &o.models {
+        let r = config::model_ref(m)?;
+        args.push("--model".into());
+        args.push(match &r.path {
+            Some(p) => abs(p)?,
+            None => m.clone(),
+        });
+    }
+    Ok(args)
+}
+
+fn service(args: &[String]) -> Result<()> {
     let exe = std::env::current_exe()?;
+    let xml = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let quote = |s: &str| {
+        if s.contains(|c: char| c.is_whitespace() || c == '"' || c == '\\') {
+            format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+        } else {
+            s.to_string()
+        }
+    };
     let home = std::env::var_os("HOME").map(PathBuf::from).context("HOME")?;
     if cfg!(target_os = "macos") {
         let plist = home.join("Library/LaunchAgents/tech.itsol.basal.plist");
@@ -187,11 +209,12 @@ fn service() -> Result<()> {
                 "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
                  \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n  \
                  <key>Label</key><string>tech.itsol.basal</string>\n  <key>ProgramArguments</key><array>\
-                 <string>{}</string><string>serve</string></array>\n  <key>RunAtLoad</key><true/>\n  \
+                 <string>{}</string><string>serve</string>{}</array>\n  <key>RunAtLoad</key><true/>\n  \
                  <key>KeepAlive</key><true/>\n  <key>StandardOutPath</key><string>{log}</string>\n  \
                  <key>StandardErrorPath</key><string>{log}</string>\n</dict></plist>\n",
-                exe.display(),
-                log = log.display()
+                xml(&exe.display().to_string()),
+                args.iter().map(|a| format!("<string>{}</string>", xml(a))).collect::<String>(),
+                log = xml(&log.display().to_string())
             ),
         )?;
         crate::done!("wrote {}; start: `launchctl load -w {0}`; log: {}", crate::term::P(&plist), crate::term::P(&log));
@@ -202,8 +225,9 @@ fn service() -> Result<()> {
             &unit,
             format!(
                 "[Unit]\nDescription=basal-rs server (basal serve)\nAfter=network-online.target\n\n[Service]\n\
-                 ExecStart={} serve\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n",
-                exe.display()
+                 ExecStart={} serve{}\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n",
+                quote(&exe.display().to_string()),
+                args.iter().map(|a| format!(" {}", quote(a))).collect::<String>()
             ),
         )?;
         crate::done!(

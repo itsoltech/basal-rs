@@ -1,9 +1,8 @@
-//! Per-user locations of the server configuration, caches (GEMM tables, downloads) and data (CUDA libraries of
+//! Per-user locations of caches (GEMM tables, downloads) and data (CUDA libraries of
 //! `basal setup`), and the CUDA build of the Linux package.
 //!
 //! | | macOS | Linux | `BASAL_HOME=DIR` |
 //! |---|---|---|---|
-//! | configuration | `~/Library/Application Support/basal` | `$XDG_CONFIG_HOME/basal`, `~/.config/basal` | `DIR` |
 //! | cache | `~/Library/Caches/basal` | `$XDG_CACHE_HOME/basal`, `~/.cache/basal` | `DIR/.cache` |
 //! | data | `~/Library/Application Support/basal` | `$XDG_DATA_HOME/basal`, `~/.local/share/basal` | `DIR/.local` |
 //!
@@ -24,17 +23,6 @@ fn xdg(var: &str, fallback: &str) -> PathBuf {
     match std::env::var_os(var).map(PathBuf::from) {
         Some(p) if p.is_absolute() => p.join("basal"),
         _ => home().join(fallback).join("basal"),
-    }
-}
-
-pub fn config_dir() -> PathBuf {
-    if let Some(h) = basal_home() {
-        return h;
-    }
-    if cfg!(target_os = "macos") {
-        home().join("Library/Application Support/basal")
-    } else {
-        xdg("XDG_CONFIG_HOME", ".config")
     }
 }
 
@@ -68,11 +56,14 @@ pub fn cuda_binary() -> Option<PathBuf> {
     p.exists().then_some(p)
 }
 
-/// Server configuration of `basal serve` without `--config` / `--model`: `BASAL_CONFIG`, else `serve.yml` in
-/// [`config_dir`].
-pub fn config_file() -> PathBuf {
+/// Name of the configuration file `basal serve` reads from the working directory.
+pub const CONFIG_NAME: &str = "basal-serve.yml";
+
+/// The configuration file of `basal serve` without `--config` / `--model`: `BASAL_CONFIG`, else `basal-serve.yml` in
+/// the working directory when it exists.
+pub fn config_file() -> Option<PathBuf> {
     match std::env::var_os("BASAL_CONFIG").filter(|v| !v.is_empty()) {
-        Some(p) => PathBuf::from(p),
-        None => config_dir().join("serve.yml"),
+        Some(p) => Some(PathBuf::from(p)),
+        None => Some(PathBuf::from(CONFIG_NAME)).filter(|p| p.exists()),
     }
 }

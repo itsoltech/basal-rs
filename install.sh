@@ -6,7 +6,7 @@
 #
 # Downloads the release package from GitHub Releases, checks its SHA-256, installs it into PREFIX (default ~/.local:
 # PREFIX/bin/basal, on Linux also PREFIX/libexec/basal/basal-cuda), then runs `basal setup` (on Linux the CUDA
-# libraries from NVIDIA, the user configuration) and `basal doctor`. Running it again updates the installation.
+# libraries from NVIDIA) and `basal doctor`. Running it again updates the installation.
 #
 # Options: --version X.Y.Z (default: the latest release), --prefix DIR, --no-setup, --dry-run (print what would be
 # done). Environment: BASAL_RELEASE_URL=URL or a local directory holding the packages and SHA256SUMS (instead of
