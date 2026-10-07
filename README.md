@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <a href="#uruchomienie-w-dockerze">Szybki start</a> ·
+  <a href="#instalacja">Instalacja</a> ·
   <a href="#wyniki">Wyniki</a> ·
   <a href="#serwer">API</a> ·
   <a href="#dokumentacja">Dokumentacja</a> ·
@@ -135,9 +135,26 @@ attention; obecne attention po jednostkach drzewa daje wynik niezależny od
 pakowania partii przy tym samym czasie pełnej decyzji
 ([pomiar](reports/metal-m2-max-tree/README.md)).
 
+## Instalacja
+
+Od pierwszego wydania (`v0.1.0`, jeszcze nieopublikowane):
+
+```sh
+brew install itsoltech/tap/basal-rs                     # macOS, Apple Silicon
+curl -fsSL https://raw.githubusercontent.com/itsoltech/basal-rs/main/install.sh | sh   # Linux x86_64 z NVIDIA
+basal doctor      # co jest na maszynie, czego brakuje i jak to naprawić
+basal serve       # http://127.0.0.1:8000; bez konfiguracji serwuje basal-1.5-4.5B
+```
+
+Na Linuksie `basal setup` (uruchamiany przez skrypt) pobiera biblioteki CUDA
+z serwerów NVIDIA; z hosta potrzebny jest tylko sterownik. `basal init`
+zapisuje konfigurację z wybranymi modelami, `basal update` (albo
+`brew upgrade`) aktualizuje. Szczegóły, wymagania i ścieżki:
+[docs/INSTALL.md](docs/INSTALL.md).
+
 ## Uruchomienie w Dockerze
 
-Najszybszy start na NVIDIA. Na Apple Silicon przejdź do [budowania z Metal](#budowanie).
+Na NVIDIA bez instalacji na hoście. Na Apple Silicon: [instalacja](#instalacja) albo [budowanie z Metal](#budowanie).
 
 Wymagane: sterownik NVIDIA i NVIDIA Container Toolkit. Modele wpisane w
 [serve.yml](serve.yml) (repozytorium Hugging Face i rewizja):
@@ -194,8 +211,9 @@ docker exec basal-dev cargo build --release --features basal-cli/cuda
 ```
 
 Kernele CUDA są kompilowane do PTX przez `nvcc` w `crates/basal-gpu/build.rs`
-dla architektur z `CUDA_COMPUTE_CAPS` (domyślnie 80, 89 i 90; `CUDA_COMPUTE_CAP`
-wybiera jedną). Przy starcie runtime ładuje PTX najwyższej architektury nie
+dla architektur z `CUDA_COMPUTE_CAPS` (domyślnie 80, 89 i 90; bez niej
+`CUDA_COMPUTE_CAP` wybiera jedną, a kernele candle kompilują się dla
+`CUDA_COMPUTE_CAP`). Przy starcie runtime ładuje PTX najwyższej architektury nie
 wyższej niż karta. Obraz `basal-dev:cuda` ustawia `CUDA_COMPUTE_CAP=89`.
 
 ## Model
@@ -323,6 +341,7 @@ referencją upstream), `bench` i `bench-requests` (pomiary), `gemm-search`.
 
 ## Dokumentacja
 
+- [Instalacja](docs/INSTALL.md): Homebrew, skrypt, `basal doctor` / `setup` / `init` / `update`, ścieżki plików.
 - [Architektura](docs/ARCHITECTURE.md): potok żądania, pakowanie, kernele, harmonogram serwera.
 - [Zgodność API](docs/SYSTEM_ONE.md): TypeSafe System One, endpoint upstream, rozszerzenia basal-1.5.
 - [Pomiary](docs/BENCHMARKS.md): metodyka, narzędzia, odtwarzanie wyników.
