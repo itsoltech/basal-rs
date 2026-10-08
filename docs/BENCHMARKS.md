@@ -80,6 +80,28 @@ python3 tools/bench/loadtest.py --gpu --model basal-1.5-max --requests tools/ben
 Loadtest porównuje odpowiedzi na to samo żądanie między fazami; różnica inna
 niż 0,0 przy tabeli `--invariant` oznacza zależność wyniku od partii.
 
+## Pomiary na wynajętym GPU
+
+`tools/cloud/basal-cloud.py` wynajmuje maszynę z GPU w Shadeform (domyślnie RTX
+6000 Ada, jak serwer pomiarów; inne karty przez `--gpu`), buduje binarkę CUDA
+z bieżącego drzewa na hoście z Dockerem (`tools/release/linux.Dockerfile`,
+etap `dev`), kopiuje ją i dane, uruchamia polecenie i pobiera wyniki:
+
+```sh
+python3 tools/cloud/basal-cloud.py template                 # raz: szablon basal-rs-test
+python3 tools/cloud/basal-cloud.py up --hours 2 --spend 3 --prefetch "4.5B max"
+python3 tools/cloud/basal-cloud.py build --host USER@HOST   # równolegle z up
+python3 tools/cloud/basal-cloud.py push
+python3 tools/cloud/basal-cloud.py sync reports/choice-sets/set.jsonl
+python3 tools/cloud/basal-cloud.py run 'basal-dev eval-choice-set --model max --set reports/choice-sets/set.jsonl --out out/x'
+python3 tools/cloud/basal-cloud.py pull out/x reports/NOWY-RAPORT
+python3 tools/cloud/basal-cloud.py down
+```
+
+Każda maszyna ma w Shadeform automatyczne usunięcie po zadanym czasie i
+kwocie. Raporty z takiej maszyny podają kartę, sterownik i limit mocy, bez
+adresu maszyny.
+
 ## Warunki
 
 Pomiary CUDA wykonano na RTX 6000 Ada z limitem mocy 250 W (domyślnie 300 W).

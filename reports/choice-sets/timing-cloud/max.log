@@ -1,0 +1,11 @@
+basal: Remek/basal-1.5-max@be1b5ee7: fetching the model files (Hugging Face cache)
+basal: Remek/basal-1.5-max: all files cached
+basal: Remek/basal-1.5-max@be1b5ee7: from the Hugging Face cache in 0.2 s (/data/hf/hub/models--Remek--basal-1.5-max/snapshots/be1b5ee7e7a9755a931262fa7fab4f59be0fd03c)
+basal: basal-1.5-max loaded on the GPU in 32.6s
+basal: template prefixes precomputed ([53, 66] tokens)
+luce2: {"banking77":0.8507462686567164,"clinc150":0.8955223880597015,"massive-pl":0.7727272727272727}
+luce2-1o: {"banking77":0.8656716417910447,"clinc150":0.8955223880597015,"massive-pl":0.7878787878787878}
+luce1-final-1o: {"banking77":0.8507462686567164,"clinc150":0.9104477611940298,"massive-pl":0.7575757575757576}
+knockout1-1o: {"banking77":0.8656716417910447,"clinc150":0.7611940298507462,"massive-pl":0.7424242424242424}
+luce2: {"banking77":0.8507462686567164,"clinc150":0.8955223880597015,"massive-pl":0.7727272727272727}
+luce2-1o: {"banking77":0.8656716417910447,"clinc150":0.8955223880597015,"massive-pl":0.7878787878787878}
