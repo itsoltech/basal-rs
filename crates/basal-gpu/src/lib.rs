@@ -143,14 +143,20 @@ struct Segment<'a> {
     len: usize,
     past: Option<&'a PrefixKv>,
     mask: Vec<f32>,
-    #[cfg_attr(not(any(feature = "cuda", target_os = "macos")), allow(dead_code))]
+    #[cfg_attr(
+        not(any(feature = "cuda", target_os = "macos")),
+        allow(dead_code, reason = "Packed attention units are read only by GPU kernels")
+    )]
     units: Vec<Unit>,
 }
 
 /// Queries `q_off..q_off + q_len` (one block of a packed row) and their key ranges: ancestor blocks from the root
 /// down, then the own block. Offsets relative to the segment's first token (after its precomputed prefix).
 #[derive(Clone, Debug)]
-#[cfg_attr(not(any(feature = "cuda", target_os = "macos")), allow(dead_code))]
+#[cfg_attr(
+    not(any(feature = "cuda", target_os = "macos")),
+    allow(dead_code, reason = "Packed attention ranges are read only by GPU kernels")
+)]
 struct Unit {
     q_off: usize,
     q_len: usize,
@@ -218,7 +224,7 @@ struct PrefixKv {
     ids: Vec<u32>,
     kv: LayerKv,
     /// CUDA tensor-core attention: per layer the K and V split into f16 hi / lo planes (`fused::split_hilo`).
-    #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+    #[cfg_attr(not(feature = "cuda"), allow(dead_code, reason = "Hi/lo KV planes are used only by CUDA attention"))]
     hl: Vec<(Tensor, Tensor)>,
     /// Template prefixes are permanent; state prefixes live in the bounded LRU.
     pinned: bool,
@@ -729,7 +735,6 @@ impl GpuBackend {
 
     /// Stock-candle forward (first port, `--kernels candle`) on rows padded to `l`: final normalised hidden states
     /// at `read` (flat indices into `[b * l]`). `cos_sin` = `[2, b, l, hd/2]`, `mask` = additive `[b, 1, l, l]` f32.
-    #[allow(clippy::too_many_arguments)]
     fn forward_padded(
         &self,
         ids: &[u32],
@@ -1011,7 +1016,7 @@ impl GpuBackend {
     }
 
     /// CUDA attention on tensor cores (f16 / bf16 forwards; `BASAL_ATT=simt` selects the f32 kernel for A/B).
-    #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+    #[cfg_attr(not(feature = "cuda"), allow(dead_code, reason = "Tensor-core attention is a CUDA-only kernel"))]
     fn tc_attention(&self) -> bool {
         self.dev.is_cuda() && self.precision != Precision::F32 && std::env::var("BASAL_ATT").as_deref() != Ok("simt")
     }
@@ -1178,7 +1183,7 @@ impl GpuBackend {
         Value::Null
     }
 
-    /// Use a cuBLASLt algorithm table written by [`gemm_search`] (CUDA; rejected if the cuBLASLt version differs).
+    /// Use a cuBLASLt algorithm table written by `gemm_search` (CUDA; rejected if the cuBLASLt version differs).
     pub fn load_gemm_table(&mut self, path: &Path) -> Result<usize> {
         #[cfg(feature = "cuda")]
         if let Some(lt) = &self.lt {

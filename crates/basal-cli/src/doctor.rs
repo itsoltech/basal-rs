@@ -272,7 +272,7 @@ fn version_pair(v: &str) -> Option<(u32, u32)> {
 /// Linux: the shared libraries the CUDA build needs, found as the dynamic loader would find them or installed by
 /// `basal setup`; then whether the CUDA build of the package starts with them.
 fn cuda_libs(r: &mut Report) {
-    // SAFETY (both loads): loading a CUDA library runs its initialisers only; nothing is called.
+    // SAFETY: only the known NVIDIA driver library is loaded and no symbols are retained after it is dropped.
     if unsafe { libloading::Library::new("libcuda.so.1") }.is_ok() {
         r.ok("cuda", "libcuda.so.1 (driver)");
     } else {
@@ -283,6 +283,7 @@ fn cuda_libs(r: &mut Report) {
     for lib in CUDA_RUNTIME_LIBS {
         if managed.join(lib).exists() {
             r.ok("cuda", format!("{lib} ({})", crate::term::P(&managed)));
+        // SAFETY: lib is one of the fixed NVIDIA runtime library names; no symbols outlive this probe.
         } else if unsafe { libloading::Library::new(lib) }.is_ok() {
             r.ok("cuda", format!("{lib} (system)"));
         } else {
@@ -455,6 +456,7 @@ fn free_bytes(p: &Path) -> Option<u64> {
         d = d.parent()?;
     }
     let c = std::ffi::CString::new(d.as_os_str().as_encoded_bytes()).ok()?;
+    // SAFETY: statvfs is a C struct of integers, for which an all-zero representation is valid.
     let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
     // SAFETY: a NUL-terminated path and a zeroed statvfs the call fills.
     (unsafe { libc::statvfs(c.as_ptr(), &mut s) } == 0).then(|| s.f_bavail as u64 * s.f_frsize as u64)

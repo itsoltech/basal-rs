@@ -13,7 +13,10 @@ use candle_core::{CpuStorage, CustomOp1, CustomOp2, CustomOp3, DType, Layout, Re
 #[cfg(target_os = "macos")]
 use metal::{launch, pipeline_suffix as suffix};
 
-#[cfg_attr(not(any(feature = "cuda", target_os = "macos")), allow(dead_code))] // GPU kernels only
+#[cfg_attr(
+    not(any(feature = "cuda", target_os = "macos")),
+    allow(dead_code, reason = "GPU kernels require contiguous layouts; the CPU fallback does not use this helper")
+)]
 fn contiguous(l: &Layout, what: &str) -> Result<usize> {
     match l.contiguous_offsets() {
         Some((start, _)) => Ok(start),
@@ -298,7 +301,10 @@ pub struct HeadDims {
     pub hd: usize,
 }
 
-#[cfg_attr(not(any(feature = "cuda", target_os = "macos")), allow(dead_code))] // GPU kernels only
+#[cfg_attr(
+    not(any(feature = "cuda", target_os = "macos")),
+    allow(dead_code, reason = "Head dimensions are read by GPU kernels; the CPU implementation is unsupported")
+)]
 struct QkvRope(HeadDims);
 
 impl CustomOp3 for QkvRope {
@@ -386,7 +392,10 @@ pub fn qkv_rope(
     Ok((flat, q, k, v))
 }
 
-#[cfg_attr(not(any(feature = "cuda", target_os = "macos")), allow(dead_code))] // GPU kernels only
+#[cfg_attr(
+    not(any(feature = "cuda", target_os = "macos")),
+    allow(dead_code, reason = "Head dimensions and dtype are read only by the GPU implementations")
+)]
 struct MergeHeads(HeadDims, DType);
 
 impl CustomOp1 for MergeHeads {
@@ -437,7 +446,7 @@ pub fn merge_heads(x: &Tensor, d: HeadDims, dt: DType) -> Result<Tensor> {
     x.apply_op1_no_bwd(&MergeHeads(d, dt))
 }
 
-#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+#[cfg_attr(not(feature = "cuda"), allow(dead_code, reason = "Softmax dimensions are used only by the CUDA kernel"))]
 struct MaskedSoftmax {
     l: usize,
     scale: f32,

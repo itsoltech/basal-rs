@@ -47,8 +47,25 @@ Measurements go into a new directory under [reports/](reports/README.md) with a 
 come from; existing reports are not overwritten. Reports and code contain no data identifying the machines they were
 made on (hostnames, IP addresses, home paths). Upstream checkouts in `.baseline/` are not modified.
 
-`cargo fmt --all --check` and `cargo clippy --all-targets -- -D warnings` pass (CI runs them without the CUDA feature;
-CUDA code also with `--features basal-cli/cuda`).
+`cargo fmt --all --check` and `cargo clippy --locked --workspace --release --all-targets -- -D warnings` pass.
+CI runs them on Linux without CUDA and on macOS with Metal, and also checks all features on Linux with CUDA.
+
+Every pull request runs formatting, Clippy, Rustdoc, dependency and workflow checks. See [CI quality gates](docs/CI.md).
+CI does not run tests while the project has none. Docker images are built and pushed only for releases or a manual
+run with a release tag.
+
+## Rust code quality
+
+The implementation and review rules are in [AGENTS.md](AGENTS.md#jakość-kodu-rust), based on
+`itsolpowers:rust-implementation`. Review ownership and unnecessary copies, public API invariants, typed errors
+and their causes, input validation, async worker lifecycles, and documented safety of FFI and `unsafe`.
+Prefer correctness and readability; justify optimization with requirements or measurements.
+
+Every crate inherits the workspace lints, which reject `dbg!`, `todo!`, `unimplemented!`, undocumented `unsafe`
+and implicit unsafe operations inside unsafe functions. Keep lint exceptions local and justified with `reason`;
+prefer `#[expect(..., reason = "...")]` for an expected lint.
+Formatting and Clippy complement `itsolpowers:rust-review` and `itsolpowers:itsol-self-review`.
+CI compiles and lints Metal and CUDA code; it does not establish GPU runtime correctness or model parity.
 
 ## Pull requests
 

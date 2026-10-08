@@ -21,7 +21,9 @@ Zasady / Rules: CONTRIBUTING.md, CONTRIBUTING.pl.md
 
 ## Sprawdzenie / Checks
 
-- [ ] `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`
+- [ ] `cargo fmt --all --check`, `cargo clippy --locked --workspace --release --all-targets -- -D warnings`
+- [ ] Przegląd zmienionych granic Rust według `AGENTS.md`: ownership, API, błędy, async i `unsafe` / Changed Rust boundaries reviewed per `AGENTS.md`: ownership, API, errors, async and `unsafe`
+- [ ] Kontrole Rustdoc, zależności i workflow według `docs/CI.md`; wszystkie joby checku `lint` przechodzą / Rustdoc, dependency and workflow checks per `docs/CI.md`; every job behind `lint` passes
 - [ ] Kod CUDA: build i uruchomienie z `--features basal-cli/cuda` / CUDA code: built and run with `--features basal-cli/cuda` on: <!-- GPU, compute capability -->
 - [ ] Kod Metal: build i uruchomienie / Metal code: built and run on: <!-- chip -->
 - [ ] Dokumentacja zaktualizowana przy zmianie zachowania lub opcji / Docs updated when behaviour or options change

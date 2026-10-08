@@ -1,0 +1,31 @@
+# Dependency policy for the supported release platforms, including optional CUDA dependencies.
+[graph]
+targets = ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin"]
+all-features = true
+
+[advisories]
+yanked = "deny"
+unmaintained = "all"
+unsound = "all"
+unused-ignored-advisory = "deny"
+
+[[advisories.ignore]]
+id = "RUSTSEC-2024-0436"
+reason = "User-approved maintenance exception for paste 1.0.15, a compile-time proc macro required by the pinned tokenizers/gemm/pulp dependencies. This advisory reports no vulnerability and has no patched release. Review by 2027-01-08; remove when upstream no longer needs paste."
+# The pinned cargo-deny version supports only id/reason for advisory exceptions.
+# CI enforces the exact dependents and the deadline in tools/ci/check-paste-exception.sh.
+
+[licenses]
+allow = ["Apache-2.0", "MIT", "BSD-2-Clause", "BSD-3-Clause", "ISC", "MPL-2.0", "Unicode-3.0", "Zlib"]
+confidence-threshold = 0.93
+
+[bans]
+# Report version duplication; different major versions may be required by upstream crates.
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true # unpublished workspace crates are resolved from this checkout
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

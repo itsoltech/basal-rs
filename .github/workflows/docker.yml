@@ -1,7 +1,6 @@
 # Container image of the server on GitHub Container Registry (ghcr.io/<owner>/<repo>), published only for releases:
 # release.yml calls this workflow after the release packages are published (input `tag`, e.g. v0.1.0); workflow_dispatch
-# with a release tag publishes the image of that release again. Pull requests build the image without pushing it; a
-# push to main publishes nothing.
+# with a release tag publishes the image of that release again. Pull requests and pushes to main do not run it.
 #
 # One image for every supported GPU architecture (kernels for compute capability 8.0, 8.9 and 9.0, chosen at start).
 # Tags of release vX.Y.Z:  vX.Y.Z; vX.Y and vX when it is the newest release of that series; latest when it is the
@@ -23,13 +22,6 @@ on:
         description: release tag to publish the image of again (vX.Y.Z)
         type: string
         required: true
-  pull_request:
-    paths:
-      - "crates/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "docker/**"
-      - ".github/workflows/docker.yml"
 
 permissions:
   contents: read
@@ -51,7 +43,6 @@ jobs:
       # shown by GHCR on the package page (OCI annotation of the image index; at most 512 characters)
       DESCRIPTION: >-
         Rust inference engine and HTTP server for the Basal decision models by Remek Kinas: TypeSafe System One API and the upstream /v1/basal endpoint, CUDA kernels for compute capability 8.0, 8.9 and 9.0 (A100, RTX 30xx/40xx, RTX 6000 Ada, L40S, H100). Run: docker run --gpus all -p 8000:8000 -v basal-data:/data ghcr.io/itsoltech/basal-rs; docs: https://github.com/itsoltech/basal-rs
-      PUSH: ${{ inputs.tag != '' }}
     steps:
       - name: Free disk space (the CUDA devel image and the build need ~25 GB)
         run: |
@@ -61,16 +52,13 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ inputs.tag }}
           fetch-depth: 0  # every release tag, to find the newest of each series
 
       - name: Tags
         id: tags
         run: |
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"  # the tagged commit, also when dispatched from main
-          if [ "$PUSH" != true ]; then
-            echo "tags=basal-rs:pr-check" >> "$GITHUB_OUTPUT"; echo "version=pr" >> "$GITHUB_OUTPUT"; exit 0
-          fi
           [[ "$TAG" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)(-.+)?$ ]] || { echo "not a release tag: $TAG"; exit 1; }
           major=${BASH_REMATCH[1]} minor=${BASH_REMATCH[2]} pre=${BASH_REMATCH[4]}
           version=$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)
@@ -95,7 +83,6 @@ jobs:
       - uses: docker/setup-buildx-action@v3
 
       - name: Log in to ghcr.io
-        if: env.PUSH == 'true'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -109,7 +96,7 @@ jobs:
           file: docker/Dockerfile
           build-args: |
             BASAL_GIT_SHA=${{ steps.tags.outputs.sha }}
-          push: ${{ env.PUSH == 'true' }}
+          push: true
           tags: ${{ steps.tags.outputs.tags }}
           labels: |
             org.opencontainers.image.title=basal-rs
@@ -132,4 +119,4 @@ jobs:
             index:org.opencontainers.image.licenses=Apache-2.0
             manifest:org.opencontainers.image.description=${{ env.DESCRIPTION }}
           cache-from: type=registry,ref=${{ env.CACHE }}:docker
-          cache-to: ${{ env.PUSH == 'true' && format('type=registry,ref={0}:docker,mode=max', env.CACHE) || '' }}
+          cache-to: type=registry,ref=${{ env.CACHE }}:docker,mode=max

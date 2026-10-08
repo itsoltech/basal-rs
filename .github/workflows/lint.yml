@@ -1,25 +1,164 @@
-# Formatting and lints of the workspace (without the CUDA feature: no CUDA toolkit on the runner).
+# Static quality gates. GPU jobs compile/lint their backend; they do not execute models or tests.
 name: lint
 
 on:
   push:
     branches: [main]
-    paths: ["crates/**", "Cargo.toml", "Cargo.lock", "rustfmt.toml", ".github/workflows/lint.yml"]
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "rustfmt.toml"
+      - "deny.toml"
+      - "tools/ci/**"
+      - ".github/**"
   # every pull request: `lint` is a required check of the main branch ruleset, a skipped one would block the merge
   pull_request:
 
 permissions:
   contents: read
 
+concurrency:
+  group: lint-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: "0"
+
 jobs:
-  lint:
+  format:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067
         with:
           toolchain: "1.95.0"
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all --check
-      - run: cargo clippy --release --all-targets -- -D warnings
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+  rust:
+    name: Rust (${{ matrix.backend }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - backend: Linux without GPU
+            runner: ubuntu-24.04
+          - backend: Metal
+            runner: macos-14
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067
+        with:
+          toolchain: "1.95.0"
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          key: quality-${{ matrix.backend }}
+      - name: Clippy (workspace, all targets)
+        run: cargo clippy --locked --workspace --release --all-targets -- -D warnings
+      - name: Documentation (including private items)
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc --locked --workspace --release --no-deps --document-private-items
+
+  cuda:
+    name: Rust (CUDA)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    # Pull the existing toolkit image; do not build or publish a Docker image on PRs.
+    container: nvidia/cuda:12.9.1-devel-ubuntu24.04
+    defaults:
+      run:
+        shell: bash
+    env:
+      CUDA_COMPUTE_CAP: "80"
+      CUDA_COMPUTE_CAPS: "80,89,90"
+    steps:
+      - name: Install build prerequisites
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends build-essential pkg-config git curl ca-certificates
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067
+        with:
+          toolchain: "1.95.0"
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          key: quality-cuda-12.9.1-sm80-89-90
+      - name: Clippy (workspace, all targets, all features)
+        run: cargo clippy --locked --workspace --release --all-targets --all-features -- -D warnings
+      - name: Documentation (all features, including private items)
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc --locked --workspace --release --all-features --no-deps --document-private-items
+
+  dependencies:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067
+        with:
+          toolchain: "1.95.0"
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2
+        with:
+          tool: cargo-deny@0.19.8
+      - name: Advisories, licenses, versions and sources (all features)
+        run: cargo deny --locked --all-features check --hide-inclusion-graph
+      - name: Require the approved paste exception scope and deadline
+        run: bash tools/ci/check-paste-exception.sh
+      - name: Dependency version report
+        if: always()
+        run: cargo tree --locked --workspace --all-features --duplicates
+
+  workflows:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2
+        with:
+          tool: actionlint@1.7.11,shellcheck@0.11.0
+      - name: Validate GitHub Actions workflows and embedded shell
+        run: actionlint
+      - name: Validate CI policy scripts
+        run: shellcheck tools/ci/*.sh
+
+  # Preserve the required check name. Fail on any failed, cancelled or skipped prerequisite.
+  lint:
+    if: always()
+    needs: [format, rust, cuda, dependencies, workflows]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every quality job to pass
+        env:
+          FORMAT_RESULT: ${{ needs.format.result }}
+          RUST_RESULT: ${{ needs.rust.result }}
+          CUDA_RESULT: ${{ needs.cuda.result }}
+          DEPENDENCIES_RESULT: ${{ needs.dependencies.result }}
+          WORKFLOWS_RESULT: ${{ needs.workflows.result }}
+        run: |
+          for result in "$FORMAT_RESULT" "$RUST_RESULT" "$CUDA_RESULT" "$DEPENDENCIES_RESULT" "$WORKFLOWS_RESULT"; do
+            if [ "$result" != success ]; then
+              echo "A required quality job did not succeed: $result"
+              exit 1
+            fi
+          done

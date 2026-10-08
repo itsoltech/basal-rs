@@ -1,6 +1,6 @@
 //! Terminal output: colours (`--color auto|always|never`, `NO_COLOR`, `CLICOLOR_FORCE`) and paths shortened to `~`.
 //!
-//! `auto` colours a stream only when it is a terminal and `NO_COLOR` is not set (https://no-color.org);
+//! `auto` colours a stream only when it is a terminal and `NO_COLOR` is not set (<https://no-color.org>);
 //! `CLICOLOR_FORCE=1` colours also when it is not.
 
 use std::io::IsTerminal;

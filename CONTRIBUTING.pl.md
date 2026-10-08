@@ -47,8 +47,25 @@ Pomiary trafiają do nowego katalogu w [reports/](reports/README.md) z `README.m
 istniejących raportów nie nadpisujemy. Raporty i kod nie zawierają danych pozwalających zidentyfikować maszyny (nazwy
 hostów, adresy IP, ścieżki domowe). Checkoutów upstream w `.baseline/` nie modyfikujemy.
 
-`cargo fmt --all --check` i `cargo clippy --all-targets -- -D warnings` przechodzą (CI uruchamia je bez feature CUDA;
-kod CUDA także z `--features basal-cli/cuda`).
+`cargo fmt --all --check` i `cargo clippy --locked --workspace --release --all-targets -- -D warnings` przechodzą.
+CI uruchamia je na Linux bez CUDA i na macOS z Metal, a na Linux z CUDA sprawdza także wszystkie features.
+
+Każdy pull request uruchamia kontrole formatowania, Clippy, Rustdoc, zależności i workflow. Zakres: [docs/CI.md](docs/CI.md).
+CI nie uruchamia testów, dopóki projekt ich nie ma. Obrazy Docker budujemy i publikujemy tylko dla wydań lub ręcznie
+ze wskazanym tagiem wydania.
+
+## Jakość kodu Rust
+
+Zasady implementacji i przeglądu są w [AGENTS.md](AGENTS.md#jakość-kodu-rust), na podstawie
+`itsolpowers:rust-implementation`. Sprawdzamy ownership i zbędne kopie, invariants publicznego API, typowane błędy
+i ich przyczyny, walidację wejścia, lifecycle workerów async oraz udokumentowane bezpieczeństwo FFI i `unsafe`.
+Najpierw poprawność i czytelność; optymalizacje uzasadniamy wymaganiami lub pomiarami.
+
+Każdy crate dziedziczy linty workspace, które odrzucają `dbg!`, `todo!`, `unimplemented!`, nieudokumentowane `unsafe`
+oraz niejawne operacje unsafe wewnątrz unsafe fn. Wyjątki od lintów ograniczamy do najmniejszego zakresu
+i uzasadniamy przez `reason`; preferujemy `#[expect(..., reason = "...")]`.
+Formatowanie i Clippy uzupełniają przegląd według `itsolpowers:rust-review` i `itsolpowers:itsol-self-review`.
+CI kompiluje i lintuje kod Metal i CUDA; nie potwierdza poprawności runtime'u GPU ani zgodności modelu.
 
 ## Pull requesty
 

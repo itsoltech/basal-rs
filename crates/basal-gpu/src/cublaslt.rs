@@ -89,6 +89,7 @@ pub struct Lt {
 
 // SAFETY: the handle and descriptors are only used under the plan/algo locks on candle's single stream.
 unsafe impl Send for Lt {}
+// SAFETY: shared access uses the same plan/algo locks and single candle stream as owned access.
 unsafe impl Sync for Lt {}
 
 fn st(s: sys::cublasStatus_t, what: &str) -> Result<()> {
@@ -161,7 +162,7 @@ impl Lt {
     ///
     /// # Safety
     /// As [`Lt::run`], with `w` holding `copies` weights of `w_bytes`.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "Timing requires the plan, device buffers, weight copies and stream")]
     unsafe fn time_algo(
         &self,
         p: &Plan,
@@ -175,11 +176,13 @@ impl Lt {
         reps: usize,
     ) -> Result<f64> {
         let wi = |i: usize| w + (i % copies.max(1)) as u64 * w_bytes;
-        self.run(p, a, wi(reps + 1), x, y, stream)?;
+        // SAFETY: the caller guarantees the plan's buffers; wi selects a complete in-bounds weight copy.
+        unsafe { self.run(p, a, wi(reps + 1), x, y, stream)? };
         stream.synchronize().w()?;
         let t = Instant::now();
         for i in 0..reps {
-            self.run(p, a, wi(i), x, y, stream)?;
+            // SAFETY: the same live buffers and plan are reused, selecting a valid weight copy.
+            unsafe { self.run(p, a, wi(i), x, y, stream)? };
         }
         stream.synchronize().w()?;
         Ok(t.elapsed().as_secs_f64() * 1e3 / reps as f64)
@@ -188,7 +191,14 @@ impl Lt {
     /// Batch-invariant choice for one weight shape: candidates without split-K from searches at a few M, each timed
     /// at every class in `classes`; the chosen one has the smallest mean slowdown against the best candidate of each
     /// class. `x` holds at least `max(classes)` rows. Returns (chosen algorithm, per-class (ms, best ms), candidates).
-    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    ///
+    /// # Safety
+    /// As [`Lt::run`] for each class: x and y hold at least max(classes) rows, and w holds copies full weights.
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::type_complexity,
+        reason = "The search receives GPU buffers and returns an opaque algorithm plus timings for each M class"
+    )]
     unsafe fn invariant_search(
         &self,
         n: usize,
@@ -208,7 +218,8 @@ impl Lt {
                 continue;
             }
             let p = self.plan_cached(m, n, k, dt)?;
-            let (top, _, _) = self.search(&p, dt, w, copies, w_bytes, x, y, stream, false)?;
+            // SAFETY: m is in classes, so the caller's max-class buffers cover this plan and every weight copy.
+            let (top, _, _) = unsafe { self.search(&p, dt, w, copies, w_bytes, x, y, stream, false)? };
             for (_, a) in top {
                 if !cands.iter().any(|c| c.data == a.data) {
                     cands.push(a);
@@ -220,7 +231,8 @@ impl Lt {
             let p = self.plan_cached(m, n, k, dt)?;
             for (ai, a) in cands.iter().enumerate() {
                 if self.check(&p, a) {
-                    times[ai][ci] = self.time_algo(&p, a, w, copies, w_bytes, x, y, stream, 10)?;
+                    // SAFETY: the algorithm passed the plan check; buffers cover every class and weight copy.
+                    times[ai][ci] = unsafe { self.time_algo(&p, a, w, copies, w_bytes, x, y, stream, 10)? };
                 }
             }
         }
@@ -228,7 +240,8 @@ impl Lt {
             (0..classes.len()).map(|ci| times.iter().map(|t| t[ci]).fold(f64::INFINITY, f64::min)).collect();
         // groups of candidates with bitwise identical outputs; the group with the smallest geometric-mean slowdown
         // of its fastest member per class (every class weighs the same) gives one algorithm per class
-        let group = self.equivalence_groups(n, k, dt, w, x, y, classes, &cands, stream)?;
+        // SAFETY: the caller guarantees live buffers large enough for every class on this stream.
+        let group = unsafe { self.equivalence_groups(n, k, dt, w, x, y, classes, &cands, stream)? };
         let geo = |f: &dyn Fn(usize) -> f64| {
             ((0..classes.len()).map(|ci| (f(ci) / best[ci]).ln()).sum::<f64>() / classes.len() as f64).exp()
         };
@@ -267,7 +280,10 @@ impl Lt {
     /// Groups of candidates whose outputs are bitwise identical on the same operands at every class (where both are
     /// valid): the group id of each candidate. Candidates without split-K or sliced K reduce over K in the same
     /// order and fall into one group.
-    #[allow(clippy::too_many_arguments)]
+    ///
+    /// # Safety
+    /// As [`Lt::run`] for every class: x and y must hold at least max(classes) rows on stream.
+    #[expect(clippy::too_many_arguments, reason = "Equivalence compares GPU buffers for each shape and algorithm")]
     unsafe fn equivalence_groups(
         &self,
         n: usize,
@@ -291,9 +307,11 @@ impl Lt {
                     sig[ai].push(None);
                     continue;
                 }
-                self.run(&p, a, w, x, y, stream)?;
+                // SAFETY: this candidate passed the plan check and the caller's buffers cover the class.
+                unsafe { self.run(&p, a, w, x, y, stream)? };
                 stream.synchronize().w()?;
-                let r = drv::cuMemcpyDtoH_v2(host.as_mut_ptr() as *mut c_void, y, bytes);
+                // SAFETY: y holds m*n elements, host has exactly bytes capacity, and the stream is synchronized.
+                let r = unsafe { drv::cuMemcpyDtoH_v2(host.as_mut_ptr() as *mut c_void, y, bytes) };
                 if r != drv::CUresult::CUDA_SUCCESS {
                     candle_core::bail!("cuBLASLt equivalence: copy failed {r:?}");
                 }
@@ -337,7 +355,7 @@ impl Lt {
     ///
     /// # Safety
     /// As [`Lt::run`].
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "Algorithm search needs a plan, dtype, live GPU buffers and stream")]
     unsafe fn search(
         &self,
         p: &Plan,
@@ -364,11 +382,13 @@ impl Lt {
             w + (i % w_copies.max(1)) as u64 * w_bytes
         };
         let time = |a: &sys::cublasLtMatmulAlgo_t, reps: usize| -> Result<f64> {
-            self.run(p, a, wi(), x, y, stream)?;
+            // SAFETY: the caller guarantees all plan buffers; wi selects one of the complete weight copies.
+            unsafe { self.run(p, a, wi(), x, y, stream)? };
             stream.synchronize().w()?;
             let t = Instant::now();
             for _ in 0..reps {
-                self.run(p, a, wi(), x, y, stream)?;
+                // SAFETY: the same live buffers and checked plan are reused with an in-bounds weight copy.
+                unsafe { self.run(p, a, wi(), x, y, stream)? };
             }
             stream.synchronize().w()?;
             Ok(t.elapsed().as_secs_f64() * 1e3 / reps as f64)
@@ -380,29 +400,45 @@ impl Lt {
         };
         let mut ids = vec![0i32; 128];
         let mut nids = 0;
-        st(sys::cublasLtMatmulAlgoGetIds(self.handle, ct, st32, t, t, t, t, 128, ids.as_mut_ptr(), &mut nids), "ids")?;
+        // SAFETY: the handle is valid and ids/nids provide initialized output storage for the requested count.
+        st(
+            unsafe {
+                sys::cublasLtMatmulAlgoGetIds(self.handle, ct, st32, t, t, t, t, 128, ids.as_mut_ptr(), &mut nids)
+            },
+            "ids",
+        )?;
         ids.truncate(nids as usize);
         let cap_u32s = |algo: &sys::cublasLtMatmulAlgo_t, attr: Cap| -> Vec<u32> {
             let mut size = 0usize;
-            sys::cublasLtMatmulAlgoCapGetAttribute(algo, attr, std::ptr::null_mut(), 0, &mut size);
+            // SAFETY: with a null buffer and zero size, cuBLASLt only writes the required size.
+            unsafe { sys::cublasLtMatmulAlgoCapGetAttribute(algo, attr, std::ptr::null_mut(), 0, &mut size) };
             let mut v = vec![0u32; size / 4];
             if !v.is_empty() {
-                sys::cublasLtMatmulAlgoCapGetAttribute(algo, attr, v.as_mut_ptr() as *mut c_void, size, &mut size);
+                // SAFETY: queried tile/stage ID arrays are u32 values and v provides the reported byte size.
+                unsafe {
+                    sys::cublasLtMatmulAlgoCapGetAttribute(algo, attr, v.as_mut_ptr() as *mut c_void, size, &mut size)
+                };
             }
             v
         };
         let cap_u32 = |algo: &sys::cublasLtMatmulAlgo_t, attr: Cap| -> u32 {
             let (mut v, mut size) = (0u32, 0usize);
-            sys::cublasLtMatmulAlgoCapGetAttribute(algo, attr, &mut v as *mut u32 as *mut c_void, 4, &mut size);
+            // SAFETY: the queried scalar capabilities are u32 values; v and size are valid output pointers.
+            unsafe {
+                sys::cublasLtMatmulAlgoCapGetAttribute(algo, attr, &mut v as *mut u32 as *mut c_void, 4, &mut size)
+            };
             v
         };
         let set = |algo: &mut sys::cublasLtMatmulAlgo_t, attr: Cfg, v: u32| {
-            sys::cublasLtMatmulAlgoConfigSetAttribute(algo, attr, &v as *const u32 as *const c_void, 4);
+            // SAFETY: these configuration attributes take u32 values and v outlives the synchronous call.
+            unsafe { sys::cublasLtMatmulAlgoConfigSetAttribute(algo, attr, &v as *const u32 as *const c_void, 4) };
         };
         let mut cands: Vec<(f64, sys::cublasLtMatmulAlgo_t)> = Vec::new();
         for &id in &ids {
-            let mut base: sys::cublasLtMatmulAlgo_t = std::mem::zeroed();
-            if sys::cublasLtMatmulAlgoInit(self.handle, ct, st32, t, t, t, t, id, &mut base)
+            // SAFETY: the opaque algorithm struct contains a fixed-size integer array, valid when zeroed.
+            let mut base: sys::cublasLtMatmulAlgo_t = unsafe { std::mem::zeroed() };
+            // SAFETY: the handle and data types are valid; base is writable storage for the initialized algorithm.
+            if unsafe { sys::cublasLtMatmulAlgoInit(self.handle, ct, st32, t, t, t, t, id, &mut base) }
                 != sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS
             {
                 continue;
@@ -551,24 +587,28 @@ impl Lt {
         let (alpha, beta) = (1f32, 0f32);
         let (ws, _g) = self.workspace.device_ptr(stream);
         st(
-            sys::cublasLtMatmul(
-                self.handle,
-                p.desc,
-                &alpha as *const f32 as *const c_void,
-                w as *const c_void,
-                p.a,
-                x as *const c_void,
-                p.b,
-                &beta as *const f32 as *const c_void,
-                y as *mut c_void,
-                p.c,
-                y as *mut c_void,
-                p.c,
-                algo,
-                ws as *mut c_void,
-                WORKSPACE,
-                stream.cu_stream() as _,
-            ),
+            // SAFETY: the caller guarantees the plan's live device buffers on stream; scalar pointers and
+            // the guarded workspace remain valid throughout this enqueue call.
+            unsafe {
+                sys::cublasLtMatmul(
+                    self.handle,
+                    p.desc,
+                    &alpha as *const f32 as *const c_void,
+                    w as *const c_void,
+                    p.a,
+                    x as *const c_void,
+                    p.b,
+                    &beta as *const f32 as *const c_void,
+                    y as *mut c_void,
+                    p.c,
+                    y as *mut c_void,
+                    p.c,
+                    algo,
+                    ws as *mut c_void,
+                    WORKSPACE,
+                    stream.cu_stream() as _,
+                )
+            },
             "matmul",
         )
     }
@@ -655,7 +695,7 @@ impl Lt {
         Ok((CudaStorage { slice, device: dev }, Shape::from((m, n))))
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "Dispatch maps one validated matmul shape and its device pointers")]
     fn dispatch(
         &self,
         m: usize,
