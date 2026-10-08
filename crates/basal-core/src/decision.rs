@@ -52,15 +52,23 @@ pub fn argmax(p: &[f64]) -> usize {
 /// TypeSafe Choice confidence `(max(p) - 1/n) / (1 - 1/n)`; `None` for n < 2.
 pub fn choice_confidence(p: &[f64]) -> Option<f64> {
     let n = p.len() as f64;
-    (p.len() >= 2).then(|| (p[argmax(p)] - 1.0 / n) / (1.0 - 1.0 / n))
+    match p.len() {
+        0 => None,
+        // a single option is certain (the TypeSafe API answers 1.0; the formula is 0/0)
+        1 => Some(1.0),
+        _ => Some((p[argmax(p)] - 1.0 / n) / (1.0 - 1.0 / n)),
+    }
 }
 
 /// TypeSafe Score confidence `max(0, 1 - sum p[i]|i-m| / uniform_mad)`, m = most probable level (first on ties);
 /// `None` for n < 2.
 pub fn score_confidence(p: &[f64]) -> Option<f64> {
     let n = p.len();
-    if n < 2 {
-        return None;
+    match n {
+        0 => return None,
+        // a single level is certain (the TypeSafe API answers 1.0; the uniform spread is 0)
+        1 => return Some(1.0),
+        _ => {}
     }
     let m = argmax(p) as f64;
     let mid = (n as f64 - 1.0) / 2.0;

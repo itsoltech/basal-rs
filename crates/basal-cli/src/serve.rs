@@ -8,7 +8,7 @@
 //! together with `Engine::run_plans`: the questions of all admitted requests share the forwards of each round (the
 //! budget counts a state shared by several requests once). A request larger than the budget runs alone; requests
 //! whose client disconnected while waiting are dropped. More than `max_inflight` waiting or running requests are
-//! refused with 503.
+//! refused with 529 and `Retry-After: 1` (the TypeSafe API's status when it is overloaded).
 //!
 //! Long requests (`--long-tokens`, default 4096 packed tokens) go to a second lane: a second engine on the same GPU
 //! sharing the weights, admitted the same way. The two lanes take turns on the GPU (`basal_core::gate`): when the
@@ -259,9 +259,33 @@ fn error_response(status: StatusCode, body: Value) -> Response {
     (status, Json(body)).into_response()
 }
 
-/// TypeSafe System One endpoint.
-async fn systemone(State(app): State<Arc<App>>, Json(body): Json<Value>) -> Response {
-    decide(app, body, Dialect::TypeSafe, Instant::now()).await
+/// TypeSafe System One endpoint. A body that is not JSON is a 422 `json_invalid` error, as in the TypeSafe API
+/// (with any content type).
+async fn systemone(State(app): State<Arc<App>>, body: axum::body::Bytes) -> Response {
+    let arrived = Instant::now();
+    match serde_json::from_slice::<Value>(&body) {
+        Ok(v) => decide(app, v, Dialect::TypeSafe, arrived).await,
+        Err(e) => error_response(StatusCode::UNPROCESSABLE_ENTITY, json_invalid(&body, &e)),
+    }
+}
+
+/// TypeSafe `json_invalid` error: location `["body", character offset]`, the decoder message in `ctx.error`.
+fn json_invalid(body: &[u8], e: &serde_json::Error) -> Value {
+    let text = String::from_utf8_lossy(body);
+    // serde_json counts lines from 1 and columns (bytes) from 1; line 0 is an error before any input
+    let pos = if e.line() == 0 {
+        0
+    } else {
+        let line_start: usize = text.split_inclusive('\n').take(e.line() - 1).map(str::len).sum();
+        let byte = (line_start + e.column().saturating_sub(1)).min(text.len());
+        text.char_indices().take_while(|(i, _)| *i < byte).count()
+    };
+    let msg = e.to_string();
+    let msg = msg.split(" at line ").next().unwrap_or(&msg);
+    let mut chars = msg.chars();
+    let msg = chars.next().map(|c| c.to_uppercase().chain(chars).collect::<String>()).unwrap_or_default();
+    json!({"detail": [{"type": "json_invalid", "loc": ["body", pos], "msg": "JSON decode error", "input": {},
+                       "ctx": {"error": msg}}]})
 }
 
 /// Upstream-compatible endpoint (`Server.decide` conventions): any failure, including a body that is not JSON, is a
@@ -289,22 +313,22 @@ impl Drop for Inflight<'_> {
 async fn decide(app: Arc<App>, body: Value, dialect: Dialect, arrived: Instant) -> Response {
     let slot = Inflight(&app.inflight);
     if app.inflight.fetch_add(1, Ordering::SeqCst) >= app.max_inflight {
-        return error_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            json!({"error": "overloaded", "detail": "too many requests in flight"}),
-        );
+        // 529 as the TypeSafe API when it is overloaded; its SDKs (and most HTTP clients) retry 5xx with backoff
+        let body = match dialect {
+            Dialect::TypeSafe => json!({"detail": {"error_type": "overloaded_error",
+                                                   "message": "Too many requests in flight. Retry after a short delay."}}),
+            Dialect::Upstream => json!({"error": "overloaded: too many requests in flight"}),
+        };
+        let mut r = error_response(StatusCode::from_u16(529).unwrap(), body);
+        r.headers_mut().insert(axum::http::header::RETRY_AFTER, HeaderValue::from_static("1"));
+        return r;
     }
     // The request's model, or the default one when the field is missing or not a string (/v1/systemone then
     // answers the schema error of the field).
     let model = match body.get("model").and_then(Value::as_str) {
         Some(m) if app.routes.contains_key(m) => m.to_string(),
         Some(m) => {
-            let e = DecideError::Validation(vec![basal_core::request::FieldError {
-                loc: vec!["body".into(), "model".into()],
-                msg: format!("unknown model {m:?}; served: {:?}", app.names),
-                kind: "unknown_model".into(),
-            }]);
-            return error_body(dialect, e);
+            return error_body(dialect, basal_core::request::api_usage_error(format!("Unknown model: {m}")));
         }
         None => app.default_model.clone(),
     };
@@ -344,11 +368,12 @@ async fn decide(app: Arc<App>, body: Value, dialect: Dialect, arrived: Instant) 
     }
 }
 
-/// Error answer of an endpoint: upstream: 422 `{"error"}` for every failure; TypeSafe: 422 for invalid or
-/// unsupported requests, 500 otherwise.
+/// Error answer of an endpoint: upstream: 422 `{"error"}` for every failure; TypeSafe: 422 for schema errors and
+/// requests this runtime does not answer, 400 for the errors the TypeSafe API answers with 400, 500 otherwise.
 fn error_body(dialect: Dialect, e: DecideError) -> Response {
     match e {
         e if dialect == Dialect::Upstream => error_response(StatusCode::UNPROCESSABLE_ENTITY, e.to_upstream_json()),
+        e @ DecideError::Usage(_) => error_response(StatusCode::BAD_REQUEST, e.to_json()),
         e @ (DecideError::Validation(_) | DecideError::Unsupported(_)) => {
             error_response(StatusCode::UNPROCESSABLE_ENTITY, e.to_json())
         }

@@ -134,7 +134,7 @@ układa kolejkę:
 Partia to pierwsze żądanie z kolejki i każde następne, które mieści się w
 `--max-batch-tokens`; pytania wszystkich żądań partii dzielą forwardy.
 Żądania porzucone przez klienta są pomijane, a ponad `--max-inflight` żądań
-w toku dostaje 503.
+w toku dostaje 529 z `Retry-After: 1` (status TypeSafe dla przeciążenia).
 
 Żądania powyżej `--long-tokens` liczy drugi tor: drugi silnik na tym samym
 GPU, ze wspólnymi wagami, tabelą GEMM i prefiksami szablonu. Oba tory

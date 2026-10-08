@@ -19,21 +19,40 @@ konwencjach żądań oraz odpowiedzi:
 
 | Pole | Kontrakt |
 |---|---|
-| `model` | wymagany; nazwa serwowanego modelu, inna kończy się błędem `unknown_model` |
-| `state` | string, obiekt lub tablica; wewnątrz dowolny JSON |
-| `questions` | mapa ID pytania na pytanie; ID wiąże odpowiedź i nie trafia do promptu |
+| `model` | wymagany; nazwa serwowanego modelu, inna: 400 `Unknown model: …` |
+| `state` | string, obiekt lub tablica; wewnątrz dowolny JSON; `null` jak brak pola |
+| `questions` | mapa ID pytania na pytanie, co najmniej jedno; ID wiąże odpowiedź i nie trafia do promptu |
 | `instructions` | string, obiekt, tablica albo brak/null |
-| `type` | `choice`, `noul`, `score`; z basal-1.5 także `multi`, `act`; inny lub brak to błąd walidacji |
+| `type` | `choice`, `noul`, `score`; z basal-1.5 także `multi`, `act`; brak: 422, inny: 400 |
 
 - `choice.criteria`: mapa klucz → opis (string, obiekt, tablica lub null;
-  null oznacza opcję opisaną kluczem), 2–255 opcji.
+  null oznacza opcję opisaną kluczem), 1–255 opcji. Przy jednej opcji
+  odpowiedź bez modelu: prawdopodobieństwo 1, confidence 1.
 - `noul.criteria`: opcjonalne `true` i `false`; puste wartości (`""`, `{}`,
-  `[]`) są zachowane, nie zastępowane domyślnymi.
-- `score.criteria`: uporządkowana tablica poziomów 0..n-1 (2–10); jak w
-  upstream także mapa nazwa → opis (odpowiedź po nazwach) i alias `levels`.
+  `[]`) są zachowane, nie zastępowane domyślnymi. Noul bez `instructions` i
+  bez `criteria` (brak lub null) to błąd 400.
+- `score.criteria`: uporządkowana tablica poziomów 0..n-1 (1–10; jeden
+  poziom: score 0, confidence 1, bez modelu); jak w upstream także mapa
+  nazwa → opis (odpowiedź po nazwach) i alias `levels`.
 
-Błędy walidacji mają postać TypeSafe `{"detail": [{"loc", "msg", "type"}]}`
-ze statusem 422.
+Błędy mają postać i statusy API TypeSafe (sprawdzone na 38 przypadkach
+brzegowych, [raport](../reports/typesafe-api-edge-cases/README.md)):
+
+- 422, błąd schematu: `{"detail": [{"type", "loc", "msg", "input", "ctx"}]}`
+  jak w pydantic. `loc` zawiera typ pytania po jego ID
+  (`["body", "questions", "q", "score", "criteria", 1, "str"]`), wartość
+  spoza unii string/obiekt/tablica daje trzy błędy (`string_type`,
+  `dict_type`, `list_type`), niepoprawny JSON daje `json_invalid`.
+- 400, poprawny schemat, ale żądanie odrzucone: `{"detail": "komunikat"}`
+  (choice bez opcji lub z ponad 255, score z ponad 10 poziomami, noul bez
+  instrukcji i kryteriów) albo `{"detail": {"error_type": "api_usage_error",
+  "message": ...}}` (nieznany model lub typ pytania). Przy błędach obu
+  rodzajów odpowiedzią jest 422.
+- 529 z `Retry-After: 1`, gdy w toku jest więcej niż `max_inflight` żądań
+  (TypeSafe odpowiada 529, gdy jest przeciążone). SDK TypeSafe ponawia 408,
+  429 i 5xx z wykładniczym odczekiwaniem.
+- 422 `{"error": "unsupported", "detail": [...]}`: żądanie poprawne, którego
+  ten runtime nie obsługuje (np. `evidence` w modelu bez głowicy dowodów).
 
 ### Odpowiedź
 
@@ -57,7 +76,14 @@ score:   m = indeks najbardziej prawdopodobnego poziomu
          max(0, 1 - Σ p[i]·|i - m| / uniform_mad)
 ```
 
-Remisy rozstrzyga pierwszy klucz (jak `max` w Pythonie).
+Remisy rozstrzyga pierwszy klucz (jak `max` w Pythonie). TypeSafe zaokrągla
+prawdopodobieństwa, score i confidence do dwóch miejsc po przecinku, a
+basal-rs zwraca pełną precyzję.
+
+Rozszerzenia przyjmowane przez basal-rs, które API TypeSafe odrzuca: typy
+`multi` i `act`, dodatkowe pola (`facts`, `evidence`, `option_keys`),
+kryteria choice jako lista nazw, kryteria score jako mapa. Klient pisany pod
+TypeSafe ich nie wysyła, więc nie zmieniają odpowiedzi na jego żądania.
 
 ### Różnice względem upstream
 
@@ -65,8 +91,8 @@ Remisy rozstrzyga pierwszy klucz (jak `max` w Pythonie).
 |---|---|---|
 | `instructions: null` | tekst `null` w prompcie | brak instrukcji |
 | Noul z pustym opisem | domyślne Tak/Nie | podana wartość |
-| Nieznany lub brak `type` | `choice` | błąd walidacji |
-| Choice/Score z jedną opcją | błąd 2..10 | błąd `unsupported_single_option` |
+| Nieznany lub brak `type` | `choice` | błąd (400 lub 422) |
+| Choice/Score z jedną opcją | błąd 2..10 | prawdopodobieństwo 1, jak TypeSafe |
 | Choice 11–255 opcji | błąd 2..10 | strategia grupowa ([opis](ARCHITECTURE.md#choice-11255)) |
 | Confidence | `max(p)` dla każdego typu | wzory TypeSafe; Noul bez confidence |
 | Legenda Score | tekst | oryginalne wartości JSON |

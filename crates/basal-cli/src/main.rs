@@ -332,7 +332,7 @@ enum Cmd {
         /// Packed tokens of the requests admitted into one batch (a larger request runs alone)
         #[arg(long, default_value_t = 8192)]
         max_batch_tokens: usize,
-        /// Waiting + running requests; more are refused with 503
+        /// Waiting + running requests; more are refused with 529 (Retry-After: 1)
         #[arg(long, default_value_t = 1024)]
         max_inflight: usize,
         /// Admission order of waiting requests

@@ -306,7 +306,7 @@ wiersza poleceń, np. `--max-batch-tokens`):
 
 Opcje procesu: `addr` (nadpisywany przez zmienną `BASAL_ADDR`; w obrazie
 `0.0.0.0:8000`), `default_model`, `max_inflight` (1024, limit żądań w
-kolejce i w trakcie wszystkich modeli; nadmiar dostaje 503), `long_slice_ms`
+kolejce i w trakcie wszystkich modeli; nadmiar dostaje 529 z `Retry-After`), `long_slice_ms`
 (100, minimalny czas pracy toru długich żądań między oddaniami GPU),
 `gemm_cache` (`.cache/gemm`).
 

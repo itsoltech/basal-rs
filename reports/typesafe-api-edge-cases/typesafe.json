@@ -1,0 +1,2052 @@
+{
+ "choice_0": {
+  "request": {
+   "model": "jev-latest",
+   "state": "Klient pisze: zapłaciłem dwa razy za to samo zamówienie, proszę o zwrot.",
+   "questions": {
+    "q": {
+     "type": "choice",
+     "instructions": "Temat?",
+     "criteria": {}
+    }
+   }
+  },
+  "status": 400,
+  "ms": 257,
+  "body": {
+   "detail": "Choice question must have at least one choice: q"
+  }
+ },
+ "choice_1": {
+  "request": {
+   "model": "jev-latest",
+   "state": "Klient pisze: zapłaciłem dwa razy za to samo zamówienie, proszę o zwrot.",
+   "questions": {
+    "q": {
+     "type": "choice",
+     "instructions": "Temat?",
+     "criteria": {
+      "billing": null
+     }
+    }
+   }
+  },
+  "status": 200,
+  "ms": 264,
+  "body": {
+   "model": "jev-1.13.0",
+   "answers": {
+    "q": {
+     "type": "choice",
+     "choice": "billing",
+     "confidence": 1.0,
+     "probabilities": {
+      "billing": 1.0
+     }
+    }
+   },
+   "usage": {
+    "input_tokens": 305,
+    "output_tokens": 24
+   }
+  }
+ },
+ "choice_1_desc": {
+  "request": {
+   "model": "jev-latest",
+   "state": "Klient pisze: zapłaciłem dwa razy za to samo zamówienie, proszę o zwrot.",
+   "questions": {
+    "q": {
+     "type": "choice",
+     "instructions": "Temat?",
+     "criteria": {
+      "billing": "płatności"
+     }
+    }
+   }
+  },
+  "status": 200,
+  "ms": 273,
+  "body": {
+   "model": "jev-1.13.0",
+   "answers": {
+    "q": {
+     "type": "choice",
+     "choice": "billing",
+     "confidence": 1.0,
+     "probabilities": {
+      "billing": 1.0
+     }
+    }
+   },
+   "usage": {
+    "input_tokens": 322,
+    "output_tokens": 24
+   }
+  }
+ },
+ "choice_2_null": {
+  "request": {
+   "model": "jev-latest",
+   "state": "Klient pisze: zapłaciłem dwa razy za to samo zamówienie, proszę o zwrot.",
+   "questions": {
+    "q": {
+     "type": "choice",
+     "instructions": "Temat?",
+     "criteria": {
+      "billing": null,
+      "shipping": null
+     }
+    }
+   }
+  },
+  "status": 200,
+  "ms": 262,
+  "body": {
+   "model": "jev-1.13.0",
+   "answers": {
+    "q": {
+     "type": "choice",
+     "choice": "billing",
+     "confidence": 1.0,
+     "probabilities": {
+      "shipping": 0.0,
+      "billing": 1.0
+     }
+    }
+   },
+   "usage": {
+    "input_tokens": 311,
+    "output_tokens": 31
+   }
+  }
+ },
+ "choice_11": {
+  "request": {
+   "model": "jev-latest",
+   "state": "Klient pisze: zapłaciłem dwa razy za to samo zamówienie, proszę o zwrot.",
+   "questions": {
+    "q": {
+     "type": "choice",
+     "instructions": "Temat?",
+     "criteria": {
+      "billing": "płatności",
+      "o0": null,
+      "o1": null,
+      "o2": null,
+      "o3": null,
+      "o4": null,
+      "o5": null,
+      "o6": null,
+      "o7": null,
+      "o8": null,
+      "o9": null
+     }
+    }
+   }
+  },
+  "status": 200,
+  "ms": 285,
+  "body": {
+   "model": "jev-1.13.0",
+   "answers": {
+    "q": {
+     "type": "choice",
+     "choice": "billing",
+     "confidence": 1.0,
+     "probabilities": {
+      "o9": 0.0,
+      "o3": 0.0,
+      "o4": 0.0,
+      "o2": 0.0,
+      "billing": 1.0,
+      "o5": 0.0,
+      "o6": 0.0,
+      "o7": 0.0,
+      "o1": 0.0,
+      "o0": 0.0,
+      "o8": 0.0
+     }
+    }
+   },
+   "usage": {
+    "input_tokens": 392,
+    "output_tokens": 104
+   }
+  }
+ },
+ "choice_255": {
+  "request": {
+   "model": "jev-latest",
+   "state": "Klient pisze: zapłaciłem dwa razy za to samo zamówienie, proszę o zwrot.",
+   "questions": {
+    "q": {
+     "type": "choice",
+     "instructions": "Temat?",
+     "criteria": {
+      "billing": "płatności",
+      "o0": null,
+      "o1": null,
+      "o2": null,
+      "o3": null,
+      "o4": null,
+      "o5": null,
+      "o6": null,
+      "o7": null,
+      "o8": null,
+      "o9": null,
+      "o10": null,
+      "o11": null,
+      "o12": null,
+      "o13": null,
+      "o14": null,
+      "o15": null,
+      "o16": null,
+      "o17": null,
+      "o18": null,
+      "o19": null,
+      "o20": null,
+      "o21": null,
+      "o22": null,
+      "o23": null,
+      "o24": null,
+      "o25": null,
+      "o26": null,
+      "o27": null,
+      "o28": null,
+      "o29": null,
+      "o30": null,
+      "o31": null,
+      "o32": null,
+      "o33": null,
+      "o34": null,
+      "o35": null,
+      "o36": null,
+      "o37": null,
+      "o38": null,
+      "o39": null,
+      "o40": null,
+      "o41": null,
+      "o42": null,
+      "o43": null,
+      "o44": null,
+      "o45": null,
+      "o46": null,
+      "o47": null,
+      "o48": null,
+      "o49": null,
+      "o50": null,
+      "o51": null,
+      "o52": null,
+      "o53": null,
+      "o54": null,
+      "o55": null,
+      "o56": null,
+      "o57": null,
+      "o58": null,
+      "o59": null,
+      "o60": null,
+      "o61": null,
+      "o62": null,
+      "o63": null,
+      "o64": null,
+      "o65": null,
+      "o66": null,
+      "o67": null,
+      "o68": null,
+      "o69": null,
+      "o70": null,
+      "o71": null,
+      "o72": null,
+      "o73": null,
+      "o74": null,
+      "o75": null,
+      "o76": null,
+      "o77": null,
+      "o78": null,
+      "o79": null,
+      "o80": null,
+      "o81": null,
+      "o82": null,
+      "o83": null,
+      "o84": null,
+      "o85": null,
+      "o86": null,
+      "o87": null,
+      "o88": null,
+      "o89": null,
+      "o90": null,
+      "o91": null,
+      "o92": null,
+      "o93": null,
+      "o94": null,
+      "o95": null,
+      "o96": null,
+      "o97": null,
+      "o98": null,
+      "o99": null,
+      "o100": null,
+      "o101": null,
+      "o102": null,
+      "o103": null,
+      "o104": null,
+      "o105": null,
+      "o106": null,
+      "o107": null,
+      "o108": null,
+      "o109": null,
+      "o110": null,
+      "o111": null,
+      "o112": null,
+      "o113": null,
+      "o114": null,
+      "o115": null,
+      "o116": null,
+      "o117": null,
+      "o118": null,
+      "o119": null,
+      "o120": null,
+      "o121": null,
+      "o122": null,
+      "o123": null,
+      "o124": null,
+      "o125": null,
+      "o126": null,
+      "o127": null,
+      "o128": null,
+      "o129": null,
+      "o130": null,
+      "o131": null,
+      "o132": null,
+      "o133": null,
+      "o134": null,
+      "o135": null,
+      "o136": null,
+      "o137": null,
+      "o138": null,
+      "o139": null,
+      "o140": null,
+      "o141": null,
+      "o142": null,
+      "o143": null,
+      "o144": null,
+      "o145": null,
+      "o146": null,
+      "o147": null,
+      "o148": null,
+      "o149": null,
+      "o150": null,
+      "o151": null,
+      "o152": null,
+      "o153": null,
+      "o154": null,
+      "o155": null,
+      "o156": null,
+      "o157": null,
+      "o158": null,
+      "o159": null,
+      "o160": null,
+      "o161": null,
+      "o162": null,
+      "o163": null,
+      "o164": null,
+      "o165": null,
+      "o166": null,
+      "o167": null,
+      "o168": null,
+      "o169": null,
+      "o170": null,
+      "o171": null,
+      "o172": null,
+      "o173": null,
+      "o174": null,
+      "o175": null,
+      "o176": null,
+      "o177": null,
+      "o178": null,
+      "o179": null,
+      "o180": null,
+      "o181": null,
+      "o182": null,
+      "o183": null,
+      "o184": null,
+      "o185": null,
+      "o186": null,
+      "o187": null,
+      "o188": null,
+      "o189": null,
+      "o190": null,
+      "o191": null,
+      "o192": null,
+      "o193": null,
+      "o194": null,
+      "o195": null,
+      "o196": null,
+      "o197": null,
+      "o198": null,
+      "o199": null,
+      "o200": null,
+      "o201": null,
+      "o202": null,
+      "o203": null,
+      "o204": null,
+      "o205": null,
+      "o206": null,
+      "o207": null,
+      "o208": null,
+      "o209": null,
+      "o210": null,
+      "o211": null,
+      "o212": null,
+      "o213": null,
+      "o214": null,
+      "o215": null,
+      "o216": null,
+      "o217": null,
+      "o218": null,
+      "o219": null,
+      "o220": null,
+      "o221": null,
+      "o222": null,
+      "o223": null,
+      "o224": null,
+      "o225": null,
+      "o226": null,
+      "o227": null,
+      "o228": null,
+      "o229": null,
+      "o230": null,
+      "o231": null,
+      "o232": null,
+      "o233": null,
+      "o234": null,
+      "o235": null,
+      "o236": null,
+      "o237": null,
+      "o238": null,
+      "o239": null,
+      "o240": null,
+      "o241": null,
+      "o242": null,
+      "o243": null,
+      "o244": null,
+      "o245": null,
+      "o246": null,
+      "o247": null,
+      "o248": null,
+      "o249": null,
+      "o250": null,
+      "o251": null,
+      "o252": null,
+      "o253": null
+     }
+    }
+   }
+  },
+  "status": 200,
+  "ms": 248,
+  "body": {
+   "model": "jev-1.13.0",
+   "answers": {
+    "q": {
+     "type": "choice",
+     "choice": "billing",
+     "confidence": 0.96,
+     "probabilities": {
+      "o108": 0.0,
+      "o74": 0.0,
+      "o201": 0.0,
+      "o110": 0.0,
+      "o241": 0.0,
+      "o238": 0.0,
+      "o30": 0.0,
+      "o18": 0.0,
+      "o192": 0.0,
+      "o161": 0.0,
+      "o145": 0.0,
+      "o37": 0.0,
+      "o33": 0.0,
+      "o9": 0.0,
+      "o136": 0.0,
+      "o148": 0.0,
+      "o205": 0.0,
+      "o185": 0.0,
+      "o140": 0.0,
+      "o189": 0.0,
+      "o63": 0.0,
+      "o78": 0.0,
+      "o3": 0.0,
+      "o106": 0.0,
+      "o27": 0.0,
+      "o47": 0.0,
+      "o127": 0.0,
+      "o87": 0.0,
+      "o129": 0.0,
+      "o243": 0.0,
+      "o174": 0.0,
+      "o207": 0.0,
+      "o4": 0.0,
+      "o210": 0.0,
+      "o99": 0.01,
+      "o125": 0.0,
+      "o176": 0.0,
+      "o208": 0.0,
+      "o45": 0.0,
+      "o251": 0.0,
+      "o92": 0.0,
+      "o29": 0.0,
+      "o38": 0.0,
+      "o239": 0.0,
+      "o119": 0.0,
+      "o124": 0.0,
+      "o91": 0.0,
+      "o219": 0.0,
+      "o181": 0.0,
+      "o84": 0.0,
+      "o144": 0.0,
+      "o39": 0.0,
+      "o151": 0.0,
+      "o245": 0.0,
+      "o62": 0.0,
+      "o130": 0.0,
+      "o220": 0.0,
+      "o222": 0.0,
+      "o203": 0.0,
+      "o122": 0.0,
+      "o107": 0.0,
+      "o0": 0.0,
+      "o113": 0.0,
+      "o1": 0.0,
+      "o111": 0.0,
+      "o250": 0.0,
+      "o193": 0.0,
+      "billing": 0.96,
+      "o159": 0.0,
+      "o178": 0.0,
+      "o197": 0.0,
+      "o64": 0.0,
+      "o73": 0.0,
+      "o43": 0.0,
+      "o15": 0.0,
+      "o21": 0.0,
+      "o187": 0.0,
+      "o94": 0.0,
+      "o142": 0.0,
+      "o160": 0.0,
+      "o5": 0.0,
+      "o36": 0.0,
+      "o249": 0.0,
+      "o22": 0.0,
+      "o170": 0.0,
+      "o19": 0.0,
+      "o23": 0.0,
+      "o56": 0.0,
+      "o77": 0.0,
+      "o244": 0.0,
+      "o164": 0.0,
+      "o153": 0.0,
+      "o54": 0.0,
+      "o165": 0.0,
+      "o51": 0.0,
+      "o155": 0.0,
+      "o162": 0.0,
+      "o53": 0.0,
+      "o198": 0.0,
+      "o82": 0.0,
+      "o242": 0.0,
+      "o16": 0.0,
+      "o172": 0.0,
+      "o118": 0.0,
+      "o114": 0.0,
+      "o104": 0.0,
+      "o126": 0.0,
+      "o117": 0.0,
+      "o96": 0.01,
+      "o128": 0.0,
+      "o135": 0.0,
+      "o209": 0.0,
+      "o109": 0.0,
+      "o134": 0.0,
+      "o177": 0.0,
+      "o169": 0.0,
+      "o66": 0.0,
+      "o139": 0.0,
+      "o216": 0.0,
+      "o182": 0.0,
+      "o215": 0.0,
+      "o218": 0.0,
+      "o105": 0.0,
+      "o146": 0.0,
+      "o59": 0.0,
+      "o184": 0.0,
+      "o46": 0.0,
+      "o50": 0.0,
+      "o100": 0.0,
+      "o186": 0.0,
+      "o194": 0.0,
+      "o115": 0.0,
+      "o67": 0.0,
+      "o68": 0.0,
+      "o132": 0.0,
+      "o212": 0.0,
+      "o112": 0.0,
+      "o236": 0.0,
+      "o248": 0.0,
+      "o191": 0.0,
+      "o217": 0.0,
+      "o49": 0.0,
+      "o25": 0.0,
+      "o123": 0.0,
+      "o141": 0.0,
+      "o195": 0.0,
+      "o26": 0.0,
+      "o79": 0.0,
+      "o14": 0.0,
+      "o173": 0.0,
+      "o101": 0.0,
+      "o20": 0.0,
+      "o163": 0.0,
+      "o61": 0.0,
+      "o40": 0.0,
+      "o235": 0.0,
+      "o17": 0.0,
+      "o58": 0.0,
+      "o35": 0.0,
+      "o196": 0.0,
+      "o180": 0.0,
+      "o93": 0.0,
+      "o75": 0.0,
+      "o156": 0.0,
+      "o133": 0.0,
+      "o41": 0.0,
+      "o202": 0.0,
+      "o150": 0.0,
+      "o42": 0.0,
+      "o223": 0.0,
+      "o199": 0.0,
+      "o167": 0.0,
+      "o252": 0.0,
+      "o85": 0.0,
+      "o232": 0.0,
+      "o131": 0.0,
+      "o2": 0.0,
+      "o253": 0.0,
+      "o8": 0.0,
+      "o48": 0.0,
+      "o183": 0.0,
+      "o72": 0.0,
+      "o149": 0.0,
+      "o13": 0.0,
+      "o98": 0.01,
+      "o214": 0.0,
+      "o121": 0.0,
+      "o229": 0.0,
+      "o76": 0.0,
+      "o157": 0.0,
+      "o237": 0.0,
+      "o204": 0.0,
+      "o34": 0.0,
+      "o71": 0.0,
+      "o137": 0.0,
+      "o116": 0.0,
+      "o175": 0.0,
+      "o200": 0.0,
+      "o102": 0.0,
+      "o143": 0.0,
+      "o230": 0.0,
+      "o227": 0.0,
+      "o231": 0.0,
+      "o240": 0.0,
+      "o7": 0.0,
+      "o95": 0.0,
+      "o225": 0.0,
+      "o168": 0.0,
+      "o246": 0.0,
+      "o179": 0.0,
+      "o152": 0.0,
+      "o44": 0.0,
+      "o60": 0.0,
+      "o247": 0.0,
+      "o171": 0.0,
+      "o97": 0.01,
+      "o89": 0.0,
+      "o228": 0.0,
+      "o83": 0.0,
+      "o12": 0.0,
+      "o65": 0.0,
+      "o206": 0.0,
+      "o103": 0.0,
+      "o10": 0.0,
+      "o70": 0.0,
+      "o57": 0.0,
+      "o32": 0.0,
+      "o86": 0.0,
+      "o158": 0.0,
+      "o55": 0.0,
+      "o233": 0.0,
+      "o221": 0.0,
+      "o69": 0.0,
+      "o88": 0.0,
+      "o80": 0.0,
+      "o120": 0.0,
+      "o6": 0.0,
+      "o31": 0.0,
+      "o90": 0.0,
+      "o224": 0.0,
+      "o81": 0.0,
+      "o147": 0.0,
+      "o226": 0.0,
+      "o188": 0.0,
+      "o166": 0.0,
+      "o154": 0.0,
+      "o234": 0.0,
+      "o138": 0.0,
+      "o24": 0.0,
+      "o213": 0.0,
+      "o11": 0.0,
+      "o190": 0.0,
+      "o28": 0.0,
+      "o211": 0.0,
+      "o52": 0.0
+     }
+    }
+   },
+   "usage": {
+    "input_tokens": 2498,
+    "output_tokens": 2454
+   }
+  }
+ },
+ "choice_256": {
+  "request": {
+   "model": "jev-latest",
+   "state": "Klient pisze: zapłaciłem dwa razy za to samo zamówienie, proszę o zwrot.",
+   "questions": {
+    "q": {
+     "type": "choice",
+     "instructions": "Temat?",
+     "criteria": {
+      "billing": "płatności",
+      "o0": null,
+      "o1": null,
+      "o2": null,
+      "o3": null,
+      "o4": null,
+      "o5": null,
+      "o6": null,
+      "o7": null,
+      "o8": null,
+      "o9": null,
+      "o10": null,
+      "o11": null,
+      "o12": null,
+      "o13": null,
+      "o14": null,
+      "o15": null,
+      "o16": null,
+      "o17": null,
+      "o18": null,
+      "o19": null,
+      "o20": null,
+      "o21": null,
+      "o22": null,
+      "o23": null,
+      "o24": null,
+      "o25": null,
+      "o26": null,
+      "o27": null,
+      "o28": null,
+      "o29": null,
+      "o30": null,
+      "o31": null,
+      "o32": null,
+      "o33": null,
+      "o34": null,
+      "o35": null,
+      "o36": null,
+      "o37": null,
+      "o38": null,
+      "o39": null,
+      "o40": null,
+      "o41": null,
+      "o42": null,
+      "o43": null,
+      "o44": null,
+      "o45": null,
+      "o46": null,
+      "o47": null,
+      "o48": null,
+      "o49": null,
+      "o50": null,
+      "o51": null,
+      "o52": null,
+      "o53": null,
+      "o54": null,
+      "o55": null,
+      "o56": null,
+      "o57": null,
+      "o58": null,
+      "o59": null,
+      "o60": null,
+      "o61": null,
+      "o62": null,
+      "o63": null,
+      "o64": null,
+      "o65": null,
+      "o66": null,
+      "o67": null,
+      "o68": null,
+      "o69": null,
+      "o70": null,
+      "o71": null,
+      "o72": null,
+      "o73": null,
+      "o74": null,
+      "o75": null,
+      "o76": null,
+      "o77": null,
+      "o78": null,
+      "o79": null,
+      "o80": null,
+      "o81": null,
+      "o82": null,
+      "o83": null,
+      "o84": null,
+      "o85": null,
+      "o86": null,
+      "o87": null,
+      "o88": null,
+      "o89": null,
+      "o90": null,
+      "o91": null,
+      "o92": null,
+      "o93": null,
+      "o94": null,
+      "o95": null,
+      "o96": null,
+      "o97": null,
+      "o98": null,
+      "o99": null,
+      "o100": null,
+      "o101": null,
+      "o102": null,
+      "o103": null,
+      "o104": null,
+      "o105": null,
+      "o106": null,
+      "o107": null,
+      "o108": null,
+      "o109": null,
+      "o110": null,
+      "o111": null,
+      "o112": null,
+      "o113": null,
+      "o114": null,
+      "o115": null,
+      "o116": null,
+      "o117": null,
+      "o118": null,
+      "o119": null,
+      "o120": null,
+      "o121": null,
+      "o122": null,
+      "o123": null,
+      "o124": null,
+      "o125": null,
+      "o126": null,
+      "o127": null,
+      "o128": null,
+      "o129": null,
+      "o130": null,
+      "o131": null,
+      "o132": null,
+      "o133": null,
+      "o134": null,
+      "o135": null,
+      "o136": null,
+      "o137": null,
+      "o138": null,
+      "o139": null,
+      "o140": null,
+      "o141": null,
+      "o142": null,
+      "o143": null,
+      "o144": null,
+      "o145": null,
+      "o146": null,
+      "o147": null,
+      "o148": null,
+      "o149": null,
+      "o150": null,
+      "o151": null,
+      "o152": null,
+      "o153": null,
+      "o154": null,
+      "o155": null,
+      "o156": null,
+      "o157": null,
+      "o158": null,
+      "o159": null,
+      "o160": null,
+      "o161": null,
+      "o162": null,
+      "o163": null,
+      "o164": null,
+      "o165": null,
+      "o166": null,
+      "o167": null,
+      "o168": null,
+      "o169": null,
+      "o170": null,
+      "o171": null,
+      "o172": null,
+      "o173": null,
+      "o174": null,
+      "o175": null,
+      "o176": null,
+      "o177": null,
+      "o178": null,
+      "o179": null,
+      "o180": null,
+      "o181": null,
+      "o182": null,
+      "o183": null,
+      "o184": null,
+      "o185": null,
+      "o186": null,
+      "o187": null,
+      "o188": null,
+      "o189": null,
+      "o190": null,
+      "o191": null,
+      "o192": null,
+      "o193": null,
+      "o194": null,
+      "o195": null,
+      "o196": null,
+      "o197": null,
+      "o198": null,
+      "o199": null,
+      "o200": null,
+      "o201": null,
+      "o202": null,
+      "o203": null,
+      "o204": null,
+      "o205": null,
+      "o206": null,
+      "o207": null,
+      "o208": null,
+      "o209": null,
+      "o210": null,
+      "o211": null,
+      "o212": null,
+      "o213": null,
+      "o214": null,
+      "o215": null,
+      "o216": null,
+      "o217": null,
+      "o218": null,
+      "o219": null,
+      "o220": null,
+      "o221": null,
+      "o222": null,
+      "o223": null,
+      "o224": null,
+      "o225": null,
+      "o226": null,
+      "o227": null,
+      "o228": null,
+      "o229": null,
+      "o230": null,
+      "o231": null,
+      "o232": null,
+      "o233": null,
+      "o234": null,
+      "o235": null,
+      "o236": null,
+      "o237": null,
+      "o238": null,
+      "o239": null,
+      "o240": null,
+      "o241": null,
+      "o242": null,
+      "o243": null,
+      "o244": null,
+      "o245": null,
+      "o246": null,
+      "o247": null,
+      "o248": null,
+      "o249": null,
+      "o250": null,
+      "o251": null,
+      "o252": null,
+      "o253": null,
+      "o254": null
+     }
+    }
+   }
+  },
+  "status": 400,
+  "ms": 215,
+  "body": {
+   "detail": "Too many choices. Must have at most 255 choices."
+  }
+ },
+ "choice_criteria_list": {
+  "request": {
+   "model": "jev-latest",
+   "state": "Klient pisze: zapłaciłem dwa razy za to samo zamówienie, proszę o zwrot.",
+   "questions": {
+    "q": {
+     "type": "choice",
+     "instructions": "Temat?",
+     "criteria": [
+      "a",
+      "b"
+     ]
+    }
+   }
+  },
+  "status": 422,
+  "ms": 212,
+  "body": {
+   "detail": [
+    {
+     "type": "dict_type",
+     "loc": [
+      "body",
+      "questions",
+      "q",
+      "choice",
+      "criteria"
+     ],
+     "msg": "Input should be a valid dictionary",
+     "input": [
+      "a",
+      "b"
+     ]
+    }
+   ]
+  }
+ },
+ "choice_no_criteria": {
+  "request": {
+   "model": "jev-latest",
+   "state": "Klient pisze: zapłaciłem dwa razy za to samo zamówienie, proszę o zwrot.",
+   "questions": {
+    "q": {
+     "type": "choice",
+     "instructions": "Temat?"
+    }
+   }
+  },
+  "status": 422,
+  "ms": 207,
+  "body": {
+   "detail": [
+    {
+     "type": "missing",
+     "loc": [
+      "body",
+      "questions",
+      "q",
+      "choice",
+      "criteria"
+     ],
+     "msg": "Field required",
+     "input": {
+      "type": "choice",
+      "instructions": "Temat?"
+     }
+    }
+   ]
+  }
+ },
+ "score_0": {
+  "request": {
+   "model": "jev-latest",
+   "state": "Klient pisze: zapłaciłem dwa razy za to samo zamówienie, proszę o zwrot.",
+   "questions": {
+    "q": {
+     "type": "score",
+     "instructions": "Pilność?",
+     "criteria": []
+    }
+   }
+  },
+  "status": 422,
+  "ms": 204,
+  "body": {
+   "detail": [
+    {
+     "type": "too_short",
+     "loc": [
+      "body",
+      "questions",
+      "q",
+      "score",
+      "criteria"
+     ],
+     "msg": "List should have at least 1 item after validation, not 0",
+     "input": [],
+     "ctx": {
+      "field_type": "List",
+      "min_length": 1,
+      "actual_length": 0
+     }
+    }
+   ]
+  }
+ },
+ "score_1": {
+  "request": {
+   "model": "jev-latest",
+   "state": "Klient pisze: zapłaciłem dwa razy za to samo zamówienie, proszę o zwrot.",
+   "questions": {
+    "q": {
+     "type": "score",
+     "instructions": "Pilność?",
+     "criteria": [
+      "pilne"
+     ]
+    }
+   }
+  },
+  "status": 200,
+  "ms": 232,
+  "body": {
+   "model": "jev-1.13.0",
+   "answers": {
+    "q": {
+     "type": "score",
+     "score": 0.0,
+     "confidence": 1.0,
+     "legend": {
+      "0": "pilne"
+     },
+     "probabilities": {
+      "0": 1.0
+     }
+    }
+   },
+   "usage": {
+    "input_tokens": 310,
+    "output_tokens": 17
+   }
+  }
+ },
+ "score_2": {
+  "request": {
+   "model": "jev-latest",
+   "state": "Klient pisze: zapłaciłem dwa razy za to samo zamówienie, proszę o zwrot.",
+   "questions": {
+    "q": {
+     "type": "score",
+     "instructions": "Pilność?",
+     "criteria": [
+      "może czekać",
+      "pilne"
+     ]
+    }
+   }
+  },
+  "status": 200,
+  "ms": 254,
+  "body": {
+   "model": "jev-1.13.0",
+   "answers": {
+    "q": {
+     "type": "score",
+     "score": 0.94,
+     "confidence": 0.88,
+     "legend": {
+      "0": "może czekać",
+      "1": "pilne"
+     },
+     "probabilities": {
+      "0": 0.06,
+      "1": 0.94
+     }
+    }
+   },
+   "usage": {
+    "input_tokens": 320,
+    "output_tokens": 17
+   }
+  }
+ },
+ "score_10": {
+  "request": {
+   "model": "jev-latest",
+   "state": "Klient pisze: zapłaciłem dwa razy za to samo zamówienie, proszę o zwrot.",
+   "questions": {
+    "q": {
+     "type": "score",
+     "instructions": "Pilność?",
+     "criteria": [
+      "poziom 0",
+      "poziom 1",
+      "poziom 2",
+      "poziom 3",
+      "poziom 4",
+      "poziom 5",
+      "poziom 6",
+      "poziom 7",
+      "poziom 8",
+      "poziom 9"
+     ]
+    }
+   }
+  },
+  "status": 200,
+  "ms": 271,
+  "body": {
+   "model": "jev-1.13.0",
+   "answers": {
+    "q": {
+     "type": "score",
+     "score": 5.63,
+     "confidence": 0.33,
+     "legend": {
+      "0": "poziom 0",
+      "1": "poziom 1",
+      "2": "poziom 2",
+      "3": "poziom 3",
+      "4": "poziom 4",
+      "5": "poziom 5",
+      "6": "poziom 6",
+      "7": "poziom 7",
+      "8": "poziom 8",
+      "9": "poziom 9"
+     },
+     "probabilities": {
+      "0": 0.0,
+      "1": 0.01,
+      "2": 0.05,
+      "3": 0.1,
+      "4": 0.11,
+      "5": 0.14,
+      "6": 0.19,
+      "7": 0.25,
+      "8": 0.13,
+      "9": 0.02
+     }
+    }
+   },
+   "usage": {
+    "input_tokens": 403,
+    "output_tokens": 17
+   }
+  }
+ },
+ "score_11": {
+  "request": {
+   "model": "jev-latest",
+   "state": "Klient pisze: zapłaciłem dwa razy za to samo zamówienie, proszę o zwrot.",
+   "questions": {
+    "q": {
+     "type": "score",
+     "instructions": "Pilność?",
+     "criteria": [
+      "poziom 0",
+      "poziom 1",
+      "poziom 2",
+      "poziom 3",
+      "poziom 4",
+      "poziom 5",
+      "poziom 6",
+      "poziom 7",
+      "poziom 8",
+      "poziom 9",
+      "poziom 10"
+     ]
+    }
+   }
+  },
+  "status": 400,
+  "ms": 228,
+  "body": {
+   "detail": "Too many score levels. Must have at most 10 levels."
+  }
+ },
+ "score_null_item": {
+  "request": {
+   "model": "jev-latest",
+   "state": "Klient pisze: zapłaciłem dwa razy za to samo zamówienie, proszę o zwrot.",
+   "questions": {
+    "q": {
+     "type": "score",
+     "instructions": "Pilność?",
+     "criteria": [
+      "niska",
+      null,
+      "wysoka"
+     ]
+    }
+   }
+  },
+  "status": 422,
+  "ms": 217,
+  "body": {
+   "detail": [
+    {
+     "type": "string_type",
+     "loc": [
+      "body",
+      "questions",
+      "q",
+      "score",
+      "criteria",
+      1,
+      "str"
+     ],
+     "msg": "Input should be a valid string",
+     "input": null
+    },
+    {
+     "type": "dict_type",
+     "loc": [
+      "body",
+      "questions",
+      "q",
+      "score",
+      "criteria",
+      1,
+      "dict[any,any]"
+     ],
+     "msg": "Input should be a valid dictionary",
+     "input": null
+    },
+    {
+     "type": "list_type",
+     "loc": [
+      "body",
+      "questions",
+      "q",
+      "score",
+      "criteria",
+      1,
+      "list[any]"
+     ],
+     "msg": "Input should be a valid list",
+     "input": null
+    }
+   ]
+  }
+ },
+ "score_objects": {
+  "request": {
+   "model": "jev-latest",
+   "state": "Klient pisze: zapłaciłem dwa razy za to samo zamówienie, proszę o zwrot.",
+   "questions": {
+    "q": {
+     "type": "score",
+     "instructions": "Pilność?",
+     "criteria": [
+      {
+       "level": "niska"
+      },
+      [
+       "średnia"
+      ],
+      "wysoka"
+     ]
+    }
+   }
+  },
+  "status": 200,
+  "ms": 256,
+  "body": {
+   "model": "jev-1.13.0",
+   "answers": {
+    "q": {
+     "type": "score",
+     "score": 1.68,
+     "confidence": 0.53,
+     "legend": {
+      "0": {
+       "level": "niska"
+      },
+      "1": [
+       "średnia"
+      ],
+      "2": "wysoka"
+     },
+     "probabilities": {
+      "0": 0.0,
+      "1": 0.31,
+      "2": 0.6900000000000001
+     }
+    }
+   },
+   "usage": {
+    "input_tokens": 333,
+    "output_tokens": 17
+   }
+  }
+ },
+ "score_map": {
+  "request": {
+   "model": "jev-latest",
+   "state": "Klient pisze: zapłaciłem dwa razy za to samo zamówienie, proszę o zwrot.",
+   "questions": {
+    "q": {
+     "type": "score",
+     "instructions": "Pilność?",
+     "criteria": {
+      "niska": "x",
+      "wysoka": "y"
+     }
+    }
+   }
+  },
+  "status": 422,
+  "ms": 225,
+  "body": {
+   "detail": [
+    {
+     "type": "list_type",
+     "loc": [
+      "body",
+      "questions",
+      "q",
+      "score",
+      "criteria"
+     ],
+     "msg": "Input should be a valid list",
+     "input": {
+      "niska": "x",
+      "wysoka": "y"
+     }
+    }
+   ]
+  }
+ },
+ "noul_no_instr": {
+  "request": {
+   "model": "jev-latest",
+   "state": "Klient pisze: zapłaciłem dwa razy za to samo zamówienie, proszę o zwrot.",
+   "questions": {
+    "q": {
+     "type": "noul"
+    }
+   }
+  },
+  "status": 400,
+  "ms": 201,
+  "body": {
+   "detail": "Noul question must have criteria or instructions: q"
+  }
+ },
+ "noul_criteria_null": {
+  "request": {
+   "model": "jev-latest",
+   "state": "Klient pisze: zapłaciłem dwa razy za to samo zamówienie, proszę o zwrot.",
+   "questions": {
+    "q": {
+     "type": "noul",
+     "instructions": "Czy chodzi o płatność?",
+     "criteria": null
+    }
+   }
+  },
+  "status": 200,
+  "ms": 262,
+  "body": {
+   "model": "jev-1.13.0",
+   "answers": {
+    "q": {
+     "type": "noul",
+     "noul": 0.97
+    }
+   },
+   "usage": {
+    "input_tokens": 303,
+    "output_tokens": 20
+   }
+  }
+ },
+ "noul_only_true": {
+  "request": {
+   "model": "jev-latest",
+   "state": "Klient pisze: zapłaciłem dwa razy za to samo zamówienie, proszę o zwrot.",
+   "questions": {
+    "q": {
+     "type": "noul",
+     "instructions": "Czy chodzi o płatność?",
+     "criteria": {
+      "true": "płatność"
+     }
+    }
+   }
+  },
+  "status": 200,
+  "ms": 283,
+  "body": {
+   "model": "jev-1.13.0",
+   "answers": {
+    "q": {
+     "type": "noul",
+     "noul": 0.98
+    }
+   },
+   "usage": {
+    "input_tokens": 320,
+    "output_tokens": 20
+   }
+  }
+ },
+ "noul_empty_true": {
+  "request": {
+   "model": "jev-latest",
+   "state": "Klient pisze: zapłaciłem dwa razy za to samo zamówienie, proszę o zwrot.",
+   "questions": {
+    "q": {
+     "type": "noul",
+     "instructions": "Czy chodzi o płatność?",
+     "criteria": {
+      "true": "",
+      "false": ""
+     }
+    }
+   }
+  },
+  "status": 200,
+  "ms": 254,
+  "body": {
+   "model": "jev-1.13.0",
+   "answers": {
+    "q": {
+     "type": "noul",
+     "noul": 0.98
+    }
+   },
+   "usage": {
+    "input_tokens": 319,
+    "output_tokens": 20
+   }
+  }
+ },
+ "noul_instr_null": {
+  "request": {
+   "model": "jev-latest",
+   "state": "Klient pisze: zapłaciłem dwa razy za to samo zamówienie, proszę o zwrot.",
+   "questions": {
+    "q": {
+     "type": "noul",
+     "instructions": null
+    }
+   }
+  },
+  "status": 400,
+  "ms": 213,
+  "body": {
+   "detail": "Noul question must have criteria or instructions: q"
+  }
+ },
+ "noul_instr_number": {
+  "request": {
+   "model": "jev-latest",
+   "state": "Klient pisze: zapłaciłem dwa razy za to samo zamówienie, proszę o zwrot.",
+   "questions": {
+    "q": {
+     "type": "noul",
+     "instructions": 5
+    }
+   }
+  },
+  "status": 422,
+  "ms": 219,
+  "body": {
+   "detail": [
+    {
+     "type": "string_type",
+     "loc": [
+      "body",
+      "questions",
+      "q",
+      "noul",
+      "instructions",
+      "str"
+     ],
+     "msg": "Input should be a valid string",
+     "input": 5
+    },
+    {
+     "type": "dict_type",
+     "loc": [
+      "body",
+      "questions",
+      "q",
+      "noul",
+      "instructions",
+      "dict[any,any]"
+     ],
+     "msg": "Input should be a valid dictionary",
+     "input": 5
+    },
+    {
+     "type": "list_type",
+     "loc": [
+      "body",
+      "questions",
+      "q",
+      "noul",
+      "instructions",
+      "list[any]"
+     ],
+     "msg": "Input should be a valid list",
+     "input": 5
+    }
+   ]
+  }
+ },
+ "no_type": {
+  "request": {
+   "model": "jev-latest",
+   "state": "Klient pisze: zapłaciłem dwa razy za to samo zamówienie, proszę o zwrot.",
+   "questions": {
+    "q": {
+     "instructions": "Czy chodzi o płatność?"
+    }
+   }
+  },
+  "status": 422,
+  "ms": 216,
+  "body": {
+   "detail": [
+    {
+     "type": "union_tag_not_found",
+     "loc": [
+      "body",
+      "questions",
+      "q"
+     ],
+     "msg": "Unable to extract tag using discriminator 'type'",
+     "input": {
+      "instructions": "Czy chodzi o płatność?"
+     },
+     "ctx": {
+      "discriminator": "'type'"
+     }
+    }
+   ]
+  }
+ },
+ "type_unknown": {
+  "request": {
+   "model": "jev-latest",
+   "state": "Klient pisze: zapłaciłem dwa razy za to samo zamówienie, proszę o zwrot.",
+   "questions": {
+    "q": {
+     "type": "rank",
+     "instructions": "x"
+    }
+   }
+  },
+  "status": 400,
+  "ms": 210,
+  "body": {
+   "detail": {
+    "error_type": "api_usage_error",
+    "message": "Invalid request."
+   }
+  }
+ },
+ "type_multi": {
+  "request": {
+   "model": "jev-latest",
+   "state": "Klient pisze: zapłaciłem dwa razy za to samo zamówienie, proszę o zwrot.",
+   "questions": {
+    "q": {
+     "type": "multi",
+     "instructions": "x",
+     "criteria": {
+      "a": null,
+      "b": null
+     }
+    }
+   }
+  },
+  "status": 400,
+  "ms": 228,
+  "body": {
+   "detail": {
+    "error_type": "api_usage_error",
+    "message": "Invalid request."
+   }
+  }
+ },
+ "questions_empty": {
+  "request": {
+   "model": "jev-latest",
+   "state": "Klient pisze: zapłaciłem dwa razy za to samo zamówienie, proszę o zwrot.",
+   "questions": {}
+  },
+  "status": 422,
+  "ms": 219,
+  "body": {
+   "detail": [
+    {
+     "type": "too_short",
+     "loc": [
+      "body",
+      "questions"
+     ],
+     "msg": "Dictionary should have at least 1 item after validation, not 0",
+     "input": {},
+     "ctx": {
+      "field_type": "Dictionary",
+      "min_length": 1,
+      "actual_length": 0
+     }
+    }
+   ]
+  }
+ },
+ "questions_list": {
+  "request": {
+   "model": "jev-latest",
+   "state": "Klient pisze: zapłaciłem dwa razy za to samo zamówienie, proszę o zwrot.",
+   "questions": [
+    {
+     "type": "noul",
+     "instructions": "x"
+    }
+   ]
+  },
+  "status": 422,
+  "ms": 242,
+  "body": {
+   "detail": [
+    {
+     "type": "dict_type",
+     "loc": [
+      "body",
+      "questions"
+     ],
+     "msg": "Input should be a valid dictionary",
+     "input": [
+      {
+       "type": "noul",
+       "instructions": "x"
+      }
+     ]
+    }
+   ]
+  }
+ },
+ "state_number": {
+  "request": {
+   "model": "jev-latest",
+   "state": 5,
+   "questions": {
+    "q": {
+     "type": "noul",
+     "instructions": "x"
+    }
+   }
+  },
+  "status": 422,
+  "ms": 224,
+  "body": {
+   "detail": [
+    {
+     "type": "string_type",
+     "loc": [
+      "body",
+      "state",
+      "str"
+     ],
+     "msg": "Input should be a valid string",
+     "input": 5
+    },
+    {
+     "type": "dict_type",
+     "loc": [
+      "body",
+      "state",
+      "dict[any,any]"
+     ],
+     "msg": "Input should be a valid dictionary",
+     "input": 5
+    },
+    {
+     "type": "list_type",
+     "loc": [
+      "body",
+      "state",
+      "list[any]"
+     ],
+     "msg": "Input should be a valid list",
+     "input": 5
+    }
+   ]
+  }
+ },
+ "state_null": {
+  "request": {
+   "model": "jev-latest",
+   "state": null,
+   "questions": {
+    "q": {
+     "type": "noul",
+     "instructions": "x"
+    }
+   }
+  },
+  "status": 422,
+  "ms": 210,
+  "body": {
+   "detail": [
+    {
+     "type": "missing",
+     "loc": [
+      "body",
+      "state"
+     ],
+     "msg": "Field required",
+     "input": {
+      "model": "jev-latest",
+      "questions": {
+       "q": {
+        "type": "noul",
+        "instructions": "x",
+        "criteria": null
+       }
+      },
+      "state": null
+     }
+    }
+   ]
+  }
+ },
+ "state_empty": {
+  "request": {
+   "model": "jev-latest",
+   "state": "",
+   "questions": {
+    "q": {
+     "type": "noul",
+     "instructions": "Czy chodzi o płatność?"
+    }
+   }
+  },
+  "status": 200,
+  "ms": 279,
+  "body": {
+   "model": "jev-1.13.0",
+   "answers": {
+    "q": {
+     "type": "noul",
+     "noul": 0.44
+    }
+   },
+   "usage": {
+    "input_tokens": 277,
+    "output_tokens": 20
+   }
+  }
+ },
+ "no_state": {
+  "request": {
+   "model": "jev-latest",
+   "questions": {
+    "q": {
+     "type": "noul",
+     "instructions": "x"
+    }
+   }
+  },
+  "status": 422,
+  "ms": 220,
+  "body": {
+   "detail": [
+    {
+     "type": "missing",
+     "loc": [
+      "body",
+      "state"
+     ],
+     "msg": "Field required",
+     "input": {
+      "questions": {
+       "q": {
+        "type": "noul",
+        "instructions": "x",
+        "criteria": null
+       }
+      },
+      "model": "jev-latest"
+     }
+    }
+   ]
+  }
+ },
+ "no_model": {
+  "request": {
+   "state": "Klient pisze: zapłaciłem dwa razy za to samo zamówienie, proszę o zwrot.",
+   "questions": {
+    "q": {
+     "type": "noul",
+     "instructions": "x"
+    }
+   }
+  },
+  "status": 422,
+  "ms": 213,
+  "body": {
+   "detail": [
+    {
+     "type": "missing",
+     "loc": [
+      "body",
+      "model"
+     ],
+     "msg": "Field required",
+     "input": {
+      "state": "Klient pisze: zapłaciłem dwa razy za to samo zamówienie, proszę o zwrot.",
+      "questions": {
+       "q": {
+        "type": "noul",
+        "instructions": "x"
+       }
+      }
+     }
+    }
+   ]
+  }
+ },
+ "model_unknown": {
+  "request": {
+   "model": "nope-1",
+   "state": "Klient pisze: zapłaciłem dwa razy za to samo zamówienie, proszę o zwrot.",
+   "questions": {
+    "q": {
+     "type": "noul",
+     "instructions": "x"
+    }
+   }
+  },
+  "status": 400,
+  "ms": 229,
+  "body": {
+   "detail": {
+    "error_type": "api_usage_error",
+    "message": "Unknown model: nope-1"
+   }
+  }
+ },
+ "extra_field": {
+  "request": {
+   "model": "jev-latest",
+   "state": "Klient pisze: zapłaciłem dwa razy za to samo zamówienie, proszę o zwrot.",
+   "questions": {
+    "q": {
+     "type": "noul",
+     "instructions": "Czy chodzi o płatność?",
+     "foo": 1
+    }
+   },
+   "bar": 2
+  },
+  "status": 400,
+  "ms": 221,
+  "body": {
+   "detail": {
+    "error_type": "api_usage_error",
+    "message": "Invalid request."
+   }
+  }
+ },
+ "body_not_json": {
+  "request": "not json",
+  "status": 422,
+  "ms": 202,
+  "body": {
+   "detail": [
+    {
+     "type": "json_invalid",
+     "loc": [
+      "body",
+      0
+     ],
+     "msg": "JSON decode error",
+     "input": {},
+     "ctx": {
+      "error": "Expecting value"
+     }
+    }
+   ]
+  }
+ },
+ "body_array": {
+  "request": [],
+  "status": 422,
+  "ms": 224,
+  "body": {
+   "detail": [
+    {
+     "type": "model_attributes_type",
+     "loc": [
+      "body"
+     ],
+     "msg": "Input should be a valid dictionary or object to extract fields from",
+     "input": []
+    }
+   ]
+  }
+ },
+ "multi_errors": {
+  "request": {
+   "model": "jev-latest",
+   "state": null,
+   "questions": {
+    "a": {
+     "type": "score",
+     "criteria": []
+    },
+    "b": {
+     "type": "choice"
+    }
+   }
+  },
+  "status": 422,
+  "ms": 217,
+  "body": {
+   "detail": [
+    {
+     "type": "too_short",
+     "loc": [
+      "body",
+      "questions",
+      "a",
+      "score",
+      "criteria"
+     ],
+     "msg": "List should have at least 1 item after validation, not 0",
+     "input": [],
+     "ctx": {
+      "field_type": "List",
+      "min_length": 1,
+      "actual_length": 0
+     }
+    },
+    {
+     "type": "missing",
+     "loc": [
+      "body",
+      "questions",
+      "b",
+      "choice",
+      "criteria"
+     ],
+     "msg": "Field required",
+     "input": {
+      "type": "choice"
+     }
+    }
+   ]
+  }
+ }
+}

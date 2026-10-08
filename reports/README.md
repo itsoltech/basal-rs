@@ -50,6 +50,12 @@ Metodyka: [docs/BENCHMARKS.md](../docs/BENCHMARKS.md).
 | [metal-m2-max-tree](metal-m2-max-tree/README.md) | M2 Max: attention po jednostkach drzewa (wynik niezależny od pakowania) wobec SDPA, wczytywanie basal-1.5-max; CUDA bez zmian |
 | `reference-basal-1.5-{max,4.5B,mini}-{mlx,mlx-q8,mlx-f16}` | eksporty upstream v1.5.0 MLX na M1 Pro |
 
+## API
+
+| Katalog | Zawartość |
+|---|---|
+| [typesafe-api-edge-cases](typesafe-api-edge-cases/README.md) | /v1/systemone wobec API TypeSafe: 38 przypadków brzegowych, statusy i błędy, SDK |
+
 ## basal-1.0-4.5B
 
 | Katalog | Zawartość |

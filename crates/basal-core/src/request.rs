@@ -91,19 +91,43 @@ pub enum Dialect {
     Upstream,
 }
 
-/// One validation problem, in the shape of TypeSafe `ValidationError` (`loc`, `msg`, `type`).
+/// One validation problem, in the shape of TypeSafe `ValidationError` (`type`, `loc`, `msg`, `input`, `ctx`; the
+/// pydantic error of the TypeSafe API, docs/SYSTEM_ONE.md).
 #[derive(Clone, Debug, Serialize)]
 pub struct FieldError {
-    pub loc: Vec<Value>,
-    pub msg: String,
     #[serde(rename = "type")]
     pub kind: String,
+    pub loc: Vec<Value>,
+    pub msg: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ctx: Option<Value>,
+}
+
+impl FieldError {
+    pub fn new(loc: Vec<Value>, msg: impl Into<String>, kind: &str) -> Self {
+        FieldError { kind: kind.into(), loc, msg: msg.into(), input: None, ctx: None }
+    }
+
+    fn input(mut self, v: &Value) -> Self {
+        self.input = Some(v.clone());
+        self
+    }
+
+    fn ctx(mut self, v: Value) -> Self {
+        self.ctx = Some(v);
+        self
+    }
 }
 
 #[derive(Debug)]
 pub enum DecideError {
-    /// The request does not satisfy the System One schema.
+    /// The request does not satisfy the System One schema (HTTP 422).
     Validation(Vec<FieldError>),
+    /// A schema-valid request the TypeSafe API refuses (HTTP 400): the value of its `detail`, a message or
+    /// `{"error_type": "api_usage_error", "message": ...}`.
+    Usage(Value),
     /// Valid request that this runtime/backend cannot answer yet (explicit, never a silent fallback).
     Unsupported(Vec<FieldError>),
     Internal(anyhow::Error),
@@ -113,10 +137,17 @@ impl std::fmt::Display for DecideError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DecideError::Validation(e) => write!(f, "validation error: {}", serde_json::to_string(e).unwrap()),
+            DecideError::Usage(d) => write!(f, "invalid request: {d}"),
             DecideError::Unsupported(e) => write!(f, "unsupported: {}", serde_json::to_string(e).unwrap()),
             DecideError::Internal(e) => write!(f, "internal error: {e:#}"),
         }
     }
+}
+
+/// `{"error_type": "api_usage_error", "message": ...}`, the `detail` of TypeSafe's 400 answers about the request
+/// as a whole (unknown model, unknown question type).
+pub fn api_usage_error(message: impl Into<String>) -> DecideError {
+    DecideError::Usage(json!({"error_type": "api_usage_error", "message": message.into()}))
 }
 
 impl std::error::Error for DecideError {}
@@ -134,6 +165,8 @@ impl DecideError {
             DecideError::Validation(d) | DecideError::Unsupported(d) => {
                 d.iter().map(|e| e.msg.clone()).collect::<Vec<_>>().join("; ")
             }
+            DecideError::Usage(Value::String(s)) => s.clone(),
+            DecideError::Usage(d) => d.get("message").and_then(Value::as_str).unwrap_or_default().to_string(),
             DecideError::Internal(e) => format!("{e:#}"),
         };
         json!({"error": msg})
@@ -142,6 +175,7 @@ impl DecideError {
     pub fn to_json(&self) -> Value {
         match self {
             DecideError::Validation(d) => json!({"detail": d}),
+            DecideError::Usage(d) => json!({"detail": d}),
             DecideError::Unsupported(d) => json!({"error": "unsupported", "detail": d}),
             DecideError::Internal(e) => json!({"error": "internal", "detail": format!("{e:#}")}),
         }
@@ -211,12 +245,57 @@ fn loc(path: &[&str]) -> Vec<Value> {
 }
 
 fn err(path: &[&str], msg: impl Into<String>, kind: &str) -> FieldError {
-    FieldError { loc: loc(path), msg: msg.into(), kind: kind.into() }
+    FieldError::new(loc(path), msg, kind)
 }
 
 fn qerr(name: &str, rest: &[&str], msg: impl Into<String>, kind: &str) -> FieldError {
     let path: Vec<&str> = ["questions", name].into_iter().chain(rest.iter().copied()).collect();
     err(&path, msg, kind)
+}
+
+/// `["body", "questions", name, rest...]`; [`question`] adds the question type after the name, as the TypeSafe API
+/// (a pydantic discriminated union) reports it.
+fn qloc(name: &str, rest: &[Value]) -> Vec<Value> {
+    ["body", "questions", name].into_iter().map(Value::from).chain(rest.iter().cloned()).collect()
+}
+
+/// `Field required` of a missing field of `parent`.
+fn missing(loc: Vec<Value>, parent: &Value) -> FieldError {
+    FieldError::new(loc, "Field required", "missing").input(parent)
+}
+
+/// The errors of a value that is none of string, object and array (the description type of System One: one per
+/// member of the union, as pydantic reports them).
+fn union_errs(loc: Vec<Value>, input: &Value) -> Vec<FieldError> {
+    [
+        ("str", "string_type", "Input should be a valid string"),
+        ("dict[any,any]", "dict_type", "Input should be a valid dictionary"),
+        ("list[any]", "list_type", "Input should be a valid list"),
+    ]
+    .into_iter()
+    .map(|(member, kind, msg)| {
+        let mut l = loc.clone();
+        l.push(member.into());
+        FieldError::new(l, msg, kind).input(input)
+    })
+    .collect()
+}
+
+/// pydantic `too_short` of an empty list or object.
+fn too_short(loc: Vec<Value>, input: &Value) -> FieldError {
+    let what = if input.is_array() { "List" } else { "Dictionary" };
+    FieldError::new(loc, format!("{what} should have at least 1 item after validation, not 0"), "too_short")
+        .input(input)
+        .ctx(json!({"field_type": what, "min_length": 1, "actual_length": 0}))
+}
+
+/// Kind of an error the TypeSafe API answers with 400 instead of 422 (its `detail` is in `input`); it is reported
+/// only when the request has no schema error.
+const USAGE: &str = "api_usage";
+
+/// A 400 answer of the TypeSafe API: `detail` is a message or an `api_usage_error` object.
+fn usage(detail: Value) -> FieldError {
+    FieldError::new(vec![], "", USAGE).input(&detail)
 }
 
 /// Python truthiness of an optional JSON value (`q.get("evidence")`).
@@ -261,44 +340,50 @@ pub fn parse_request(body: &Value) -> Result<ParsedRequest, DecideError> {
 pub fn parse_request_as(body: &Value, dialect: Dialect) -> Result<ParsedRequest, DecideError> {
     let mut errs = Vec::new();
     let Some(obj) = body.as_object() else {
-        return Err(DecideError::Validation(vec![err(&[], "request body must be a JSON object", "object_type")]));
+        return Err(DecideError::Validation(vec![FieldError::new(
+            loc(&[]),
+            "Input should be a valid dictionary or object to extract fields from",
+            "model_attributes_type",
+        )
+        .input(body)]));
     };
     let model = match obj.get("model") {
         // upstream ignores the model field
         _ if dialect == Dialect::Upstream => String::new(),
         Some(Value::String(s)) => s.clone(),
-        Some(_) => {
-            errs.push(err(&["model"], "model must be a string", "string_type"));
+        Some(v) => {
+            errs.push(FieldError::new(loc(&["model"]), "Input should be a valid string", "string_type").input(v));
             String::new()
         }
         None => {
-            errs.push(err(&["model"], "Field required", "missing"));
+            errs.push(missing(loc(&["model"]), body));
             String::new()
         }
     };
     let state = match obj.get("state") {
         Some(v) if is_description(v, false) || (dialect == Dialect::Upstream && !v.is_null()) => Some(text(v)),
-        Some(_) => {
-            errs.push(err(&["state"], "state must be a string, an object or an array", "state_type"));
+        // a null state is a missing one for the TypeSafe API
+        None | Some(Value::Null) => {
+            errs.push(missing(loc(&["state"]), body));
             None
         }
-        None => {
-            errs.push(err(&["state"], "Field required", "missing"));
+        Some(v) => {
+            errs.append(&mut union_errs(loc(&["state"]), v));
             None
         }
     };
     let questions = match obj.get("questions") {
         Some(Value::Object(m)) if !m.is_empty() => Some(m),
-        Some(Value::Object(_)) => {
-            errs.push(err(&["questions"], "questions must have at least 1 entry", "too_short"));
+        Some(v @ Value::Object(_)) => {
+            errs.push(too_short(loc(&["questions"]), v));
             None
         }
-        Some(_) => {
-            errs.push(err(&["questions"], "questions must be an object", "dict_type"));
+        Some(v) => {
+            errs.push(FieldError::new(loc(&["questions"]), "Input should be a valid dictionary", "dict_type").input(v));
             None
         }
         None => {
-            errs.push(err(&["questions"], "Field required", "missing"));
+            errs.push(missing(loc(&["questions"]), body));
             None
         }
     };
@@ -327,7 +412,9 @@ pub fn parse_request_as(body: &Value, dialect: Dialect) -> Result<ParsedRequest,
             }
         }
     }
+    // TypeSafe: questions are checked also without a valid state, so that all schema errors are reported together
     let mut items = Vec::new();
+    let state = if dialect == Dialect::TypeSafe { Some(state.unwrap_or_default()) } else { state };
     if let (Some(state), Some(questions)) = (state, questions) {
         for (name, q) in questions {
             let built = match dialect {
@@ -340,37 +427,55 @@ pub fn parse_request_as(body: &Value, dialect: Dialect) -> Result<ParsedRequest,
             }
         }
     }
+    // schema errors first (422), then the first error the TypeSafe API answers with 400
+    let (usage, errs): (Vec<FieldError>, Vec<FieldError>) = errs.into_iter().partition(|e| e.kind == USAGE);
     if !errs.is_empty() {
         Err(DecideError::Validation(errs))
+    } else if let Some(u) = usage.into_iter().next() {
+        Err(DecideError::Usage(u.input.unwrap_or_default()))
     } else {
         Ok(ParsedRequest { model, items, facts_limit })
     }
 }
 
-fn question(name: &str, q: &Value, state: &str) -> Result<Item, Vec<FieldError>> {
-    let Some(q) = q.as_object() else {
-        return Err(vec![qerr(name, &[], "question must be an object", "model_type")]);
+fn question(name: &str, qv: &Value, state: &str) -> Result<Item, Vec<FieldError>> {
+    let Some(q) = qv.as_object() else {
+        return Err(vec![FieldError::new(
+            qloc(name, &[]),
+            "Input should be a valid dictionary or object to extract fields from",
+            "model_attributes_type",
+        )
+        .input(qv)]);
     };
     let mut errs = Vec::new();
     let kind = match q.get("type") {
         Some(Value::String(s)) => match QType::parse(s) {
             Some(t) => Some(t),
             None => {
-                errs.push(qerr(
-                    name,
-                    &["type"],
-                    format!("unknown question type {s:?} (choice, noul, score, multi, act)"),
-                    "union_tag_invalid",
-                ));
+                errs.push(usage(json!({
+                    "error_type": "api_usage_error",
+                    "message": format!("Invalid request. Unknown question type {s:?} (choice, noul, score): {name}"),
+                })));
                 None
             }
         },
-        Some(_) => {
-            errs.push(qerr(name, &["type"], "type must be a string", "union_tag_invalid"));
+        None => {
+            errs.push(
+                FieldError::new(
+                    qloc(name, &[]),
+                    "Unable to extract tag using discriminator 'type'",
+                    "union_tag_not_found",
+                )
+                .input(qv)
+                .ctx(json!({"discriminator": "'type'"})),
+            );
             None
         }
-        None => {
-            errs.push(qerr(name, &["type"], "Field required (choice, noul or score)", "union_tag_not_found"));
+        Some(t) => {
+            errs.push(usage(json!({
+                "error_type": "api_usage_error",
+                "message": format!("Invalid request. Question type {t} is not a string: {name}"),
+            })));
             None
         }
     };
@@ -379,13 +484,8 @@ fn question(name: &str, q: &Value, state: &str) -> Result<Item, Vec<FieldError>>
     let instructions = match q.get("instructions") {
         None | Some(Value::Null) => String::new(),
         Some(v) if is_description(v, false) => text(v),
-        Some(_) => {
-            errs.push(qerr(
-                name,
-                &["instructions"],
-                "instructions must be a string, an object, an array or null",
-                "instructions_type",
-            ));
+        Some(v) => {
+            errs.append(&mut union_errs(qloc(name, &["instructions".into()]), v));
             String::new()
         }
     };
@@ -399,6 +499,23 @@ fn question(name: &str, q: &Value, state: &str) -> Result<Item, Vec<FieldError>>
         }
     };
     let Some(kind) = kind else { return Err(errs) };
+    // the question type after the name in the location of every error, as in the TypeSafe API
+    let tag = |mut errs: Vec<FieldError>| {
+        for e in &mut errs {
+            if e.loc.len() > 3 && e.loc[2] == name {
+                e.loc.insert(3, kind.as_str().into());
+            }
+        }
+        errs
+    };
+    let errs = tag(errs);
+    if kind == QType::Noul
+        && q.get("instructions").is_none_or(Value::is_null)
+        && q.get("criteria").is_none_or(Value::is_null)
+    {
+        return Err(vec![usage(format!("Noul question must have criteria or instructions: {name}").into())]);
+    }
+    let mut errs = errs;
     let lang = lang_of(&format!("{state}{instructions}"));
     let mut ext = Ext::None;
     let built = match kind {
@@ -429,8 +546,8 @@ fn question(name: &str, q: &Value, state: &str) -> Result<Item, Vec<FieldError>>
             uncalibrated: false,
         }),
         Ok(_) => Err(errs),
-        Err(mut e) => {
-            errs.append(&mut e);
+        Err(e) => {
+            errs.append(&mut tag(e));
             Err(errs)
         }
     }
@@ -694,8 +811,13 @@ fn noul(q: &serde_json::Map<String, Value>, lang: Lang, name: &str) -> Built {
     let crit = match q.get("criteria") {
         None | Some(Value::Null) => serde_json::Map::new(),
         Some(Value::Object(m)) => m.clone(),
-        Some(_) => {
-            return Err(vec![qerr(name, &["criteria"], "noul criteria must be an object or null", "model_type")])
+        Some(v) => {
+            return Err(vec![FieldError::new(
+                qloc(name, &["criteria".into()]),
+                "Input should be a valid dictionary or instance of NoulCriteria",
+                "model_type",
+            )
+            .input(v)])
         }
     };
     let mut errs = Vec::new();
@@ -705,13 +827,8 @@ fn noul(q: &serde_json::Map<String, Value>, lang: Lang, name: &str) -> Built {
             // (upstream used truthiness, see docs/SYSTEM_ONE.md).
             None | Some(Value::Null) => default.to_string(),
             Some(v) if is_description(v, false) => text(v),
-            Some(_) => {
-                errs.push(qerr(
-                    name,
-                    &["criteria", key],
-                    "must be a string, an object, an array or null",
-                    "description_type",
-                ));
+            Some(v) => {
+                errs.append(&mut union_errs(qloc(name, &["criteria".into(), key.into()]), v));
                 String::new()
             }
         }
@@ -731,9 +848,7 @@ fn choice(q: &serde_json::Map<String, Value>, hide: bool, name: &str) -> Built {
             let bad: Vec<_> = m
                 .iter()
                 .filter(|(_, v)| !is_description(v, true))
-                .map(|(k, _)| {
-                    qerr(name, &["criteria", k], "must be a string, an object, an array or null", "description_type")
-                })
+                .flat_map(|(k, v)| union_errs(qloc(name, &["criteria".into(), k.as_str().into()]), v))
                 .collect();
             if !bad.is_empty() {
                 return Err(bad);
@@ -749,25 +864,32 @@ fn choice(q: &serde_json::Map<String, Value>, hide: bool, name: &str) -> Built {
                         m.entry(s.clone()).or_insert(Value::Null);
                     }
                     _ => {
-                        return Err(vec![qerr(
-                            name,
-                            &["criteria", &i.to_string()],
-                            "choice names must be strings",
+                        return Err(vec![FieldError::new(
+                            qloc(name, &["criteria".into(), i.into()]),
+                            "Input should be a valid string",
                             "string_type",
-                        )])
+                        )
+                        .input(x)])
                     }
                 }
             }
             m
         }
-        Some(_) => return Err(vec![qerr(name, &["criteria"], "choice criteria must be an object", "dict_type")]),
-        None => return Err(vec![qerr(name, &["criteria"], "Field required", "missing")]),
+        Some(v) => {
+            return Err(vec![FieldError::new(
+                qloc(name, &["criteria".into()]),
+                "Input should be a valid dictionary",
+                "dict_type",
+            )
+            .input(v)])
+        }
+        None => return Err(vec![missing(qloc(name, &["criteria".into()]), &Value::Object(q.clone()))]),
     };
     if crit.is_empty() {
-        return Err(vec![qerr(name, &["criteria"], "choice criteria must have at least 1 option", "too_short")]);
+        return Err(vec![usage(format!("Choice question must have at least one choice: {name}").into())]);
     }
     if crit.len() > MAX_CHOICE_OPTIONS {
-        return Err(vec![qerr(name, &["criteria"], format!("at most {MAX_CHOICE_OPTIONS} options"), "too_long")]);
+        return Err(vec![usage(format!("Too many choices. Must have at most {MAX_CHOICE_OPTIONS} choices.").into())]);
     }
     let (keys, opts) = named_options(&crit, hide);
     Ok((keys, opts, vec![]))
@@ -778,23 +900,25 @@ fn score(q: &serde_json::Map<String, Value>, hide: bool, name: &str) -> Built {
     let (field, crit) = match (q.get("criteria"), q.get("levels")) {
         (Some(c), _) if !c.is_null() => ("criteria", c),
         (_, Some(l)) if !l.is_null() => ("levels", l),
-        _ => return Err(vec![qerr(name, &["criteria"], "Field required", "missing")]),
+        _ => return Err(vec![missing(qloc(name, &["criteria".into()]), &Value::Object(q.clone()))]),
     };
+    let too_many = || usage(format!("Too many score levels. Must have at most {MAX_OPTIONS} levels.").into());
     match crit {
         Value::Array(xs) => {
             if xs.is_empty() {
-                return Err(vec![qerr(name, &[field], "score criteria must have at least 1 level", "too_short")]);
+                return Err(vec![too_short(qloc(name, &[field.into()]), crit)]);
             }
             let bad: Vec<_> = xs
                 .iter()
                 .enumerate()
                 .filter(|(_, v)| !is_description(v, false))
-                .map(|(i, _)| {
-                    qerr(name, &[field, &i.to_string()], "must be a string, an object or an array", "description_type")
-                })
+                .flat_map(|(i, v)| union_errs(qloc(name, &[field.into(), i.into()]), v))
                 .collect();
             if !bad.is_empty() {
                 return Err(bad);
+            }
+            if xs.len() > MAX_OPTIONS {
+                return Err(vec![too_many()]);
             }
             let keys = (0..xs.len()).map(|i| i.to_string()).collect();
             Ok((keys, xs.iter().map(text).collect(), xs.clone()))
@@ -802,26 +926,34 @@ fn score(q: &serde_json::Map<String, Value>, hide: bool, name: &str) -> Built {
         // Basal extension: ordered {name: description}; answers keyed by the names.
         Value::Object(m) => {
             if m.is_empty() {
-                return Err(vec![qerr(name, &[field], "score criteria must have at least 1 level", "too_short")]);
+                return Err(vec![too_short(qloc(name, &[field.into()]), crit)]);
+            }
+            if m.len() > MAX_OPTIONS {
+                return Err(vec![too_many()]);
             }
             let map = to_map(m);
             let (keys, opts) = named_options(&map, hide);
             Ok((keys, opts, map.values().cloned().collect()))
         }
-        _ => Err(vec![qerr(name, &[field], "score criteria must be an array", "list_type")]),
+        _ => Err(vec![
+            FieldError::new(qloc(name, &[field.into()]), "Input should be a valid list", "list_type").input(crit)
+        ]),
     }
 }
 
-/// Limits of the A–J letter readout of basal-1.0 (2..=10 options). Requests outside of it are valid System One
-/// requests that this runtime does not answer yet: an explicit transitional error, see docs/SYSTEM_ONE.md.
+/// Limits of the A–J letter readout (2..=10 options). Requests outside of it that the schema allows are answered with
+/// an explicit error, see docs/SYSTEM_ONE.md.
 /// `large_choice`: choice questions with 11..=255 options are answered by the grouped strategy
 /// (`crate::large_choice`) instead of an error.
-pub fn check_capability(items: &[Item], large_choice: bool) -> Result<(), DecideError> {
+/// `single_option`: choice and score questions with one option are answered without the model (probability 1, as the
+/// TypeSafe API does); without it they are an error too.
+pub fn check_capability(items: &[Item], large_choice: bool, single_option: bool) -> Result<(), DecideError> {
     let mut errs = Vec::new();
     for it in items {
         let n = it.options.len();
         let path = ["questions", it.name.as_str(), "criteria"];
-        if n == 1 {
+        let fixed = single_option && matches!(it.kind, QType::Choice | QType::Score) && matches!(it.ext, Ext::None);
+        if n == 1 && !fixed {
             errs.push(err(
                 &path,
                 format!(
@@ -831,7 +963,7 @@ pub fn check_capability(items: &[Item], large_choice: bool) -> Result<(), Decide
                 "unsupported_single_option",
             ));
         } else if n > MAX_OPTIONS && !(large_choice && it.kind == QType::Choice) {
-            errs.push(err(&path, format!("{n} options: the basal-1.0 letter readout supports 2..{MAX_OPTIONS}; the grouped 11..255 strategy covers choice questions only (and is switched off when disabled)"), "unsupported_option_count"));
+            errs.push(err(&path, format!("{n} options: the letter readout of the model reads 2..{MAX_OPTIONS}; only choice questions take more (the grouped 11..255 strategy)"), "unsupported_option_count"));
         }
     }
     if errs.is_empty() {

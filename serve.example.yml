@@ -6,7 +6,7 @@
 
 addr: 0.0.0.0:8000
 default_model: basal-1.5-max       # default: the first model
-max_inflight: 1024                 # waiting + running requests of all models; more get 503
+max_inflight: 1024                 # waiting + running requests of all models; more get 529
 long_slice_ms: 100                 # least work of a long-request lane between two hand-overs of the GPU
 access_log: false                  # one log line per request: [POST] 200 /v1/systemone 31 ms (queue, compute, batch)
 gemm_cache: .cache/gemm            # tables of `gemm_table: auto`

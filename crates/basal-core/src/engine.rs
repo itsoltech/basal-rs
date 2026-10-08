@@ -261,13 +261,9 @@ impl<B: Backend> Engine<B> {
     pub fn prepare_request(&self, body: &Value) -> Result<Vec<Prepared>, DecideError> {
         let req = parse_request(body)?;
         if req.model != self.manifest.name {
-            return Err(DecideError::Validation(vec![crate::request::FieldError {
-                loc: vec!["body".into(), "model".into()],
-                msg: format!("unknown model {:?}; served: {:?}", req.model, self.manifest.name),
-                kind: "unknown_model".into(),
-            }]));
+            return Err(crate::request::api_usage_error(format!("Unknown model: {}", req.model)));
         }
-        check_capability(&req.items, false)?;
+        check_capability(&req.items, false, false)?;
         Ok(req.items.into_iter().map(|it| self.prepare(it)).collect::<Result<Vec<_>>>()?)
     }
 
@@ -281,30 +277,26 @@ impl<B: Backend> Engine<B> {
     pub fn plan_request_as(&self, body: &Value, dialect: crate::request::Dialect) -> Result<RequestPlan, DecideError> {
         let req = crate::request::parse_request_as(body, dialect)?;
         if dialect == crate::request::Dialect::TypeSafe && req.model != self.manifest.name {
-            return Err(DecideError::Validation(vec![crate::request::FieldError {
-                loc: vec!["body".into(), "model".into()],
-                msg: format!("unknown model {:?}; served: {:?}", req.model, self.manifest.name),
-                kind: "unknown_model".into(),
-            }]));
+            return Err(crate::request::api_usage_error(format!("Unknown model: {}", req.model)));
         }
-        check_capability(&req.items, self.large_choice)?;
+        check_capability(&req.items, self.large_choice, true)?;
         let ev: Vec<&Item> = req.items.iter().filter(|it| it.evidence).collect();
         if !ev.is_empty() {
             let mut errs = Vec::new();
             for it in ev {
                 let loc = vec!["body".into(), "questions".into(), it.name.clone().into(), "evidence".into()];
                 if !self.backend.has_evidence() {
-                    errs.push(crate::request::FieldError {
+                    errs.push(crate::request::FieldError::new(
                         loc,
-                        msg: "evidence is not available for this model (no evidence_head.pt)".into(),
-                        kind: "unsupported_feature".into(),
-                    });
-                } else if it.options.len() > crate::prompt::MAX_OPTIONS {
-                    errs.push(crate::request::FieldError {
+                        "evidence is not available for this model (no evidence_head.pt)",
+                        "unsupported_feature",
+                    ));
+                } else if !(2..=crate::prompt::MAX_OPTIONS).contains(&it.options.len()) {
+                    errs.push(crate::request::FieldError::new(
                         loc,
-                        msg: "evidence needs at most 10 options".into(),
-                        kind: "unsupported_feature".into(),
-                    });
+                        "evidence needs 2 to 10 options",
+                        "unsupported_feature",
+                    ));
                 }
             }
             if !errs.is_empty() {
@@ -348,7 +340,10 @@ impl<B: Backend> Engine<B> {
                 plan.questions.push(QuestionPlan::Multi { item: it, parts });
                 continue;
             }
-            if it.options.len() <= crate::prompt::MAX_OPTIONS {
+            if it.options.len() == 1 {
+                // one option or level (choice, score): probability 1 without the model, as the TypeSafe API answers
+                plan.questions.push(QuestionPlan::Fixed(it));
+            } else if it.options.len() <= crate::prompt::MAX_OPTIONS {
                 plan.questions.push(QuestionPlan::Direct(plan.prepared.len()));
                 plan.prepared.push(self.prepare(it)?);
             } else {
@@ -422,6 +417,7 @@ impl<B: Backend> Engine<B> {
                     QuestionPlan::Direct(i) => {
                         finals.push((plan.prepared[*i].item.clone(), results[off + *i].p_cal.clone()))
                     }
+                    QuestionPlan::Fixed(item) => finals.push((item.clone(), vec![1.0])),
                     QuestionPlan::Multi { item, parts } => {
                         finals.push((item.clone(), parts.iter().map(|&i| results[off + i].p_cal[0]).collect()))
                     }
@@ -538,6 +534,8 @@ pub struct PlanOutput {
 pub enum QuestionPlan {
     /// One letter readout (index into `RequestPlan::prepared`).
     Direct(usize),
+    /// A choice or score question with a single option: probability 1, no readout.
+    Fixed(Item),
     /// Grouped strategy for 11..=255 choice options: `parts[k]` answers `groups[k]`.
     Groups { item: Item, groups: Vec<Vec<usize>>, parts: Vec<usize> },
     /// `multi`: `parts[k]` is the yes/no branch of label k.
@@ -558,11 +556,11 @@ pub fn plan_response(model: &str, plan: &RequestPlan, out: &PlanOutput) -> Resul
     let mut answers = serde_json::Map::new();
     for ((it, p), ev) in out.finals.iter().zip(&out.evidence) {
         let a = crate::decision::answer_checked(it, p, plan.dialect).map_err(|msg| {
-            DecideError::Validation(vec![crate::request::FieldError {
-                loc: vec!["body".into(), "questions".into(), it.name.clone().into()],
+            DecideError::Validation(vec![crate::request::FieldError::new(
+                vec!["body".into(), "questions".into(), it.name.clone().into()],
                 msg,
-                kind: "value_error".into(),
-            }])
+                "value_error",
+            )])
         })?;
         let mut a = a;
         if let (Some(ev), Some(obj)) = (ev, a.as_object_mut()) {
@@ -575,6 +573,7 @@ pub fn plan_response(model: &str, plan: &RequestPlan, out: &PlanOutput) -> Resul
         .iter()
         .map(|q| match q {
             QuestionPlan::Multi { parts, .. } => parts.len(),
+            QuestionPlan::Fixed(_) => 0,
             _ => 1,
         })
         .sum();
