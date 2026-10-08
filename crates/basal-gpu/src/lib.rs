@@ -297,6 +297,12 @@ pub fn gpu_device() -> Result<Device> {
         set_cuda_sync().context("BASAL_CUDA_SYNC")?;
         let dev = Device::new_cuda(0).context("CUDA device 0")?;
         if let Device::Cuda(d) = &dev {
+            // cudarc creates two CUDA events for every allocation, which it records and waits on only when the context
+            // has streams of its own (`is_in_multi_stream_mode`); candle and this crate use only the per-thread default
+            // stream, so the events are created and destroyed unused, two driver calls each per tensor.
+            // SAFETY: no stream is created here or in candle's CUDA backend (Device::new_cuda), so no allocation is
+            // ever shared between streams that the events would have to order; set before the first allocation.
+            unsafe { d.disable_event_tracking() };
             use candle_core::cuda_backend::cudarc::driver::sys::CUdevice_attribute as A;
             let ctx = d.cuda_stream().context().clone();
             let major = ctx.attribute(A::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)?;
@@ -340,6 +346,9 @@ pub struct GpuBackend {
     norm: Tensor,
     lm_head: Tensor,
     inv_freq: Vec<f64>,
+    /// RoPE cos and sin of every position below `cfg.max_positions` (`rope_row`), `[pos][cos: hd/2 | sin: hd/2]`:
+    /// computed once instead of per token and forward
+    rope: std::sync::Arc<[f32]>,
     pub load_s: f64,
     /// When set, every forward section is synchronised and timed (slows the forward; diagnostic only).
     pub profile: Option<std::cell::RefCell<BTreeMap<&'static str, f64>>>,
@@ -608,7 +617,12 @@ impl GpuBackend {
         };
         dev.synchronize()?;
         let d = cfg.head_dim;
-        let inv_freq = (0..d / 2).map(|j| 1.0 / cfg.rope_theta.powf((2 * j) as f64 / d as f64)).collect();
+        let inv_freq: Vec<f64> = (0..d / 2).map(|j| 1.0 / cfg.rope_theta.powf((2 * j) as f64 / d as f64)).collect();
+        let mut rope = vec![0f32; cfg.max_positions * d];
+        for (pos, row) in rope.chunks_exact_mut(d).enumerate() {
+            let (cos, sin) = row.split_at_mut(d / 2);
+            rope_angles(&inv_freq, pos as f64, cos, sin);
+        }
         Ok(Self {
             prefixes: Vec::new(),
             state_cache_bytes: 0,
@@ -624,6 +638,7 @@ impl GpuBackend {
             norm,
             lm_head,
             inv_freq,
+            rope: rope.into(),
             load_s: t0.elapsed().as_secs_f64(),
             profile: None,
             residual_max: None,
@@ -910,7 +925,8 @@ impl GpuBackend {
         let mut x = self.embed.index_select(&ids, 0)?.to_dtype(dt)?; // [total, h]
         self.mark(&mut t, "embed+inputs")?;
         let n_layers = self.layers.len();
-        // CUDA: the RMSNorm of the next block comes out of the residual add of the previous one (one kernel)
+        // CUDA: the RMSNorm of the next block (after the last block: the final norm) comes out of the residual add of
+        // the previous one (one kernel)
         let mut normed: Option<Tensor> = None;
         for (li, ly) in self.layers.iter().enumerate() {
             let a = match normed.take() {
@@ -920,6 +936,17 @@ impl GpuBackend {
             self.mark(&mut t, "rms_norm")?;
             let qkv = self.matmul_t(&a, &ly.wqkv)?;
             self.mark(&mut t, "qkv_proj")?;
+            // CUDA tensor-core attention: K and V come split into hi / lo planes from the same kernel
+            #[cfg(feature = "cuda")]
+            let (_flat, q, k, v, hl) = if ragged_cuda && self.tc_attention() {
+                let v_lo = self.precision != Precision::F16;
+                let (f, q, k, v, hl) = fused::qkv_rope_hilo(&qkv, &self.w(&ly.bqkv)?, &cs, dims, v_lo, capture)?;
+                (f, q, k, v, Some(hl))
+            } else {
+                let (f, q, k, v) = fused::qkv_rope(&qkv, &self.w(&ly.bqkv)?, &cs, dims)?;
+                (f, q, k, v, None)
+            };
+            #[cfg(not(feature = "cuda"))]
             let (_flat, q, k, v) = fused::qkv_rope(&qkv, &self.w(&ly.bqkv)?, &cs, dims)?;
             self.mark(&mut t, "bias+rope+heads")?;
             #[cfg(feature = "cuda")]
@@ -938,14 +965,13 @@ impl GpuBackend {
                     }
                 }
                 let us: Vec<fused::TreeUnit> = units.iter().map(|(u, _)| u.clone()).collect();
-                if tc {
-                    let (nq, nk) = (nh * total * hd, nkv * total * hd);
-                    let khl = fused::split_hilo(&_flat.narrow(0, nq, nk)?)?;
-                    let vhl = fused::split_hilo(&_flat.narrow(0, nq + nk, nk)?)?;
+                if let Some(hl) = &hl {
+                    let nk = nkv * total * hd;
+                    let (khl, vhl) = (hl.narrow(0, 0, 2 * nk)?, hl.narrow(0, 2 * nk, 2 * nk)?);
                     let v_exact = self.precision == Precision::F16;
-                    Some(fused::attention_tree(&_flat, &us, dims, scale, Some((&khl, &vhl, v_exact)))?)
+                    Some(fused::attention_tree(&_flat, &us, dims, scale, Some((&khl, &vhl, v_exact)), Some(dt))?)
                 } else {
-                    Some(fused::attention_tree(&_flat, &us, dims, scale, None)?)
+                    Some(fused::attention_tree(&_flat, &us, dims, scale, None, Some(dt))?)
                 }
             } else {
                 None
@@ -989,7 +1015,8 @@ impl GpuBackend {
                 None if outs.len() == 1 => outs.pop().unwrap(),
                 None => Tensor::cat(&outs, 2)?,
             };
-            let mut o = fused::merge_heads(&o, dims, dt)?;
+            // the CUDA tree attention returns merged heads [total, NH * HD] in the forward's dtype
+            let mut o = if ragged_cuda { o } else { fused::merge_heads(&o, dims, dt)? };
             self.mark(&mut t, "attention")?;
             if let (true, Some(rt)) = (li + 1 == n_layers, &read_t) {
                 // Only the readout positions are needed after the last attention.
@@ -1005,9 +1032,12 @@ impl GpuBackend {
             let act = fused::bias_silu_mul(&gu, &self.w(&ly.bgu)?)?;
             self.mark(&mut t, "bias+silu*up")?;
             let y = self.matmul_t(&act, &ly.wdown)?;
-            if self.dev.is_cuda() && li + 1 < n_layers {
+            if self.dev.is_cuda() {
+                // the next block's RMSNorm, after the last block the final norm
+                let last = li + 1 == n_layers;
+                let ln = if last { &self.norm } else { &self.layers[li + 1].ln1 };
                 let a;
-                (x, a) = self.residual_norm(&x, &y, &ly.bdown, &self.layers[li + 1].ln1, eps)?;
+                (x, a) = self.residual_norm(&x, &y, &ly.bdown, ln, eps)?;
                 normed = Some(a);
             } else {
                 x = fused::bias_residual(&x, &y, &self.w(&ly.bdown)?)?;
@@ -1022,7 +1052,10 @@ impl GpuBackend {
                 self.layer_checkpoint()?;
             }
         }
-        let out = rms_norm(&x, &self.w(&self.norm)?, eps)?;
+        let out = match normed {
+            Some(a) => a,
+            None => rms_norm(&x, &self.w(&self.norm)?, eps)?,
+        };
         self.mark(&mut t, "final_norm")?;
         Ok((Some(out), captured))
     }
@@ -1040,10 +1073,14 @@ impl GpuBackend {
     }
 
     fn rope_row(&self, pos: f64, cos: &mut [f32], sin: &mut [f32]) {
-        for (j, f) in self.inv_freq.iter().enumerate() {
-            let a = pos * f;
-            cos[j] = a.cos() as f32;
-            sin[j] = a.sin() as f32;
+        let d = 2 * self.inv_freq.len();
+        match self.rope.get(pos as usize * d..(pos as usize + 1) * d).filter(|_| pos.fract() == 0.0 && pos >= 0.0) {
+            Some(row) => {
+                let (c, s) = row.split_at(d / 2);
+                cos.copy_from_slice(c);
+                sin.copy_from_slice(s);
+            }
+            None => rope_angles(&self.inv_freq, pos, cos, sin),
         }
     }
 
@@ -1293,6 +1330,15 @@ pub fn check_gemm_table(v: &Value) -> Result<()> {
     bail!("GEMM tables need the CUDA backend ({})", v["gpu"])
 }
 
+/// RoPE cos and sin of position `pos` for every frequency.
+fn rope_angles(inv_freq: &[f64], pos: f64, cos: &mut [f32], sin: &mut [f32]) {
+    for (j, f) in inv_freq.iter().enumerate() {
+        let a = pos * f;
+        cos[j] = a.cos() as f32;
+        sin[j] = a.sin() as f32;
+    }
+}
+
 fn bf16_round(v: f32) -> f32 {
     half::bf16::from_f32(v).to_f32()
 }
@@ -1349,6 +1395,7 @@ impl Backend for GpuBackend {
             norm: self.norm.clone(),
             lm_head: self.lm_head.clone(),
             inv_freq: self.inv_freq.clone(),
+            rope: self.rope.clone(),
             load_s: 0.0,
             profile: None,
             residual_max: None,

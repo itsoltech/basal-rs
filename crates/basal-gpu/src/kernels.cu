@@ -110,9 +110,15 @@ __device__ void residual_rmsnorm(const T *x, const T *y, const T *b, const T *al
 // qkv = [B*L, (NH + 2*NKV) * HD] projection without bias. Adds the bias (rounded to T), applies rotate-half RoPE to q
 // and k in f32 with cs = [2, B, L, HD/2] (cos, sin) and writes f32 heads:
 //   out = [q: B, NH, L, HD | k: B, NKV, L, HD | v: B, NKV, L, HD]
+// hl (tensor-core attention, flags & QR_HILO): K and V also as f16 hi / lo planes [K hi | K lo | V hi | V lo] of
+// B*NKV*L*HD each, hi = f16(x), lo = f16(x - hi) as in split_hilo_f32; QR_VLO: also the V lo plane (zero for an f16
+// forward, where the attention skips it); QR_NO_KV32: K and V only in hl, not in out (no prefix capture).
+#define QR_HILO 1u
+#define QR_VLO 2u
+#define QR_NO_KV32 4u
 template <typename T>
 __device__ void qkv_rope(const T *qkv, const T *bias, const float *cs, float *out, unsigned B, unsigned L,
-                         unsigned NH, unsigned NKV, unsigned HD) {
+                         unsigned NH, unsigned NKV, unsigned HD, __half *hl, unsigned flags) {
     unsigned id = blockIdx.x * blockDim.x + threadIdx.x;
     unsigned hd2 = HD / 2;
     unsigned heads = NH + 2 * NKV;
@@ -144,8 +150,22 @@ __device__ void qkv_rope(const T *qkv, const T *bias, const float *cs, float *ou
         base = (size_t)B * (NH + NKV) * L * HD; hh = j - NH - NKV; nh = NKV;
     }
     size_t o = base + ((size_t)(b * nh + hh) * L + l) * HD + d;
-    out[o] = y1;
-    out[o + hd2] = y2;
+    if (j < NH || !(flags & QR_NO_KV32)) {
+        out[o] = y1;
+        out[o + hd2] = y2;
+    }
+    if (j >= NH && (flags & QR_HILO)) {
+        const size_t nk = (size_t)B * NKV * L * HD, i = o - (size_t)B * NH * L * HD;  // i: index in [K | V]
+        const bool isv = i >= nk;
+        __half *hi = hl + (isv ? nk + i : i);  // K hi at i, V hi at 2 nk + (i - nk); lo planes nk further
+        __half h1 = __float2half_rn(y1), h2 = __float2half_rn(y2);
+        hi[0] = h1;
+        hi[hd2] = h2;
+        if (!isv || (flags & QR_VLO)) {
+            hi[nk] = __float2half_rn(y1 - __half2float(h1));
+            hi[nk + hd2] = __float2half_rn(y2 - __half2float(h2));
+        }
+    }
 }
 
 // [B, NH, L, HD] f32 attention output -> [B*L, NH*HD] in T
@@ -175,8 +195,9 @@ __device__ void merge_heads(const float *in, T *out, unsigned B, unsigned L, uns
         residual_rmsnorm<T>(x, y, b, alpha, out, H, M, eps);                                                       \
     }                                                                                                              \
     extern "C" __global__ void qkv_rope_##S(const T *qkv, const T *bias, const float *cs, float *out, unsigned B,  \
-                                            unsigned L, unsigned NH, unsigned NKV, unsigned HD) {                  \
-        qkv_rope<T>(qkv, bias, cs, out, B, L, NH, NKV, HD);                                                        \
+                                            unsigned L, unsigned NH, unsigned NKV, unsigned HD, __half *hl,        \
+                                            unsigned flags) {                                                      \
+        qkv_rope<T>(qkv, bias, cs, out, B, L, NH, NKV, HD, hl, flags);                                             \
     }                                                                                                              \
     extern "C" __global__ void merge_heads_##S(const float *in, T *out, unsigned B, unsigned L, unsigned NH,       \
                                                unsigned HD) {                                                      \
@@ -442,6 +463,10 @@ extern "C" __global__ void split_hilo_f32(const float *x, __half *out, unsigned 
 // are skipped, which adds exactly nothing. Block: 4 warps, 64 query rows (16 per warp); keys in tiles of 32;
 // fragments are read with ldmatrix (V transposed by ldmatrix.trans). Every row sees the same key tiles in the same
 // order whatever else is packed, so results stay independent of batching.
+// output of the tensor-core attention: f32 heads [NH, T, HD], or merged heads [T, NH * HD] in f16 / bf16
+#define ATT_OUT_F32 0u
+#define ATT_OUT_F16 1u
+#define ATT_OUT_BF16 2u
 #define TC_BM 128  // query rows per block: 8 warps x 16 (32 tokens x 4 heads of a K/V group)
 #define TC_THREADS 256
 #define TC_BN 32
@@ -497,9 +522,9 @@ __device__ __forceinline__ unsigned pack2(__half a, __half b) {
 // QK3: S = Qh·Kh + Qh·Kl + Ql·Kh (f16 hi/lo split, ~f32 products) or only Qh·Kh. PL: P·V with P split into
 // hi/lo (two MMAs) or P rounded to f16 (one MMA). Softmax, accumulation and output stay f32 in every variant.
 template <bool QK3, bool PL>
-__device__ __forceinline__ void attn_tree_tc_body(const float *qkv, const __half *khl, const __half *vhl, float *out,
+__device__ __forceinline__ void attn_tree_tc_body(const float *qkv, const __half *khl, const __half *vhl, void *out,
                                                   const TreeTable &tab, unsigned T, unsigned NH, unsigned NKV,
-                                                  float scale, unsigned v_exact) {
+                                                  float scale, unsigned v_exact, unsigned out_mode) {
     // Shared memory holds one Q plane (hi, then lo) until each warp has its Q fragments in registers, then the K / V
     // tiles: 34 KiB per block.
     extern __shared__ __align__(16) unsigned char smraw[];
@@ -686,10 +711,30 @@ __device__ __forceinline__ void attn_tree_tc_body(const float *qkv, const __half
         unsigned r = r0 + rr2[a];
         if (r >= rows) continue;
         float inv = 1.0f / l[a];
-        float *dst = out + ((size_t)(kvh * rep + r / U.q_len) * T + U.q_off + r % U.q_len) * ATT_HD;
+        const unsigned head = kvh * rep + r / U.q_len, tok = U.q_off + r % U.q_len;
+        if (out_mode == ATT_OUT_F32) {
+            float *dst = (float *)out + ((size_t)head * T + tok) * ATT_HD;
 #pragma unroll
-        for (int dt = 0; dt < ATT_HD / 8; dt++)
-            *reinterpret_cast<float2 *>(dst + dt * 8 + 2 * t4) = make_float2(o[dt][2 * a] * inv, o[dt][2 * a + 1] * inv);
+            for (int dt = 0; dt < ATT_HD / 8; dt++)
+                *reinterpret_cast<float2 *>(dst + dt * 8 + 2 * t4) =
+                    make_float2(o[dt][2 * a] * inv, o[dt][2 * a + 1] * inv);
+        } else {
+            // merged heads [token, NH * HD] in the forward's dtype: what merge_heads makes of the f32 output
+            const size_t at = ((size_t)tok * NH + head) * ATT_HD;
+#pragma unroll
+            for (int dt = 0; dt < ATT_HD / 8; dt++) {
+                const float x0 = o[dt][2 * a] * inv, x1 = o[dt][2 * a + 1] * inv;
+                if (out_mode == ATT_OUT_F16) {
+                    __half *dst = (__half *)out + at + dt * 8 + 2 * t4;
+                    dst[0] = from_f<__half>(x0);
+                    dst[1] = from_f<__half>(x1);
+                } else {
+                    __nv_bfloat16 *dst = (__nv_bfloat16 *)out + at + dt * 8 + 2 * t4;
+                    dst[0] = from_f<__nv_bfloat16>(x0);
+                    dst[1] = from_f<__nv_bfloat16>(x1);
+                }
+            }
+        }
     }
 }
 
@@ -1014,11 +1059,11 @@ __device__ __forceinline__ void attn_tree_tc_pipe_body(const float *qkv, const _
 }
 
 
-#define ATTN_TC_ENTRY(name, qk3, pl)                                                                                 \
-    extern "C" __global__ void __launch_bounds__(TC_THREADS)                                                       \
-        name(const float *qkv, const __half *khl, const __half *vhl, float *out, TreeTable tab, unsigned T,          \
-             unsigned NH, unsigned NKV, float scale, unsigned v_exact) {                                           \
-        attn_tree_tc_body<qk3, pl>(qkv, khl, vhl, out, tab, T, NH, NKV, scale, v_exact);                           \
+#define ATTN_TC_ENTRY(name, qk3, pl)                                                                                  \
+    extern "C" __global__ void __launch_bounds__(TC_THREADS)                                                          \
+        name(const float *qkv, const __half *khl, const __half *vhl, void *out, TreeTable tab, unsigned T,            \
+             unsigned NH, unsigned NKV, float scale, unsigned v_exact, unsigned out_mode) {                           \
+        attn_tree_tc_body<qk3, pl>(qkv, khl, vhl, out, tab, T, NH, NKV, scale, v_exact, out_mode);                    \
     }
 ATTN_TC_ENTRY(attn_tree_tc, true, true)
 ATTN_TC_ENTRY(attn_tree_tc_pv1, true, false)

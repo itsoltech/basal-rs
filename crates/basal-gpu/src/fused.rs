@@ -381,7 +381,14 @@ pub struct HeadDims {
     not(any(feature = "cuda", target_os = "macos")),
     allow(dead_code, reason = "Head dimensions are read by GPU kernels; the CPU implementation is unsupported")
 )]
-struct QkvRope(HeadDims);
+struct QkvRope {
+    d: HeadDims,
+    /// CUDA: device address of the f16 `[K hi | K lo | V hi | V lo]` buffer (0: none) and the kernel's QR_* flags
+    #[cfg_attr(not(feature = "cuda"), expect(dead_code, reason = "read by the CUDA kernel only"))]
+    hl: u64,
+    #[cfg_attr(not(feature = "cuda"), expect(dead_code, reason = "read by the CUDA kernel only"))]
+    flags: u32,
+}
 
 impl CustomOp3 for QkvRope {
     fn name(&self) -> &'static str {
@@ -409,7 +416,7 @@ impl CustomOp3 for QkvRope {
         cl: &Layout,
     ) -> Result<(CudaStorage, Shape)> {
         use candle_core::cuda_backend::{cudarc::driver::PushKernelArg, WrapErr};
-        let d = self.0;
+        let d = self.d;
         let n = d.b * d.l * (d.nh + 2 * d.nkv) * d.hd;
         let dev = qkv.device.clone();
         let (qo, bo, co) = (contiguous(ql, "qkv")?, contiguous(bl, "bias")?, contiguous(cl, "cos/sin")?);
@@ -422,6 +429,7 @@ impl CustomOp3 for QkvRope {
             let mut a = f.builder();
             let c = [d.b as u32, d.l as u32, d.nh as u32, d.nkv as u32, d.hd as u32];
             a.arg(&qv).arg(&bv).arg(&csv).arg(&out).arg(&c[0]).arg(&c[1]).arg(&c[2]).arg(&c[3]).arg(&c[4]);
+            a.arg(&self.hl).arg(&self.flags);
             // SAFETY: argument types and counts match the kernel signature.
             unsafe { a.launch(cu::cfg(n / 2)) }.w()?;
         });
@@ -437,7 +445,7 @@ impl CustomOp3 for QkvRope {
         cs: &MetalStorage,
         cl: &Layout,
     ) -> Result<(MetalStorage, Shape)> {
-        let d = self.0;
+        let d = self.d;
         if cs.dtype() != DType::F32 {
             candle_core::bail!("qkv_rope: cos/sin must be f32");
         }
@@ -460,12 +468,37 @@ pub fn qkv_rope(
     cos_sin: &Tensor,
     d: HeadDims,
 ) -> Result<(Tensor, Tensor, Tensor, Tensor)> {
-    let flat = qkv.apply_op3_no_bwd(bias, cos_sin, &QkvRope(d))?;
+    let flat = qkv.apply_op3_no_bwd(bias, cos_sin, &QkvRope { d, hl: 0, flags: 0 })?;
     let (nq, nk) = (d.b * d.nh * d.l * d.hd, d.b * d.nkv * d.l * d.hd);
     let q = flat.narrow(0, 0, nq)?.reshape((d.b, d.nh, d.l, d.hd))?;
     let k = flat.narrow(0, nq, nk)?.reshape((d.b, d.nkv, d.l, d.hd))?;
     let v = flat.narrow(0, nq + nk, nk)?.reshape((d.b, d.nkv, d.l, d.hd))?;
     Ok((flat, q, k, v))
+}
+
+/// [`qkv_rope`] for the tensor-core attention (CUDA): also returns the layer's K and V split into f16 hi / lo planes,
+/// `[K hi | K lo | V hi | V lo]` of `B*NKV*L*HD` each, as [`split_hilo`] of K and of V would give them. `v_lo`: write
+/// the V lo plane (not read by the attention when V is exact f16); `kv_f32`: also write K and V into the flat f32
+/// buffer (a prefix capture needs them; otherwise only its Q part is read).
+#[cfg(feature = "cuda")]
+pub fn qkv_rope_hilo(
+    qkv: &Tensor,
+    bias: &Tensor,
+    cos_sin: &Tensor,
+    d: HeadDims,
+    v_lo: bool,
+    kv_f32: bool,
+) -> Result<(Tensor, Tensor, Tensor, Tensor, Tensor)> {
+    let nk = d.b * d.nkv * d.l * d.hd;
+    // SAFETY: qkv_rope writes the K hi, K lo and V hi planes, and the V lo plane when it is read (`v_lo`).
+    let hl = unsafe { Tensor::empty((4 * nk,), DType::F16, qkv.device())? };
+    let flags = 1 | if v_lo { 2 } else { 0 } | if kv_f32 { 0 } else { 4 };
+    let flat = qkv.apply_op3_no_bwd(bias, cos_sin, &QkvRope { d, hl: device_addr_f16(&hl)?, flags })?;
+    let nq = d.b * d.nh * d.l * d.hd;
+    let q = flat.narrow(0, 0, nq)?.reshape((d.b, d.nh, d.l, d.hd))?;
+    let k = flat.narrow(0, nq, nk)?.reshape((d.b, d.nkv, d.l, d.hd))?;
+    let v = flat.narrow(0, nq + nk, nk)?.reshape((d.b, d.nkv, d.l, d.hd))?;
+    Ok((flat, q, k, v, hl))
 }
 
 #[cfg_attr(
@@ -713,12 +746,13 @@ struct AttentionTree<'a> {
     tc_kernel: &'static str,
     /// V values are exact f16 (f16 forward): the lo plane of V is zero and skipped
     v_exact: bool,
+    /// tensor-core kernels: output merged heads `[T, NH * HD]` in this dtype (f16 / bf16) instead of f32 heads
+    merged: Option<DType>,
 }
 
-/// Dynamic shared memory of attn_tree_tc: Q hi/lo `[64][136]`, K hi/lo and V hi/lo `[32][136]` (f16).
+/// Dynamic shared memory of attn_tree_tc_pipe: two stages of K and of V tiles (8 x 32 x 136 x 2); the other tensor-core
+/// kernels take half: one Q plane of up to 128 rows, then the K / V tiles (4 x 32 x 136 x 2) in the same memory.
 #[cfg(feature = "cuda")]
-// attn_tree_tc: one Q plane of 128 rows, then the K / V tiles (4 x 32 x 136 x 2) in the same memory;
-// attn_tree_tc_pipe: two stages of K and of V tiles (8 x 32 x 136 x 2)
 const TC_SMEM: usize = 8 * 32 * 136 * 2;
 
 #[cfg(feature = "cuda")]
@@ -756,11 +790,27 @@ impl CustomOp3 for AttentionTree<'_> {
         }
         let dev = qkv.device.clone();
         let qv = view!(qkv, f32, contiguous(ql, "qkv")?);
-        // SAFETY: every query of every unit is written; the units cover the token list.
-        let out = unsafe { dev.alloc::<f32>(nh * t * HD)? };
+        let n = nh * t * HD;
+        let out = match self.merged {
+            // SAFETY: every query of every unit is written; the units cover the token list.
+            None => Cs::F32(unsafe { dev.alloc::<f32>(n)? }),
+            // SAFETY: as above.
+            Some(DType::F16) => Cs::F16(unsafe { dev.alloc::<half::f16>(n)? }),
+            // SAFETY: as above.
+            Some(DType::BF16) => Cs::BF16(unsafe { dev.alloc::<half::bf16>(n)? }),
+            Some(d) => candle_core::bail!("attention_tree: merged output in {d:?}"),
+        };
+        let out_mode: u32 = match self.merged {
+            None => 0,
+            Some(DType::F16) => 1,
+            _ => 2,
+        };
         // rows per block and threads: attn_tree_tc* TC_BM / TC_THREADS, attn_tree_f32 ATT_BM / ATT_THREADS
-        let (name, bm, threads, smem) =
-            if self.tc { (self.tc_kernel, 128, 256, TC_SMEM) } else { ("attn_tree_f32", 16, 128, 0) };
+        let (name, bm, threads, smem) = match self.tc_kernel {
+            _ if !self.tc => ("attn_tree_f32", 16, 128, 0),
+            k @ "attn_tree_tc_pipe" => (k, 128, 256, TC_SMEM),
+            k => (k, 128, 256, TC_SMEM / 2),
+        };
         let f = dev.get_or_load_custom_func(name, "basal_fused", cu::ptx())?;
         if smem > 0 {
             use candle_core::cuda_backend::cudarc::driver::sys::CUfunction_attribute;
@@ -803,16 +853,17 @@ impl CustomOp3 for AttentionTree<'_> {
                     view!(khl, half::f16, contiguous(kl, "K hi/lo")?),
                     view!(vhl, half::f16, contiguous(vl, "V hi/lo")?),
                 );
-                a.arg(&qv)
-                    .arg(&kv)
-                    .arg(&vv)
-                    .arg(&out)
-                    .arg(&tab)
-                    .arg(&t_)
-                    .arg(&nh_)
-                    .arg(&nkv_)
-                    .arg(&self.scale)
-                    .arg(&vx);
+                a.arg(&qv).arg(&kv).arg(&vv);
+                match &out {
+                    Cs::F32(o) => a.arg(o),
+                    Cs::F16(o) => a.arg(o),
+                    Cs::BF16(o) => a.arg(o),
+                    _ => unreachable!("allocated above"),
+                };
+                a.arg(&tab).arg(&t_).arg(&nh_).arg(&nkv_).arg(&self.scale).arg(&vx);
+                if self.tc_kernel != "attn_tree_tc_pipe" {
+                    a.arg(&out_mode);
+                }
                 // SAFETY: argument types and counts match the kernel signature; prefix addresses are live tensors.
                 unsafe {
                     a.launch(LaunchConfig {
@@ -824,7 +875,8 @@ impl CustomOp3 for AttentionTree<'_> {
                 .w()?;
                 continue;
             }
-            a.arg(&qv).arg(&out).arg(&tab).arg(&t_).arg(&nh_).arg(&nkv_).arg(&self.scale);
+            let Cs::F32(out) = &out else { candle_core::bail!("attention_tree: the f32 kernel has f32 output") };
+            a.arg(&qv).arg(out).arg(&tab).arg(&t_).arg(&nh_).arg(&nkv_).arg(&self.scale);
             let cfg = LaunchConfig {
                 grid_dim: (tiles, nkv as u32, 1),
                 block_dim: (threads, 1, 1),
@@ -833,7 +885,8 @@ impl CustomOp3 for AttentionTree<'_> {
             // SAFETY: argument types and counts match the kernel signature; prefix addresses are live tensors.
             unsafe { a.launch(cfg) }.w()?;
         }
-        Ok((CudaStorage { slice: Cs::F32(out), device: dev }, Shape::from((1, nh, t, HD))))
+        let shape = if self.merged.is_some() { Shape::from((t, nh * HD)) } else { Shape::from((1, nh, t, HD)) };
+        Ok((CudaStorage { slice: out, device: dev }, shape))
     }
 }
 
@@ -863,7 +916,11 @@ pub fn attention_tree(
     d: HeadDims,
     scale: f32,
     tc: Option<(&Tensor, &Tensor, bool)>,
+    merge: Option<DType>,
 ) -> Result<Tensor> {
+    // the tensor-core kernels (except tc-pipe) write merged heads themselves, bitwise as merge_heads would
+    let in_kernel = merge
+        .filter(|&dt| tc.is_some() && tc_kernel() != "attn_tree_tc_pipe" && matches!(dt, DType::F16 | DType::BF16));
     let op = AttentionTree {
         units,
         total: d.l,
@@ -873,10 +930,15 @@ pub fn attention_tree(
         tc: tc.is_some(),
         tc_kernel: tc_kernel(),
         v_exact: tc.is_some_and(|t| t.2),
+        merged: in_kernel,
     };
-    match tc {
-        Some((k, v, _)) => qkv.apply_op3_no_bwd(k, v, &op),
-        None => qkv.apply_op3_no_bwd(qkv, qkv, &op),
+    let o = match tc {
+        Some((k, v, _)) => qkv.apply_op3_no_bwd(k, v, &op)?,
+        None => qkv.apply_op3_no_bwd(qkv, qkv, &op)?,
+    };
+    match merge {
+        Some(dt) if in_kernel.is_none() => merge_heads(&o, d, dt),
+        _ => Ok(o),
     }
 }
 
