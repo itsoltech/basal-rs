@@ -1,12 +1,13 @@
-//! Choice with 11..=255 options on a model whose readout covers at most 10 option letters (basal-1.0: A–J).
+//! Choice with 11..=255 options on a model whose readout covers at most 10 option letters (A–J).
 //!
-//! Strategy (a hypothesis under evaluation, see docs/SYSTEM_ONE.md): the options are asked in groups of at most
-//! `MAX_OPTIONS`, every group as an ordinary Basal question (both option orders, same state and instructions). Two
-//! balanced partitions are used, contiguous blocks and round-robin, so every option is in two groups and the groups
-//! are connected. The joint distribution is the Luce model `p = softmax(theta)` whose group-restricted softmaxes best
+//! Default strategy ([`Strategy::DEFAULT`], measured in reports/choice-sets): the options are asked in groups of at
+//! most `MAX_OPTIONS`, every group as a Basal question with the same state and instructions, in the first round in
+//! one option order. Two balanced partitions are used, contiguous blocks and round-robin, so every option is in two
+//! groups and the groups are connected. The joint distribution is the Luce model `p = softmax(theta)` whose group-restricted softmaxes best
 //! match the observed group distributions (maximum likelihood with the group distributions as soft targets; convex,
 //! solved by Newton's method). A second round asks the `MAX_OPTIONS` strongest candidates of the first fit as one
-//! group (`finalists`) and the fit is repeated with that group added. With n <= MAX_OPTIONS this path is not used.
+//! group (`finalists`, both option orders) and the fit is repeated with that group added. With n <= MAX_OPTIONS this
+//! path is not used. Other strategies ([`Strategy::parse`]) are kept for `basal eval-choice-set`.
 //!
 //! The model never sees all options at once, so its answers can depend on group composition; the result is an
 //! approximation whose quality has to be measured, not an equivalent of a single 255-way readout.
@@ -25,30 +26,48 @@ pub struct Strategy {
     /// The final group's readout decides between the finalists (their joint mass is kept); otherwise the final
     /// group is one more input of the joint fit.
     pub final_decides: bool,
+    /// Option orders of the groups before the final one: 2 (as written and reversed, as every Basal question) or
+    /// 1 (as written; half the prompts, position bias not averaged out). The final group always uses both.
+    pub screen_orders: usize,
 }
 
 impl Strategy {
     /// 0.1.x: two partitions, final group of the 10 strongest, joint refit.
-    pub const LUCE2: Strategy = Strategy { partitions: 2, keep: None, final_decides: false };
+    pub const LUCE2: Strategy = Strategy { partitions: 2, keep: None, final_decides: false, screen_orders: 2 };
+    /// The default: as [`Strategy::LUCE2`], with one option order in the first round (half its prompts; the same
+    /// accuracy on reports/choice-sets).
+    pub const DEFAULT: Strategy = Strategy { screen_orders: 1, ..Self::LUCE2 };
 
+    /// `luce2`, `luce2-final`, `luce1-final`, `knockout1`..`knockout3`, each optionally with `-1o` (one option order
+    /// before the final group).
     pub fn parse(s: &str) -> Option<Strategy> {
-        Some(match s {
-            "luce2" => Self::LUCE2,
-            "luce2-final" => Strategy { partitions: 2, keep: None, final_decides: true },
-            "luce1-final" => Strategy { partitions: 1, keep: None, final_decides: true },
-            "knockout1" => Strategy { partitions: 1, keep: Some(1), final_decides: true },
-            "knockout2" => Strategy { partitions: 1, keep: Some(2), final_decides: true },
-            "knockout3" => Strategy { partitions: 1, keep: Some(3), final_decides: true },
+        let (base, screen_orders) = match s.strip_suffix("-1o") {
+            Some(b) => (b, 1),
+            None => (s, 2),
+        };
+        let (partitions, keep, final_decides) = match base {
+            "luce2" => (2, None, false),
+            "luce2-final" => (2, None, true),
+            "luce1-final" => (1, None, true),
+            "knockout1" => (1, Some(1), true),
+            "knockout2" => (1, Some(2), true),
+            "knockout3" => (1, Some(3), true),
             _ => return None,
-        })
+        };
+        Some(Strategy { partitions, keep, final_decides, screen_orders })
     }
 
     pub fn name(&self) -> String {
-        match (self.partitions, self.keep, self.final_decides) {
+        let base = match (self.partitions, self.keep, self.final_decides) {
             (2, None, false) => "luce2".into(),
             (p, None, true) => format!("luce{p}-final"),
             (1, Some(k), true) => format!("knockout{k}"),
             (p, k, f) => format!("partitions={p} keep={k:?} final_decides={f}"),
+        };
+        if self.screen_orders == 1 {
+            base + "-1o"
+        } else {
+            base
         }
     }
 }

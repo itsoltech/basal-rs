@@ -14,6 +14,7 @@
 //!   basal serve         [--model REF]... | [--config FILE]             HTTP server (default: ./basal-serve.yml)
 
 mod bench;
+mod choice_set;
 mod compare;
 mod config;
 mod doctor;
@@ -69,8 +70,18 @@ pub fn cuda_command(bin: &Path) -> std::process::Command {
 #[cfg(all(target_os = "linux", not(feature = "cuda")))]
 fn delegate_gpu_command() {
     use std::os::unix::process::CommandExt;
-    const GPU: [&str; 9] =
-        ["decide", "export", "bench-requests", "eval-large-choice", "profile", "serve", "gemm-search", "gemm", "bench"];
+    const GPU: [&str; 10] = [
+        "decide",
+        "export",
+        "bench-requests",
+        "eval-large-choice",
+        "eval-choice-set",
+        "profile",
+        "serve",
+        "gemm-search",
+        "gemm",
+        "bench",
+    ];
     let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
     if !args.get(1).and_then(|a| a.to_str()).is_some_and(|c| GPU.contains(&c)) {
         return;
@@ -198,6 +209,24 @@ enum Cmd {
         batching: String,
     },
     /// Evaluate the grouped 11..255 choice strategy on reference items with added distractor options
+    /// Choice questions with more than 10 options from a labelled set (tools/choice-sets), with each grouped strategy
+    EvalChoiceSet {
+        #[command(flatten)]
+        m: ModelArgs,
+        #[command(flatten)]
+        g: GpuArgs,
+        /// JSONL: id, dataset, state, question, options, gold (index)
+        #[arg(long)]
+        set: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        /// Strategies, e.g. luce2-1o,luce1-final,knockout1-1o
+        #[arg(long, value_delimiter = ',', default_value = "luce2-1o")]
+        strategies: Vec<String>,
+        /// First N questions only
+        #[arg(long)]
+        limit: Option<usize>,
+    },
     EvalLargeChoice {
         #[command(flatten)]
         m: ModelArgs,
@@ -214,8 +243,9 @@ enum Cmd {
         /// Fraction of wall time the GPU computes: after each question sleep `t * (1 / duty - 1)` (limits heat)
         #[arg(long, default_value_t = 1.0)]
         duty: f64,
-        /// Strategy for more than 10 options: luce2, luce2-final, luce1-final, knockout1, knockout2, knockout3
-        #[arg(long, default_value = "luce2")]
+        /// Strategy for more than 10 options: luce2, luce2-final, luce1-final, knockout1, knockout2, knockout3, each
+        /// also with -1o (one option order before the final group); the default of the server is luce2-1o
+        #[arg(long, default_value = "luce2-1o")]
         strategy: String,
     },
     /// Per-section forward profile on reference items (synchronises after every section; diagnostic)
@@ -577,6 +607,10 @@ fn run() -> Result<()> {
             r["state_cache"] =
                 json!({"hits": engine.backend.state_cache_hits, "inserts": engine.backend.state_cache_inserts});
             write_json(&out, &r)?;
+        }
+        Cmd::EvalChoiceSet { m, g, set, out, strategies, limit } => {
+            let mut engine = gpu_engine(&m, &g)?;
+            choice_set::eval(&mut engine, &set, &strategies, limit, &out)?;
         }
         Cmd::EvalLargeChoice { m, g, reference, out, sizes, seeds, duty, strategy } => {
             let mut engine = gpu_engine(&m, &g)?;

@@ -127,7 +127,7 @@ impl<B: Backend> Engine<B> {
             tree_max_tokens: TREE_MAX_TOKENS,
             forward_max_tokens: FORWARD_MAX_TOKENS,
             large_choice: true,
-            large_choice_strategy: crate::large_choice::Strategy::LUCE2,
+            large_choice_strategy: crate::large_choice::Strategy::DEFAULT,
         })
     }
 
@@ -158,7 +158,17 @@ impl<B: Backend> Engine<B> {
     }
 
     pub fn prepare(&self, item: Item) -> Result<Prepared> {
+        self.prepare_orders(item, 2)
+    }
+
+    /// [`Engine::prepare`] with the first `orders` option orders only (1: as written; a screening group of a large
+    /// choice).
+    pub fn prepare_orders(&self, item: Item, orders: usize) -> Result<Prepared> {
         let mut p = prepare(&self.tok, &self.manifest.bos_token, item)?;
+        if orders < p.orders.len() {
+            p.orders.truncate(orders);
+            p.packed = pack(&p.orders.iter().map(|o| o.input_ids.clone()).collect::<Vec<_>>());
+        }
         if self.mark_state {
             p.state_len = self.state_len(&p)?;
             p.packed.state_len = p.state_len.min(p.packed.prefix_len);
@@ -358,7 +368,7 @@ impl<B: Backend> Engine<B> {
                     sub.keys = g.iter().map(|&i| it.keys[i].clone()).collect();
                     sub.options = g.iter().map(|&i| it.options[i].clone()).collect();
                     parts.push(plan.prepared.len());
-                    plan.prepared.push(self.prepare(sub)?);
+                    plan.prepared.push(self.prepare_orders(sub, self.large_choice_strategy.screen_orders)?);
                 }
                 plan.questions.push(QuestionPlan::Groups { item: it, groups, parts });
             }
@@ -426,7 +436,7 @@ impl<B: Backend> Engine<B> {
                     let mut sub = l.item.clone();
                     sub.keys = g.iter().map(|&i| l.item.keys[i].clone()).collect();
                     sub.options = g.iter().map(|&i| l.item.options[i].clone()).collect();
-                    prep.push(self.prepare(sub)?);
+                    prep.push(self.prepare_orders(sub, if last { 2 } else { strategy.screen_orders })?);
                     owners.push((li, g, last));
                 }
             }

@@ -91,10 +91,9 @@ Docker: [niżej](#uruchomienie-w-dockerze). Wymagania, ścieżki i szczegóły:
 Typy pytań: `choice` (2–10 opcji oraz 11–255 przybliżoną strategią grupową), `noul`,
 `score`, a z basal-1.5 także `multi`, `act`, `facts: "auto"` i `evidence`.
 Strategia dla ponad 10 opcji jest rozszerzeniem runtime'u, ocenianym osobno od
-zgodności z upstream ([basal-1.5](reports/large-choice-1.5/README.md),
-[basal-1.0](reports/large-choice/README.md)): na basal-1.5-4.5B i max przy
-11–20 opcjach trafność równa pytaniu z samymi właściwymi opcjami, przy 100
-opcjach niższa o 9–10 z 60 pytań.
+zgodności z upstream: na zbiorach intencji z 59–150 opcjami basal-1.5-max
+odpowiada poprawnie na 156, 182 i 157 z 200 pytań, TypeSafe jev na 159, 185 i
+159 ([pomiar](reports/choice-sets/README.md)).
 
 ## Wyniki
 

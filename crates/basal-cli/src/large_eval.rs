@@ -88,7 +88,7 @@ impl Rng {
     }
 }
 
-fn choice_item(name: String, state: &str, question: &str, options: Vec<String>) -> Item {
+pub(crate) fn choice_item(name: String, state: &str, question: &str, options: Vec<String>) -> Item {
     Item {
         name,
         kind: QType::Choice,
@@ -106,16 +106,16 @@ fn choice_item(name: String, state: &str, question: &str, options: Vec<String>) 
 
 /// One answered question: final distribution, prompts of all rounds, packed tokens of the first round, time and the
 /// final group of a grouped large choice.
-struct Answered {
-    p: Vec<f64>,
-    prompts: usize,
-    tokens: usize,
-    ms: f64,
-    finalists: Option<Vec<usize>>,
+pub(crate) struct Answered {
+    pub(crate) p: Vec<f64>,
+    pub(crate) prompts: usize,
+    pub(crate) tokens: usize,
+    pub(crate) ms: f64,
+    pub(crate) finalists: Option<Vec<usize>>,
 }
 
 /// Run planned items one by one (each item = one shared-prefix tree forward per round) and return the answer.
-fn answer<B: Backend>(engine: &mut Engine<B>, item: Item, duty: f64) -> Result<Answered> {
+pub(crate) fn answer<B: Backend>(engine: &mut Engine<B>, item: Item, duty: f64) -> Result<Answered> {
     let t = Instant::now();
     let plan = engine.plan_items(vec![item])?;
     let mut out = engine.run_plan(&plan)?;

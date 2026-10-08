@@ -1,0 +1,9 @@
+basal: basal-1.5-4.5B loaded on the GPU in 13.0s
+basal: 100 GEMM classes from .cache/gemm/basal-1.5-4.5B-f16.json
+basal: template prefixes precomputed ([53, 66] tokens)
+luce2: {"banking77":0.735,"clinc150":0.87,"massive-pl":0.765}
+luce1-final: {"banking77":0.75,"clinc150":0.875,"massive-pl":0.73}
+knockout1: {"banking77":0.755,"clinc150":0.865,"massive-pl":0.735}
+knockout2: {"banking77":0.755,"clinc150":0.875,"massive-pl":0.735}
+luce1-final-1o: {"banking77":0.75,"clinc150":0.86,"massive-pl":0.74}
+knockout1-1o: {"banking77":0.77,"clinc150":0.845,"massive-pl":0.72}

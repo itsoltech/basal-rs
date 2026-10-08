@@ -112,11 +112,14 @@ mierzono.
 
 Opcje dzielone są dwa razy na `ceil(n/10)` grup: blokami i cyklicznie, więc
 każda opcja jest w dwóch grupach, a graf grup jest spójny. Każda grupa to
-zwykłe pytanie basal (oba porządki, jedno drzewo ze wspólnym stanem). Wspólny
-rozkład to model Luce `softmax(theta)` dopasowany metodą największej
+pytanie basal w jednej kolejności opcji (jedno drzewo ze wspólnym stanem).
+Wspólny rozkład to model Luce `softmax(theta)` dopasowany metodą największej
 wiarygodności do rozkładów grup, uzupełniony rundą finałową z 10 najlepszymi
-opcjami. To przybliżenie (model nie widzi wszystkich opcji naraz); ocena w
-[reports/large-choice](../reports/large-choice/README.md).
+opcjami w obu kolejnościach. To przybliżenie (model nie widzi wszystkich
+opcji naraz); ocena na zbiorach z etykietami i porównanie z TypeSafe w
+[reports/choice-sets](../reports/choice-sets/README.md), wcześniejsze w
+[reports/large-choice-1.5](../reports/large-choice-1.5/README.md). Inne
+strategie (`basal eval-choice-set --strategies`) służą do porównań.
 
 ## Serwer
 
