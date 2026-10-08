@@ -400,8 +400,8 @@ impl Lt {
         };
         let mut ids = vec![0i32; 128];
         let mut nids = 0;
-        // SAFETY: the handle is valid and ids/nids provide initialized output storage for the requested count.
         st(
+            // SAFETY: the handle is valid and ids/nids provide initialized output storage for the requested count.
             unsafe {
                 sys::cublasLtMatmulAlgoGetIds(self.handle, ct, st32, t, t, t, t, 128, ids.as_mut_ptr(), &mut nids)
             },
@@ -659,9 +659,10 @@ impl Lt {
                         Mode::Plain => 0,
                         Mode::Search(c) => *c,
                         Mode::Invariant(c, classes) => {
-                            // SAFETY: x holds m >= max(classes) rows, w holds c copies, y holds m*n elements.
-                            let (per_class, ncand) =
-                                unsafe { self.invariant_search(n, k, dt, wp, *c, w_bytes, xp, yp, classes, &stream)? };
+                            let (per_class, ncand) = {
+                                // SAFETY: x holds m >= max(classes) rows, w holds c copies, y holds m*n elements.
+                                unsafe { self.invariant_search(n, k, dt, wp, *c, w_bytes, xp, yp, classes, &stream)? }
+                            };
                             let mut tuned = self.tuned.lock().unwrap();
                             let mut list = Vec::new();
                             for (&mc, (a, ms, best)) in classes.iter().zip(per_class) {
