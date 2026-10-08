@@ -323,9 +323,13 @@ Jeden model bez pliku konfiguracji:
 | `POST /v1/basal` | konwencje `Server.decide` upstream v1.5.0: walidacja `to_items`, `confidence = max(p)`, błędy jako 422 `{"error"}` |
 | `GET /v1/models` | lista modeli TypeSafe z polami upstream `mode` i `early_exit` |
 | `GET /health` | gotowość |
+| `GET /metrics` | metryki Prometheus: żądania, opóźnienia, tokeny, kolejka i partie, z podziałem na modele |
 
 Odpowiedzi mają nagłówki `x-basal-queue-ms`, `x-basal-compute-ms` i
 `x-basal-batch-requests`.
+
+Metryki są dostępne automatycznie na tym samym porcie. Konfiguracja Prometheusa,
+definicje liczników oraz zapytania p50/p99: [Observability](docs/OBSERVABILITY.md).
 
 ```sh
 curl --fail-with-body localhost:8000/v1/systemone -H 'content-type: application/json' -d '{

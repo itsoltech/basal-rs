@@ -23,6 +23,7 @@ hf-hub = { version = "1", features = ["blocking", "rustls-tls"] }
 clap.workspace = true
 tokio.workspace = true
 axum.workspace = true
+prometheus = { version = "0.14", default-features = false }
 # HTTP (doctor: Hugging Face Hub) and system calls; the versions hf-hub already brings
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 libc = "0.2"

@@ -156,6 +156,21 @@ między warstwami, więc krótkie partie dowolnego modelu wyprzedzają długie
 jest i tak ograniczone mocą, a kolejność decyduje harmonogram zamiast
 sterownika.
 
+### Metryki Prometheus
+
+`GET /metrics` eksportuje prywatny rejestr procesu w formacie tekstowym Prometheus
+0.0.4 (`basal-cli/src/serve/metrics.rs`). Middleware obejmuje wyłącznie trasy
+inferencji: mierzy czas od wejścia przed odczytem body do zbudowania odpowiedzi,
+liczy statusy i aktywne handlery. Handler po parsowaniu przypisuje etykietę modelu
+z listy obsługiwanych modeli; pozostałe żądania mają pustą etykietę.
+
+Tory `main` i `long` mają uchwyty do histogramów kolejki i partii. Czas partii
+jest obserwowany raz, a czas kolejki osobno dla każdego żądania uruchomionej
+partii. Liczniki tokenów i pytań sumują `usage` poprawnie zbudowanych odpowiedzi
+na wątku modelu, również gdy klient już nie czeka. Rejestr nie odczytuje GPU;
+scrape nie przechodzi przez kolejkę inferencji. Szczegółowa semantyka i PromQL:
+[Observability](OBSERVABILITY.md).
+
 ## Ograniczenia
 
 - Score powyżej 10 poziomów i pytania z jedną opcją kończą się jawnym błędem.
