@@ -53,6 +53,9 @@ pub struct ServeConfig {
     /// `BASAL_ACCESS_LOG=1`.
     #[serde(default)]
     pub access_log: bool,
+    /// Collect and expose Prometheus metrics at GET /metrics; disabled unless explicitly enabled.
+    #[serde(default)]
+    pub metrics: bool,
     /// Directory of the GEMM tables of `gemm_table: auto`.
     #[serde(default = "default_gemm_cache")]
     pub gemm_cache: PathBuf,
@@ -253,7 +256,8 @@ pub fn template(models: &[ModelConfig]) -> String {
          # Models are downloaded from Hugging Face at the first start (HF_HOME, HF_TOKEN for private ones).\n\n\
          addr: 127.0.0.1:8000             # 0.0.0.0:8000 to serve other machines\n\
          # default_model: basal-1.5-4.5B  # /v1/basal requests without \"model\" (default: the first model)\n\
-         # access_log: true               # one log line per request\n\n\
+         # access_log: true               # one log line per request\n\
+         # metrics: true                  # enable Prometheus at /metrics (default: false)\n\n\
          models:\n",
     );
     for m in models {

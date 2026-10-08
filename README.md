@@ -323,9 +323,15 @@ Jeden model bez pliku konfiguracji:
 | `POST /v1/basal` | konwencje `Server.decide` upstream v1.5.0: walidacja `to_items`, `confidence = max(p)`, błędy jako 422 `{"error"}` |
 | `GET /v1/models` | lista modeli TypeSafe z polami upstream `mode` i `early_exit` |
 | `GET /health` | gotowość |
+| `GET /metrics` | opcjonalne metryki Prometheus: żądania, opóźnienia, tokeny, kolejka i partie, z podziałem na modele |
 
 Odpowiedzi mają nagłówki `x-basal-queue-ms`, `x-basal-compute-ms` i
 `x-basal-batch-requests`.
+
+Metryki są domyślnie wyłączone. Włącza je `basal serve --metrics` albo
+`metrics: true` w `basal-serve.yml`; endpoint działa na tym samym porcie co API.
+Konfiguracja Prometheusa,
+definicje liczników oraz zapytania p50/p99: [Observability](docs/OBSERVABILITY.md).
 
 ```sh
 curl --fail-with-body localhost:8000/v1/systemone -H 'content-type: application/json' -d '{
@@ -357,7 +363,8 @@ Opcje procesu: `addr` (nadpisywany przez zmienną `BASAL_ADDR`; w obrazie
 `0.0.0.0:8000`), `default_model`, `max_inflight` (1024, limit żądań w
 kolejce i w trakcie wszystkich modeli; nadmiar dostaje 529 z `Retry-After`), `long_slice_ms`
 (100, minimalny czas pracy toru długich żądań między oddaniami GPU),
-`gemm_cache` (`.cache/gemm`).
+`gemm_cache` (`.cache/gemm`), `metrics` (`false`; zbieranie metryk i endpoint
+Prometheus, włączane także flagą `--metrics`).
 
 Tabela GEMM ustala algorytmy cuBLASLt tak, by wynik pytania nie zależał od
 partii: dla każdej klasy liczby wierszy najszybszy algorytm z grupy
