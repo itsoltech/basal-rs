@@ -79,6 +79,17 @@ Anulowane żądania nie trafiają do histogramu opóźnienia. Pomiar HTTP obejmu
 odczyt body, parsowanie, walidację, planowanie, oczekiwanie, obliczenia i
 serializację JSON; nie obejmuje wysyłania odpowiedzi po sieci do klienta.
 
+Prompt dłuższy niż kontekst modelu wątek modelu odrzuca już podczas planowania
+żądania (`Engine::plan_request_as`, kontrola `check_context`), zanim żądanie
+trafi do kolejki partii. Oba API odpowiadają 422: `/v1/systemone` błędem typu
+`context_length_exceeded` w `detail`, `/v1/basal` polem `error` z komunikatem
+„maximum context length”. Takie żądanie zwiększa `basal_http_requests_total` i
+trafia do `basal_http_request_duration_seconds` z etykietą modelu, do którego
+zostało skierowane, oraz `status="422"`. Nie zwiększa liczników tokenów ani
+pytań i nie trafia do histogramów kolejki ani partii. Metryki nie rozróżniają
+przyczyn statusu 422: ten sam status mają błędy walidacji i inne żądania
+nieobsługiwane przez model, a przyczynę podaje tylko treść odpowiedzi.
+
 Gauge modelu zwalnia miejsce także po porzuceniu handlera. Obliczenia już
 uruchomione na GPU mogą wówczas nadal trwać. Jest to liczba oczekujących
 handlerów, a nie pomiar zajętości GPU ani dokładnej długości kolejki.
@@ -126,6 +137,27 @@ Histogramy czasu mają granice od 1 ms do 600 s oraz `+Inf`:
 0.75, 1, 1.5, 2, 3, 5, 7.5, 10, 15, 20, 30, 45, 60, 90, 120, 180, 300, 600`.
 Histogram wielkości partii: `1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, +Inf`.
 Każdy histogram eksportuje `_bucket`, `_sum` i `_count`.
+
+## Start serwera
+
+Metryki nie obejmują startu. `basal serve` przed otwarciem portu wybiera
+konfigurację, odnajduje lub pobiera pliki modeli, dla każdego modelu ustala
+tabelę GEMM (z `gemm_cache`, tabelę wbudowaną w binarkę CUDA po sprawdzeniu
+przez cuBLASLt albo nowe wyszukiwanie, jednorazowo do kilkudziesięciu minut),
+wczytuje wagi, przygotowuje silnik i sprawdza, czy tabela obejmuje kształty wag
+modelu. Rejestr metryk powstaje dopiero potem, w `serve::serve`, przed
+uruchomieniem wątków modeli (z drugim silnikiem toru `long`) i otwarciem portu.
+Żadna metryka nie mierzy tych etapów ani uruchomienia wątków; ich czas jest
+widoczny w logu:
+`GEMM table done in … s` (wyszukiwanie), `loaded on the GPU in …s` oraz
+`serving on … (ready … s after the start)`. Do otwarcia portu `/health` i
+`/metrics` nie odpowiadają.
+
+Nie dotyczy to wykonywania GEMM podczas inferencji. Mnożenia macierzy są
+częścią forwardów, więc ich czas wchodzi do `basal_batch_duration_seconds` i do
+czasu żądania HTTP. Przy `gemm_table: none` (CUDA) pierwsze wywołanie danej
+klasy liczby wierszy mierzy kandydatów cuBLASLt w trakcie partii, więc pierwsze
+partie po starcie mogą być dłuższe.
 
 ## Zapytania PromQL do Grafany lub Prometheusa
 
