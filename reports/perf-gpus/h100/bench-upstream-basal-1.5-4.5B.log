@@ -1,0 +1,5 @@
+Loading weights:   0%|          | 0/963 [00:00<?, ?it/s]Loading weights: 100%|██████████| 963/963 [00:00<00:00, 19840.53it/s]
+{"mode": "fast", "reference_mode": "fast", "gpu": "NVIDIA H100 80GB HBM3", "n": 44, "load_s": 255.0, "lat1_ms": 9.387, "lat2_ms": 9.785, "lat2_p95_ms": 11.873, "dec_s": 144.14, "mem_gb": 12.94, "acc": 0.795}
+
+mode                lat2 ms  lat1 ms   dec/s   agree    acc    GB
+fast                    9.8      9.4   144.1     nan  0.795  12.9

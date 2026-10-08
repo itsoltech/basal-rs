@@ -1,0 +1,5 @@
+Loading weights:   0%|          | 0/963 [00:00<?, ?it/s]Loading weights:  48%|████▊     | 461/963 [00:00<00:00, 4566.19it/s]Loading weights:  95%|█████████▌| 918/963 [00:00<00:00, 4168.76it/s]Loading weights: 100%|██████████| 963/963 [00:00<00:00, 4321.96it/s]
+{"mode": "fast", "reference_mode": "fast", "gpu": "NVIDIA A100-SXM4-80GB", "n": 44, "load_s": 341.8, "lat1_ms": 18.173, "lat2_ms": 19.836, "lat2_p95_ms": 27.382, "dec_s": 62.525, "mem_gb": 12.193, "acc": 0.795}
+
+mode                lat2 ms  lat1 ms   dec/s   agree    acc    GB
+fast                   19.8     18.2    62.5     nan  0.795  12.2

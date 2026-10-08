@@ -1,0 +1,5 @@
+Loading weights:   0%|          | 0/453 [00:00<?, ?it/s]Loading weights:  58%|█████▊    | 263/453 [00:00<00:00, 2628.17it/s]Loading weights: 100%|██████████| 453/453 [00:00<00:00, 2657.16it/s]
+{"mode": "fast", "reference_mode": "fast", "gpu": "NVIDIA RTX A6000", "n": 44, "load_s": 612.3, "lat1_ms": 61.623, "lat2_ms": 78.014, "lat2_p95_ms": 101.828, "dec_s": 14.118, "mem_gb": 25.491, "acc": 0.818}
+
+mode                lat2 ms  lat1 ms   dec/s   agree    acc    GB
+fast                   78.0     61.6    14.1     nan  0.818  25.5

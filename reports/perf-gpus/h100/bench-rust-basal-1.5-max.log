@@ -1,0 +1,4 @@
+basal: basal-1.5-max loaded on the GPU in 31.4s
+basal: 100 GEMM classes from /data/basal/.cache/gemm/basal-1.5-max-f16.json
+basal: template prefixes precomputed ([53, 66] tokens)
+lat2 median 17.5 ms, p95 18.1 ms, lat1 14.8 ms, 98.283 dec/s, acc 0.8181818181818182, GEMM probe {"before":481.25414835250353,"after":453.21101591631543}

@@ -1,0 +1,5 @@
+Loading weights:   0%|          | 0/515 [00:00<?, ?it/s]Loading weights: 100%|██████████| 515/515 [00:00<00:00, 11986.05it/s]
+{"mode": "fast", "reference_mode": "fast", "gpu": "NVIDIA L40S", "n": 44, "load_s": 142.4, "lat1_ms": 7.733, "lat2_ms": 8.347, "lat2_p95_ms": 9.284, "dec_s": 149.579, "mem_gb": 5.656, "acc": 0.705}
+
+mode                lat2 ms  lat1 ms   dec/s   agree    acc    GB
+fast                    8.3      7.7   149.6     nan  0.705   5.7
