@@ -90,8 +90,11 @@ Docker: [niżej](#uruchomienie-w-dockerze). Wymagania, ścieżki i szczegóły:
 
 Typy pytań: `choice` (2–10 opcji oraz 11–255 przybliżoną strategią grupową), `noul`,
 `score`, a z basal-1.5 także `multi`, `act`, `facts: "auto"` i `evidence`.
-Strategia dla ponad 10 opcji jest rozszerzeniem runtime'u;
-[jej ewaluacja](reports/large-choice/README.md) jest osobna od zgodności z upstream.
+Strategia dla ponad 10 opcji jest rozszerzeniem runtime'u, ocenianym osobno od
+zgodności z upstream ([basal-1.5](reports/large-choice-1.5/README.md),
+[basal-1.0](reports/large-choice/README.md)): na basal-1.5-4.5B i max przy
+11–20 opcjach trafność równa pytaniu z samymi właściwymi opcjami, przy 100
+opcjach niższa o 9–10 z 60 pytań.
 
 ## Wyniki
 

@@ -54,6 +54,7 @@ Metodyka: [docs/BENCHMARKS.md](../docs/BENCHMARKS.md).
 
 | Katalog | Zawartość |
 |---|---|
+| [large-choice-1.5](large-choice-1.5/README.md) | Choice 11–255 (strategia grupowa) na basal-1.5 mini, 4.5B i max, Metal M2 Max |
 | [typesafe-api-edge-cases](typesafe-api-edge-cases/README.md) | /v1/systemone wobec API TypeSafe: 38 przypadków brzegowych, statusy i błędy, SDK |
 
 ## basal-1.0-4.5B

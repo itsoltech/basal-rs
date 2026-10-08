@@ -108,6 +108,8 @@ pub struct Engine<B: Backend> {
     pub forward_max_tokens: usize,
     /// Answer choice questions with 11..=255 options by the grouped strategy (`crate::large_choice`).
     pub large_choice: bool,
+    /// Rounds and answer of the grouped strategy.
+    pub large_choice_strategy: crate::large_choice::Strategy,
 }
 
 impl<B: Backend> Engine<B> {
@@ -125,6 +127,7 @@ impl<B: Backend> Engine<B> {
             tree_max_tokens: TREE_MAX_TOKENS,
             forward_max_tokens: FORWARD_MAX_TOKENS,
             large_choice: true,
+            large_choice_strategy: crate::large_choice::Strategy::LUCE2,
         })
     }
 
@@ -136,6 +139,7 @@ impl<B: Backend> Engine<B> {
         e.tree_max_tokens = self.tree_max_tokens;
         e.forward_max_tokens = self.forward_max_tokens;
         e.large_choice = self.large_choice;
+        e.large_choice_strategy = self.large_choice_strategy;
         Ok(e)
     }
 
@@ -347,7 +351,7 @@ impl<B: Backend> Engine<B> {
                 plan.questions.push(QuestionPlan::Direct(plan.prepared.len()));
                 plan.prepared.push(self.prepare(it)?);
             } else {
-                let groups = crate::large_choice::groups(it.options.len());
+                let groups = crate::large_choice::groups(it.options.len(), self.large_choice_strategy.partitions);
                 let mut parts = Vec::with_capacity(groups.len());
                 for g in &groups {
                     let mut sub = it.clone();
@@ -388,31 +392,75 @@ impl<B: Backend> Engine<B> {
             all.extend(p.prepared.iter().cloned());
         }
         let results = self.run(&all, self.request_batching)?;
-        // first-round fits and final groups
-        let mut finals_prep = Vec::new();
-        let mut fits = Vec::new();
+        // grouped large choices: further rounds until each has asked its final group; the questions of all plans
+        // share the forwards of a round
+        let strategy = self.large_choice_strategy;
+        let mut large: Vec<Large> = Vec::new();
         for (plan, &off) in plans.iter().zip(&offs) {
             for q in &plan.questions {
                 if let QuestionPlan::Groups { item, groups, parts } = q {
-                    let targets: Vec<Vec<f64>> = parts.iter().map(|&i| results[off + i].p_avg.clone()).collect();
-                    let first = crate::large_choice::fit_joint(item.options.len(), groups, &targets);
-                    let fin = crate::large_choice::finalists(&first);
-                    let mut sub = item.clone();
-                    sub.keys = fin.iter().map(|&i| item.keys[i].clone()).collect();
-                    sub.options = fin.iter().map(|&i| item.options[i].clone()).collect();
-                    finals_prep.push(self.prepare(sub)?);
-                    fits.push((targets, fin));
+                    large.push(Large {
+                        item: item.clone(),
+                        groups: groups.clone(),
+                        targets: parts.iter().map(|&i| results[off + i].p_avg.clone()).collect(),
+                        last: (0..groups.len()).collect(),
+                        finalists: None,
+                        final_p: vec![],
+                        tokens: 0,
+                        prompts: 0,
+                    });
                 }
             }
         }
-        let final_results =
-            if finals_prep.is_empty() { vec![] } else { self.run(&finals_prep, self.request_batching)? };
-        let mut fi = 0;
+        loop {
+            let mut prep = Vec::new();
+            let mut owners = Vec::new();
+            for (li, l) in large.iter().enumerate().filter(|(_, l)| l.finalists.is_none()) {
+                let n = l.item.options.len();
+                let (round, last) = match crate::large_choice::next_round(&strategy, n, &l.groups, &l.targets, &l.last)
+                {
+                    crate::large_choice::Round::Final(f) => (vec![f], true),
+                    crate::large_choice::Round::Groups(g) => (g, false),
+                };
+                for g in round {
+                    let mut sub = l.item.clone();
+                    sub.keys = g.iter().map(|&i| l.item.keys[i].clone()).collect();
+                    sub.options = g.iter().map(|&i| l.item.options[i].clone()).collect();
+                    prep.push(self.prepare(sub)?);
+                    owners.push((li, g, last));
+                }
+            }
+            if prep.is_empty() {
+                break;
+            }
+            let res = self.run(&prep, self.request_batching)?;
+            for l in large.iter_mut() {
+                if l.finalists.is_none() {
+                    l.last.clear();
+                }
+            }
+            for (((li, g, last), r), p) in owners.into_iter().zip(res).zip(&prep) {
+                let l = &mut large[li];
+                l.tokens += p.orders.iter().map(|o| o.input_ids.len()).sum::<usize>();
+                l.prompts += p.orders.len();
+                l.last.push(l.groups.len());
+                if last {
+                    l.finalists = Some(g.clone());
+                    l.final_p = r.p_cal.clone();
+                }
+                l.groups.push(g);
+                l.targets.push(r.p_avg);
+            }
+        }
+        let mut li = 0;
         let mut outs = Vec::with_capacity(plans.len());
         for (plan, &off) in plans.iter().zip(&offs) {
             let mut finals = Vec::with_capacity(plan.questions.len());
             let mut final_round_tokens = 0;
+            let mut extra_prompts = 0;
+            let mut finalists = Vec::with_capacity(plan.questions.len());
             for q in &plan.questions {
+                let mut fin = None;
                 match q {
                     QuestionPlan::Direct(i) => {
                         finals.push((plan.prepared[*i].item.clone(), results[off + *i].p_cal.clone()))
@@ -421,23 +469,33 @@ impl<B: Backend> Engine<B> {
                     QuestionPlan::Multi { item, parts } => {
                         finals.push((item.clone(), parts.iter().map(|&i| results[off + i].p_cal[0]).collect()))
                     }
-                    QuestionPlan::Groups { item, groups, .. } => {
-                        let (mut targets, fin) = fits[fi].clone();
-                        let mut all_groups = groups.clone();
-                        all_groups.push(fin);
-                        targets.push(final_results[fi].p_avg.clone());
-                        final_round_tokens += finals_prep[fi].orders.iter().map(|o| o.input_ids.len()).sum::<usize>();
-                        fi += 1;
-                        let joint = crate::large_choice::fit_joint(item.options.len(), &all_groups, &targets);
-                        finals.push((item.clone(), calibrate(&joint, self.manifest.temperature(item.temp_kind()))));
+                    QuestionPlan::Groups { item, .. } => {
+                        let l = &large[li];
+                        li += 1;
+                        final_round_tokens += l.tokens;
+                        extra_prompts += l.prompts;
+                        let f = l.finalists.clone().unwrap_or_default();
+                        let t = self.manifest.temperature(item.temp_kind());
+                        let p = crate::large_choice::answer(
+                            &strategy,
+                            item.options.len(),
+                            &l.groups,
+                            &l.targets,
+                            &f,
+                            &l.final_p,
+                            |x| calibrate(x, t),
+                        );
+                        fin = Some(f);
+                        finals.push((item.clone(), p));
                     }
                 }
+                finalists.push(fin);
             }
             let mut evidence = Vec::with_capacity(finals.len());
             for (item, _) in &finals {
                 evidence.push(if item.evidence { Some(self.evidence_for(item, plan.evidence_limit)?) } else { None });
             }
-            outs.push(PlanOutput { finals, final_round_tokens, evidence });
+            outs.push(PlanOutput { finals, final_round_tokens, extra_prompts, finalists, evidence });
         }
         Ok(outs)
     }
@@ -520,11 +578,28 @@ pub fn prepare(tok: &BasalTokenizer, bos: &str, item: Item) -> Result<Prepared> 
     Ok(Prepared { item, orders, packed, state_len: 0 })
 }
 
-/// Answers of a planned request: final distribution per question, and the prompt tokens of the final round of
-/// grouped large choices (counted in `usage.input_tokens`).
+/// A grouped large choice between rounds: the groups asked so far with their distributions (`p_avg`), the groups of
+/// the latest round, and the final group with its calibrated readout once asked.
+struct Large {
+    item: Item,
+    groups: Vec<Vec<usize>>,
+    targets: Vec<Vec<f64>>,
+    last: Vec<usize>,
+    finalists: Option<Vec<usize>>,
+    final_p: Vec<f64>,
+    tokens: usize,
+    prompts: usize,
+}
+
+/// Answers of a planned request: final distribution per question, and the prompt tokens of the rounds after the
+/// first of grouped large choices (counted in `usage.input_tokens`).
 pub struct PlanOutput {
     pub finals: Vec<(Item, Vec<f64>)>,
     pub final_round_tokens: usize,
+    /// Prompts of the rounds after the first (grouped large choices).
+    pub extra_prompts: usize,
+    /// Final group of each grouped large choice (same order as `finals`).
+    pub finalists: Vec<Option<Vec<usize>>>,
     /// Evidence spans per question (same order as `finals`), for questions that asked for them.
     pub evidence: Vec<Option<Value>>,
 }

@@ -13,22 +13,120 @@
 
 use crate::prompt::MAX_OPTIONS;
 
-/// Groups (indices into the options) for `n > MAX_OPTIONS` options: two balanced partitions with
-/// `g = ceil(n / MAX_OPTIONS)` groups each, contiguous blocks and round-robin.
-pub fn groups(n: usize) -> Vec<Vec<usize>> {
-    let g = n.div_ceil(MAX_OPTIONS);
-    let mut out = Vec::with_capacity(2 * g);
-    let (base, extra) = (n / g, n % g);
-    let mut start = 0;
-    for k in 0..g {
-        let len = base + usize::from(k < extra);
-        out.push((start..start + len).collect());
-        start += len;
+/// How the rounds of a large choice are built and the answer is read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Strategy {
+    /// Partitions of the first round: 1 (contiguous blocks) or 2 (also round-robin, every option in two groups).
+    pub partitions: usize,
+    /// Knockout: after each round the `keep` best options of every group of that round (at least; more when few
+    /// groups remain) go on, until at most `MAX_OPTIONS` are left for the final group. `None`: one final group of
+    /// the `MAX_OPTIONS` strongest options of the first-round fit.
+    pub keep: Option<usize>,
+    /// The final group's readout decides between the finalists (their joint mass is kept); otherwise the final
+    /// group is one more input of the joint fit.
+    pub final_decides: bool,
+}
+
+impl Strategy {
+    /// 0.1.x: two partitions, final group of the 10 strongest, joint refit.
+    pub const LUCE2: Strategy = Strategy { partitions: 2, keep: None, final_decides: false };
+
+    pub fn parse(s: &str) -> Option<Strategy> {
+        Some(match s {
+            "luce2" => Self::LUCE2,
+            "luce2-final" => Strategy { partitions: 2, keep: None, final_decides: true },
+            "luce1-final" => Strategy { partitions: 1, keep: None, final_decides: true },
+            "knockout1" => Strategy { partitions: 1, keep: Some(1), final_decides: true },
+            "knockout2" => Strategy { partitions: 1, keep: Some(2), final_decides: true },
+            "knockout3" => Strategy { partitions: 1, keep: Some(3), final_decides: true },
+            _ => return None,
+        })
     }
-    for k in 0..g {
-        out.push((k..n).step_by(g).collect());
+
+    pub fn name(&self) -> String {
+        match (self.partitions, self.keep, self.final_decides) {
+            (2, None, false) => "luce2".into(),
+            (p, None, true) => format!("luce{p}-final"),
+            (1, Some(k), true) => format!("knockout{k}"),
+            (p, k, f) => format!("partitions={p} keep={k:?} final_decides={f}"),
+        }
+    }
+}
+
+/// Indices `0..c` in `ceil(c / MAX_OPTIONS)` contiguous groups of balanced size.
+fn blocks(c: usize) -> Vec<std::ops::Range<usize>> {
+    let g = c.div_ceil(MAX_OPTIONS);
+    let (base, extra) = (c / g, c % g);
+    let mut start = 0;
+    (0..g)
+        .map(|k| {
+            let len = base + usize::from(k < extra);
+            start += len;
+            start - len..start
+        })
+        .collect()
+}
+
+/// First-round groups (indices into the options) for `n > MAX_OPTIONS` options: `partitions` balanced partitions
+/// with `g = ceil(n / MAX_OPTIONS)` groups each, contiguous blocks and (second partition) round-robin.
+pub fn groups(n: usize, partitions: usize) -> Vec<Vec<usize>> {
+    let mut out: Vec<Vec<usize>> = blocks(n).into_iter().map(|r| r.collect()).collect();
+    if partitions >= 2 {
+        let g = out.len();
+        for k in 0..g {
+            out.push((k..n).step_by(g).collect());
+        }
     }
     out
+}
+
+/// The next round of a large choice after the rounds asked so far (`groups`, `targets`; `last`: groups of the
+/// latest round).
+pub enum Round {
+    Groups(Vec<Vec<usize>>),
+    Final(Vec<usize>),
+}
+
+pub fn next_round(s: &Strategy, n: usize, groups: &[Vec<usize>], targets: &[Vec<f64>], last: &[usize]) -> Round {
+    let Some(keep) = s.keep else {
+        return Round::Final(finalists(&fit_joint(n, groups, targets)));
+    };
+    // knockout: the best of every group of the latest round; with few groups more of each, to fill the final
+    let keep = keep.max(MAX_OPTIONS.div_ceil(last.len()));
+    let mut cand: Vec<usize> = Vec::new();
+    for &k in last {
+        let (g, t) = (&groups[k], &targets[k]);
+        let mut idx: Vec<usize> = (0..g.len()).collect();
+        idx.sort_by(|&a, &b| t[b].partial_cmp(&t[a]).unwrap().then(a.cmp(&b)));
+        cand.extend(idx.into_iter().take(keep).map(|a| g[a]));
+    }
+    cand.sort_unstable();
+    if cand.len() <= MAX_OPTIONS {
+        Round::Final(cand)
+    } else {
+        Round::Groups(blocks(cand.len()).into_iter().map(|r| cand[r].to_vec()).collect())
+    }
+}
+
+/// The answer of a large choice: the joint fit of all rounds (`calibrated` by the caller's temperature), with the
+/// final group's readout `final_p` deciding between the `finalists` when the strategy says so.
+pub fn answer(
+    s: &Strategy,
+    n: usize,
+    groups: &[Vec<usize>],
+    targets: &[Vec<f64>],
+    finalists: &[usize],
+    final_p: &[f64],
+    calibrate: impl Fn(&[f64]) -> Vec<f64>,
+) -> Vec<f64> {
+    let mut p = calibrate(&fit_joint(n, groups, targets));
+    if s.final_decides {
+        let m: f64 = finalists.iter().map(|&i| p[i]).sum();
+        for (&i, &q) in finalists.iter().zip(final_p) {
+            p[i] = m * q;
+        }
+    }
+    p
 }
 
 fn group_softmax(theta: &[f64], g: &[usize]) -> Vec<f64> {

@@ -1,0 +1,255 @@
+{
+  "strategy": "two balanced partitions (contiguous, round-robin) into groups of <= 10, both option orders per group, Luce maximum likelihood joint; second round with the 10 strongest candidates as one group, refit; choice temperature",
+  "direct_quality": {
+    "n": 44,
+    "correct": 36,
+    "accuracy": 0.8181818181818182,
+    "nll": 0.43795141981317476,
+    "brier": 0.26591765657093547,
+    "ece_10bin": 0.12348619043145186
+  },
+  "seeds": [
+    0,
+    1
+  ],
+  "sizes": [
+    {
+      "n": 11,
+      "evaluated": 88,
+      "quality": {
+        "n": 88,
+        "correct": 73,
+        "accuracy": 0.8295454545454546,
+        "nll": 0.5455950964780643,
+        "brier": 0.2805418730376757,
+        "ece_10bin": 0.06475312372633361
+      },
+      "restricted_argmax_agrees_with_direct": "85/88",
+      "tv_restricted_vs_direct": {
+        "n": 88,
+        "max": 0.464058629393042,
+        "p50": 0.005269621444382684,
+        "p95": 0.14129227484987358,
+        "p99": 0.464058629393042,
+        "mean": 0.030851654156453745
+      },
+      "mass_on_original_options": {
+        "n": 88,
+        "max": 0.999193377850001,
+        "p50": 0.9529454065379318,
+        "p95": 0.9973240296488101,
+        "p99": 0.999193377850001,
+        "mean": 0.9051557736445535
+      },
+      "winner_same_across_seeds": "43/44",
+      "ms_per_question": {
+        "n": 88,
+        "max": 2843.917375,
+        "p50": 2508.6023955,
+        "p95": 2828.103666,
+        "p99": 2843.917375,
+        "mean": 2479.237531170454
+      },
+      "tokens_per_question": {
+        "n": 88,
+        "max": 824.0,
+        "p50": 698.5,
+        "p95": 796.0,
+        "p99": 824.0,
+        "mean": 705.7045454545455
+      },
+      "prompts_per_question": {
+        "n": 88,
+        "max": 10.0,
+        "p50": 10.0,
+        "p95": 10.0,
+        "p99": 10.0,
+        "mean": 10.0
+      }
+    },
+    {
+      "n": 20,
+      "evaluated": 88,
+      "quality": {
+        "n": 88,
+        "correct": 73,
+        "accuracy": 0.8295454545454546,
+        "nll": 0.6540832270684344,
+        "brier": 0.3088218856904367,
+        "ece_10bin": 0.0925053515002223
+      },
+      "restricted_argmax_agrees_with_direct": "86/88",
+      "tv_restricted_vs_direct": {
+        "n": 88,
+        "max": 0.4246760330001086,
+        "p50": 0.006581012277544405,
+        "p95": 0.15074940632533002,
+        "p99": 0.4246760330001086,
+        "mean": 0.035221506705015275
+      },
+      "mass_on_original_options": {
+        "n": 88,
+        "max": 0.9983257401349676,
+        "p50": 0.8877953020376261,
+        "p95": 0.9917243083829311,
+        "p99": 0.9983257401349676,
+        "mean": 0.8261337352562795
+      },
+      "winner_same_across_seeds": "43/44",
+      "ms_per_question": {
+        "n": 88,
+        "max": 3587.051083,
+        "p50": 3124.2875004999996,
+        "p95": 3415.324542,
+        "p99": 3587.051083,
+        "mean": 3117.0002978295447
+      },
+      "tokens_per_question": {
+        "n": 88,
+        "max": 1147.0,
+        "p50": 990.5,
+        "p95": 1096.0,
+        "p99": 1147.0,
+        "mean": 995.0
+      },
+      "prompts_per_question": {
+        "n": 88,
+        "max": 10.0,
+        "p50": 10.0,
+        "p95": 10.0,
+        "p99": 10.0,
+        "mean": 10.0
+      }
+    },
+    {
+      "n": 40,
+      "evaluated": 88,
+      "quality": {
+        "n": 88,
+        "correct": 70,
+        "accuracy": 0.7954545454545454,
+        "nll": 0.876255283176064,
+        "brier": 0.3612368704441449,
+        "ece_10bin": 0.152817659829548
+      },
+      "restricted_argmax_agrees_with_direct": "86/88",
+      "tv_restricted_vs_direct": {
+        "n": 88,
+        "max": 0.4937116757433826,
+        "p50": 0.011391663107049782,
+        "p95": 0.21759686758702093,
+        "p99": 0.4937116757433826,
+        "mean": 0.047076166662395426
+      },
+      "mass_on_original_options": {
+        "n": 88,
+        "max": 0.9871274243858219,
+        "p50": 0.6931615463476812,
+        "p95": 0.9665021137144709,
+        "p99": 0.9871274243858219,
+        "mean": 0.6876776437000607
+      },
+      "winner_same_across_seeds": "42/44",
+      "ms_per_question": {
+        "n": 88,
+        "max": 5649.190042,
+        "p50": 5140.426604,
+        "p95": 5349.046083,
+        "p99": 5649.190042,
+        "mean": 5072.445605488636
+      },
+      "tokens_per_question": {
+        "n": 88,
+        "max": 2035.0,
+        "p50": 1854.0,
+        "p95": 1979.0,
+        "p99": 2035.0,
+        "mean": 1862.9431818181818
+      },
+      "prompts_per_question": {
+        "n": 88,
+        "max": 18.0,
+        "p50": 18.0,
+        "p95": 18.0,
+        "p99": 18.0,
+        "mean": 18.0
+      }
+    },
+    {
+      "n": 100,
+      "evaluated": 60,
+      "quality": {
+        "n": 60,
+        "correct": 41,
+        "accuracy": 0.6833333333333333,
+        "nll": 1.3128979513931198,
+        "brier": 0.5027497089718435,
+        "ece_10bin": 0.23380361229713673
+      },
+      "restricted_argmax_agrees_with_direct": "60/60",
+      "tv_restricted_vs_direct": {
+        "n": 60,
+        "max": 0.48898236699517367,
+        "p50": 0.028066102985915435,
+        "p95": 0.36647210851963796,
+        "p99": 0.48898236699517367,
+        "mean": 0.06252259593479788
+      },
+      "mass_on_original_options": {
+        "n": 60,
+        "max": 0.9699614665881102,
+        "p50": 0.4795159652306316,
+        "p95": 0.8861294286816978,
+        "p99": 0.9699614665881102,
+        "mean": 0.497635608487148
+      },
+      "winner_same_across_seeds": "26/30",
+      "ms_per_question": {
+        "n": 60,
+        "max": 11516.873667,
+        "p50": 11153.941479500001,
+        "p95": 11393.262125,
+        "p99": 11516.873667,
+        "mean": 11129.649320933331
+      },
+      "tokens_per_question": {
+        "n": 60,
+        "max": 4639.0,
+        "p50": 4511.5,
+        "p95": 4611.0,
+        "p99": 4639.0,
+        "mean": 4508.866666666667
+      },
+      "prompts_per_question": {
+        "n": 60,
+        "max": 42.0,
+        "p50": 42.0,
+        "p95": 42.0,
+        "p99": 42.0,
+        "mean": 42.0
+      }
+    }
+  ],
+  "backend": {
+    "backend": "metal",
+    "device": "Apple GPU through candle Device::new_metal(0)",
+    "tensor_library": "candle-core 0.11.0 (Metal; matmul = MLX steel GEMM port)",
+    "weights": "f16 (converted from bf16, experiment)",
+    "activations": "f16 residual stream, norms and MLP",
+    "attention": "f32 q/k/v (bias + rotate-half RoPE fused kernel, cos/sin from f64 on host); candle sdpa (MLX steel attention) in f32 with additive block mask; GQA in-kernel",
+    "kernels": "fused: q/k/v and gate/up projections as single GEMMs without bias; bias added in fused kernels (bias+RoPE+head split, bias+SiLU*up, bias+residual)",
+    "readout": "letter rows of lm_head only, f32",
+    "padding": "none: compact token list for GEMM/norm/MLP, attention per packed row (segment)",
+    "attention_kernel": "attn_tree_f32",
+    "gemm": "MLX steel GEMM (candle); 32-row tiles when M mod 64 is in 1..=32 and M <= 600",
+    "prefix_kv": [
+      53,
+      66
+    ],
+    "state_cache_bytes": 0,
+    "last_layer": "o_proj and MLP of the last layer only at the readout positions"
+  },
+  "duty": 1.0,
+  "distractor_pool": 114,
+  "distractors": "options of items with another topic (TOPICS)"
+}

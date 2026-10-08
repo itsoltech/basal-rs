@@ -214,6 +214,9 @@ enum Cmd {
         /// Fraction of wall time the GPU computes: after each question sleep `t * (1 / duty - 1)` (limits heat)
         #[arg(long, default_value_t = 1.0)]
         duty: f64,
+        /// Strategy for more than 10 options: luce2, luce2-final, luce1-final, knockout1, knockout2, knockout3
+        #[arg(long, default_value = "luce2")]
+        strategy: String,
     },
     /// Per-section forward profile on reference items (synchronises after every section; diagnostic)
     Profile {
@@ -575,8 +578,10 @@ fn run() -> Result<()> {
                 json!({"hits": engine.backend.state_cache_hits, "inserts": engine.backend.state_cache_inserts});
             write_json(&out, &r)?;
         }
-        Cmd::EvalLargeChoice { m, g, reference, out, sizes, seeds, duty } => {
+        Cmd::EvalLargeChoice { m, g, reference, out, sizes, seeds, duty, strategy } => {
             let mut engine = gpu_engine(&m, &g)?;
+            engine.large_choice_strategy = basal_core::large_choice::Strategy::parse(&strategy)
+                .with_context(|| format!("unknown strategy {strategy:?}"))?;
             let s = large_eval::eval(&mut engine, &reference, &sizes, &seeds, duty, &out)?;
             println!("{}", serde_json::to_string_pretty(&s["sizes"])?);
         }

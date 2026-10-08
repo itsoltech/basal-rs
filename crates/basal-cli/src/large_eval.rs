@@ -104,13 +104,23 @@ fn choice_item(name: String, state: &str, question: &str, options: Vec<String>) 
     }
 }
 
-/// Run planned items one by one (each item = one shared-prefix tree forward) and return final distributions.
-fn answer<B: Backend>(engine: &mut Engine<B>, item: Item, duty: f64) -> Result<(Vec<f64>, usize, usize, f64)> {
+/// One answered question: final distribution, prompts of all rounds, packed tokens of the first round, time and the
+/// final group of a grouped large choice.
+struct Answered {
+    p: Vec<f64>,
+    prompts: usize,
+    tokens: usize,
+    ms: f64,
+    finalists: Option<Vec<usize>>,
+}
+
+/// Run planned items one by one (each item = one shared-prefix tree forward per round) and return the answer.
+fn answer<B: Backend>(engine: &mut Engine<B>, item: Item, duty: f64) -> Result<Answered> {
     let t = Instant::now();
     let plan = engine.plan_items(vec![item])?;
-    let p = engine.run_plan(&plan)?.finals.remove(0).1;
-    let final_round = usize::from(plan.prepared.len() > 1);
-    let prompts = plan.prepared.iter().map(|p| p.orders.len()).sum::<usize>() + 2 * final_round;
+    let mut out = engine.run_plan(&plan)?;
+    let p = out.finals.remove(0).1;
+    let prompts = plan.prepared.iter().map(|p| p.orders.len()).sum::<usize>() + out.extra_prompts;
     let toks: Vec<Vec<Vec<u32>>> =
         plan.prepared.iter().map(|p| p.orders.iter().map(|o| o.input_ids.clone()).collect()).collect();
     let tokens = basal_core::pack::pack_tree(&toks).ids.len();
@@ -118,7 +128,7 @@ fn answer<B: Backend>(engine: &mut Engine<B>, item: Item, duty: f64) -> Result<(
     if duty < 1.0 {
         std::thread::sleep(std::time::Duration::from_secs_f64(ms / 1e3 * (1.0 / duty.max(0.05) - 1.0)));
     }
-    Ok((p, prompts, tokens, ms))
+    Ok(Answered { p, prompts, tokens, ms, finalists: out.finalists.remove(0) })
 }
 
 pub fn eval<B: Backend>(
@@ -150,7 +160,7 @@ pub fn eval<B: Backend>(
     let mut direct = Vec::new();
     for r in &recs {
         let it = choice_item(r["index"].to_string(), str_of(r, "state"), str_of(r, "question"), opts(r));
-        direct.push(answer(engine, it, duty)?.0);
+        direct.push(answer(engine, it, duty)?.p);
     }
     let mut f = std::fs::File::create(out.join("items.jsonl"))?;
     let mut sizes_out = Vec::new();
@@ -158,6 +168,7 @@ pub fn eval<B: Backend>(
         let mut per_seed: Vec<Vec<Option<Value>>> = Vec::new();
         let (mut dists, mut golds, mut tvs, mut mass, mut agree, mut ms, mut toks, mut prompts) =
             (vec![], vec![], vec![], vec![], 0usize, vec![], vec![], vec![]);
+        let (mut gold_in_final, mut with_gold) = (0usize, 0usize);
         let mut evaluated = 0usize;
         for &seed in seeds {
             let mut row = Vec::new();
@@ -187,7 +198,8 @@ pub fn eval<B: Backend>(
                     str_of(r, "question"),
                     all.iter().map(|(_, o)| o.clone()).collect(),
                 );
-                let (p, np, nt, t) = answer(engine, item, duty)?;
+                let a = answer(engine, item, duty)?;
+                let (p, np, nt, t) = (a.p, a.prompts, a.tokens, a.ms);
                 let restricted: Vec<f64> = {
                     let v: Vec<f64> = pos.iter().map(|&q| p[q]).collect();
                     let s: f64 = v.iter().sum();
@@ -197,10 +209,13 @@ pub fn eval<B: Backend>(
                 let top = argmax(&p);
                 let top_orig = all[top].0; // Some(j) if an original option won
                 let gold = r["gold"].as_u64().map(|g| g as usize);
+                let in_final = gold.zip(a.finalists.as_ref()).map(|(g, f)| f.contains(&pos[g]));
                 if let Some(g) = gold {
                     // quality of the joint distribution over all n options, gold at its shuffled position
                     dists.push(p.clone());
                     golds.push(pos[g]);
+                    with_gold += 1;
+                    gold_in_final += usize::from(in_final == Some(true));
                 }
                 tvs.push(tv(&restricted, &direct[i]));
                 mass.push(m);
@@ -210,7 +225,7 @@ pub fn eval<B: Backend>(
                 toks.push(nt as f64);
                 prompts.push(np as f64);
                 let rec = json!({"n": n, "seed": seed, "index": r["index"], "gold": gold, "winner_original": top_orig, "winner": all[top].1,
-                                 "mass_original": m, "tv_restricted_vs_direct": tvs.last(), "ms": t, "prompts": np,
+                                 "mass_original": m, "tv_restricted_vs_direct": tvs.last(), "ms": t, "prompts": np, "gold_in_final": in_final,
                                  "tokens": nt, "restricted": restricted, "direct": direct[i]});
                 writeln!(f, "{rec}")?;
                 row.push(Some(json!({"winner": all[top].1})));
@@ -229,6 +244,7 @@ pub fn eval<B: Backend>(
         let s = json!({
             "n": n, "evaluated": evaluated, "quality": quality(&dists, &golds),
             "restricted_argmax_agrees_with_direct": format!("{agree}/{evaluated}"),
+            "gold_in_final_group": format!("{gold_in_final}/{with_gold}"),
             "tv_restricted_vs_direct": summary(&tvs), "mass_on_original_options": summary(&mass),
             "winner_same_across_seeds": format!("{}/{}", seed_agree.0, seed_agree.1),
             "ms_per_question": summary(&ms), "tokens_per_question": summary(&toks), "prompts_per_question": summary(&prompts),
@@ -238,7 +254,8 @@ pub fn eval<B: Backend>(
     }
     let golds: Vec<usize> = recs.iter().filter_map(|r| r["gold"].as_u64().map(|g| g as usize)).collect();
     let summary = json!({
-        "strategy": "two balanced partitions (contiguous, round-robin) into groups of <= 10, both option orders per group, Luce maximum likelihood joint; second round with the 10 strongest candidates as one group, refit; choice temperature",
+        "strategy": engine.large_choice_strategy.name(),
+        "strategy_detail": format!("{:?}", engine.large_choice_strategy),
         "direct_quality": quality(&direct, &golds), "seeds": seeds, "sizes": sizes_out,
         "backend": engine.backend.describe(), "duty": duty, "distractor_pool": pool.len(), "distractors": "options of items with another topic (TOPICS)",
     });
