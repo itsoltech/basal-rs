@@ -71,7 +71,7 @@ pub fn cuda_command(bin: &Path) -> std::process::Command {
 #[cfg(all(target_os = "linux", not(feature = "cuda")))]
 fn delegate_gpu_command() {
     use std::os::unix::process::CommandExt;
-    const GPU: [&str; 10] = [
+    const GPU: [&str; 11] = [
         "decide",
         "export",
         "bench-requests",
@@ -81,6 +81,7 @@ fn delegate_gpu_command() {
         "serve",
         "gemm-search",
         "gemm",
+        "gemm-share",
         "bench",
     ];
     let args: Vec<std::ffi::OsString> = std::env::args_os().collect();

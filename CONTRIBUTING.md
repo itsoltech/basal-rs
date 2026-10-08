@@ -63,6 +63,12 @@ matching one after cuBLASLt accepts its algorithms on the GPU. A user who genera
 build lacks can send it with `basal gemm-share` (an issue with the `gemm-table` label, after a confirmation; without
 `gh` through the "GEMM table" issue form).
 
+Only the CUDA build carries tables, and `build.rs` bounds them: f16, the cuBLASLt version of the CUDA toolkit
+(`cublas_api.h`) and the current search version, one table per GPU and weight shapes, the file name
+`<gpu>--<model>--f16--cublaslt<version>.json`. It keeps only the fields the server reads (13-15 KB per table instead
+of ~34 KB) and stops the build when a table breaks a rule or all of them exceed 1 MiB; CI (Clippy with CUDA) runs
+it for every pull request. A new CUDA toolkit or search version therefore means new tables, not more of them.
+
 Before a table is added, a maintainer checks it on the same GPU and cuBLASLt version, with the table as
 `gemm_table`: exports of the basal-bench items as single requests, in a tree and in a budgeted batch compared with
 each other (0.0), the decision set against upstream FP32, and the time against a table generated there

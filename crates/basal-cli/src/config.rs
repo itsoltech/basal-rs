@@ -515,7 +515,7 @@ pub fn gemm_table(m: &ModelConfig, manifest: &ModelManifest, cache: &Path) -> Re
     Ok(Some(path))
 }
 
-/// GEMM tables compiled into this build (crates/basal-cli/gemm-tables, see build.rs).
+/// GEMM tables compiled into this build (crates/basal-cli/gemm-tables, reduced by build.rs; none without CUDA).
 pub mod bundled {
     include!(concat!(env!("OUT_DIR"), "/gemm_tables.rs"));
 }

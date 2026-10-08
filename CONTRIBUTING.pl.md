@@ -63,6 +63,13 @@ pasującej, gdy cuBLASLt przyjmie jej algorytmy na tej karcie. Użytkownik, któ
 modelu, których build nie ma, może ją wysłać przez `basal gemm-share` (issue z etykietą `gemm-table`, po
 potwierdzeniu; bez `gh` przez formularz „Tabela GEMM / GEMM table”).
 
+Tabele trafiają tylko do buildu CUDA, a `build.rs` ogranicza ich zbiór: f16, wersja cuBLASLt z toolkitu CUDA
+(`cublas_api.h`) i bieżąca wersja wyszukiwania, jedna tabela na GPU i kształty wag, nazwa pliku
+`<gpu>--<model>--f16--cublaslt<wersja>.json`. Zostawia tylko pola czytane przez serwer (13–15 KB na tabelę zamiast
+~34 KB) i przerywa build, gdy tabela łamie regułę albo wszystkie razem przekraczają 1 MiB; CI (Clippy z CUDA)
+sprawdza to w każdym pull requeście. Nowy toolkit CUDA lub nowa wersja wyszukiwania oznacza więc wymianę tabel,
+a nie dokładanie kolejnych.
+
 Przed dodaniem tabeli maintainer sprawdza ją na tym samym GPU i wersji cuBLASLt, z tabelą jako `gemm_table`:
 eksporty przykładów basal-bench jako pojedyncze żądania, w drzewie i w partii z budżetem porównane ze sobą (0,0),
 zestaw decyzyjny wobec FP32 upstream oraz czas wobec tabeli wygenerowanej na miejscu (`basal bench`, drabina

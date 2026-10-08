@@ -31,5 +31,8 @@ sha2 = "0.10"
 basal-core = { path = "../basal-core" }
 basal-gpu = { path = "../basal-gpu" }
 
+[build-dependencies]
+serde_json.workspace = true
+
 [features]
 cuda = ["basal-gpu/cuda"]
