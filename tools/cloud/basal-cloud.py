@@ -4,8 +4,10 @@
 
     types   [--gpu RTX6000Ada] [--num-gpus 1]    on-demand machines available now, cheapest first
     template                                     save or update the Shadeform template basal-rs-test
-    up      [--gpu RTX6000Ada] [--max-price 1.2] [--hours 3] [--spend 4] [--prefetch "4.5B"]
-                                                 cheapest machine with the template; waits until SSH works
+    up      [--gpu RTX6000Ada] [--max-price 1.2] [--hours 3] [--spend 4] [--prefetch "4.5B"] [--boot-timeout 15]
+            [--region R]
+                                                 cheapest machine with the template and a CUDA 13 image (driver
+                                                 580); the next offer when one does not start; waits until ready
     build   [--host USER@HOST] [--caps 80,89,90] CUDA binary of the working tree (Docker on HOST, no GPU used)
     push                                         the binary to the machine (/opt/basal-dev, command basal-dev)
     sync    PATH...                              repository paths to /work on the machine (e.g. reports/choice-sets)
@@ -111,7 +113,8 @@ def types(args):
     rows = []
     for t in data.get("instance_types", []):
         for a in t["availability"]:
-            if a["available"] and a.get("rental_type", "on_demand") == "on_demand":
+            if a["available"] and a.get("rental_type", "on_demand") == "on_demand" \
+                    and opt(args, "--region", a["region"]) == a["region"]:
                 rows.append((t["hourly_price"], t, a["region"]))
     rows.sort(key=lambda r: r[0])
     return rows
@@ -155,44 +158,59 @@ def cmd_up(args):
     max_price = float(opt(args, "--max-price", "1.20"))
     hours = float(opt(args, "--hours", "3"))
     spend = opt(args, "--spend", "4")
-    rows = [r for r in types(args) if r[0] / 100 <= max_price]
+    boot_minutes = float(opt(args, "--boot-timeout", "15"))
+    # the kernels of the CUDA 12.9 build and upstream's PyTorch (CUDA 13 wheels) need driver 580: the cuda13 images
+    rows = [r for r in types(args) if r[0] / 100 <= max_price
+            and any("cuda13" in o for o in r[1]["configuration"]["os_options"])]
     if not rows:
-        sys.exit(f"no machine with {opt(args, '--gpu', 'RTX6000Ada')} at most ${max_price}/h available now")
-    price, t, region = rows[0]
-    oses = t["configuration"]["os_options"]
-    os_name = next((o for o in oses if "cuda13" in o), next((o for o in oses if "cuda12.8" in o), oses[0]))
+        sys.exit(f"no machine with {opt(args, '--gpu', 'RTX6000Ada')} at most ${max_price}/h and a CUDA 13 image now")
     key = next((k["id"] for k in shade("ssh-keys", "list").get("ssh_keys", []) if k["name"] == SSH_KEY_NAME), None)
     if key is None:
         sys.exit(f"no SSH key named {SSH_KEY_NAME} in Shadeform (BASAL_CLOUD_SSH_KEY)")
-    until = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=hours)).isoformat(timespec="seconds")
-    name = "basal-test-" + datetime.datetime.now().strftime("%Y%m%d-%H%M")
-    body = {
-        "cloud": t["cloud"], "region": region, "shade_instance_type": t["shade_instance_type"], "shade_cloud": True,
-        "name": name, "os": os_name, "template_id": template_id(), "ssh_key_id": key, "tags": [TAG],
-        "auto_delete": {"date_threshold": until, "spend_threshold": spend},
-        "alert": {"spend_threshold": str(round(float(spend) * 0.75, 2))},
-        "envs": [{"name": "BASAL_PREFETCH", "value": opt(args, "--prefetch", "4.5B")}],
-    }
-    iid = shade("instances", "create", body=body)["id"]
     os.makedirs(STATE_DIR, exist_ok=True)
-    s = {"id": iid, "name": name, "cloud": t["cloud"], "type": t["shade_instance_type"], "price": price / 100,
-         "auto_delete": until, "spend": spend}
-    json.dump(s, open(SESSION, "w"), indent=1)
-    print(f"created {name} ({iid}): {t['cloud']} {t['shade_instance_type']} {region}, ${price / 100:.2f}/h, {os_name}; "
-          f"deleted at {until} or after ${spend}")
-    while True:
-        info = shade("instances", "get", iid)
+    # a provider may never start a machine (status pending_provider): after --boot-timeout minutes delete it and
+    # try the next offer
+    for price, t, region in rows[:4]:
+        os_name = next(o for o in t["configuration"]["os_options"] if "cuda13" in o)
+        until = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=hours)).isoformat(
+            timespec="seconds")
+        name = "basal-test-" + datetime.datetime.now().strftime("%Y%m%d-%H%M")
+        body = {
+            "cloud": t["cloud"], "region": region, "shade_instance_type": t["shade_instance_type"],
+            "shade_cloud": True, "name": name, "os": os_name, "template_id": template_id(), "ssh_key_id": key,
+            "tags": [TAG], "auto_delete": {"date_threshold": until, "spend_threshold": spend},
+            "alert": {"spend_threshold": str(round(float(spend) * 0.75, 2))},
+            "envs": [{"name": "BASAL_PREFETCH", "value": opt(args, "--prefetch", "4.5B")}],
+        }
+        iid = shade("instances", "create", body=body)["id"]
+        s = {"id": iid, "name": name, "cloud": t["cloud"], "type": t["shade_instance_type"], "price": price / 100,
+             "auto_delete": until, "spend": spend}
+        json.dump(s, open(SESSION, "w"), indent=1)
+        print(f"created {name} ({iid}): {t['cloud']} {t['shade_instance_type']} {region}, ${price / 100:.2f}/h, "
+              f"{os_name}; deleted at {until} or after ${spend}", flush=True)
+        start = time.time()
+        info = {}
+        while time.time() - start < boot_minutes * 60:
+            info = shade("instances", "get", iid)
+            if info.get("status") == "active" and info.get("ip"):
+                break
+            if info.get("status") in ("error", "deleted"):
+                break
+            time.sleep(20)
         if info.get("status") == "active" and info.get("ip"):
             break
-        if info.get("status") in ("error", "deleted"):
-            sys.exit(f"instance {info.get('status')}: {info.get('status_details')}")
-        time.sleep(20)
+        print(f"not active after {(time.time() - start) / 60:.0f} min ({info.get('status')}: "
+              f"{info.get('status_details')}): deleted, next offer", flush=True)
+        shade("instances", "delete", iid)
+        os.remove(SESSION)
+    else:
+        sys.exit("no machine became active")
     s.update({"ip": info["ip"], "user": info.get("ssh_user", "shadeform"), "port": info.get("ssh_port", 22)})
     json.dump(s, open(SESSION, "w"), indent=1)
-    print(f"active: {' '.join(ssh_base(s))}")
+    print(f"active: {' '.join(ssh_base(s))}", flush=True)
     while ssh(s, "test -f /data/ready", check=False) != 0:
         time.sleep(20)
-    print("ready (/data/ready): release, CUDA libraries and models in place")
+    print("ready (/data/ready): release, CUDA libraries and models in place", flush=True)
 
 
 def cmd_build(args):
