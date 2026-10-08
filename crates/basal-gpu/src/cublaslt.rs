@@ -146,6 +146,21 @@ impl Lt {
         Ok(())
     }
 
+    /// Every algorithm of the batch-invariant table is accepted by cuBLASLt for its M class on this GPU (a table
+    /// made on another GPU or cuBLASLt version may hold configurations this one does not have).
+    pub fn validate_invariant(&self) -> Result<()> {
+        let inv = self.invariant.lock().unwrap().clone();
+        for ((n, k, dt), list) in inv {
+            for (mc, a) in list {
+                let p = self.plan_cached(mc, n, k, dt)?;
+                if !self.check(&p, &a) {
+                    candle_core::bail!("cuBLASLt rejects the table's algorithm for M={mc} n={n} k={k} {dt:?}");
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// A table entry (batch-invariant or per class) exists for the weight shape (N, K) in `dt`.
     pub fn covers(&self, n: usize, k: usize, dt: DType) -> bool {
         self.invariant.lock().unwrap().contains_key(&(n, k, dt))

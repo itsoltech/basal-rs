@@ -19,6 +19,7 @@ mod compare;
 mod config;
 mod doctor;
 mod export;
+mod gemm_share;
 mod large_eval;
 mod paths;
 mod reference;
@@ -318,6 +319,19 @@ enum Cmd {
         /// Only report whether a newer release exists
         #[arg(long)]
         check: bool,
+    },
+    /// Send the GEMM tables generated on this machine for a GPU this build has none for to the basal-rs project (a
+    /// GitHub issue per table, after a confirmation), so later builds ship them
+    GemmShare {
+        /// Directory of the tables (default: the GEMM cache of `basal serve`)
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Send without asking
+        #[arg(long)]
+        yes: bool,
+        /// Only write the issue text next to each table
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Remove what basal put on this machine: user service, configuration, caches, CUDA libraries, the binaries of a
     /// package installation; with --models also the basal models in the Hugging Face cache
@@ -666,6 +680,7 @@ fn run() -> Result<()> {
             setup::run(&setup::Options { config, models, force, prefetch, service })?;
         }
         Cmd::Update { version, check } => update::run(version, check)?,
+        Cmd::GemmShare { dir, yes, dry_run } => gemm_share::run(dir, yes, dry_run)?,
         Cmd::Uninstall { models, yes, dry_run } => uninstall::run(&uninstall::Options { models, yes, dry_run })?,
         Cmd::Init { models, out, force } => {
             let models = if models.is_empty() { vec![config::DEFAULT_MODEL.short.to_string()] } else { models };

@@ -426,7 +426,9 @@ fn models(r: &mut Report, c: &ServeConfig, gpu_budget: Option<u64>) {
         hub(r, &repos);
     }
     if let Some(gc) = Some(&c.gemm_cache).filter(|_| cfg!(feature = "cuda")) {
-        r.info("models", format!("GEMM tables: {}", crate::term::P(&gc)));
+        let gpus = crate::config::bundled_gpus();
+        let built_in = if gpus.is_empty() { "none".to_string() } else { gpus.join(", ") };
+        r.info("models", format!("GEMM tables: {}; built in for: {built_in}", crate::term::P(&gc)));
     }
 }
 

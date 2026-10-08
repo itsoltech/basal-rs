@@ -1231,25 +1231,7 @@ impl GpuBackend {
                 let here = d.cuda_stream().context().name()?;
                 ensure!(t == here, "{}: table for {t}, this GPU is {here}", path.display());
             }
-            let mut entries = Vec::new();
-            for e in v["entries"].as_array().context("entries")? {
-                let algo: Vec<u64> = e["algo"].as_array().context("algo")?.iter().filter_map(|x| x.as_u64()).collect();
-                ensure!(algo.len() == 8, "algo must have 8 words");
-                entries.push(cublaslt::Tuned {
-                    m_class: e["m_class"].as_u64().context("m_class")? as usize,
-                    n: e["n"].as_u64().context("n")? as usize,
-                    k: e["k"].as_u64().context("k")? as usize,
-                    dtype: match e["dtype"].as_str() {
-                        Some("f16") => DType::F16,
-                        Some("bf16") => DType::BF16,
-                        d => bail!("dtype {d:?}"),
-                    },
-                    algo: algo.try_into().unwrap(),
-                    ms: 0.0,
-                    heuristic_ms: 0.0,
-                    tried: 0,
-                });
-            }
+            let entries = table_entries(&v)?;
             if v["invariant"].as_bool() == Some(true) {
                 lt.load_invariant(&entries)?;
             } else {
@@ -1259,6 +1241,56 @@ impl GpuBackend {
         }
         bail!("--gemm-table needs the CUDA backend with cuBLASLt ({})", path.display())
     }
+}
+
+/// The entries of a GEMM table written by [`gemm_search`].
+#[cfg(feature = "cuda")]
+fn table_entries(v: &Value) -> Result<Vec<cublaslt::Tuned>> {
+    let mut entries = Vec::new();
+    for e in v["entries"].as_array().context("entries")? {
+        let algo: Vec<u64> = e["algo"].as_array().context("algo")?.iter().filter_map(|x| x.as_u64()).collect();
+        ensure!(algo.len() == 8, "algo must have 8 words");
+        entries.push(cublaslt::Tuned {
+            m_class: e["m_class"].as_u64().context("m_class")? as usize,
+            n: e["n"].as_u64().context("n")? as usize,
+            k: e["k"].as_u64().context("k")? as usize,
+            dtype: match e["dtype"].as_str() {
+                Some("f16") => DType::F16,
+                Some("bf16") => DType::BF16,
+                d => bail!("dtype {d:?}"),
+            },
+            algo: algo.try_into().map_err(|_| anyhow::anyhow!("algo must have 8 words"))?,
+            ms: 0.0,
+            heuristic_ms: 0.0,
+            tried: 0,
+        });
+    }
+    Ok(entries)
+}
+
+/// A batch-invariant GEMM table (e.g. one shipped with the build) is usable on this GPU: same GPU name and cuBLASLt
+/// version, and cuBLASLt accepts every algorithm at its M class.
+pub fn check_gemm_table(v: &Value) -> Result<()> {
+    #[cfg(feature = "cuda")]
+    {
+        ensure!(
+            v["cublaslt_version"].as_u64() == Some(cublaslt::version() as u64),
+            "table for cuBLASLt {}, this process uses {}",
+            v["cublaslt_version"],
+            cublaslt::version()
+        );
+        ensure!(v["invariant"].as_bool() == Some(true), "not a batch-invariant table");
+        let dev = gpu_device()?;
+        let Device::Cuda(d) = &dev else { bail!("not a CUDA device") };
+        let here = d.cuda_stream().context().name()?;
+        ensure!(v["gpu"].as_str() == Some(here.as_str()), "table for {}, this GPU is {here}", v["gpu"]);
+        let lt = cublaslt::Lt::new(d)?;
+        lt.load_invariant(&table_entries(v)?)?;
+        lt.validate_invariant()?;
+        Ok(())
+    }
+    #[cfg(not(feature = "cuda"))]
+    bail!("GEMM tables need the CUDA backend ({})", v["gpu"])
 }
 
 fn bf16_round(v: f32) -> f32 {

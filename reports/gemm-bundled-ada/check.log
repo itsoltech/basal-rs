@@ -1,0 +1,6 @@
+ready after 11 s
+table: /tmp/bh-bundled/.cache/gemm/basal-1.5-4.5B-f16.json
+single vs tree: tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.0; max TV avg 0.0
+fp32 vs tree:   tokens: 8 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.036615499389647255; max TV avg 0.0035468003967499286
+basal: no GEMM tables to share in /tmp/bh-bundled/.cache/gemm: none generated here, or this build already has them
+DONE

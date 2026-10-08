@@ -108,7 +108,7 @@ fn default_release_date() -> String {
 fn default_long_slice_ms() -> u64 {
     100
 }
-fn default_gemm_cache() -> PathBuf {
+pub fn default_gemm_cache() -> PathBuf {
     crate::paths::cache_dir().join("gemm")
 }
 fn default_dtype() -> String {
@@ -464,26 +464,29 @@ pub fn gemm_table(m: &ModelConfig, manifest: &ModelManifest, cache: &Path) -> Re
         Err(_) => Some("no table".to_string()),
         Ok(text) => {
             let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-            let covered = |n: usize, k: usize| {
-                v["entries"].as_array().is_some_and(|es| {
-                    es.iter().any(|e| e["n"].as_u64() == Some(n as u64) && e["k"].as_u64() == Some(k as u64))
-                })
-            };
-            if v["cublaslt_version"].as_u64() != Some(version as u64) {
-                Some(format!("table for cuBLASLt {}", v["cublaslt_version"]))
-            } else if v["gpu"].as_str() != Some(gpu.as_str()) {
-                Some(format!("table for GPU {}", v["gpu"]))
-            } else if v["invariant"].as_bool() != Some(true) || v["dtype"].as_str() != Some(m.dtype.as_str()) {
-                Some("not a batch-invariant table of this dtype".into())
-            } else if v["gemm_search_version"].as_u64().unwrap_or(1) < basal_gpu::gemm_search_version() {
-                Some(format!("table of search version {}", v["gemm_search_version"].as_u64().unwrap_or(1)))
-            } else if let Some((n, k)) = shapes.iter().copied().find(|&(n, k)| !covered(n, k)) {
-                Some(format!("shape {n}x{k} missing"))
-            } else {
-                None
-            }
+            table_problem(&v, version, &gpu, &m.dtype, &shapes)
         }
     };
+    // a table compiled into this build for the same GPU, cuBLASLt version and shapes, checked on this GPU
+    if problem.is_some() {
+        for (file, text) in bundled::TABLES {
+            let Ok(v) = serde_json::from_str::<Value>(text) else { continue };
+            if table_problem(&v, version, &gpu, &m.dtype, &shapes).is_some() {
+                continue;
+            }
+            match basal_gpu::check_gemm_table(&v) {
+                Ok(()) => {
+                    std::fs::create_dir_all(cache).with_context(|| format!("creating {}", crate::term::P(&cache)))?;
+                    let tmp = path.with_extension("json.tmp");
+                    std::fs::write(&tmp, text)?;
+                    std::fs::rename(&tmp, &path)?;
+                    crate::done!("{}: GEMM table for {gpu} from this build ({file}), no search needed", manifest.name);
+                    return Ok(Some(path));
+                }
+                Err(e) => crate::warn!("{}: GEMM table {file} of this build rejected ({e:#})", manifest.name),
+            }
+        }
+    }
     if let Some(why) = problem {
         crate::progress!(
             "{}: generating the batch-invariant GEMM table for {gpu} ({why}; {} classes x {} shapes, one-time) -> {}",
@@ -493,14 +496,61 @@ pub fn gemm_table(m: &ModelConfig, manifest: &ModelManifest, cache: &Path) -> Re
             crate::term::P(&path)
         );
         let t = std::time::Instant::now();
-        let table = search(&shapes, &m.dtype)?;
+        let mut table = search(&shapes, &m.dtype)?;
+        // for `basal gemm-share`: which build and model made the table
+        table["model"] = Value::from(manifest.name.clone());
+        table["basal"] = Value::from(format!("{} ({})", env!("CARGO_PKG_VERSION"), env!("BASAL_GIT_SHA")));
         std::fs::create_dir_all(cache).with_context(|| format!("creating {}", crate::term::P(&cache)))?;
         let tmp = path.with_extension("json.tmp");
         std::fs::write(&tmp, serde_json::to_string_pretty(&table)? + "\n")?;
         std::fs::rename(&tmp, &path)?;
         crate::done!("{}: GEMM table done in {:.0} s", manifest.name, t.elapsed().as_secs_f64());
+        crate::note!(
+            "basal {} has no GEMM table of {} for {gpu}: `basal gemm-share` sends this one to the basal-rs project \
+             (a GitHub issue, after your confirmation), so that later builds spare other users of this GPU the search",
+            env!("CARGO_PKG_VERSION"),
+            manifest.name
+        );
     }
     Ok(Some(path))
+}
+
+/// GEMM tables compiled into this build (crates/basal-cli/gemm-tables, see build.rs).
+pub mod bundled {
+    include!(concat!(env!("OUT_DIR"), "/gemm_tables.rs"));
+}
+
+/// GPUs with a GEMM table in this build.
+pub fn bundled_gpus() -> Vec<String> {
+    let mut g: Vec<String> = bundled::TABLES
+        .iter()
+        .filter_map(|(_, t)| serde_json::from_str::<Value>(t).ok()?["gpu"].as_str().map(str::to_string))
+        .collect();
+    g.sort();
+    g.dedup();
+    g
+}
+
+/// Why a GEMM table cannot be used for this GPU, cuBLASLt version, dtype and model shapes (None: it can).
+fn table_problem(v: &Value, version: usize, gpu: &str, dtype: &str, shapes: &[(usize, usize)]) -> Option<String> {
+    let covered = |n: usize, k: usize| {
+        v["entries"]
+            .as_array()
+            .is_some_and(|es| es.iter().any(|e| e["n"].as_u64() == Some(n as u64) && e["k"].as_u64() == Some(k as u64)))
+    };
+    if v["cublaslt_version"].as_u64() != Some(version as u64) {
+        Some(format!("table for cuBLASLt {}", v["cublaslt_version"]))
+    } else if v["gpu"].as_str() != Some(gpu) {
+        Some(format!("table for GPU {}", v["gpu"]))
+    } else if v["invariant"].as_bool() != Some(true) || v["dtype"].as_str() != Some(dtype) {
+        Some("not a batch-invariant table of this dtype".into())
+    } else if v["gemm_search_version"].as_u64().unwrap_or(1) < basal_gpu::gemm_search_version() {
+        Some(format!("table of search version {}", v["gemm_search_version"].as_u64().unwrap_or(1)))
+    } else if let Some((n, k)) = shapes.iter().copied().find(|&(n, k)| !covered(n, k)) {
+        Some(format!("shape {n}x{k} missing"))
+    } else {
+        None
+    }
 }
 
 fn search(shapes: &[(usize, usize)], dtype: &str) -> Result<Value> {

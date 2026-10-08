@@ -365,10 +365,14 @@ algorytmów dających bitowo te same wyniki
 ([pomiar](reports/rust-cuda-1.5-max/gemm-equiv/README.md)). Zależy od
 modelu (kształtów wag), GPU, wersji cuBLASLt i precyzji. Przy `gemm_table:
 auto` serwer szuka tabeli w `gemm_cache` i generuje ją przy starcie, gdy jej
-nie ma albo powstała na innym GPU lub cuBLASLt (jednorazowo, kilka do
-kilkudziesięciu minut). Tabela z repozytorium
-(`reports/rust-cuda-1.5-max/gemm-equiv/gemm-algos-f16-invariant-groups.json`)
-jest dla basal-1.5-max na RTX 6000 Ada z cuBLASLt 12.9.1. Ręcznie:
+nie ma albo powstała na innym GPU lub cuBLASLt. Najpierw sięga po tabele
+wkompilowane w binarkę ([crates/basal-cli/gemm-tables](crates/basal-cli/gemm-tables):
+H100 PCIe dla 4.5B i max, RTX 6000 Ada dla 4.5B, cuBLASLt 12.9.1, f16), a gdy
+żadna nie pasuje, generuje własną (jednorazowo, kilka do kilkudziesięciu
+minut). Tabelę wygenerowaną dla karty lub modelu spoza tej listy
+`basal gemm-share` wysyła do projektu jako issue (po potwierdzeniu), żeby
+kolejne wydania ją zawierały ([CONTRIBUTING](CONTRIBUTING.pl.md#tabele-gemm)).
+`basal doctor` wypisuje karty z tabelami w binarce. Ręcznie:
 `basal gemm-search --model DIR --invariant --out gemm.json`. Serwer odmawia
 startu z tabelą, która nie obejmuje kształtów wag modelu.
 
