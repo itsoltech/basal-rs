@@ -74,6 +74,24 @@ basal-rs liczy wspólny stan raz dla wszystkich pytań (drzewo prefiksów), a
 żądania powyżej 4096 tokenów idą do osobnego toru, który oddaje GPU krótkim
 żądaniom między warstwami.
 
+## Długość kontekstu (H100)
+
+H100 PCIe 350 W, całe żądanie, jedno pytanie, upstream / basal-rs
+([context-h100](../reports/context-h100/README.md)):
+
+| Stan | 4.5B | max |
+|---:|---:|---:|
+| 512 tokenów | 23 / 31 ms | 41 / 56 ms |
+| 1 792 tokenów | 84 / 100 ms | 152 / 194 ms |
+| 4 096 tokenów | 487 / 267 ms | 892 / 510 ms |
+| 16 384 tokenów | 4 200 / 1 743 ms | |
+| 16 384 tokenów, 5 pytań | 29,5 / 2,0 s | |
+
+Do ~2k tokenów domyślna tabela GEMM niezależna od partii jest na H100 o
+20–35% wolniejsza od heurystyki cuBLASLt (wybór algorytmów pomija kernele
+Hoppera); z heurystyką basal-rs jest tam porównywalny z upstream. Od ~4k
+tokenów basal-rs jest szybszy 1,75–2,4 raza, przy pięciu pytaniach 10–15 razy.
+
 ## Apple Silicon (Metal)
 
 Pojedyncza decyzja (mediana), upstream z MLX w bf16 (ścieżka serwowana) i f16

@@ -54,6 +54,7 @@ Metodyka: [docs/BENCHMARKS.md](../docs/BENCHMARKS.md).
 
 | Katalog | Zawartość |
 |---|---|
+| [context-h100](context-h100/README.md) | H100: stany 512–16k tokenów, 1 i 5 pytań, basal-rs wobec upstream; tabela GEMM wobec heurystyki cuBLASLt; sekcje forwardu |
 | [perf-gpus](perf-gpus/README.md) | H100, A100, L40S, RTX 6000 Ada, RTX A6000: pojedyncza decyzja, HTTP 1/8/32 klientów, ruch mieszany, energia; basal-rs i upstream na trzech modelach |
 | [decision-sets](decision-sets/README.md) | 900 pytań z 9 zbiorów (PL, EN; choice, noul, score) wobec upstream FP32: basal-rs f16 i f32, upstream BF16; basal-1.5-max, 4.5B i mini, RTX 6000 Ada i A100 |
 | [choice-sets](choice-sets/README.md) | Choice 59–150 opcji na zbiorach intencji (Banking77, CLINC150, MASSIVE pl): strategie grupowe na trzech modelach wobec TypeSafe jev, czekanie na GPU |

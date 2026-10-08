@@ -1,0 +1,369 @@
+{
+  "batching": "Tree",
+  "reps": 3,
+  "requests": [
+    {
+      "id": "ctx-512-q1",
+      "questions": 1,
+      "input_tokens": 1030,
+      "packed_tokens_per_question_rows": 553,
+      "packed_tokens_shared_tree": 553,
+      "median_ms": 23.403014,
+      "min_ms": 23.344077000000002,
+      "max_ms": 23.431120999999997,
+      "all_ms": [
+        23.344077000000002,
+        23.403014,
+        23.431120999999997
+      ],
+      "answers": {
+        "kara": {
+          "type": "noul",
+          "noul": 0.007274801876754325
+        }
+      }
+    },
+    {
+      "id": "ctx-512-q5",
+      "questions": 5,
+      "input_tokens": 7178,
+      "packed_tokens_per_question_rows": 2746,
+      "packed_tokens_shared_tree": 949,
+      "median_ms": 46.918814000000005,
+      "min_ms": 46.821524000000004,
+      "max_ms": 47.435295,
+      "all_ms": [
+        46.821524000000004,
+        46.918814000000005,
+        47.435295
+      ],
+      "answers": {
+        "kara": {
+          "type": "noul",
+          "noul": 0.007274801876754325
+        },
+        "forma": {
+          "type": "choice",
+          "choice": "a",
+          "probabilities": {
+            "a": 0.9990056611878767,
+            "b": 0.0004963586793091273,
+            "c": 0.0004979801328141232
+          },
+          "confidence": 0.9985084917818149
+        },
+        "ryzyko": {
+          "type": "score",
+          "score": 1.7252877766369363,
+          "legend": {
+            "0": "niskie",
+            "1": "średnie",
+            "2": "wysokie"
+          },
+          "probabilities": {
+            "0": 0.05514990270238686,
+            "1": 0.16441241795829012,
+            "2": 0.7804376793393231
+          },
+          "confidence": 0.5879316649554043
+        },
+        "termin": {
+          "type": "noul",
+          "noul": 0.9771541411744895
+        },
+        "tematy": {
+          "type": "multi",
+          "selected": [
+            "dostawy towaru",
+            "kary umowne"
+          ],
+          "probabilities": {
+            "dostawy towaru": 0.9898155025952657,
+            "kary umowne": 0.9690511163502573,
+            "wynagrodzenie pracowników": 0.010898359891210673
+          },
+          "threshold": 0.5,
+          "set_confidence": 0.9487283091195622
+        }
+      }
+    },
+    {
+      "id": "ctx-1792-q1",
+      "questions": 1,
+      "input_tokens": 3518,
+      "packed_tokens_per_question_rows": 1797,
+      "packed_tokens_shared_tree": 1797,
+      "median_ms": 76.473399,
+      "min_ms": 75.863054,
+      "max_ms": 76.517745,
+      "all_ms": [
+        75.863054,
+        76.473399,
+        76.517745
+      ],
+      "answers": {
+        "kara": {
+          "type": "noul",
+          "noul": 0.005835867381995405
+        }
+      }
+    },
+    {
+      "id": "ctx-1792-q5",
+      "questions": 5,
+      "input_tokens": 24582,
+      "packed_tokens_per_question_rows": 8962,
+      "packed_tokens_shared_tree": 2193,
+      "median_ms": 116.51777700000001,
+      "min_ms": 115.91404600000001,
+      "max_ms": 117.90187900000001,
+      "all_ms": [
+        115.91404600000001,
+        116.51777700000001,
+        117.90187900000001
+      ],
+      "answers": {
+        "kara": {
+          "type": "noul",
+          "noul": 0.005835867381995405
+        },
+        "forma": {
+          "type": "choice",
+          "choice": "a",
+          "probabilities": {
+            "a": 0.9985804078784115,
+            "b": 0.0006488662828541027,
+            "c": 0.000770725838734396
+          },
+          "confidence": 0.9978706118176173
+        },
+        "ryzyko": {
+          "type": "score",
+          "score": 1.8121916009829744,
+          "legend": {
+            "0": "niskie",
+            "1": "średnie",
+            "2": "wysokie"
+          },
+          "probabilities": {
+            "0": 0.03841066076194722,
+            "1": 0.11098707749313125,
+            "2": 0.8506022617449216
+          },
+          "confidence": 0.7182874014744615
+        },
+        "termin": {
+          "type": "noul",
+          "noul": 0.9753497218109295
+        },
+        "tematy": {
+          "type": "multi",
+          "selected": [
+            "dostawy towaru",
+            "kary umowne"
+          ],
+          "probabilities": {
+            "dostawy towaru": 0.9855312114801142,
+            "kary umowne": 0.9794905205490875,
+            "wynagrodzenie pracowników": 0.024289316591720334
+          },
+          "threshold": 0.5,
+          "set_confidence": 0.941871553193259
+        }
+      }
+    },
+    {
+      "id": "ctx-2048-q1",
+      "questions": 1,
+      "input_tokens": 4100,
+      "packed_tokens_per_question_rows": 2088,
+      "packed_tokens_shared_tree": 2088,
+      "median_ms": 90.155379,
+      "min_ms": 90.12307999999999,
+      "max_ms": 90.98021,
+      "all_ms": [
+        90.12307999999999,
+        90.155379,
+        90.98021
+      ],
+      "answers": {
+        "kara": {
+          "type": "noul",
+          "noul": 0.007163064434499644
+        }
+      }
+    },
+    {
+      "id": "ctx-2048-q5",
+      "questions": 5,
+      "input_tokens": 28656,
+      "packed_tokens_per_question_rows": 10417,
+      "packed_tokens_shared_tree": 2484,
+      "median_ms": 135.619849,
+      "min_ms": 135.151145,
+      "max_ms": 135.626837,
+      "all_ms": [
+        135.151145,
+        135.619849,
+        135.626837
+      ],
+      "answers": {
+        "kara": {
+          "type": "noul",
+          "noul": 0.007163064434499644
+        },
+        "forma": {
+          "type": "choice",
+          "choice": "a",
+          "probabilities": {
+            "a": 0.9988692749508953,
+            "b": 0.0005655254521113773,
+            "c": 0.0005651995969932793
+          },
+          "confidence": 0.9983039124263428
+        },
+        "ryzyko": {
+          "type": "score",
+          "score": 1.8032534589908067,
+          "legend": {
+            "0": "niskie",
+            "1": "średnie",
+            "2": "wysokie"
+          },
+          "probabilities": {
+            "0": 0.043123482647160157,
+            "1": 0.11049957571487279,
+            "2": 0.846376941637967
+          },
+          "confidence": 0.7048801884862104
+        },
+        "termin": {
+          "type": "noul",
+          "noul": 0.9757207467484189
+        },
+        "tematy": {
+          "type": "multi",
+          "selected": [
+            "dostawy towaru",
+            "kary umowne"
+          ],
+          "probabilities": {
+            "dostawy towaru": 0.985132904978478,
+            "kary umowne": 0.9768813763485303,
+            "wynagrodzenie pracowników": 0.0223895203781418
+          },
+          "threshold": 0.5,
+          "set_confidence": 0.9408112543159333
+        }
+      }
+    },
+    {
+      "id": "ctx-4096-q1",
+      "questions": 1,
+      "input_tokens": 8338,
+      "packed_tokens_per_question_rows": 4207,
+      "packed_tokens_shared_tree": 4207,
+      "median_ms": 212.22569,
+      "min_ms": 211.198991,
+      "max_ms": 213.73046100000002,
+      "all_ms": [
+        211.198991,
+        212.22569,
+        213.73046100000002
+      ],
+      "answers": {
+        "kara": {
+          "type": "noul",
+          "noul": 0.014624020928409339
+        }
+      }
+    },
+    {
+      "id": "ctx-4096-q5",
+      "questions": 5,
+      "input_tokens": 58322,
+      "packed_tokens_per_question_rows": 21012,
+      "packed_tokens_shared_tree": 4603,
+      "median_ms": 283.72625600000003,
+      "min_ms": 283.725212,
+      "max_ms": 284.29481400000003,
+      "all_ms": [
+        283.725212,
+        283.72625600000003,
+        284.29481400000003
+      ],
+      "answers": {
+        "kara": {
+          "type": "noul",
+          "noul": 0.014624020928409339
+        },
+        "forma": {
+          "type": "choice",
+          "choice": "a",
+          "probabilities": {
+            "a": 0.9975992720288239,
+            "b": 0.001175370265676464,
+            "c": 0.0012253577054997145
+          },
+          "confidence": 0.9963989080432357
+        },
+        "ryzyko": {
+          "type": "score",
+          "score": 1.7355662343674543,
+          "legend": {
+            "0": "niskie",
+            "1": "średnie",
+            "2": "wysokie"
+          },
+          "probabilities": {
+            "0": 0.06110596481443703,
+            "1": 0.1422218360036719,
+            "2": 0.7966721991818911
+          },
+          "confidence": 0.6033493515511811
+        },
+        "termin": {
+          "type": "noul",
+          "noul": 0.962148860406955
+        },
+        "tematy": {
+          "type": "multi",
+          "selected": [
+            "dostawy towaru",
+            "kary umowne"
+          ],
+          "probabilities": {
+            "dostawy towaru": 0.9660374965255195,
+            "kary umowne": 0.963769812205583,
+            "wynagrodzenie pracowników": 0.034358606854896404
+          },
+          "threshold": 0.5,
+          "set_confidence": 0.8990486156763532
+        }
+      }
+    }
+  ],
+  "backend": {
+    "backend": "cuda",
+    "device": "NVIDIA GPU through candle Device::new_cuda(0)",
+    "tensor_library": "candle-core 0.11.0 (CUDA; matmul = cuBLAS, no TF32)",
+    "weights": "f16 (converted from bf16, experiment)",
+    "activations": "f16 residual stream, norms and MLP",
+    "attention": "f32 q/k/v (bias + rotate-half RoPE fused kernel, cos/sin from f64 on host); one f32 flash-style kernel for all segments of a forward (online softmax, additive block mask, prefix K/V read from the cache, fully masked key tiles skipped), GQA as stacked query rows",
+    "kernels": "fused: q/k/v and gate/up projections as single GEMMs without bias; bias added in fused kernels (bias+RoPE+head split, bias+SiLU*up, bias+residual)",
+    "readout": "letter rows of lm_head only, f32",
+    "padding": "none: compact token list for GEMM/norm/MLP, attention per packed row (segment)",
+    "attention_kernel": "attn_tree_tc",
+    "gemm": "cuBLASLt, f32 accumulation; algorithm per (N, K, M class: 16 up to 512, then 128) from the --gemm-table search, else the fastest of up to 16 heuristic algorithms timed at first use",
+    "prefix_kv": [
+      53,
+      66
+    ],
+    "state_cache_bytes": 0,
+    "last_layer": "o_proj and MLP of the last layer only at the readout positions"
+  },
+  "state_cache": {
+    "hits": 0,
+    "inserts": 0
+  }
+}

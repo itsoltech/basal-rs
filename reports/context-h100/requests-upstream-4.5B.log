@@ -1,0 +1,15 @@
+Loading weights:   0%|          | 0/963 [00:00<?, ?it/s]Loading weights:  61%|██████    | 588/963 [00:00<00:00, 5877.20it/s]Loading weights: 100%|██████████| 963/963 [00:00<00:00, 5757.72it/s]
+{"id": "ctx-512-q1", "questions": 1, "input_tokens": 1030, "median_ms": 23.19670600002155, "min_ms": 22.971309000013207, "max_ms": 23.422103000029892}
+{"id": "ctx-512-q5", "questions": 5, "input_tokens": 7178, "median_ms": 47.56307699994977, "min_ms": 47.51594100002876, "max_ms": 47.61021299987078}
+{"id": "ctx-1024-q1", "questions": 1, "input_tokens": 1962, "median_ms": 40.14083250001477, "min_ms": 40.12715099997877, "max_ms": 40.15451400005077}
+{"id": "ctx-1024-q5", "questions": 5, "input_tokens": 13702, "median_ms": 68.70696500016038, "min_ms": 68.02997900012997, "max_ms": 69.38395100019079}
+{"id": "ctx-1792-q1", "questions": 1, "input_tokens": 3518, "median_ms": 84.04190099997777, "min_ms": 84.03864399997474, "max_ms": 84.0451579999808}
+{"id": "ctx-1792-q5", "questions": 5, "input_tokens": 24582, "median_ms": 108.66716199996063, "min_ms": 107.58545199996661, "max_ms": 109.74887199995464}
+{"id": "ctx-2048-q1", "questions": 1, "input_tokens": 4100, "median_ms": 95.59789500008264, "min_ms": 95.49849300015012, "max_ms": 95.69729700001517}
+{"id": "ctx-2048-q5", "questions": 5, "input_tokens": 28656, "median_ms": 142.84268250003151, "min_ms": 142.46496000009756, "max_ms": 143.22040499996547}
+{"id": "ctx-4096-q1", "questions": 1, "input_tokens": 8338, "median_ms": 487.4947940000993, "min_ms": 487.4382750001587, "max_ms": 487.55131300003995}
+{"id": "ctx-4096-q5", "questions": 5, "input_tokens": 58322, "median_ms": 3398.923403000026, "min_ms": 3397.4949410001045, "max_ms": 3400.351864999948}
+{"id": "ctx-8192-q1", "questions": 1, "input_tokens": 16630, "median_ms": 1340.1386109998157, "min_ms": 1339.824758999839, "max_ms": 1340.4524629997923}
+{"id": "ctx-8192-q5", "questions": 5, "input_tokens": 116366, "median_ms": 9375.83100200004, "min_ms": 9365.332682999906, "max_ms": 9386.329321000176}
+{"id": "ctx-16384-q1", "questions": 1, "input_tokens": 33644, "median_ms": 4199.637071499978, "min_ms": 4198.017918000005, "max_ms": 4201.256224999952}
+{"id": "ctx-16384-q5", "questions": 5, "input_tokens": 235452, "median_ms": 29457.618311999908, "min_ms": 29455.921564999924, "max_ms": 29459.31505899989}

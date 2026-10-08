@@ -1,0 +1,10 @@
+basal: basal-1.5-4.5B loaded on the GPU in 11.6s
+basal: template prefixes precomputed ([53, 66] tokens)
+"ctx-512-q1" q=1 median 23.4 ms
+"ctx-512-q5" q=5 median 46.9 ms
+"ctx-1792-q1" q=1 median 76.5 ms
+"ctx-1792-q5" q=5 median 116.5 ms
+"ctx-2048-q1" q=1 median 90.2 ms
+"ctx-2048-q5" q=5 median 135.6 ms
+"ctx-4096-q1" q=1 median 212.2 ms
+"ctx-4096-q5" q=5 median 283.7 ms
