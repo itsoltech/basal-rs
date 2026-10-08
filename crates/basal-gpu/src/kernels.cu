@@ -29,12 +29,82 @@ __device__ void bias_silu_mul(const T *gu, const T *bias, T *out, unsigned I, un
     out[id] = from_f<T>(s * u);
 }
 
+// bias_silu_mul for 2-byte T, 8 consecutive outputs per thread with 16-byte loads and stores (I % 8 == 0, 16-byte
+// aligned operands); the same arithmetic per element, so the same results
+template <typename T>
+__device__ void bias_silu_mul8(const T *gu, const T *bias, T *out, unsigned I, unsigned total8) {
+    unsigned id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (id >= total8) return;
+    unsigned I8 = I / 8;
+    unsigned m = id / I8, i = (id - m * I8) * 8;
+    uint4 gv = *reinterpret_cast<const uint4 *>(gu + (size_t)m * 2 * I + i);
+    uint4 uv = *reinterpret_cast<const uint4 *>(gu + (size_t)m * 2 * I + I + i);
+    uint4 bgv = *reinterpret_cast<const uint4 *>(bias + i);
+    uint4 buv = *reinterpret_cast<const uint4 *>(bias + I + i);
+    const T *g8 = reinterpret_cast<const T *>(&gv), *u8 = reinterpret_cast<const T *>(&uv);
+    const T *bg8 = reinterpret_cast<const T *>(&bgv), *bu8 = reinterpret_cast<const T *>(&buv);
+    uint4 ov;
+    T *o8 = reinterpret_cast<T *>(&ov);
+#pragma unroll
+    for (int e = 0; e < 8; e++) {
+        float g = rt<T>(to_f(g8[e]) + to_f(bg8[e]));
+        float u = rt<T>(to_f(u8[e]) + to_f(bu8[e]));
+        float s = rt<T>(g / (1.0f + expf(-g)));
+        o8[e] = from_f<T>(s * u);
+    }
+    *reinterpret_cast<uint4 *>(out + (size_t)m * I + i) = ov;
+}
+
 // out = T(x + T(y + b)): residual add of a linear output whose bias is still to be added
 template <typename T>
 __device__ void bias_residual(const T *x, const T *y, const T *b, T *out, unsigned H, unsigned total) {
     unsigned id = blockIdx.x * blockDim.x + threadIdx.x;
     if (id >= total) return;
     out[id] = from_f<T>(to_f(x[id]) + rt<T>(to_f(y[id]) + to_f(b[id % H])));
+}
+
+// out = [2, M, H]: out[0] = T(x + T(y + b)) as bias_residual, out[1] = RMSNorm(out[0]) * alpha with the arithmetic and
+// summation order of candle's rmsnorm kernel (one block of blockDim.x threads per row, blockDim.x = 32 for H < 1024
+// else 1024, strided partial sums, xor warp reduction, then over the warps), so both outputs are bitwise those of the
+// two separate kernels. One block per row.
+__device__ __forceinline__ float warp_sum_xor(float v) {
+#pragma unroll
+    for (int mask = 16; mask > 0; mask >>= 1) v += __shfl_xor_sync(0xffffffff, v, mask, 32);
+    return v;
+}
+template <typename T>
+__device__ void residual_rmsnorm(const T *x, const T *y, const T *b, const T *alpha, T *out, unsigned H, unsigned M,
+                                 float eps) {
+    const int row = blockIdx.x;
+    const int tid = threadIdx.x;
+    const int bs = blockDim.x;
+    const int ncols = H;
+    T *xo = out + (size_t)row * H;
+    T *no = out + (size_t)M * H + (size_t)row * H;
+    float tmp = 0.0f;
+    for (int col = tid; col < ncols; col += bs) {
+        size_t i = (size_t)row * H + col;
+        T v = from_f<T>(to_f(x[i]) + rt<T>(to_f(y[i]) + to_f(b[col])));
+        xo[col] = v;
+        const float xi = to_f(v);
+        tmp += xi * xi;
+    }
+    tmp = warp_sum_xor(tmp);
+    if (bs > 32) {
+        __shared__ float s_sum[32];
+        int warp_id = tid / 32;
+        int lane_id = tid % 32;
+        if (lane_id == 0) s_sum[warp_id] = tmp;
+        __syncthreads();
+        tmp = s_sum[lane_id];
+        tmp = warp_sum_xor(tmp);
+    }
+    const float mean = tmp / ncols;
+    const float scale = rsqrtf(mean + eps);
+    for (int col = tid; col < ncols; col += bs) {
+        float a = to_f(alpha[col]);
+        no[col] = from_f<T>(scale * to_f(xo[col]) * a);
+    }
 }
 
 // qkv = [B*L, (NH + 2*NKV) * HD] projection without bias. Adds the bias (rounded to T), applies rotate-half RoPE to q
@@ -100,6 +170,10 @@ __device__ void merge_heads(const float *in, T *out, unsigned B, unsigned L, uns
                                                  unsigned total) {                                                 \
         bias_residual<T>(x, y, b, out, H, total);                                                                  \
     }                                                                                                              \
+    extern "C" __global__ void residual_rmsnorm_##S(const T *x, const T *y, const T *b, const T *alpha, T *out,   \
+                                                    unsigned H, unsigned M, float eps) {                           \
+        residual_rmsnorm<T>(x, y, b, alpha, out, H, M, eps);                                                       \
+    }                                                                                                              \
     extern "C" __global__ void qkv_rope_##S(const T *qkv, const T *bias, const float *cs, float *out, unsigned B,  \
                                             unsigned L, unsigned NH, unsigned NKV, unsigned HD) {                  \
         qkv_rope<T>(qkv, bias, cs, out, B, L, NH, NKV, HD);                                                        \
@@ -112,6 +186,13 @@ __device__ void merge_heads(const float *in, T *out, unsigned B, unsigned L, uns
 INSTANTIATE(float, f32)
 INSTANTIATE(__half, f16)
 INSTANTIATE(__nv_bfloat16, bf16)
+
+#define INSTANTIATE_VEC8(T, S)                                                                                    \
+    extern "C" __global__ void bias_silu_mul8_##S(const T *gu, const T *bias, T *out, unsigned I, unsigned total8) { \
+        bias_silu_mul8<T>(gu, bias, out, I, total8);                                                               \
+    }
+INSTANTIATE_VEC8(__half, f16)
+INSTANTIATE_VEC8(__nv_bfloat16, bf16)
 
 // Attention softmax with the scale and the additive mask fused (f32): s = scores [R, LK] with R = heads * L rows in
 // head-major order (row r is query position r % L), mask = [L, LK] shared by all heads. out = softmax(s * scale + mask)

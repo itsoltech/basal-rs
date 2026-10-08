@@ -910,8 +910,13 @@ impl GpuBackend {
         let mut x = self.embed.index_select(&ids, 0)?.to_dtype(dt)?; // [total, h]
         self.mark(&mut t, "embed+inputs")?;
         let n_layers = self.layers.len();
+        // CUDA: the RMSNorm of the next block comes out of the residual add of the previous one (one kernel)
+        let mut normed: Option<Tensor> = None;
         for (li, ly) in self.layers.iter().enumerate() {
-            let a = rms_norm(&x, &self.w(&ly.ln1)?, eps)?;
+            let a = match normed.take() {
+                Some(a) => a,
+                None => rms_norm(&x, &self.w(&ly.ln1)?, eps)?,
+            };
             self.mark(&mut t, "rms_norm")?;
             let qkv = self.matmul_t(&a, &ly.wqkv)?;
             self.mark(&mut t, "qkv_proj")?;
@@ -991,15 +996,22 @@ impl GpuBackend {
                 o = o.index_select(rt, 0)?;
                 x = x.index_select(rt, 0)?;
             }
-            x = fused::bias_residual(&x, &self.matmul_t(&o, &ly.wo)?, &self.w(&ly.bo)?)?;
-            self.mark(&mut t, "o_proj+bias+residual")?;
-            let a = rms_norm(&x, &self.w(&ly.ln2)?, eps)?;
-            self.mark(&mut t, "rms_norm")?;
+            let y = self.matmul_t(&o, &ly.wo)?;
+            let a;
+            (x, a) = self.residual_norm(&x, &y, &ly.bo, &ly.ln2, eps)?;
+            self.mark(&mut t, "o_proj+bias+residual+rms_norm")?;
             let gu = self.matmul_t(&a, &ly.wgu)?;
             self.mark(&mut t, "gate_up_proj")?;
             let act = fused::bias_silu_mul(&gu, &self.w(&ly.bgu)?)?;
             self.mark(&mut t, "bias+silu*up")?;
-            x = fused::bias_residual(&x, &self.matmul_t(&act, &ly.wdown)?, &self.w(&ly.bdown)?)?;
+            let y = self.matmul_t(&act, &ly.wdown)?;
+            if self.dev.is_cuda() && li + 1 < n_layers {
+                let a;
+                (x, a) = self.residual_norm(&x, &y, &ly.bdown, &self.layers[li + 1].ln1, eps)?;
+                normed = Some(a);
+            } else {
+                x = fused::bias_residual(&x, &y, &self.w(&ly.bdown)?)?;
+            }
             self.mark(&mut t, "down_proj+bias+residual")?;
             if let Some(rm) = &self.residual_max {
                 let m = x.abs()?.to_dtype(DType::F32)?.max_all()?.to_scalar::<f32>()?;
@@ -1013,6 +1025,18 @@ impl GpuBackend {
         let out = rms_norm(&x, &self.w(&self.norm)?, eps)?;
         self.mark(&mut t, "final_norm")?;
         Ok((Some(out), captured))
+    }
+
+    /// `x + (y + b)` and its RMSNorm with `ln`: one fused kernel on CUDA, the two separate ops elsewhere (bitwise the
+    /// same results).
+    fn residual_norm(&self, x: &Tensor, y: &Tensor, b: &Tensor, ln: &Tensor, eps: f32) -> Result<(Tensor, Tensor)> {
+        #[cfg(feature = "cuda")]
+        if self.dev.is_cuda() {
+            return Ok(fused::residual_rmsnorm(x, y, &self.w(b)?, &self.w(ln)?, eps)?);
+        }
+        let x = fused::bias_residual(x, y, &self.w(b)?)?;
+        let a = rms_norm(&x, &self.w(ln)?, eps)?;
+        Ok((x, a))
     }
 
     fn rope_row(&self, pos: f64, cos: &mut [f32], sin: &mut [f32]) {

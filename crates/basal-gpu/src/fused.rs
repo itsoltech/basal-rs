@@ -179,12 +179,17 @@ impl CustomOp2 for BiasSiluMul {
             let (g, bb) = (view!(gu, T, go), view!(b, T, bo));
             // SAFETY: every element is written by the kernel.
             let out = unsafe { dev.alloc::<T>(total)? };
-            let f = dev.get_or_load_custom_func(&format!("bias_silu_mul_{S}"), "basal_fused", cu::ptx())?;
+            // 8 outputs per thread with 16-byte accesses when the layout allows it (same arithmetic per element)
+            let vec8 = S != "f32" && i % 8 == 0 && go % 8 == 0 && bo % 8 == 0;
+            let name = if vec8 { format!("bias_silu_mul8_{S}") } else { format!("bias_silu_mul_{S}") };
+            let f = dev.get_or_load_custom_func(&name, "basal_fused", cu::ptx())?;
             let mut a = f.builder();
-            let (i_, n_) = (i as u32, total as u32);
+            let threads = if vec8 { total / 8 } else { total };
+            let (i_, n_) = (i as u32, threads as u32);
             a.arg(&g).arg(&bb).arg(&out).arg(&i_).arg(&n_);
-            // SAFETY: argument types and counts match the kernel signature.
-            unsafe { a.launch(cu::cfg(total)) }.w()?;
+            // SAFETY: argument types and counts match the kernel signature; with vec8 every operand offset and I are
+            // multiples of 8 elements (16 bytes), as the kernel's 16-byte accesses need.
+            unsafe { a.launch(cu::cfg(threads)) }.w()?;
             <T as candle_core::cuda_backend::CudaDType>::wrap_cuda_slice(out, dev.clone())
         });
         Ok((st, Shape::from((m, i))))
@@ -218,6 +223,77 @@ impl CustomOp2 for BiasSiluMul {
 /// `silu(gate + b_gate) * (up + b_up)` for `gu = [M, 2I]` (gate | up) and `bias = [2I]`.
 pub fn bias_silu_mul(gu: &Tensor, bias: &Tensor) -> Result<Tensor> {
     gu.apply_op2_no_bwd(bias, &BiasSiluMul)
+}
+
+/// `(T(x + T(y + b)), RMSNorm(that) * alpha)` in one CUDA kernel: the residual add of a linear output and the RMSNorm
+/// of the next block, bitwise as [`bias_residual`] followed by candle's `rms_norm` (same arithmetic and summation
+/// order), with one read of the residual stream instead of two. Returns (x, normed) as views of one [2, M, H] buffer.
+#[cfg(feature = "cuda")]
+pub fn residual_rmsnorm(x: &Tensor, y: &Tensor, b: &Tensor, alpha: &Tensor, eps: f32) -> Result<(Tensor, Tensor)> {
+    let out = x.apply_op3_no_bwd(y, b, &ResidualRmsNorm { alpha: alpha.clone(), eps })?;
+    Ok((out.get(0)?, out.get(1)?))
+}
+
+#[cfg(feature = "cuda")]
+struct ResidualRmsNorm {
+    alpha: Tensor,
+    eps: f32,
+}
+
+#[cfg(feature = "cuda")]
+impl CustomOp3 for ResidualRmsNorm {
+    fn name(&self) -> &'static str {
+        "residual-rmsnorm"
+    }
+    fn cpu_fwd(
+        &self,
+        _: &CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+    ) -> Result<(CpuStorage, Shape)> {
+        no_cpu()
+    }
+    fn cuda_fwd(
+        &self,
+        x: &CudaStorage,
+        xl: &Layout,
+        y: &CudaStorage,
+        yl: &Layout,
+        b: &CudaStorage,
+        bl: &Layout,
+    ) -> Result<(CudaStorage, Shape)> {
+        use candle_core::cuda_backend::{
+            cudarc::driver::{LaunchConfig, PushKernelArg},
+            WrapErr,
+        };
+        let (m, h) = xl.shape().dims2()?;
+        let dev = x.device.clone();
+        let (xo, yo, bo) = (contiguous(xl, "x")?, contiguous(yl, "y")?, contiguous(bl, "bias")?);
+        let (ast, al) = self.alpha.storage_and_layout();
+        let candle_core::Storage::Cuda(acs) = &*ast else {
+            candle_core::bail!("residual-rmsnorm: alpha must be on the CUDA device");
+        };
+        let ao = contiguous(al, "alpha")?;
+        let st = by_dtype!(x.dtype(), |T, S| {
+            let (xv, yv, bv, av) = (view!(x, T, xo), view!(y, T, yo), view!(b, T, bo), view!(acs, T, ao));
+            // SAFETY: the kernel writes all 2 * m * h elements (both halves of every row).
+            let out = unsafe { dev.alloc::<T>(2 * m * h)? };
+            let f = dev.get_or_load_custom_func(&format!("residual_rmsnorm_{S}"), "basal_fused", cu::ptx())?;
+            let mut a = f.builder();
+            let (h_, m_, eps) = (h as u32, m as u32, self.eps);
+            a.arg(&xv).arg(&yv).arg(&bv).arg(&av).arg(&out).arg(&h_).arg(&m_).arg(&eps);
+            // the block size of candle's rmsnorm, on which the summation order depends
+            let bs = if h < 1024 { 32 } else { 1024 };
+            let cfg = LaunchConfig { grid_dim: (m as u32, 1, 1), block_dim: (bs, 1, 1), shared_mem_bytes: 0 };
+            // SAFETY: argument types and counts match the kernel signature; one block per row of m.
+            unsafe { a.launch(cfg) }.w()?;
+            <T as candle_core::cuda_backend::CudaDType>::wrap_cuda_slice(out, dev.clone())
+        });
+        Ok((st, Shape::from((2, m, h))))
+    }
 }
 
 struct BiasResidual;
