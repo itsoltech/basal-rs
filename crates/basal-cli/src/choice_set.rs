@@ -32,6 +32,7 @@ pub fn eval<B: Backend>(
         recs.truncate(l);
     }
     let mut by_strategy = Vec::new();
+    engine.trace_large_choice = true;
     for name in strategies {
         let strategy = Strategy::parse(name).with_context(|| format!("unknown strategy {name:?}"))?;
         engine.large_choice_strategy = strategy;
@@ -53,12 +54,14 @@ pub fn eval<B: Backend>(
             );
             let a = answer(engine, item, 1.0)?;
             let in_final = a.finalists.as_ref().map(|f| f.contains(&gold));
+            // rank of the label (1 = strongest) in the joint fit after the first round
+            let first_rank = a.first_round.as_ref().map(|q| 1 + q.iter().filter(|&&v| v > q[gold]).count());
             let top = argmax(&a.p);
             writeln!(
                 f,
                 "{}",
                 json!({"id": r["id"], "dataset": r["dataset"], "gold": gold, "top": top, "p_gold": a.p[gold],
-                       "p_top": a.p[top], "gold_in_final": in_final, "finalists": a.finalists, "prompts": a.prompts,
+                       "p_top": a.p[top], "gold_in_final": in_final, "gold_rank_first_round": first_rank, "finalists": a.finalists, "prompts": a.prompts,
                        "ms": a.ms, "p": a.p})
             )?;
             let e = sets.entry(r["dataset"].as_str().unwrap_or("?").to_string()).or_default();

@@ -123,3 +123,26 @@ sam proces i warunki (`cuda-sync/*.log`; czas procesu z wczytaniem modelu):
 Odpowiedzi są bitowo równe we wszystkich trybach. `blocking` oszczędza ok.
 0,7 rdzenia w czasie pracy GPU kosztem 2,5% czasu pytania; domyślny tryb
 zostaje bez zmian.
+
+## Etykiety, które nie weszły do finału
+
+Pytanie: czy strategia (grupy przed finałem) traci poprawne odpowiedzi.
+`cuda-semifinal/` (2026-10-08, ten sam zestaw, 200 W) zapisuje dla każdego
+pytania pozycję etykiety we wspólnym rozkładzie po pierwszej rundzie
+(`gold_rank_first_round`). Z `luce2-1o` do finału nie weszło 21 (mini), 19
+(4.5B) i 15 (max) etykiet na 600; ich pozycje po pierwszej rundzie to od 12.
+do 58. (połowa poniżej 30.), a jev daje im zwykle prawdopodobieństwo bliskie
+zera (np. „nowy jork” → `transport query`, „system cisco” →
+`recommendation movies`).
+
+Sprawdzenie (`label-in-final/`, Metal): finałowa dziesiątka każdego z tych
+pytań z jedną opcją zastąpioną etykietą, zadana jako zwykłe pytanie z 10
+opcjami. Etykieta wygrywa w 0/21 (mini), 1/19 (4.5B: „nowy jork” →
+`transport query`, p = 0,19) i 0/15 (max). Wejście etykiety do finału
+zmieniłoby więc najwyżej jedną odpowiedź na 600; pozostałe odrzuca sam model.
+
+Półfinał (`-sN`: N najmocniejszych opcji po pierwszej rundzie w dodatkowej
+rundzie przed finałem, 2–4 prompty więcej) wprowadza do finału 1–3 etykiety
+więcej, a trafność zmienia nieregularnie (mini 457 → 457–464, 4.5B 473 →
+468–470, max 495 → 493–498 na 600), przez inny skład finału. Domyślna
+strategia zostaje bez półfinału.
