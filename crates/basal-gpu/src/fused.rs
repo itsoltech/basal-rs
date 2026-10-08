@@ -639,7 +639,7 @@ struct AttentionTree<'a> {
     v_exact: bool,
 }
 
-/// Dynamic shared memory of attn_tree_tc: Q hi/lo [64][136], K hi/lo and V hi/lo [32][136] (f16).
+/// Dynamic shared memory of attn_tree_tc: Q hi/lo `[64][136]`, K hi/lo and V hi/lo `[32][136]` (f16).
 #[cfg(feature = "cuda")]
 // attn_tree_tc: one Q plane of 128 rows, then the K / V tiles (4 x 32 x 136 x 2) in the same memory;
 // attn_tree_tc_pipe: two stages of K and of V tiles (8 x 32 x 136 x 2)
