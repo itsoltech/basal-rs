@@ -52,7 +52,10 @@ brzegowych, [raport](../reports/typesafe-api-edge-cases/README.md)):
   (TypeSafe odpowiada 529, gdy jest przeciążone). SDK TypeSafe ponawia 408,
   429 i 5xx z wykładniczym odczekiwaniem.
 - 422 `{"error": "unsupported", "detail": [...]}`: żądanie poprawne, którego
-  ten runtime nie obsługuje (np. `evidence` w modelu bez głowicy dowodów).
+  ten runtime nie obsługuje (np. `evidence` w modelu bez głowicy dowodów), w
+  tym prompt dłuższy niż limit pozycji modelu (`context_length_exceeded`,
+  komunikat zawiera „maximum context length”; sprawdzane przed forwardem).
+  `/v1/basal` zwraca wtedy 422 `{"error": ...}` z tym samym komunikatem.
 
 ### Odpowiedź
 

@@ -322,9 +322,40 @@ impl<B: Backend> Engine<B> {
             }
         }
         let mut plan = self.plan_items(req.items)?;
+        self.check_context(&plan)?;
         plan.evidence_limit = req.facts_limit;
         plan.dialect = dialect;
         Ok(plan)
+    }
+
+    /// Prompts longer than the model's position limit are refused before the forward (422, "maximum context length",
+    /// the marker benchmark runners read as a capacity limit), not left to fail inside the backend (500).
+    fn check_context(&self, plan: &RequestPlan) -> Result<(), DecideError> {
+        let limit = self.manifest.config.max_positions;
+        let mut errs = Vec::new();
+        for p in &plan.prepared {
+            let longest = p.orders.iter().map(|o| o.input_ids.len()).max().unwrap_or(0);
+            if longest > limit {
+                let name = p.item.name.split('#').next().unwrap_or(&p.item.name).to_string();
+                if errs.iter().any(|e: &crate::request::FieldError| e.loc.get(2) == Some(&Value::from(name.clone()))) {
+                    continue;
+                }
+                errs.push(crate::request::FieldError::new(
+                    vec!["body".into(), "questions".into(), name.into()],
+                    format!(
+                        "the prompt has {longest} tokens, more than the maximum context length of {limit} tokens of \
+                         model {}",
+                        self.manifest.name
+                    ),
+                    "context_length_exceeded",
+                ));
+            }
+        }
+        if errs.is_empty() {
+            Ok(())
+        } else {
+            Err(DecideError::Unsupported(errs))
+        }
     }
 
     /// Plan validated items (see [`Engine::plan_request`]).
