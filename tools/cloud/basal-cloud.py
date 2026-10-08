@@ -100,8 +100,8 @@ def ssh(s, command, check=True):
 
 def rsync(s, *paths, dest):
     e = f"ssh -p {s['port']} -o UserKnownHostsFile={KNOWN_HOSTS} -o StrictHostKeyChecking=accept-new"
-    subprocess.run(["rsync", "-az", "--relative", "-e", e, *paths, f"{s['user']}@{s['ip']}:{dest}"], check=True,
-                   cwd=ROOT)
+    subprocess.run(["rsync", "-az", "--relative", "--exclude", ".venv*", "--exclude", "__pycache__", "-e", e, *paths,
+                    f"{s['user']}@{s['ip']}:{dest}"], check=True, cwd=ROOT)
 
 
 def types(args):

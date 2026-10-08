@@ -73,8 +73,13 @@ def calibrate(p, T):
     return softmax(np.log(np.maximum(p, 1e-12)) / T)
 
 
-def bench_items(n):
-    """Same items and order as basal.bench.load_questions(DEFAULT_QUESTIONS, n), with source file and line."""
+def bench_items(n, questions=None):
+    """Same items and order as basal.bench.load_questions(DEFAULT_QUESTIONS, n), with source file and line; with
+    `questions` (a JSONL of basal-bench questions, e.g. tools/decision-sets/build.py) its items in file order."""
+    if questions:
+        rows = [(Path(questions).name, i, json.loads(line))
+                for i, line in enumerate(Path(questions).read_text().splitlines(), 1) if line.strip()]
+        return rows[:n] if n else rows
     rows = []
     for path in DEFAULT_QUESTIONS:
         for i, line in enumerate(Path(path).read_text().splitlines(), 1):
@@ -142,9 +147,11 @@ def _prefix_len(toks):
     return P
 
 
-def export_bench(be, temps, n, out):
+def export_bench(be, temps, n, out, questions=None):
+    items = bench_items(n, questions)
+    n = len(items)
     with open(out / "bench.jsonl", "w") as f:
-        for idx, (src, line, q) in enumerate(bench_items(n)):
+        for idx, (src, line, q) in enumerate(items):
             k = len(q["options"])
             perms = [list(range(k)), list(range(k))[::-1]]
             prompts = [render(be.tok, q["state"], q["question"], [q["options"][c] for c in p]) for p in perms]
@@ -155,7 +162,7 @@ def export_bench(be, temps, n, out):
             qtype = q.get("type", "choice")
             T = float(temps.get(qtype, 1.0))
             p_cal = calibrate(p_avg, T)
-            rec = dict(index=idx, source=src, line=line, id=q.get("id"), type=qtype, state=q["state"],
+            rec = dict(index=idx, source=src, line=line, id=q.get("id"), dataset=q.get("dataset"), type=qtype, state=q["state"],
                        question=q["question"], options=q["options"], gold=q.get("gold"),
                        lang=lang_of(q["state"] + q["question"]), orders=orders, pack=pack,
                        p_avg=p_avg.tolist(), argmax_avg=int(np.argmax(p_avg)), temperature=T,
@@ -242,7 +249,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", default=str(ROOT / ".models/basal-1.0-4.5B"))
     ap.add_argument("--out", required=True)
-    ap.add_argument("--n", type=int, default=44)
+    ap.add_argument("--n", type=int, default=None, help="bench items (default: 44, or all of --questions)")
+    ap.add_argument("--questions", default=None,
+                    help="JSONL of basal-bench questions instead of the default ones, e.g. tools/decision-sets/build.py")
+    ap.add_argument("--no-system-one", action="store_true", help="bench items only (no systemone.jsonl)")
     ap.add_argument("--mode", default="mlx", help="upstream server mode (mlx; on CUDA: eager, fast, fast-nocompile)")
     ap.add_argument("--device", default=None, help="upstream >= 1.5, mode eager: cuda, mps or cpu")
     ap.add_argument("--cases", default=None, help="extra System One requests (JSONL), e.g. tools/reference/systemone_cases_1.5.jsonl")
@@ -266,8 +276,13 @@ def main():
         be.pool.submit(lambda: (be.model.set_dtype(getattr(mx, a.dtype)), mx.eval(be.model.parameters()))).result()
     load_s = time.time() - t0
     t1 = time.time()
-    export_bench(srv.backend, srv.temps, a.n, out)
-    asyncio.run(export_system_one(srv, out, a.cases))
+    if a.n is None and not a.questions:
+        a.n = 44
+    export_bench(srv.backend, srv.temps, a.n, out, a.questions)
+    if a.no_system_one:
+        (out / "systemone.jsonl").write_text("")  # basal export / compare read the file
+    else:
+        asyncio.run(export_system_one(srv, out, a.cases))
     rev = subprocess.run(["git", "-C", str(UPSTREAM), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
     dirty = subprocess.run(["git", "-C", str(UPSTREAM), "status", "--porcelain", "--untracked-files=no"],
                            capture_output=True, text=True).stdout
@@ -282,7 +297,7 @@ def main():
                      note=f"letter logits computed by the {a.mode} backend forward ({a.dtype}) and lm_head, cast to float32; "
                           "softmax, average and calibration in float64 here; upstream_answer comes from "
                           "Server.decide (float32 torch, batched as served, confidence = max(p))"),
-        calibration=dict(temperatures=srv.temps), n_bench=a.n, load_s=round(load_s, 2),
+        calibration=dict(temperatures=srv.temps), n_bench=len(bench_items(a.n, a.questions)), questions=a.questions, load_s=round(load_s, 2),
         export_s=round(time.time() - t1, 2), platform=dict(machine=platform.machine(), mac_ver=platform.mac_ver()[0]),
         versions=versions())
     (out / "manifest.json").write_text(json.dumps(manifest, indent=1, ensure_ascii=False) + "\n")
