@@ -96,6 +96,12 @@ zastępują plik.
 `basal serve` i `basal doctor` raz na dobę sprawdzają, czy jest nowsze
 wydanie, i piszą o tym w logu (`BASAL_NO_UPDATE_CHECK=1` wyłącza).
 
+CUDA: wątek serwera domyślnie czeka na GPU aktywnie i zajmuje przy tym cały
+rdzeń CPU. Na hoście współdzielonym z innymi usługami
+`BASAL_CUDA_SYNC=blocking` zwalnia ten rdzeń kosztem ok. 2,5% czasu odpowiedzi
+([pomiar](../reports/choice-sets/README.md#czekanie-na-gpu-cuda)); wynik się
+nie zmienia.
+
 ## Pliki
 
 | | macOS | Linux |

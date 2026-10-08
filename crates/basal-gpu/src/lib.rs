@@ -256,9 +256,31 @@ pub fn cublaslt_version() -> Option<usize> {
     None
 }
 
+/// How a host thread waits for the GPU (`BASAL_CUDA_SYNC`): `auto` (driver default: spins while there are more cores
+/// than GPUs, a full core busy during every wait), `spin`, `yield` or `blocking` (sleeps until the GPU signals; frees
+/// the core, a wake-up per synchronisation). Set on the primary context before it is created.
+#[cfg(feature = "cuda")]
+fn set_cuda_sync() -> Result<()> {
+    use candle_core::cuda_backend::cudarc::driver::{result, sys};
+    use sys::CUctx_flags_enum as F;
+    let flag = match std::env::var("BASAL_CUDA_SYNC").as_deref() {
+        Err(_) | Ok("") | Ok("auto") => return Ok(()),
+        Ok("spin") => F::CU_CTX_SCHED_SPIN,
+        Ok("yield") => F::CU_CTX_SCHED_YIELD,
+        Ok("blocking") => F::CU_CTX_SCHED_BLOCKING_SYNC,
+        Ok(v) => anyhow::bail!("BASAL_CUDA_SYNC={v:?}: auto, spin, yield or blocking"),
+    };
+    result::init()?;
+    let dev = result::device::get(0)?;
+    // SAFETY: a valid device; the flags apply to its primary context, retained afterwards by candle
+    unsafe { sys::cuDevicePrimaryCtxSetFlags_v2(dev, flag as u32).result()? };
+    Ok(())
+}
+
 pub fn gpu_device() -> Result<Device> {
     #[cfg(feature = "cuda")]
     {
+        set_cuda_sync().context("BASAL_CUDA_SYNC")?;
         let dev = Device::new_cuda(0).context("CUDA device 0")?;
         if let Device::Cuda(d) = &dev {
             use candle_core::cuda_backend::cudarc::driver::sys::CUdevice_attribute as A;
