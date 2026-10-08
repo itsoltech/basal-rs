@@ -8,6 +8,7 @@
             [--region R] [--compat]
                                                  cheapest machine with the template and a CUDA 13 image (driver
                                                  580); the next offer when one does not start; waits until ready
+    bootstrap [--prefetch "4.5B"]                 run the start script over SSH (providers that skip it)
     build   [--host USER@HOST] [--caps 80,89,90] CUDA binary of the working tree (Docker on HOST, no GPU used)
     push                                         the binary to the machine (/opt/basal-dev, command basal-dev)
     sync    PATH...                              repository paths to /work on the machine (e.g. reports/choice-sets)
@@ -232,9 +233,29 @@ def cmd_up(args):
     s.update({"ip": info["ip"], "user": info.get("ssh_user", "shadeform"), "port": info.get("ssh_port", 22)})
     json.dump(s, open(SESSION, "w"), indent=1)
     print(f"active: {' '.join(ssh_base(s))}", flush=True)
+    prefetch = opt(args, "--prefetch", "4.5B")
+    start = time.time()
     while ssh(s, "test -f /data/ready", check=False) != 0:
+        # the start script can begin minutes after SSH works (Scaleway: ~3 min); if there is still no /data and no
+        # `basal setup` after 10 minutes, run it over SSH
+        if time.time() - start > 600 and ssh(
+            s, "test -d /data || test -f /tmp/basal-start.log || pgrep -f '[b]asal --color never setup'", check=False
+        ) != 0:
+            print("the start script did not run: running it over SSH", flush=True)
+            bootstrap(s, prefetch)
         time.sleep(20)
     print("ready (/data/ready): release, CUDA libraries and models in place", flush=True)
+
+
+def bootstrap(s, prefetch):
+    """Run the template's start script on the machine over SSH (as root, in the background, log /tmp/basal-start.log)."""
+    script = base64.b64encode(START_SCRIPT.encode()).decode()
+    ssh(s, f"echo {script} | base64 -d > /tmp/basal-start.sh && sudo BASAL_PREFETCH={shlex.quote(prefetch)} "
+           "nohup bash /tmp/basal-start.sh > /tmp/basal-start.log 2>&1 < /dev/null &")
+
+
+def cmd_bootstrap(args):
+    bootstrap(load_session(), opt(args, "--prefetch", "4.5B"))
 
 
 def cmd_build(args):
@@ -312,7 +333,8 @@ def cmd_down(args):
             os.remove(KNOWN_HOSTS)
 
 
-COMMANDS = {"types": cmd_types, "template": cmd_template, "up": cmd_up, "build": cmd_build, "push": cmd_push,
+COMMANDS = {"types": cmd_types, "template": cmd_template, "up": cmd_up, "bootstrap": cmd_bootstrap,
+            "build": cmd_build, "push": cmd_push,
             "sync": cmd_sync, "run": cmd_run, "pull": cmd_pull, "ssh": cmd_ssh, "ls": cmd_ls, "down": cmd_down}
 
 if __name__ == "__main__":
