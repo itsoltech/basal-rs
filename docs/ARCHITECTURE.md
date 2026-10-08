@@ -158,7 +158,12 @@ sterownika.
 
 ### Metryki Prometheus
 
-`GET /metrics` eksportuje prywatny rejestr procesu w formacie tekstowym Prometheus
+Metryki są domyślnie wyłączone. `--metrics` lub `metrics: true` w konfiguracji
+włącza rejestr, instrumentację HTTP i torów modelu oraz endpoint `GET /metrics`.
+Bez włączenia rejestr i uchwyty metryk nie powstają, middleware nie jest
+instalowane, a `/metrics` zwraca 404.
+
+Po włączeniu `GET /metrics` eksportuje prywatny rejestr procesu w formacie tekstowym Prometheus
 0.0.4 (`basal-cli/src/serve/metrics.rs`). Middleware obejmuje wyłącznie trasy
 inferencji: mierzy czas od wejścia przed odczytem body do zbudowania odpowiedzi,
 liczy statusy i aktywne handlery. Handler po parsowaniu przypisuje etykietę modelu

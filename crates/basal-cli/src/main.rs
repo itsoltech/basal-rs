@@ -397,6 +397,9 @@ enum Cmd {
         /// in the configuration or BASAL_ACCESS_LOG=1)
         #[arg(long)]
         access_log: bool,
+        /// Enable Prometheus metrics at GET /metrics (also `metrics: true` in the configuration; default: off)
+        #[arg(long)]
+        metrics: bool,
         /// `release_date` reported by GET /v1/models (default: the release date upstream basal v1.5.0 reports)
         #[arg(long, default_value = "2026-10-05")]
         release_date: String,
@@ -722,6 +725,7 @@ fn run() -> Result<()> {
             long_tokens,
             long_slice_ms,
             access_log,
+            metrics,
             release_date,
         } => {
             let access_log = access_log || std::env::var("BASAL_ACCESS_LOG").is_ok_and(|v| !v.is_empty() && v != "0");
@@ -807,6 +811,7 @@ fn run() -> Result<()> {
                 default_model: c.default_model,
                 long_slice_ms: c.long_slice_ms,
                 access_log: access_log || c.access_log,
+                metrics: metrics || c.metrics,
             };
             serve::serve(served, opts)?;
         }

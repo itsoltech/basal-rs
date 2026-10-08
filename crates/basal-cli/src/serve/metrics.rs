@@ -202,8 +202,8 @@ impl Drop for GaugeGuard {
 pub(super) struct RequestModel(pub Arc<OnceLock<String>>);
 
 /// Records the request when dropped: with its status, or as `cancelled` when the handler future was dropped first.
-struct HttpObservation {
-    app: Arc<App>,
+struct HttpObservation<'a> {
+    metrics: &'a Metrics,
     endpoint: &'static str,
     model: RequestModel,
     started: Instant,
@@ -211,12 +211,12 @@ struct HttpObservation {
     _inflight: GaugeGuard,
 }
 
-impl Drop for HttpObservation {
+impl Drop for HttpObservation<'_> {
     fn drop(&mut self) {
         let model = self.model.0.get().map_or("", String::as_str);
         let status = self.status.as_ref().map_or("cancelled", StatusCode::as_str);
         let labels = [self.endpoint, model, status];
-        let metrics = &self.app.metrics;
+        let metrics = self.metrics;
         metrics.requests.with_label_values(&labels).inc();
         if self.status.is_some() {
             metrics.duration.with_label_values(&labels).observe(self.started.elapsed().as_secs_f64());
@@ -226,20 +226,26 @@ impl Drop for HttpObservation {
 
 /// Installed only on the two inference routes, so scrapes and probes cannot skew latency or request counts.
 pub(super) async fn observe(State(app): State<Arc<App>>, mut req: Request, next: Next) -> Response {
+    let Some(metrics) = &app.metrics else {
+        return next.run(req).await;
+    };
     let endpoint = if req.uri().path() == ENDPOINTS[0] { ENDPOINTS[0] } else { ENDPOINTS[1] };
     let model = RequestModel::default();
     req.extensions_mut().insert(model.clone());
-    let inflight = GaugeGuard::new(app.metrics.http_inflight.with_label_values(&[endpoint]));
+    let inflight = GaugeGuard::new(metrics.http_inflight.with_label_values(&[endpoint]));
     let mut observation =
-        HttpObservation { app, endpoint, model, started: Instant::now(), status: None, _inflight: inflight };
+        HttpObservation { metrics, endpoint, model, started: Instant::now(), status: None, _inflight: inflight };
     let response = next.run(req).await;
     observation.status = Some(response.status());
     response
 }
 
 pub(super) async fn export(State(app): State<Arc<App>>) -> Response {
+    let Some(metrics) = &app.metrics else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
     let encoder = TextEncoder::new();
-    match encoder.encode_to_string(&app.metrics.registry.gather()) {
+    match encoder.encode_to_string(&metrics.registry.gather()) {
         Ok(body) => ([(CONTENT_TYPE, encoder.format_type())], body).into_response(),
         Err(e) => {
             crate::warn!("encoding Prometheus metrics: {e}");

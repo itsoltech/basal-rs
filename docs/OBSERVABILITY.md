@@ -1,8 +1,31 @@
 # Observability: Prometheus
 
-`basal serve` udostępnia `GET /metrics` na tym samym adresie i porcie co API,
-bez dodatkowej flagi. Endpoint zwraca `text/plain; version=0.0.4`.
-Każdy proces ma własny rejestr; liczniki zerują się po restarcie.
+Metryki są **domyślnie wyłączone**. Włącz je flagą:
+
+```sh
+basal serve --metrics
+# także z jawnym plikiem konfiguracji:
+basal serve --config basal-serve.yml --metrics
+```
+
+Albo ustaw opcję na poziomie procesu w `basal-serve.yml` (obok `models`):
+
+```yaml
+metrics: true
+models:
+  - repo: Remek/basal-1.5-4.5B
+```
+
+Brak `metrics` lub `metrics: false` wyłącza funkcję, o ile nie podano flagi
+`--metrics`. Flaga włącza ją także przy `metrics: false` w YAML. Konfiguracja
+jest odczytywana przy starcie; zmiana ustawienia wymaga restartu serwera.
+Plik wygenerowany przez `basal init` zawiera zakomentowany przykład włączenia.
+
+Gdy metryki są wyłączone, serwer nie tworzy rejestru, nie zbiera liczników ani
+histogramów i nie instaluje middleware metryk; `GET /metrics` zwraca 404.
+Po włączeniu endpoint działa na tym samym adresie i porcie co API i zwraca
+`text/plain; version=0.0.4`. Każdy proces ma własny rejestr; liczniki zerują się
+po restarcie. Poniższe definicje i zapytania dotyczą włączonych metryk.
 
 ```sh
 curl --fail localhost:8000/metrics
