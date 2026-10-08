@@ -1,0 +1,8 @@
+=== 4.5B timing 18:38:55
+=== 4.5B invariance 18:41:00
+single-vs-tree-4.5B              tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.0; max TV avg 0.0
+single-vs-budget-4.5B            tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.0; max TV avg 0.0
+fp32-vs-new-4.5B                 tokens: 8 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.036615499389647255; max TV avg 0.0035468003967499286
+=== 4.5B decision set 18:41:54
+decision-set-fp32-vs-new-4.5B    tokens: 0 mismatches; bench argmax avg "899/900", cal "899/900"; max |logit diff| 0.05521413549804777; max TV avg 0.00842790035707125
+DONE

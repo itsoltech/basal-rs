@@ -475,6 +475,8 @@ pub fn gemm_table(m: &ModelConfig, manifest: &ModelManifest, cache: &Path) -> Re
                 Some(format!("table for GPU {}", v["gpu"]))
             } else if v["invariant"].as_bool() != Some(true) || v["dtype"].as_str() != Some(m.dtype.as_str()) {
                 Some("not a batch-invariant table of this dtype".into())
+            } else if v["gemm_search_version"].as_u64().unwrap_or(1) < basal_gpu::gemm_search_version() {
+                Some(format!("table of search version {}", v["gemm_search_version"].as_u64().unwrap_or(1)))
             } else if let Some((n, k)) = shapes.iter().copied().find(|&(n, k)| !covered(n, k)) {
                 Some(format!("shape {n}x{k} missing"))
             } else {

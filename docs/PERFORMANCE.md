@@ -87,9 +87,12 @@ H100 PCIe 350 W, całe żądanie, jedno pytanie, upstream / basal-rs
 | 16 384 tokenów | 4 200 / 1 743 ms | |
 | 16 384 tokenów, 5 pytań | 29,5 / 2,0 s | |
 
-Do ~2k tokenów domyślna tabela GEMM niezależna od partii jest na H100 o
-20–35% wolniejsza od heurystyki cuBLASLt (wybór algorytmów pomija kernele
-Hoppera); z heurystyką basal-rs jest tam porównywalny z upstream. Od ~4k
+W wersji 0.1.4 domyślna tabela GEMM niezależna od partii pomijała kernele
+Hoppera i do ~2k tokenów była na H100 o 20–35% wolniejsza od heurystyki
+cuBLASLt. Druga wersja doboru (po 0.1.4,
+[gemm-invariant-v2](../reports/gemm-invariant-v2/README.md)) skraca czasy na
+H100 o 17–27% (4.5B, 1792 tokenów: 103 → 84 ms, upstream 84 ms) przy tej samej
+niezależności od partii; na RTX 6000 Ada bez zmian. Od ~4k
 tokenów basal-rs jest szybszy 1,75–2,4 raza, przy pięciu pytaniach 10–15 razy.
 
 ## Apple Silicon (Metal)

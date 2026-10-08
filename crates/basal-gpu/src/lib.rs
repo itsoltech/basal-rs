@@ -254,6 +254,14 @@ pub fn gpu_name() -> Result<String> {
     bail!("gpu_name: CUDA only")
 }
 
+/// Version of the batch-invariant GEMM search of this build (CUDA; 0 without cuBLASLt), as recorded in GEMM tables.
+pub fn gemm_search_version() -> u64 {
+    #[cfg(feature = "cuda")]
+    return cublaslt::INVARIANT_SEARCH_VERSION;
+    #[cfg(not(feature = "cuda"))]
+    0
+}
+
 /// Version of the cuBLASLt library this build runs with (CUDA), as recorded in GEMM tables.
 pub fn cublaslt_version() -> Option<usize> {
     #[cfg(feature = "cuda")]
@@ -1642,7 +1650,8 @@ pub fn gemm_search(m_classes: &[usize], shapes: &[(usize, usize)], dtype: &str, 
         })
         .collect();
     Ok(json!({"cublaslt_version": cublaslt::version(), "gpu": d.cuda_stream().context().name()?, "dtype": dtype,
-              "invariant": invariant, "shapes": shapes, "entries": entries,
+              "invariant": invariant, "gemm_search_version": cublaslt::INVARIANT_SEARCH_VERSION, "shapes": shapes,
+              "entries": entries,
               "timing": "each configuration timed on rotating copies of the weight larger than L2 (cold weights, as in a forward)",
               "note": "algorithms are opaque cuBLASLt configurations, valid for this GPU and cuBLASLt version"}))
 }
