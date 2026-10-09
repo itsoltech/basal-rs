@@ -69,6 +69,11 @@ rozszerza je przed użyciem (dokładny forward FP32, punkt odniesienia).
   paddingu.
 - Projekcje q/k/v oraz gate/up to pojedyncze GEMM; bias, RoPE i podział głów,
   bias+SiLU·up oraz bias+residual to własne kernele.
+  CUDA SiLU w wektoryzowanej ścieżce f16 używa bloku 256 wątków na compute
+  capability 9.0 w buildzie z PTX 90a; pozostałe ścieżki pozostają przy 1024.
+  Zmienia się podział pracy, nie arytmetyka
+  ([pomiary H100 i RTX 6000 Ada](../reports/inference-campaign-2026-10-09/README.md)).
+  `BASAL_SILU_BLOCK=128|256|512|1024` pozwala przypiąć wariant do pomiarów.
 - Attention w f32 po jednostkach drzewa: zapytania jednego bloku i klucze
   jego przodków oraz własnego bloku, kafelkowane według pozycji klucza w
   prompcie. CUDA: `attn_tree_tc` na tensor cores (mma.sync, operandy f16
@@ -79,7 +84,13 @@ rozszerza je przed użyciem (dokładny forward FP32, punkt odniesienia).
   ([pomiar](../reports/attention-h100-wgmma-2/README.md)); przy krótkich
   promptach w blokach po 64 zamiast 128 wierszy (`attn_tree_wgp64`, te same
   bity, [pomiar](../reports/attention-h100-short/README.md)), `attn_tree_f32` dla
-  ścieżki f32. K i V przychodzą z `qkv_rope` od razu rozbite na płaszczyzny
+  ścieżki f32. Domyślnie oba rozmiary bloków WGP używają wariantu `_sw128`:
+  ciągłych odczytów K/V oraz układu 128 B w pamięci współdzielonej. Kolejność
+  arytmetyki pozostaje taka sama; [pomiary i zgodność](../reports/inference-profile-h100-2026-10-09/README.md).
+  `BASAL_WGP_LOAD=original|coalesced|sw128` wybiera stary układ, samą zmianę
+  odczytów lub pełny swizzling do A/B. Dotyczy wyłącznie Hopper WGP f16;
+  ścieżki bf16, f32 i innych GPU zachowują swój wybór kernela.
+  K i V przychodzą z `qkv_rope` od razu rozbite na płaszczyzny
   f16, a wynik attention od razu jako scalone głowy w dtype forwardu. Metal: `attn_tree_f32` z `kernels.metal`
   na macierzach `simdgroup_float8x8` w f32 (`BASAL_ATT=sdpa`: poprzednie SDPA
   z MLX po całym wierszu z maską, wynik zależny od pakowania).

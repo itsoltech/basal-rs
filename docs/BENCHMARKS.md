@@ -79,6 +79,15 @@ python3 tools/bench/loadtest.py --gpu --model basal-1.5-max --requests tools/ben
 
 Loadtest porównuje odpowiedzi na to samo żądanie między fazami; różnica inna
 niż 0,0 przy tabeli `--invariant` oznacza zależność wyniku od partii.
+`answers_differing_vs_first` liczy odpowiedzi, których pełny obiekt `answers`
+różni się od pierwszej odpowiedzi na dane żądanie, także w confidence,
+evidence lub zestawie pól. Zerowa różnica prawdopodobieństw nie zastępuje
+tej kontroli. Porównanie obejmuje powtórzenia wewnątrz jednego uruchomienia
+klienta. `--answers-out FILE.json` zapisuje pierwsze pełne odpowiedzi według
+ID do porównania między konfiguracjami (po sortowaniu po `id`); zgodność
+logitów różnych buildów sprawdzamy osobnymi eksportami. `--gpu` zapisuje
+także `gpu_memory_peak_sampled_mib`: najwyższe użycie całej pamięci GPU
+zaobserwowane przez `nvidia-smi` co 200 ms, nie gwarantowany peak alokacji.
 
 ## Pomiary na wynajętym GPU
 

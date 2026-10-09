@@ -66,7 +66,9 @@ Każdy skrypt opisuje w nagłówku, co mierzy, jakie ścieżki trzeba wcześniej
 | `tools/perf/run-ab.sh` | A/B dwóch buildów i wariantu attention |
 | `tools/perf/run-wg-cloud.sh` | warianty attention jednego buildu (`WG_VARIANTS`), eksporty wobec FP32 i siebie nawzajem |
 | `tools/perf/run-gemm-check.sh` | zmiana wyszukiwania tabel GEMM: stara i nowa tabela, heurystyka, zestaw decyzji |
-| `tools/perf/run-profile-cloud.sh` | Nsight Systems (kategorie kerneli, przerwy) i Nsight Compute dla attention |
+| `tools/perf/run-profile-cloud.sh` | Nsight Systems: kategorie kerneli, timeline i API; opcjonalnie Nsight Compute dla wskazanego uruchomienia attention |
+| `tools/perf/run-parity-cloud.sh` | identyczność bajtowa eksportów dwóch buildów: single/tree/budget, cache prefiksu i cache stanu |
+| `tools/perf/run-http-variants-cloud.sh` | HTTP A/B/B/A jednego buildu: pełne odpowiedzi, latency, throughput, energia i VRAM |
 | `tools/decision-sets/run-cloud.sh` | zestaw decyzji wobec upstream FP32 |
 
 ## Pilnowanie maszyny
@@ -93,10 +95,12 @@ końcu woła `down`, usunie maszynę również wtedy, gdy przerwiesz któryś z 
 - `sync` nie usuwa plików: plik skasowany lokalnie zostaje w `/work` (np. stara tabela GEMM w
   `crates/basal-cli/gemm-tables`, którą skrypty biorą jako wbudowaną). Usuń go na maszynie przez `run 'rm ŚCIEŻKA'`.
 - Nsight 2026.3 nie działa ze sterownikiem 570; działa Nsight Systems 2025.1.3 (pakiet
-  `nsight-systems-2025.1.3`). `run-profile-cloud.sh` instaluje najnowszy pakiet, więc na starszym sterowniku
-  zainstaluj tę wersję wcześniej.
-- `ncu --launch-skip` musi pominąć uruchomienia z przechwytywania prefiksów (co najmniej 200 dla jednego
-  forwardu); raport ma rozszerzenie `.ncu-rep`.
+  `nsight-systems-2025.1.3`). `run-profile-cloud.sh` wymaga wcześniej zainstalowanej zgodnej wersji;
+  nie instaluje pakietów. Wersja 2025.1.3 jest wcześniejszym sprawdzonym przykładem, nie uniwersalnym wyborem.
+- `ncu --launch-skip` liczy uruchomienia pasujące do filtra kernela. Nie ma stałej wartości gwarantującej
+  pominięcie prefiksów i rozgrzewki: wybierz ją z timeline dla konkretnego modelu i wariantu. Runner wymaga
+  jawnego `PROF_LAUNCH_SKIP`, gdy włączono `PROF_NCU=1`; domyślnie wykonuje tylko Systems.
+  Semantyka filtrów: [Nsight Compute CLI](https://docs.nvidia.com/nsight-compute/NsightComputeCli/index.html).
 - Blokada zegara SM (`sudo -n nvidia-smi -lgc`) nie u każdego dostawcy jest dozwolona; skrypty zapisują jej wynik
   w `lock.txt`. Przy pełnej mocy karta schodzi chwilami poniżej zablokowanego zegara, więc zegary trafiają do logu.
 
@@ -106,3 +110,13 @@ Pomiary czasu: warianty w rotacji (A B B A ...), kilka powtórzeń, mediana bez 
 gdy dostawca na to pozwala. Zmiana bez wpływu na numerykę musi dawać eksporty bitowo równe (`basal compare` 0,0),
 zmiana numeryki wymaga porównania z upstream FP32 na zestawie decyzji. Szczegóły zestawów odniesienia:
 [BENCHMARKS.md](BENCHMARKS.md).
+
+Runnery `tools/perf/run-*-cloud.sh` opisują wymagane wejścia i opcje w nagłówkach.
+Prześlij dane na maszynę przed uruchomieniem. `PROF_LADDER`, `PARITY_INPUT_45B`,
+`PARITY_INPUT_MAX` i `HTTP_REQUESTS` wskazują wejścia spoza raportów w Git.
+Historyczne wejścia kampanii są w lokalnym archiwum jej autora.
+Uruchamiaj pomiary kolejno, bez innych zadań GPU; katalog wyniku musi być nowy.
+
+Do `reports/` zapisuj krótkie wyniki i zakres weryfikacji. Pełne eksporty, logi
+i profile pobieraj do ignorowanego `.cache/` i archiwizuj poza Gitem.
+Czasów spod profilera nie używaj jako pomiaru przyspieszenia inferencji.

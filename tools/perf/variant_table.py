@@ -39,7 +39,9 @@ def best(pattern, key):
 
 rows = {}
 for v in V:
-    r = best(f"bench-{v}-*.json", lambda j: [("single decision", j["lat2_ms"])])
+    r = best(f"bench-{v}-*.json", lambda j: [
+        ("single decision (ms)", j["lat2_ms"]), ("throughput (decisions/s)", j["dec_s"]),
+    ])
     r.update(best(f"requests-{v}-*.json", lambda j: [(q["id"][4:], q["median_ms"]) for q in j["requests"]]))
     rows[v] = r
 print("| | " + " | ".join(V) + " | " + " | ".join(f"{v} / {base}" for v in vs) + " |")
