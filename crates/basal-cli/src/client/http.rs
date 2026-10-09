@@ -11,6 +11,12 @@ use super::{ClientArgs, Failure};
 
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
+/// reqwest's own text names only the stage ("error sending request"); its causes say what failed (refused connection,
+/// DNS, TLS, timeout). The URL is left out.
+fn describe(error: reqwest::Error) -> String {
+    format!("{:#}", anyhow::Error::new(error.without_url()))
+}
+
 pub(super) struct Remote {
     client: reqwest::Client,
     base: Url,
@@ -98,7 +104,7 @@ impl Remote {
         if let Some(body) = body {
             request = request.header(header::CONTENT_TYPE, "application/json").body(body);
         }
-        let request = request.build().map_err(|e| Failure::message("http", e.without_url().to_string()))?;
+        let request = request.build().map_err(|e| Failure::message("http", describe(e)))?;
         let mut attempt = 0;
         loop {
             // A buffered body is reference counted: an attempt shares the encoded bytes instead of copying them.
@@ -134,7 +140,7 @@ impl Remote {
             Err(error) => {
                 // A connection closed or reset while sending is as transient as a refused connection.
                 let kind = if error.is_builder() { "http" } else { "transport" };
-                return (Err(Failure::message(kind, error.without_url().to_string())), None);
+                return (Err(Failure::message(kind, describe(error))), None);
             }
         };
         let status = response.status();
@@ -152,9 +158,7 @@ impl Remote {
                 }
                 Ok(Some(_)) => return (Err(Failure::message("protocol", "server response exceeds 16 MiB")), None),
                 Ok(None) => break,
-                Err(error) => {
-                    return (Err(Failure::message("transport", error.without_url().to_string())), retry_after)
-                }
+                Err(error) => return (Err(Failure::message("transport", describe(error))), retry_after),
             }
         }
         let parsed = serde_json::from_slice(&bytes);

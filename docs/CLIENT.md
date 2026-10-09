@@ -117,6 +117,8 @@ jq -c '.tickets[]' export.json |
 Wybierz jawnie sposób podziału danych:
 
 - `--input text` (domyślnie z `--ask`/`--template`): cały UTF-8, również wielowierszowy, to jeden stan.
+  Zachowuje końcowy znak nowej linii; pusty plik lub stdin daje pusty stan tekstowy. Aby przekazać tekst bez
+  końcowego znaku nowej linii, użyj `printf '%s' 'treść'` zamiast `echo`.
 - `--input json`: cały input to jeden obiekt, tablica lub string JSON.
 - `--input lines`: każda niepusta linia tekstu to osobny stan; CRLF jest obsługiwane.
 - `--input jsonl`: każda niepusta linia to osobny JSON. Puste/białe linie są pomijane.
@@ -222,7 +224,9 @@ export BASAL_MODEL='basal-1.5-mini'
 `--url` ma pierwszeństwo nad `BASAL_URL`. `--model` ma pierwszeństwo nad `BASAL_MODEL`, następnie nad modelem
 w request/szablonie. Skróty znanych modeli są normalizowane (`mini` → `basal-1.5-mini`). Gdy modelu nie podano,
 HTTP pobiera `/v1/models` i wybiera model tylko wtedy, gdy lista zawiera dokładnie jeden; przy wielu modelach
-trzeba wskazać go jawnie. Brak połączenia nie uruchamia lokalnego modelu.
+trzeba wskazać go jawnie. Brak połączenia nie uruchamia lokalnego modelu. Klient respektuje `HTTP_PROXY`,
+`HTTPS_PROXY`, `ALL_PROXY` i `NO_PROXY`, także dla adresu lokalnego. Przy ustawionym proxy dodaj serwer lokalny
+do `NO_PROXY` (np. `127.0.0.1,localhost`), aby requesty nie przechodziły przez proxy.
 
 - stdout: kompaktowy JSON/JSONL, albo sama wartość przy `--value`. Logi i błędy pojedynczych requestów: stderr.
 - Exit `0`: wszystkie rekordy wykonane poprawnie (także decyzja „nie” i pusty strumień); `1`: co najmniej jeden

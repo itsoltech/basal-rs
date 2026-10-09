@@ -47,7 +47,8 @@ impl Requests {
             // Templates are configuration, not streaming data; bound them before allocating their content.
             let file = std::fs::File::open(path).with_context(|| format!("opening template {}", path.display()))?;
             let mut bytes = Vec::new();
-            std::io::Read::read_to_end(&mut std::io::Read::take(file, args.max_input_bytes as u64 + 1), &mut bytes)?;
+            std::io::Read::read_to_end(&mut std::io::Read::take(file, args.max_input_bytes as u64 + 1), &mut bytes)
+                .with_context(|| format!("reading template {}", path.display()))?;
             ensure!(bytes.len() <= args.max_input_bytes, "template exceeds --max-input-bytes");
             Some(serde_json::from_slice::<Value>(&bytes).context("parsing request template")?)
         } else if let Some(ask) = &args.ask {
