@@ -21,7 +21,7 @@ CATEGORIES = [
     ("norm+residual", ("rmsnorm", "residual")),
     ("silu", ("silu",)),
     ("readout", ("letter_logits",)),
-    ("gemm", ("gemm", "xmma", "cutlass", "splitk", "gemv", "kernel2")),  # Kernel2: cuBLASLt (CUTLASS) GEMM
+    ("gemm", ("gemm", "xmma", "cutlass", "splitk", "gemv", "kernel2", "nvjet")),  # Kernel2, nvjet: cuBLASLt
 ]
 
 

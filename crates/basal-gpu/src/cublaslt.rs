@@ -270,7 +270,8 @@ impl Lt {
         // of its fastest member per class (every class weighs the same) gives one algorithm per class
         // SAFETY: the caller guarantees live buffers large enough for every class on this stream.
         let (group, row_invariant) = unsafe { self.equivalence_groups(n, k, dt, w, x, y, classes, &cands, stream)? };
-        // a candidate whose rows change with M is never chosen
+        let raw = times.clone(); // before the row check (BASAL_GEMM_EQUIV)
+                                 // a candidate whose rows change with M is never chosen
         for (t, ok) in times.iter_mut().zip(&row_invariant) {
             if !ok {
                 t.iter_mut().for_each(|v| *v = f64::INFINITY);
@@ -296,6 +297,44 @@ impl Lt {
             );
             for &(r, sc) in &scored {
                 eprintln!("  group of {:2}: best member per class {sc:.3}", group.iter().filter(|&&g| g == r).count());
+            }
+            // every candidate: K split, row check, group, geometric-mean slowdown over the classes up to 256 rows and
+            // from 4096 rows (times measured before the row check)
+            let parts = |a: &sys::cublasLtMatmulAlgo_t| -> u32 {
+                let (mut v, mut size) = (0u32, 0usize);
+                // SAFETY: SPLITK_NUM is a u32 configuration value; v and size are valid outputs.
+                unsafe {
+                    sys::cublasLtMatmulAlgoConfigGetAttribute(
+                        a,
+                        sys::cublasLtMatmulAlgoConfigAttributes_t::CUBLASLT_ALGO_CONFIG_SPLITK_NUM,
+                        &mut v as *mut u32 as *mut c_void,
+                        4,
+                        &mut size,
+                    )
+                };
+                v
+            };
+            let part_geo = |ai: usize, keep: &dyn Fn(usize) -> bool| {
+                let cs: Vec<usize> = (0..classes.len()).filter(|&ci| keep(classes[ci])).collect();
+                (cs.iter().map(|&ci| (raw[ai][ci] / best[ci]).ln()).sum::<f64>() / cs.len().max(1) as f64).exp()
+            };
+            let mut rows: Vec<(f64, String)> = (0..cands.len())
+                .map(|ai| {
+                    let small = part_geo(ai, &|m| m <= 256);
+                    let line = format!(
+                        "  cand {ai:3} split {} rows {} group {:3}: <=256 {small:.3} >=4096 {:.3} all {:.3}",
+                        parts(&cands[ai]),
+                        if row_invariant[ai] { "same" } else { "DIFF" },
+                        group[ai],
+                        part_geo(ai, &|m| m >= 4096),
+                        part_geo(ai, &|_| true)
+                    );
+                    (small, line)
+                })
+                .collect();
+            rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+            for (_, line) in rows.iter().take(15) {
+                eprintln!("{line}");
             }
         }
         let (root, _) =

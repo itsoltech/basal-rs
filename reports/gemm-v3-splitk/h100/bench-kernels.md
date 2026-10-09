@@ -1,0 +1,15 @@
+attn_tree_wgp                               7560 avg     53.9 us  total     407.2 ms
+nvjet_hsh_112x192_64x5_2x1_v_bz_TNN         4248 avg     84.4 us  total     358.4 ms
+nvjet_hsh_64x64_64x13_4x1_v_bz_TNT          8791 avg     26.0 us  total     228.8 ms
+nvjet_hsh_80x192_64x6_4x1_v_bz_TNN           649 avg    323.8 us  total     210.1 ms
+bias_silu_mul8_f16                          7558 avg     19.5 us  total     147.2 ms
+nvjet_hsh_320x128_64x3_1x2_h_bz_coopB_TN     708 avg    199.6 us  total     141.3 ms
+residual_rmsnorm_f16                       15116 avg      8.1 us  total     123.1 ms
+nvjet_hsh_112x128_64x7_4x1_v_bz_TNN         1534 avg     57.9 us  total      88.8 ms
+nvjet_hsh_128x256_64x4_4x2_h_bz_coopA_TN     425 avg    151.7 us  total      64.5 ms
+qkv_rope_f16                                7560 avg      8.2 us  total      61.7 ms
+nvjet_hsh_144x128_64x6_4x2_h_bz_TNN          708 avg     62.3 us  total      44.1 ms
+nvjet_hsh_112x128_64x7_1x2_h_bz_TNN          885 avg     46.7 us  total      41.3 ms
+nvjet_hsh_96x128_64x7_1x4_h_bz_TNN           720 avg     55.4 us  total      39.9 ms
+nvjet_hsh_72x64_64x12_4x1_v_bz_TNN          3600 avg     10.2 us  total      36.9 ms
+nvjet_hsh_168x128_64x5_1x2_h_bz_TNN           59 avg    602.3 us  total      35.5 ms
