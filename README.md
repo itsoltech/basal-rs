@@ -386,8 +386,19 @@ startu z tabelą, która nie obejmuje kształtów wag modelu.
 ## Polecenia
 
 `basal --help` opisuje wszystkie polecenia. Poza `serve` najczęściej:
+`client` (decyzje w pipe i skryptach, HTTP lub lokalny model),
 `decide` (jedno żądanie z pliku), `export` i `compare` (porównanie z
 referencją upstream), `bench` i `bench-requests` (pomiary), `gemm-search`.
+
+```sh
+cat zgloszenie.txt | basal client --ask 'Czy zgłoszenie opisuje awarię blokującą pracę?' --value
+# W Bash użyj set -o pipefail, aby zachować błędy klienta także przy końcowym jq.
+basal client --template examples/client/routing.json --state examples/client/tickets.jsonl \
+  --input jsonl --state-pointer /text --jobs 8 | jq -c 'select(.ok) | {id:.input.id,answers:.response.answers}'
+```
+
+Pytania bez pliku, formaty wejścia, JSONL, `act`, warunki Bash oraz gotowe skrypty:
+[Klient do automatyzacji](docs/CLIENT.md).
 
 ## Struktura
 
@@ -408,6 +419,7 @@ referencją upstream), `bench` i `bench-requests` (pomiary), `gemm-search`.
 - [Instalacja](docs/INSTALL.md): Homebrew, skrypt, `basal doctor` / `setup` / `init` / `update`, ścieżki plików.
 - [Architektura](docs/ARCHITECTURE.md): potok żądania, pakowanie, kernele, harmonogram serwera.
 - [Zgodność API](docs/SYSTEM_ONE.md): TypeSafe System One, endpoint upstream, rozszerzenia basal-1.5.
+- [Klient do automatyzacji](docs/CLIENT.md): stdin, JSONL, pytania w CLI, lokalny model i przykłady Bash.
 - [Wydajność](docs/PERFORMANCE.md): karty NVIDIA, Apple Silicon, limit mocy, długie dokumenty, konfiguracja.
 - [Pomiary](docs/BENCHMARKS.md): metodyka, narzędzia, odtwarzanie wyników.
 - [Raporty](reports/README.md).

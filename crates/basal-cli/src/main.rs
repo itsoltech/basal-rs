@@ -1,5 +1,6 @@
 //! `basal` command line.
 //!
+//!   basal client        --ask QUESTION | --template FILE | --request FILE   stdin -> decisions (HTTP or --local)
 //!   basal decide        --model DIR [--request FILE|-] [--timing]      System One request -> response (Metal)
 //!   basal prepare       --model DIR [--request FILE|-]                 items, prompts, token ids (no GPU)
 //!   basal check-prompts --model DIR --reference DIR                    prompts/tokens vs the reference (no GPU)
@@ -15,6 +16,7 @@
 
 mod bench;
 mod choice_set;
+mod client;
 mod compare;
 mod config;
 mod doctor;
@@ -149,6 +151,8 @@ struct GpuArgs {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Use decisions in pipes and scripts: HTTP by default, --local loads a model once
+    Client(Box<client::ClientArgs>),
     /// Answer one System One request and print the response
     Decide {
         #[command(flatten)]
@@ -558,6 +562,18 @@ fn run() -> Result<()> {
     let cli = Cli::parse();
     term::set_mode(cli.color);
     match cli.cmd {
+        Cmd::Client(args) => {
+            let code = match client::run(*args) {
+                Ok(code) => code,
+                Err(e) => {
+                    term::error(&e);
+                    2
+                }
+            };
+            if code != 0 {
+                std::process::exit(i32::from(code));
+            }
+        }
         Cmd::Decide { m, g, request, timing } => {
             let body = read_request(&request)?;
             let mut engine = gpu_engine(&m, &g)?;

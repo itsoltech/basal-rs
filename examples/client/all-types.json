@@ -1,0 +1,53 @@
+{
+  "questions": {
+    "department": {
+      "type": "choice",
+      "instructions": "Do którego działu skierować zgłoszenie?",
+      "criteria": {
+        "returns": "Zwrot pieniędzy lub reklamacja",
+        "support": "Pomoc techniczna",
+        "sales": "Pytania przed zakupem",
+        "other": "Inna sprawa lub brak informacji"
+      }
+    },
+    "urgent": {
+      "type": "noul",
+      "instructions": "Czy zgłoszenie opisuje bieżące zagrożenie bezpieczeństwa lub awarię blokującą pracę?"
+    },
+    "severity": {
+      "type": "score",
+      "instructions": "Oceń wpływ problemu na możliwość korzystania z produktu.",
+      "criteria": [
+        "Brak utrudnień",
+        "Drobne utrudnienia; podstawowe funkcje działają",
+        "Istotne ograniczenia; część podstawowych funkcji nie działa",
+        "Produkt jest całkowicie nieużywalny"
+      ]
+    },
+    "tags": {
+      "type": "multi",
+      "instructions": "Zaznacz wszystkie tematy występujące w zgłoszeniu.",
+      "criteria": {
+        "damage": "Uszkodzenie produktu",
+        "refund": "Prośba o zwrot pieniędzy",
+        "delivery": "Problem z dostawą"
+      },
+      "threshold": 0.7
+    },
+    "refund_action": {
+      "type": "act",
+      "base": "noul",
+      "instructions": "Czy reklamacja spełnia podane w stanie warunki zwrotu? Oceniaj na podstawie podanych informacji.",
+      "criteria": {
+        "true": "Spełnia warunki zwrotu",
+        "false": "Nie spełnia warunków zwrotu"
+      },
+      "costs": {
+        "approve": {"true": 0, "false": 10},
+        "reject": {"true": 20, "false": 0},
+        "human": {"true": 2, "false": 2}
+      },
+      "defer_action": "human"
+    }
+  }
+}
