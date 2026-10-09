@@ -76,7 +76,9 @@ rozszerza je przed użyciem (dokładny forward FP32, punkt odniesienia).
   na H100 (compute capability 9.0, forward f16) `attn_tree_wgp` z tą samą
   arytmetyką na wgmma, z ładowaniem następnego kafelka K/V w trakcie liczenia
   bieżącego, i bitowo tym samym wynikiem
-  ([pomiar](../reports/attention-h100-wgmma-2/README.md)), `attn_tree_f32` dla
+  ([pomiar](../reports/attention-h100-wgmma-2/README.md)); przy krótkich
+  promptach w blokach po 64 zamiast 128 wierszy (`attn_tree_wgp64`, te same
+  bity, [pomiar](../reports/attention-h100-short/README.md)), `attn_tree_f32` dla
   ścieżki f32. K i V przychodzą z `qkv_rope` od razu rozbite na płaszczyzny
   f16, a wynik attention od razu jako scalone głowy w dtype forwardu. Metal: `attn_tree_f32` z `kernels.metal`
   na macierzach `simdgroup_float8x8` w f32 (`BASAL_ATT=sdpa`: poprzednie SDPA

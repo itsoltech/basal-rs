@@ -791,20 +791,23 @@ __device__ __forceinline__ unsigned wg_v_at(unsigned j, unsigned d) {
 
 // PIPE (f16 forward only, V lo not read): two K / V stages filled by cp.async, the next tile loading while the
 // current one is computed
-template <bool PIPE>
+// WGS warpgroups per block, 64 query rows each (BM = 64 * WGS): one warpgroup gives twice the blocks of
+// two, for short prompts; a row computes the same either way (the same key tiles in the same order).
+template <bool PIPE, unsigned WGS = 2>
 __device__ __forceinline__ void attn_tree_wg_body(const float *qkv, const __half *khl, const __half *vhl, void *out,
                                                   const TreeTable &tab, unsigned T, unsigned NH, unsigned NKV,
                                                   float scale, unsigned v_exact, unsigned out_mode) {
     // Shared memory: Q hi and lo [128 rows][128 dims] (wg_k_at), then the K hi / lo (wg_k_at) and V hi / lo (wg_v_at)
     // tiles: 96 KiB per block; PIPE: two stages of K hi / lo and V hi, 112 KiB.
+    constexpr unsigned BM = 64 * WGS, THREADS = 128 * WGS;
     extern __shared__ __align__(16) unsigned char smraw[];
-    __half *Qs = reinterpret_cast<__half *>(smraw), *Kst = Qs + 2 * TC_BM * ATT_HD;
+    __half *Qs = reinterpret_cast<__half *>(smraw), *Kst = Qs + 2 * BM * ATT_HD;
     __half *Kh = Kst, *Kl = Kh + TC_BN * ATT_HD;
     __half *Vh = Kl + TC_BN * ATT_HD, *Vl = Vh + TC_BN * ATT_HD;
     const unsigned tid = threadIdx.x, w = tid / 32, lane = tid % 32, g = lane >> 2, t4 = lane & 3;
     const unsigned kvh = blockIdx.y, rep = NH / NKV;
     const TreeUnit &U = tab.u[tree_unit_of(tab, blockIdx.x)];
-    const unsigned rows = rep * U.q_len, r0 = (blockIdx.x - U.tile0) * TC_BM;
+    const unsigned rows = rep * U.q_len, r0 = (blockIdx.x - U.tile0) * BM;
     unsigned lk = U.np;
     for (unsigned i = 0; i < U.nr; i++) lk += U.r_len[i];
     const unsigned base_own = lk - U.r_len[U.nr - 1];
@@ -813,12 +816,12 @@ __device__ __forceinline__ void attn_tree_wg_body(const float *qkv, const __half
     const float *q = qkv;
     // Q split into f16 hi = f16(x) and lo = f16(x - hi), in place for the whole block (the first tile's fence and
     // barrier make it visible to wgmma)
-    for (unsigned i = tid; i < TC_BM * ATT_HD; i += TC_THREADS) {
+    for (unsigned i = tid; i < BM * ATT_HD; i += THREADS) {
         unsigned rr = i / ATT_HD, d = i % ATT_HD, r = r0 + rr;
         float x = r < rows ? q[((size_t)(kvh * rep + r / U.q_len) * T + U.q_off + r % U.q_len) * ATT_HD + d] : 0.f;
         __half h = __float2half_rn(x);
         Qs[wg_k_at(rr, d)] = h;
-        Qs[TC_BM * ATT_HD + wg_k_at(rr, d)] = __float2half_rn(x - __half2float(h));
+        Qs[BM * ATT_HD + wg_k_at(rr, d)] = __float2half_rn(x - __half2float(h));
     }
     const unsigned rr2[2] = {w * 16 + g, w * 16 + g + 8};
     bool ok[2];
@@ -860,7 +863,7 @@ __device__ __forceinline__ void attn_tree_wg_body(const float *qkv, const __half
     // PIPE: asynchronous copies of the tile at key j0 into stage st (K hi, K lo, V hi)
     auto load_stage = [&](unsigned j0, unsigned st) {
         __half *kh = Kst + st * 3 * TC_BN * ATT_HD, *kl = kh + TC_BN * ATT_HD, *vh = kl + TC_BN * ATT_HD;
-        for (unsigned i = tid; i < TC_BN * (ATT_HD / 8); i += TC_THREADS) {
+        for (unsigned i = tid; i < TC_BN * (ATT_HD / 8); i += THREADS) {
             unsigned jj = (i / 128) * 8 + i % 8, c8 = ((i / 8) % 16) * 8;
             const __half *ks, *vs;
             size_t plane;
@@ -889,7 +892,7 @@ __device__ __forceinline__ void attn_tree_wg_body(const float *qkv, const __half
         } else {
             // 32 keys x 128 dims = 32 x 16 chunks of 8 halves (uint4) per plane; 8 neighbouring threads take 8 keys
             // of one chunk, so that their K stores fill one core matrix
-            for (unsigned i = tid; i < TC_BN * (ATT_HD / 8); i += TC_THREADS) {
+            for (unsigned i = tid; i < TC_BN * (ATT_HD / 8); i += THREADS) {
                 unsigned jj = (i / 128) * 8 + i % 8, c8 = ((i / 8) % 16) * 8, j = j0 + jj;
                 uint4 kh = make_uint4(0, 0, 0, 0), kl = kh, vh = kh, vl = kh;
                 const __half *ks = nullptr, *vs = nullptr;
@@ -937,7 +940,7 @@ __device__ __forceinline__ void attn_tree_wg_body(const float *qkv, const __half
             // A: the warpgroup's 64 rows (8 groups of 8 rows, 16 core matrices each)
             const __half *qw = Qs + (w / 4) * 64 * ATT_HD + 2 * ks * WG_CORE;
             const unsigned long long ah = wg_desc(qw, 2 * WG_CORE, 32 * WG_CORE);
-            const unsigned long long al = wg_desc(qw + TC_BM * ATT_HD, 2 * WG_CORE, 32 * WG_CORE);
+            const unsigned long long al = wg_desc(qw + BM * ATT_HD, 2 * WG_CORE, 32 * WG_CORE);
             wgmma_m64n32_ss(sf, ah, bh);
             wgmma_m64n32_ss(sf, ah, bl);
             wgmma_m64n32_ss(sf, al, bh);
@@ -1069,6 +1072,11 @@ extern "C" __global__ void __launch_bounds__(TC_THREADS, 2)
     attn_tree_wgp(const float *qkv, const __half *khl, const __half *vhl, void *out, TreeTable tab, unsigned T,
                   unsigned NH, unsigned NKV, float scale, unsigned v_exact, unsigned out_mode) {
     attn_tree_wg_body<true>(qkv, khl, vhl, out, tab, T, NH, NKV, scale, v_exact, out_mode);
+}
+extern "C" __global__ void __launch_bounds__(128, 2)
+    attn_tree_wgp64(const float *qkv, const __half *khl, const __half *vhl, void *out, TreeTable tab, unsigned T,
+                    unsigned NH, unsigned NKV, float scale, unsigned v_exact, unsigned out_mode) {
+    attn_tree_wg_body<true, 1>(qkv, khl, vhl, out, tab, T, NH, NKV, scale, v_exact, out_mode);
 }
 #endif  // BASAL_WGMMA
 

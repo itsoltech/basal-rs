@@ -1,0 +1,15 @@
+=== 4.5B results 11:51:17
+4.5B wgp single vs tree  tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.0; max TV avg 0.0
+4.5B wgp vs auto         tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.0; max TV avg 0.0
+4.5B auto single vs tree tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.0; max TV avg 0.0
+4.5B fp32 vs wgp         tokens: 8 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.04892726855468865; max TV avg 0.0028715998209095164
+4.5B fp32 vs auto        tokens: 8 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.04892726855468865; max TV avg 0.0028715998209095164
+=== max results 11:52:20
+max wgp single vs tree   tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.0; max TV avg 0.0
+max wgp vs auto          tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.0; max TV avg 0.0
+max auto single vs tree  tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.0; max TV avg 0.0
+max fp32 vs wgp          tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.3981950837402337; max TV avg 0.010350951555703092
+max fp32 vs auto         tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.3981950837402337; max TV avg 0.010350951555703092
+=== 4.5B time 11:54:29
+=== max time 11:58:55
+DONE

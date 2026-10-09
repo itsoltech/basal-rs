@@ -116,6 +116,18 @@ pub(crate) mod cu {
         Some(c)
     }
 
+    /// Streaming multiprocessors of the device (queried once).
+    pub fn sm_count(dev: &CudaDevice) -> candle_core::Result<u32> {
+        use candle_core::cuda_backend::cudarc::driver::sys::CUdevice_attribute as A;
+        use candle_core::cuda_backend::WrapErr;
+        static SMS: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+        if let Some(&n) = SMS.get() {
+            return Ok(n);
+        }
+        let n = dev.cuda_stream().context().attribute(A::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT).w()? as u32;
+        Ok(*SMS.get_or_init(|| n))
+    }
+
     /// The compute_90a PTX with the Hopper attention, when the build has it and the GPU is of compute capability 9.0.
     pub fn ptx_90a() -> Option<&'static str> {
         PTX_90A.filter(|_| CAP.get() == Some(&90))
@@ -853,19 +865,37 @@ impl CustomOp3 for AttentionTree<'_> {
             Some(DType::F16) => 1,
             _ => 2,
         };
+        // Hopper: blocks of 64 query rows (attn_tree_wgp64, one warpgroup) instead of 128 when twice the blocks still
+        // fit on the SMs at once (short prompts), more blocks then share the work; a row computes the same either way
+        let rep = nh / nkv;
+        let kernel = match self.tc_kernel {
+            "attn_tree_wgp" if std::env::var("BASAL_ATT").as_deref() != Ok("wgp") => {
+                let blocks128: usize = self.units.iter().map(|s| (rep * s.q_len).div_ceil(128)).sum::<usize>() * nkv;
+                if 2 * blocks128 <= cu::sm_count(&dev)? as usize {
+                    "attn_tree_wgp64"
+                } else {
+                    "attn_tree_wgp"
+                }
+            }
+            k => k,
+        };
         // rows per block and threads: attn_tree_tc* TC_BM / TC_THREADS, attn_tree_f32 ATT_BM / ATT_THREADS
-        let (name, bm, threads, smem) = match self.tc_kernel {
+        let (name, bm, threads, smem) = match kernel {
             _ if !self.tc => ("attn_tree_f32", 16, 128, 0),
             k @ "attn_tree_tc_pipe" => (k, 128, 256, TC_SMEM),
             // Q hi / lo of 128 rows, then the K / V tiles
             k @ "attn_tree_wg" => (k, 128, 256, (2 * 128 * 128 + 4 * 32 * 128) * 2),
             // Q hi / lo, then two stages of K hi / lo and V hi
             k @ "attn_tree_wgp" => (k, 128, 256, (2 * 128 * 128 + 2 * 3 * 32 * 128) * 2),
+            // one warpgroup: 64 query rows
+            k @ "attn_tree_wgp64" => (k, 64, 128, (2 * 64 * 128 + 2 * 3 * 32 * 128) * 2),
             k => (k, 128, 256, TC_SMEM / 2),
         };
         let f = match (name, cu::ptx_90a()) {
-            ("attn_tree_wg" | "attn_tree_wgp", Some(ptx)) => cu::func(&dev, name, "basal_fused_90a", ptx)?,
-            ("attn_tree_wg" | "attn_tree_wgp", None) => {
+            ("attn_tree_wg" | "attn_tree_wgp" | "attn_tree_wgp64", Some(ptx)) => {
+                cu::func(&dev, name, "basal_fused_90a", ptx)?
+            }
+            ("attn_tree_wg" | "attn_tree_wgp" | "attn_tree_wgp64", None) => {
                 candle_core::bail!("BASAL_ATT={name} needs a Hopper GPU (compute capability 9.0)")
             }
             _ => cu::func(&dev, name, "basal_fused", cu::ptx())?,
@@ -878,7 +908,6 @@ impl CustomOp3 for AttentionTree<'_> {
                 f.set_attribute(CUfunction_attribute::CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT, 100).w()?;
             }
         }
-        let rep = nh / nkv;
         for chunk in self.units.chunks(TREE_MAXU) {
             let mut tab = TreeTable { u: [TreeUnitC::default(); TREE_MAXU], n: chunk.len() as u32, pad: 0 };
             let mut tiles = 0u32;
@@ -968,6 +997,7 @@ pub fn tc_kernel() -> &'static str {
         Ok("tc-pipe") => "attn_tree_tc_pipe",
         Ok("wg") => "attn_tree_wg",
         Ok("wgp") => "attn_tree_wgp",
+        Ok("wgp64") => "attn_tree_wgp64",
         _ if cu::ptx_90a().is_some() => "attn_tree_wgp",
         _ => "attn_tree_tc",
     })
@@ -999,9 +1029,9 @@ pub fn attention_tree(
         tc: tc.is_some(),
         // the Hopper kernels are measured for f16 forwards: a bf16 forward (V lo plane) keeps tc unless BASAL_ATT asks
         // for wg / wgp; wgp has no V lo stage, so wg runs instead
-        tc_kernel: match (tc_kernel(), tc.is_some_and(|t| t.2), matches!(att.as_deref(), Ok("wg" | "wgp"))) {
-            ("attn_tree_wg" | "attn_tree_wgp", false, false) => "attn_tree_tc",
-            ("attn_tree_wgp", false, true) => "attn_tree_wg",
+        tc_kernel: match (tc_kernel(), tc.is_some_and(|t| t.2), matches!(att.as_deref(), Ok("wg" | "wgp" | "wgp64"))) {
+            ("attn_tree_wg" | "attn_tree_wgp" | "attn_tree_wgp64", false, false) => "attn_tree_tc",
+            ("attn_tree_wgp" | "attn_tree_wgp64", false, true) => "attn_tree_wg",
             (k, _, _) => k,
         },
         v_exact: tc.is_some_and(|t| t.2),
