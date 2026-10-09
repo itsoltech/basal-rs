@@ -247,9 +247,26 @@ impl CustomOp2 for BiasSiluMul {
             let threads = if vec8 { total / 8 } else { total };
             let (i_, n_) = (i as u32, threads as u32);
             a.arg(&g).arg(&bb).arg(&out).arg(&i_).arg(&n_);
+            // The 256-thread f16 vec8 launch improved the measured H100 4.5B forwards. Keep other paths at
+            // 1024 threads; the override permits controlled comparisons with the original launch.
+            static BLOCK: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+            let block = (*BLOCK.get_or_init(|| match std::env::var("BASAL_SILU_BLOCK").as_deref() {
+                Ok("128") => Some(128),
+                Ok("256") => Some(256),
+                Ok("512") => Some(512),
+                Ok("1024") => Some(1024),
+                _ => None,
+            }))
+            .unwrap_or(if vec8 && S == "f16" && cu::ptx_90a().is_some() { 256 } else { 1024 });
+            let cfg = candle_core::cuda_backend::cudarc::driver::LaunchConfig {
+                grid_dim: ((threads as u32).div_ceil(block), 1, 1),
+                block_dim: (block, 1, 1),
+                shared_mem_bytes: 0,
+            };
             // SAFETY: argument types and counts match the kernel signature; with vec8 every operand offset and I are
-            // multiples of 8 elements (16 bytes), as the kernel's 16-byte accesses need.
-            unsafe { a.launch(cu::cfg(threads)) }.w()?;
+            // multiples of 8 elements (16 bytes), as the kernel's 16-byte accesses need. All block sizes cover every
+            // output once; arguments and output live through the launch on the owning device's stream.
+            unsafe { a.launch(cfg) }.w()?;
             <T as candle_core::cuda_backend::CudaDType>::wrap_cuda_slice(out, dev.clone())
         });
         Ok((st, Shape::from((m, i))))
@@ -341,14 +358,20 @@ impl CustomOp3 for ResidualRmsNorm {
             let (xv, yv, bv, av) = (view!(x, T, xo), view!(y, T, yo), view!(b, T, bo), view!(acs, T, ao));
             // SAFETY: the kernel writes all 2 * m * h elements (both halves of every row).
             let out = unsafe { dev.alloc::<T>(2 * m * h)? };
-            let f = cu::func(&dev, &format!("residual_rmsnorm_{S}"), "basal_fused", cu::ptx())?;
+            static KEEP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            let keep = *KEEP.get_or_init(|| std::env::var("BASAL_NORM").as_deref() == Ok("register"))
+                && (1024..=8192).contains(&h);
+            let name = if keep { format!("residual_rmsnorm_keep_{S}") } else { format!("residual_rmsnorm_{S}") };
+            let f = cu::func(&dev, &name, "basal_fused", cu::ptx())?;
             let mut a = f.builder();
             let (h_, m_, eps) = (h as u32, m as u32, self.eps);
             a.arg(&xv).arg(&yv).arg(&bv).arg(&av).arg(&out).arg(&h_).arg(&m_).arg(&eps);
             // the block size of candle's rmsnorm, on which the summation order depends
             let bs = if h < 1024 { 32 } else { 1024 };
             let cfg = LaunchConfig { grid_dim: (m as u32, 1, 1), block_dim: (bs, 1, 1), shared_mem_bytes: 0 };
-            // SAFETY: argument types and counts match the kernel signature; one block per row of m.
+            // SAFETY: argument types and counts match the kernel signature; one block per row of m. The keep
+            // variant gets 1024 threads and H <= 8192, so its eight values per thread cover the row. Arguments and
+            // output live through the launch on the owning device's stream.
             unsafe { a.launch(cfg) }.w()?;
             <T as candle_core::cuda_backend::CudaDType>::wrap_cuda_slice(out, dev.clone())
         });
@@ -891,11 +914,24 @@ impl CustomOp3 for AttentionTree<'_> {
             k @ "attn_tree_wgp64" => (k, 64, 128, (2 * 64 * 128 + 2 * 3 * 32 * 128) * 2),
             k => (k, 128, 256, TC_SMEM / 2),
         };
+        // SW128 reduces shared-memory conflicts in the measured Hopper f16 WGP path. Keep the original layout
+        // and the copy-only experiment available for A/B; shape selection and arithmetic stay identical.
+        static LOAD: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+        let load = *LOAD.get_or_init(|| match std::env::var("BASAL_WGP_LOAD").as_deref() {
+            Ok("original") => 0,
+            Ok("coalesced") => 1,
+            _ => 2,
+        });
+        let name = match (name, load) {
+            ("attn_tree_wgp", 1) => "attn_tree_wgp_coalesced",
+            ("attn_tree_wgp64", 1) => "attn_tree_wgp64_coalesced",
+            ("attn_tree_wgp", 2) => "attn_tree_wgp_sw128",
+            ("attn_tree_wgp64", 2) => "attn_tree_wgp64_sw128",
+            (name, _) => name,
+        };
         let f = match (name, cu::ptx_90a()) {
-            ("attn_tree_wg" | "attn_tree_wgp" | "attn_tree_wgp64", Some(ptx)) => {
-                cu::func(&dev, name, "basal_fused_90a", ptx)?
-            }
-            ("attn_tree_wg" | "attn_tree_wgp" | "attn_tree_wgp64", None) => {
+            (name, Some(ptx)) if name.starts_with("attn_tree_wg") => cu::func(&dev, name, "basal_fused_90a", ptx)?,
+            (name, None) if name.starts_with("attn_tree_wg") => {
                 candle_core::bail!("BASAL_ATT={name} needs a Hopper GPU (compute capability 9.0)")
             }
             _ => cu::func(&dev, name, "basal_fused", cu::ptx())?,

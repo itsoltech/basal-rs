@@ -72,7 +72,7 @@ __device__ __forceinline__ float warp_sum_xor(float v) {
     for (int mask = 16; mask > 0; mask >>= 1) v += __shfl_xor_sync(0xffffffff, v, mask, 32);
     return v;
 }
-template <typename T>
+template <typename T, bool KEEP = false>
 __device__ void residual_rmsnorm(const T *x, const T *y, const T *b, const T *alpha, T *out, unsigned H, unsigned M,
                                  float eps) {
     const int row = blockIdx.x;
@@ -81,11 +81,15 @@ __device__ void residual_rmsnorm(const T *x, const T *y, const T *b, const T *al
     const int ncols = H;
     T *xo = out + (size_t)row * H;
     T *no = out + (size_t)M * H + (size_t)row * H;
+    // KEEP is launched only with 1024 threads and 1024 <= H <= 8192. The per-thread values preserve the
+    // storage-type rounding and the original reduction order, avoiding a second read of the residual output.
+    T values[8];
     float tmp = 0.0f;
     for (int col = tid; col < ncols; col += bs) {
         size_t i = (size_t)row * H + col;
         T v = from_f<T>(to_f(x[i]) + rt<T>(to_f(y[i]) + to_f(b[col])));
         xo[col] = v;
+        if constexpr (KEEP) values[col / bs] = v;
         const float xi = to_f(v);
         tmp += xi * xi;
     }
@@ -103,7 +107,8 @@ __device__ void residual_rmsnorm(const T *x, const T *y, const T *b, const T *al
     const float scale = rsqrtf(mean + eps);
     for (int col = tid; col < ncols; col += bs) {
         float a = to_f(alpha[col]);
-        no[col] = from_f<T>(scale * to_f(xo[col]) * a);
+        T v = KEEP ? values[col / bs] : xo[col];
+        no[col] = from_f<T>(scale * to_f(v) * a);
     }
 }
 
@@ -193,6 +198,10 @@ __device__ void merge_heads(const float *in, T *out, unsigned B, unsigned L, uns
     extern "C" __global__ void residual_rmsnorm_##S(const T *x, const T *y, const T *b, const T *alpha, T *out,   \
                                                     unsigned H, unsigned M, float eps) {                           \
         residual_rmsnorm<T>(x, y, b, alpha, out, H, M, eps);                                                       \
+    }                                                                                                              \
+    extern "C" __global__ void residual_rmsnorm_keep_##S(const T *x, const T *y, const T *b, const T *alpha,       \
+                                                         T *out, unsigned H, unsigned M, float eps) {             \
+        residual_rmsnorm<T, true>(x, y, b, alpha, out, H, M, eps);                                                 \
     }                                                                                                              \
     extern "C" __global__ void qkv_rope_##S(const T *qkv, const T *bias, const float *cs, float *out, unsigned B,  \
                                             unsigned L, unsigned NH, unsigned NKV, unsigned HD, __half *hl,        \
@@ -754,10 +763,13 @@ __device__ __forceinline__ void fence_async_smem() { asm volatile("fence.proxy.a
 // keeps the compiler from moving reads / writes of accumulators across the asynchronous MMAs
 __device__ __forceinline__ void wg_reg(float &x) { asm volatile("" : "+f"(x)::"memory"); }
 
-// matrix descriptor: no swizzle; lbo: bytes between core matrices along K, sbo: along M / N
+// No-swizzle descriptor: lbo between core matrices along K, sbo along M / N. SW128 uses the canonical K/MN-major
+// strides below and mode 1 in bits 63:62. All plane bases are 1024-byte aligned, so the swizzle base offset is zero.
+template <bool SW128 = false>
 __device__ __forceinline__ unsigned long long wg_desc(const void *smem, unsigned lbo, unsigned sbo) {
     unsigned long long a = (unsigned long long)__cvta_generic_to_shared(smem);
-    return ((a & 0x3FFFF) >> 4) | ((unsigned long long)(lbo >> 4) << 16) | ((unsigned long long)(sbo >> 4) << 32);
+    return ((a & 0x3FFFF) >> 4) | ((unsigned long long)(lbo >> 4) << 16) | ((unsigned long long)(sbo >> 4) << 32)
+           | (SW128 ? 1ull << 62 : 0ull);
 }
 
 // S += A B, m64n32k16, A and B from shared memory, both K-major
@@ -780,12 +792,25 @@ __device__ __forceinline__ void wgmma_m64n128_tb(float *d, const unsigned *a, un
 
 #define WG_CORE 64  // halves per core matrix (8 x 8)
 // K-major [rows][128 dims] (the K tile as B of S = Q K^T, Q as A): core (row / 8, dim / 8) at (row / 8) * 16 + dim / 8
+template <bool SW128 = false>
 __device__ __forceinline__ unsigned wg_k_at(unsigned j, unsigned d) {
+    if (SW128) {
+        // 8 rows x 64 halves per swizzle atom; two atoms along the 128-wide K dimension.
+        // Swizzle<3,4,3> in byte addresses, expressed here in half indices.
+        unsigned x = (j / 8) * 1024 + (d / 64) * 512 + (j % 8) * 64 + d % 64;
+        return x ^ ((x >> 3) & 56);
+    }
     return ((j / 8) * 16 + d / 8) * WG_CORE + (j % 8) * 8 + d % 8;
 }
 // the V tile [32 keys][128 dims] as B of O = P V (N = dims, K = keys), MN-major: core (dim / 8, key / 8) at
 // (dim / 8) * 4 + key / 8, a core row is one key (8 dims, as in memory)
+template <bool SW128 = false>
 __device__ __forceinline__ unsigned wg_v_at(unsigned j, unsigned d) {
+    if (SW128) {
+        // MN-major atom: 64 output dims x 8 keys. LBO advances 64 dims, SBO advances 8 keys.
+        unsigned x = (d / 64) * (TC_BN * 64) + j * 64 + d % 64;
+        return x ^ ((x >> 3) & 56);
+    }
     return ((d / 8) * 4 + j / 8) * WG_CORE + (j % 8) * 8 + d % 8;
 }
 
@@ -793,14 +818,14 @@ __device__ __forceinline__ unsigned wg_v_at(unsigned j, unsigned d) {
 // current one is computed
 // WGS warpgroups per block, 64 query rows each (BM = 64 * WGS): one warpgroup gives twice the blocks of
 // two, for short prompts; a row computes the same either way (the same key tiles in the same order).
-template <bool PIPE, unsigned WGS = 2>
+template <bool PIPE, unsigned WGS = 2, bool COALESCED = false, bool SW128 = false>
 __device__ __forceinline__ void attn_tree_wg_body(const float *qkv, const __half *khl, const __half *vhl, void *out,
                                                   const TreeTable &tab, unsigned T, unsigned NH, unsigned NKV,
                                                   float scale, unsigned v_exact, unsigned out_mode) {
     // Shared memory: Q hi and lo [128 rows][128 dims] (wg_k_at), then the K hi / lo (wg_k_at) and V hi / lo (wg_v_at)
     // tiles: 96 KiB per block; PIPE: two stages of K hi / lo and V hi, 112 KiB.
     constexpr unsigned BM = 64 * WGS, THREADS = 128 * WGS;
-    extern __shared__ __align__(16) unsigned char smraw[];
+    extern __shared__ __align__(1024) unsigned char smraw[];
     __half *Qs = reinterpret_cast<__half *>(smraw), *Kst = Qs + 2 * BM * ATT_HD;
     __half *Kh = Kst, *Kl = Kh + TC_BN * ATT_HD;
     __half *Vh = Kl + TC_BN * ATT_HD, *Vl = Vh + TC_BN * ATT_HD;
@@ -820,8 +845,8 @@ __device__ __forceinline__ void attn_tree_wg_body(const float *qkv, const __half
         unsigned rr = i / ATT_HD, d = i % ATT_HD, r = r0 + rr;
         float x = r < rows ? q[((size_t)(kvh * rep + r / U.q_len) * T + U.q_off + r % U.q_len) * ATT_HD + d] : 0.f;
         __half h = __float2half_rn(x);
-        Qs[wg_k_at(rr, d)] = h;
-        Qs[BM * ATT_HD + wg_k_at(rr, d)] = __float2half_rn(x - __half2float(h));
+        Qs[wg_k_at<SW128>(rr, d)] = h;
+        Qs[BM * ATT_HD + wg_k_at<SW128>(rr, d)] = __float2half_rn(x - __half2float(h));
     }
     const unsigned rr2[2] = {w * 16 + g, w * 16 + g + 8};
     bool ok[2];
@@ -864,13 +889,17 @@ __device__ __forceinline__ void attn_tree_wg_body(const float *qkv, const __half
     auto load_stage = [&](unsigned j0, unsigned st) {
         __half *kh = Kst + st * 3 * TC_BN * ATT_HD, *kl = kh + TC_BN * ATT_HD, *vh = kl + TC_BN * ATT_HD;
         for (unsigned i = tid; i < TC_BN * (ATT_HD / 8); i += THREADS) {
-            unsigned jj = (i / 128) * 8 + i % 8, c8 = ((i / 8) % 16) * 8;
+            // Both assignments cover every (key, chunk) once and write the same shared-memory locations.
+            // Row-major loads let a warp read two complete keys instead of eight partial keys; the WGMMA
+            // descriptors and arithmetic are unchanged. Keep the original mapping for controlled A/B.
+            unsigned jj = COALESCED ? i / (ATT_HD / 8) : (i / 128) * 8 + i % 8;
+            unsigned c8 = COALESCED ? (i % (ATT_HD / 8)) * 8 : ((i / 8) % 16) * 8;
             const __half *ks, *vs;
             size_t plane;
             const unsigned n = key_src(j0 + jj, c8, ks, vs, plane) ? 16 : 0;
-            cp_async16(kh + wg_k_at(jj, c8), ks, n);
-            cp_async16(kl + wg_k_at(jj, c8), ks + plane, n);
-            cp_async16(vh + wg_v_at(jj, c8), vs, n);
+            cp_async16(kh + wg_k_at<SW128>(jj, c8), ks, n);
+            cp_async16(kl + wg_k_at<SW128>(jj, c8), ks + plane, n);
+            cp_async16(vh + wg_v_at<SW128>(jj, c8), vs, n);
         }
     };
     if (PIPE) {
@@ -916,10 +945,10 @@ __device__ __forceinline__ void attn_tree_wg_body(const float *qkv, const __half
                     vh = *reinterpret_cast<const uint4 *>(vs);
                     if (planes == 2) vl = *reinterpret_cast<const uint4 *>(vs + plane_k);
                 }
-                *reinterpret_cast<uint4 *>(Kh + wg_k_at(jj, c8)) = kh;
-                *reinterpret_cast<uint4 *>(Kl + wg_k_at(jj, c8)) = kl;
-                *reinterpret_cast<uint4 *>(Vh + wg_v_at(jj, c8)) = vh;
-                if (planes == 2) *reinterpret_cast<uint4 *>(Vl + wg_v_at(jj, c8)) = vl;
+                *reinterpret_cast<uint4 *>(Kh + wg_k_at<SW128>(jj, c8)) = kh;
+                *reinterpret_cast<uint4 *>(Kl + wg_k_at<SW128>(jj, c8)) = kl;
+                *reinterpret_cast<uint4 *>(Vh + wg_v_at<SW128>(jj, c8)) = vh;
+                if (planes == 2) *reinterpret_cast<uint4 *>(Vl + wg_v_at<SW128>(jj, c8)) = vl;
             }
         }
         fence_async_smem();
@@ -934,13 +963,15 @@ __device__ __forceinline__ void attn_tree_wg_body(const float *qkv, const __half
         wg_fence();
 #pragma unroll
         for (int ks = 0; ks < ATT_HD / 16; ks++) {
-            // K: LBO = one core matrix (the next 8 dims), SBO = 16 core matrices (the next 8 keys)
-            const unsigned long long bh = wg_desc(Kh + 2 * ks * WG_CORE, 2 * WG_CORE, 32 * WG_CORE);
-            const unsigned long long bl = wg_desc(Kl + 2 * ks * WG_CORE, 2 * WG_CORE, 32 * WG_CORE);
+            // K-major: SBO advances 8 rows (2048 bytes in both layouts); swizzled LBO is unused (encoded as 1).
+            const unsigned koff = wg_k_at<SW128>(0, ks * 16);
+            const unsigned klbo = SW128 ? 16 : 2 * WG_CORE;
+            const unsigned long long bh = wg_desc<SW128>(Kh + koff, klbo, 32 * WG_CORE);
+            const unsigned long long bl = wg_desc<SW128>(Kl + koff, klbo, 32 * WG_CORE);
             // A: the warpgroup's 64 rows (8 groups of 8 rows, 16 core matrices each)
-            const __half *qw = Qs + (w / 4) * 64 * ATT_HD + 2 * ks * WG_CORE;
-            const unsigned long long ah = wg_desc(qw, 2 * WG_CORE, 32 * WG_CORE);
-            const unsigned long long al = wg_desc(qw + BM * ATT_HD, 2 * WG_CORE, 32 * WG_CORE);
+            const __half *qw = Qs + wg_k_at<SW128>((w / 4) * 64, ks * 16);
+            const unsigned long long ah = wg_desc<SW128>(qw, klbo, 32 * WG_CORE);
+            const unsigned long long al = wg_desc<SW128>(qw + BM * ATT_HD, klbo, 32 * WG_CORE);
             wgmma_m64n32_ss(sf, ah, bh);
             wgmma_m64n32_ss(sf, ah, bl);
             wgmma_m64n32_ss(sf, al, bh);
@@ -1017,9 +1048,11 @@ __device__ __forceinline__ void attn_tree_wg_body(const float *qkv, const __half
         wg_fence();
 #pragma unroll
         for (int kk = 0; kk < TC_BN / 16; kk++) {
-            // V: LBO = one core matrix (the next 8 keys), SBO = 4 core matrices (the next 8 dims)
-            const unsigned long long bh = wg_desc(Vh + 2 * kk * WG_CORE, 2 * WG_CORE, 8 * WG_CORE);
-            const unsigned long long bl = wg_desc(Vl + 2 * kk * WG_CORE, 2 * WG_CORE, 8 * WG_CORE);
+            // MN-major SW128: LBO advances 64 dims (4096 bytes), SBO advances 8 keys (1024 bytes).
+            const unsigned voff = wg_v_at<SW128>(kk * 16, 0);
+            const unsigned vlbo = SW128 ? TC_BN * 128 : 2 * WG_CORE, vsbo = SW128 ? 1024 : 8 * WG_CORE;
+            const unsigned long long bh = wg_desc<SW128>(Vh + voff, vlbo, vsbo);
+            const unsigned long long bl = wg_desc<SW128>(Vl + voff, vlbo, vsbo);
             wgmma_m64n128_tb(of, pha[kk], bh);
             wgmma_m64n128_tb(of, pla[kk], bh);
             if (planes == 2) wgmma_m64n128_tb(of, pha[kk], bl);
@@ -1077,6 +1110,26 @@ extern "C" __global__ void __launch_bounds__(128, 2)
     attn_tree_wgp64(const float *qkv, const __half *khl, const __half *vhl, void *out, TreeTable tab, unsigned T,
                     unsigned NH, unsigned NKV, float scale, unsigned v_exact, unsigned out_mode) {
     attn_tree_wg_body<true, 1>(qkv, khl, vhl, out, tab, T, NH, NKV, scale, v_exact, out_mode);
+}
+extern "C" __global__ void __launch_bounds__(TC_THREADS, 2)
+    attn_tree_wgp_coalesced(const float *qkv, const __half *khl, const __half *vhl, void *out, TreeTable tab, unsigned T,
+                            unsigned NH, unsigned NKV, float scale, unsigned v_exact, unsigned out_mode) {
+    attn_tree_wg_body<true, 2, true>(qkv, khl, vhl, out, tab, T, NH, NKV, scale, v_exact, out_mode);
+}
+extern "C" __global__ void __launch_bounds__(128, 2)
+    attn_tree_wgp64_coalesced(const float *qkv, const __half *khl, const __half *vhl, void *out, TreeTable tab, unsigned T,
+                              unsigned NH, unsigned NKV, float scale, unsigned v_exact, unsigned out_mode) {
+    attn_tree_wg_body<true, 1, true>(qkv, khl, vhl, out, tab, T, NH, NKV, scale, v_exact, out_mode);
+}
+extern "C" __global__ void __launch_bounds__(TC_THREADS, 2)
+    attn_tree_wgp_sw128(const float *qkv, const __half *khl, const __half *vhl, void *out, TreeTable tab, unsigned T,
+                        unsigned NH, unsigned NKV, float scale, unsigned v_exact, unsigned out_mode) {
+    attn_tree_wg_body<true, 2, true, true>(qkv, khl, vhl, out, tab, T, NH, NKV, scale, v_exact, out_mode);
+}
+extern "C" __global__ void __launch_bounds__(128, 2)
+    attn_tree_wgp64_sw128(const float *qkv, const __half *khl, const __half *vhl, void *out, TreeTable tab, unsigned T,
+                          unsigned NH, unsigned NKV, float scale, unsigned v_exact, unsigned out_mode) {
+    attn_tree_wg_body<true, 1, true, true>(qkv, khl, vhl, out, tab, T, NH, NKV, scale, v_exact, out_mode);
 }
 #endif  // BASAL_WGMMA
 

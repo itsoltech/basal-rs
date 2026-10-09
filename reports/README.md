@@ -1,7 +1,18 @@
 # Raporty
 
-Każdy katalog zawiera opis (`README.md`) i dane, z których powstały liczby.
+Nowe raporty zapisują tylko: co sprawdzono, wynik, zmierzoną poprawę lub
+regresję oraz zakres weryfikacji. Warunki i ograniczenia podajemy krótko,
+gdy są potrzebne do interpretacji liczb. Hipotezy i plany nie trafiają do
+raportów; surowe dane przechowujemy poza Gitem. Starsze katalogi mogą
+zawierać dane pomiarowe.
 Metodyka: [docs/BENCHMARKS.md](../docs/BENCHMARKS.md).
+
+## Kampanie optymalizacji
+
+| Katalog | Zawartość |
+|---|---|
+| [inference-campaign-2026-10-09](inference-campaign-2026-10-09/README.md) | H100 i RTX 6000 Ada: SiLU, RMSNorm, cache stanów, budżet partii i harmonogram; zgodność wyników, latency i throughput |
+| [inference-profile-h100-2026-10-09](inference-profile-h100-2026-10-09/README.md) | H100: Nsight Systems/Compute, SW128 w WGMMA, bitowa zgodność, latency/throughput oraz HTTP A/B/B/A |
 
 ## basal-1.5-max
 
