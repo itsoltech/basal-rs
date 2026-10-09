@@ -101,13 +101,20 @@ pub(crate) mod cu {
     include!(concat!(env!("OUT_DIR"), "/kernels_ptx.rs"));
 
     static SELECTED: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    static CAP: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
 
     /// Choose the PTX for a GPU of compute capability `cap` (major * 10 + minor): the highest architecture not
     /// above it. None when the GPU is older than every compiled architecture.
     pub fn select(cap: u32) -> Option<u32> {
         let &(c, p) = PTX.iter().rev().find(|(c, _)| *c <= cap)?;
         let _ = SELECTED.set(p);
+        let _ = CAP.set(cap);
         Some(c)
+    }
+
+    /// The compute_90a PTX with the Hopper attention, when the build has it and the GPU is of compute capability 9.0.
+    pub fn ptx_90a() -> Option<&'static str> {
+        PTX_90A.filter(|_| CAP.get() == Some(&90))
     }
 
     /// The PTX chosen by [`select`] (the lowest architecture when nothing was selected).
@@ -809,12 +816,24 @@ impl CustomOp3 for AttentionTree<'_> {
         let (name, bm, threads, smem) = match self.tc_kernel {
             _ if !self.tc => ("attn_tree_f32", 16, 128, 0),
             k @ "attn_tree_tc_pipe" => (k, 128, 256, TC_SMEM),
+            // Q hi / lo of 128 rows, then the K / V tiles
+            k @ "attn_tree_wg" => (k, 128, 256, (2 * 128 * 128 + 4 * 32 * 128) * 2),
             k => (k, 128, 256, TC_SMEM / 2),
         };
-        let f = dev.get_or_load_custom_func(name, "basal_fused", cu::ptx())?;
+        let f = match (name, cu::ptx_90a()) {
+            ("attn_tree_wg", Some(ptx)) => dev.get_or_load_custom_func(name, "basal_fused_90a", ptx)?,
+            ("attn_tree_wg", None) => {
+                candle_core::bail!("BASAL_ATT={name} needs a Hopper GPU (compute capability 9.0)")
+            }
+            _ => dev.get_or_load_custom_func(name, "basal_fused", cu::ptx())?,
+        };
         if smem > 0 {
             use candle_core::cuda_backend::cudarc::driver::sys::CUfunction_attribute;
             f.set_attribute(CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, smem as i32).w()?;
+            if name == "attn_tree_wg" {
+                // the largest shared memory carveout: two blocks of 96 KiB per SM
+                f.set_attribute(CUfunction_attribute::CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT, 100).w()?;
+            }
         }
         let rep = nh / nkv;
         for chunk in self.units.chunks(TREE_MAXU) {
@@ -890,17 +909,21 @@ impl CustomOp3 for AttentionTree<'_> {
     }
 }
 
-/// Tensor-core attention kernel from `BASAL_ATT`: `tc` (default; Q·K with f16 hi/lo operands, three MMAs, and P
-/// split into hi/lo for P·V: products close to f32), `tc-pv1` (P rounded to f16), `tc-qk1` (Q·K from the f16
-/// hi parts only), `tc-f16` (both). Softmax, accumulation and output are f32 in every variant.
+/// Tensor-core attention kernel: `tc` (Q·K with f16 hi/lo operands, three MMAs, and P split into hi/lo for P·V:
+/// products close to f32), on compute capability 9.0 the same with Hopper warpgroup MMAs (`wg`, bitwise the same
+/// outputs on H100); `BASAL_ATT` selects one for A/B: `tc`, `wg`, `tc-pv1` (P rounded to f16), `tc-qk1` (Q·K from
+/// the f16 hi parts only), `tc-f16` (both), `tc-pipe`. Softmax, accumulation and output are f32 in every variant.
 #[cfg(feature = "cuda")]
 pub fn tc_kernel() -> &'static str {
     static K: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
     K.get_or_init(|| match std::env::var("BASAL_ATT").as_deref() {
+        Ok("tc") => "attn_tree_tc",
         Ok("tc-pv1") => "attn_tree_tc_pv1",
         Ok("tc-qk1") => "attn_tree_tc_qk1",
         Ok("tc-f16") => "attn_tree_tc_f16",
         Ok("tc-pipe") => "attn_tree_tc_pipe",
+        Ok("wg") => "attn_tree_wg",
+        _ if cu::ptx_90a().is_some() => "attn_tree_wg",
         _ => "attn_tree_tc",
     })
 }
@@ -928,7 +951,13 @@ pub fn attention_tree(
         nkv: d.nkv,
         scale,
         tc: tc.is_some(),
-        tc_kernel: tc_kernel(),
+        tc_kernel: match tc_kernel() {
+            // measured on H100 for f16 forwards; a bf16 forward (V lo plane) keeps tc unless `BASAL_ATT=wg`
+            "attn_tree_wg" if !tc.is_some_and(|t| t.2) && std::env::var("BASAL_ATT").as_deref() != Ok("wg") => {
+                "attn_tree_tc"
+            }
+            k => k,
+        },
         v_exact: tc.is_some_and(|t| t.2),
         merged: in_kernel,
     };

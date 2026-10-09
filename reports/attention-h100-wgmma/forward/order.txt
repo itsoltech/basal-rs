@@ -1,0 +1,16 @@
+03:29:30 4.5B rep 1 A
+03:30:17 4.5B rep 1 B
+03:31:04 4.5B rep 2 B
+03:31:50 4.5B rep 2 A
+03:32:37 4.5B rep 3 A
+03:33:24 4.5B rep 3 B
+03:34:10 4.5B rep 4 B
+03:34:57 4.5B rep 4 A
+03:35:44 max rep 1 A
+03:37:24 max rep 1 B
+03:39:03 max rep 2 B
+03:40:41 max rep 2 A
+03:42:21 max rep 3 A
+03:44:01 max rep 3 B
+03:45:39 max rep 4 B
+03:47:19 max rep 4 A

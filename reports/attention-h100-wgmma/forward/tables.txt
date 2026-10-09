@@ -1,0 +1,2 @@
+4.5B table: crates/basal-cli/gemm-tables/nvidia-h100-pcie--basal-1.5-4.5B--f16--cublaslt120901.json
+max table: crates/basal-cli/gemm-tables/nvidia-h100-pcie--basal-1.5-max--f16--cublaslt120901.json
