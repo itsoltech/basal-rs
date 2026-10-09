@@ -54,6 +54,27 @@ Every pull request runs formatting, Clippy, Rustdoc, dependency and workflow che
 CI does not run tests while the project has none. Docker images are built and pushed only for releases or a manual
 run with a release tag.
 
+## GEMM tables
+
+`gemm_table: auto` needs a batch-invariant cuBLASLt table per GPU, cuBLASLt version, model and dtype; generating
+one takes several to tens of minutes at the first start. Tables in
+[crates/basal-cli/gemm-tables/](crates/basal-cli/gemm-tables) are compiled into the binary, and `basal serve` uses a
+matching one after cuBLASLt accepts its algorithms on the GPU. A user who generated a table for a GPU or model the
+build lacks can send it with `basal gemm-share` (an issue with the `gemm-table` label, after a confirmation; without
+`gh` through the "GEMM table" issue form).
+
+Only the CUDA build carries tables, and `build.rs` bounds them: f16, the cuBLASLt version of the CUDA toolkit
+(`cublas_api.h`) and the current search version, one table per GPU and weight shapes, the file name
+`<gpu>--<model>--f16--cublaslt<version>.json`. It keeps only the fields the server reads (13-15 KB per table instead
+of ~34 KB) and stops the build when a table breaks a rule or all of them exceed 1 MiB; CI (Clippy with CUDA) runs
+it for every pull request. A new CUDA toolkit or search version therefore means new tables, not more of them.
+
+Before a table is added, a maintainer checks it on the same GPU and cuBLASLt version, with the table as
+`gemm_table`: exports of the basal-bench items as single requests, in a tree and in a budgeted batch compared with
+each other (0.0), the decision set against upstream FP32, and the time against a table generated there
+(`basal bench`, the context ladder). The file name is `<gpu>--<model>--<dtype>--cublaslt<version>.json`, with the
+JSON from the issue plus a `source` field naming the report or issue.
+
 ## Rust code quality
 
 The implementation and review rules are in [AGENTS.md](AGENTS.md#jakość-kodu-rust), based on

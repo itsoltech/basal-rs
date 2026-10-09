@@ -1,0 +1,89 @@
+{
+ "tool": "tools/bench/loadtest.py",
+ "url": "http://127.0.0.1:8101/v1/systemone",
+ "source": "reports/reference-1.5-max-fp32/bench.jsonl",
+ "distinct_requests": 44,
+ "phases": [
+  {
+   "phase": "sequential",
+   "concurrency": 1,
+   "offered_requests_per_s": null,
+   "requests": 44,
+   "errors": 0,
+   "p50_ms": 28.712937000022976,
+   "p95_ms": 30.883740000035687,
+   "p99_ms": 32.060669999964375,
+   "requests_per_s": 38.42694601416989,
+   "decisions_per_s": 38.42694601416989,
+   "max_prob_diff_vs_first_answer": 0.0,
+   "mean_batch_requests": null,
+   "classes": {
+    "bench": {
+     "n": 44,
+     "p50_ms": 28.712937000022976,
+     "p95_ms": 30.883740000035687,
+     "max_ms": 32.060669999964375
+    }
+   },
+   "gpu_power_w": 314.5083333333333,
+   "gpu_sm_mhz": 1410.0,
+   "gpu_temp_c": 53.666666666666664,
+   "gpu_util": 88.0,
+   "joules_per_decision": 8.184577905758077
+  },
+  {
+   "phase": "concurrent",
+   "concurrency": 8,
+   "offered_requests_per_s": null,
+   "requests": 300,
+   "errors": 0,
+   "p50_ms": 148.57280399996853,
+   "p95_ms": 175.2022590001161,
+   "p99_ms": 176.54097700005877,
+   "requests_per_s": 51.27967546400587,
+   "decisions_per_s": 51.27967546400587,
+   "max_prob_diff_vs_first_answer": 0.06783711910247803,
+   "mean_batch_requests": null,
+   "classes": {
+    "bench": {
+     "n": 300,
+     "p50_ms": 148.57280399996853,
+     "p95_ms": 175.2022590001161,
+     "max_ms": 176.94799499986402
+    }
+   },
+   "gpu_power_w": 378.78793103448277,
+   "gpu_sm_mhz": 1378.448275862069,
+   "gpu_temp_c": 57.44827586206897,
+   "gpu_util": 96.0,
+   "joules_per_decision": 7.386706869866226
+  },
+  {
+   "phase": "concurrent",
+   "concurrency": 32,
+   "offered_requests_per_s": null,
+   "requests": 300,
+   "errors": 0,
+   "p50_ms": 678.7651500000038,
+   "p95_ms": 731.396838999899,
+   "p99_ms": 739.8448710000594,
+   "requests_per_s": 47.85302644262147,
+   "decisions_per_s": 47.85302644262147,
+   "max_prob_diff_vs_first_answer": 0.06783711910247803,
+   "mean_batch_requests": null,
+   "classes": {
+    "bench": {
+     "n": 300,
+     "p50_ms": 678.7651500000038,
+     "p95_ms": 731.396838999899,
+     "max_ms": 742.175338999914
+    }
+   },
+   "gpu_power_w": 390.4496774193548,
+   "gpu_sm_mhz": 1366.9354838709678,
+   "gpu_temp_c": 58.61290322580645,
+   "gpu_util": 97.48387096774194,
+   "joules_per_decision": 8.159351799567503
+  }
+ ]
+}

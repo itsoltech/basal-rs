@@ -1,0 +1,7 @@
+basal: basal-1.5-4.5B: GEMM table for NVIDIA RTX 6000 Ada Generation from this build (nvidia-rtx-6000-ada-generation--basal-1.5-4.5B--f16--cublaslt120901.json), no search needed
+basal: basal-1.5-4.5B loaded on the GPU in 10.3s
+basal: 100 GEMM classes from /tmp/bh-bundled/.cache/gemm/basal-1.5-4.5B-f16.json
+basal: template prefixes precomputed ([53, 66] tokens)
+basal: serving basal-1.5-4.5B (batch 8192 tokens, Hrrn, long lane above 4096 tokens)
+basal: serving on http://127.0.0.1:8199 (ready 11.0 s after the start)
+basal: shutting down

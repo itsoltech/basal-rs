@@ -2,7 +2,8 @@
 //! (comma-separated, default 80,89,90: A100 / RTX 30xx, RTX 6000 Ada / L40S / RTX 40xx, H100), else only for
 //! CUDA_COMPUTE_CAP when that is set (candle's own kernels are compiled for CUDA_COMPUTE_CAP, which candle needs
 //! without a GPU in the build machine; their PTX for 8.0 runs on newer GPUs too). At run time the PTX of the highest architecture not above the GPU's is loaded
-//! (`fused::ptx`); a GPU older than every one of them is refused.
+//! (`fused::ptx`); a GPU older than every one of them is refused. With 90 among them, also a compute_90a build of the
+//! same file with the Hopper (wgmma) attention, used on compute capability 9.0 only.
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
@@ -37,5 +38,19 @@ fn main() {
         table += &format!("    ({cap}, include_str!({:?})),\n", out.display().to_string());
     }
     table += "];\n";
+    // Hopper: the same kernels plus the wgmma attention (BASAL_WGMMA), for compute capability 9.0 only (an `a` target
+    // runs on no other architecture)
+    if caps.contains(&90) {
+        let out = out_dir.join("kernels_90a.ptx");
+        let status = std::process::Command::new(&nvcc)
+            .args(["--ptx", "-O3", "-std=c++17", "-arch=compute_90a", "-DBASAL_WGMMA", "src/kernels.cu", "-o"])
+            .arg(&out)
+            .status()
+            .unwrap_or_else(|e| panic!("running {nvcc}: {e}"));
+        assert!(status.success(), "nvcc failed on src/kernels.cu (compute_90a)");
+        table += &format!("pub const PTX_90A: Option<&str> = Some(include_str!({:?}));\n", out.display().to_string());
+    } else {
+        table += "pub const PTX_90A: Option<&str> = None;\n";
+    }
     std::fs::write(out_dir.join("kernels_ptx.rs"), table).unwrap();
 }

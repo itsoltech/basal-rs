@@ -11,6 +11,8 @@ Rust. Błąd, anulowanie lub pominięcie wymaganego joba oznacza błąd bramki. 
 - **CUDA:** Clippy ze wszystkimi features na Linux z toolkitem CUDA 12.9.1. Kompilacja nie wymaga GPU;
   `CUDA_COMPUTE_CAP=80` ustala architekturę kerneli Candle, a `CUDA_COMPUTE_CAPS=80,89,90` sprawdza kompilację
   własnych kerneli PTX dla wszystkich architektur dystrybuowanych w wydaniu.
+  Pobieranie przypiętych zależności jest osobnym krokiem; w kontenerze Cargo używa HTTP/1.1 i pięciu ponowień
+  błędów sieciowych. Błąd pobierania blokuje job, zanim rozpocznie się kontrola kodu.
 - **Dokumentacja:** Rustdoc na każdej z tych platform, z prywatnymi elementami, bez dokumentowania zależności.
   Ostrzeżenia, w tym błędne odsyłacze, są błędami CI.
 - **Zależności:** `cargo deny` dla Linux i Apple Silicon, ze wszystkimi features, według [deny.toml](../deny.toml).
@@ -22,6 +24,8 @@ Rust. Błąd, anulowanie lub pominięcie wymaganego joba oznacza błąd bramki. 
   wygaśnięcie zatwierdzonego wyjątku. Szczegóły poniżej.
 - **Workflow:** przypięte wersje `actionlint` i ShellCheck sprawdzają wszystkie workflow, osadzony kod powłoki
   oraz skrypty polityki CI.
+  `actionlint` pochodzi z binarnego wydania upstream i jest weryfikowany przez przypiętą sumę SHA-256;
+  `taiki-e/install-action` instaluje tylko obsługiwany przez nią ShellCheck, bez fallbacku do Cargo.
 
 Wszystkie polecenia Cargo dotyczące zależności używają `--locked`. Wersja Rust jest ustalona na 1.95.0 w
 [rust-toolchain.toml](../rust-toolchain.toml), a crate'y dziedziczą `rust-version` i politykę lintów z workspace.

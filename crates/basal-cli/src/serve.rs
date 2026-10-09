@@ -1,5 +1,5 @@
 //! `basal serve`: HTTP server: POST /v1/systemone (TypeSafe System One), POST /v1/basal (upstream basal conventions),
-//! GET /v1/models, GET /health.
+//! GET /v1/models, GET /health, opt-in GET /metrics (Prometheus).
 //!
 //! One thread owns the GPU engine; HTTP handlers (tokio) send jobs to it over a channel. The scheduler plans arriving
 //! requests (validation errors are answered at once), orders the waiting ones (`--schedule`: highest response ratio
@@ -35,7 +35,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
 use basal_core::engine::{plan_response, RequestPlan};
 use basal_core::gate::Gate;
 use basal_core::pack::TrieSize;
@@ -43,6 +43,9 @@ use basal_core::request::Dialect;
 use basal_core::{Backend, DecideError, Engine};
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot};
+
+mod metrics;
+use metrics::{LaneMetrics, Metrics, RequestModel};
 
 pub struct ServeOptions {
     pub addr: SocketAddr,
@@ -56,6 +59,8 @@ pub struct ServeOptions {
     pub long_slice_ms: u64,
     /// One log line per HTTP request.
     pub access_log: bool,
+    /// Collect and expose Prometheus metrics; disabled by default.
+    pub metrics: bool,
 }
 
 /// One served model: its engine and admission options.
@@ -83,6 +88,7 @@ struct Job {
 }
 
 struct App {
+    metrics: Option<Metrics>,
     /// Job queue of every served model, by name.
     routes: HashMap<String, mpsc::UnboundedSender<Job>>,
     names: Vec<String>,
@@ -117,6 +123,7 @@ struct Waiting {
 /// Admission of one lane: order of the waiting requests, budget, packed tokens per second of its recent batches
 /// (exponential average, converts tokens to seconds for HRRN).
 struct Lane {
+    metrics: Option<LaneMetrics>,
     schedule: Schedule,
     max_batch_tokens: usize,
     rate: f64,
@@ -124,8 +131,8 @@ struct Lane {
 }
 
 impl Lane {
-    fn new(schedule: Schedule, max_batch_tokens: usize) -> Self {
-        Self { schedule, max_batch_tokens, rate: 3000.0, waiting: Vec::new() }
+    fn new(schedule: Schedule, max_batch_tokens: usize, metrics: Option<LaneMetrics>) -> Self {
+        Self { metrics, schedule, max_batch_tokens, rate: 3000.0, waiting: Vec::new() }
     }
 
     /// Take the next batch: the first waiting request in schedule order always, then every other one that still fits
@@ -164,6 +171,9 @@ impl Lane {
         let plans: Vec<&RequestPlan> = batch.iter().map(|(_, p)| p).collect();
         let result = engine.run_plans(&plans);
         let compute_ms = start.elapsed().as_secs_f64() * 1e3;
+        if let Some(metrics) = &self.metrics {
+            metrics.batch(compute_ms / 1e3, result.is_ok(), batch.iter().map(|(job, _)| start - job.arrived));
+        }
         if compute_ms > 1.0 {
             self.rate = 0.8 * self.rate + 0.2 * (tokens as f64 / (compute_ms / 1e3));
         }
@@ -172,6 +182,9 @@ impl Lane {
             Ok(outs) => {
                 for ((job, plan), out) in batch.into_iter().zip(outs) {
                     let resp = plan_response(&engine.manifest.name, &plan, &out);
+                    if let (Some(metrics), Ok(v)) = (&self.metrics, &resp) {
+                        metrics.usage(v);
+                    }
                     let queue_ms = (start - job.arrived).as_secs_f64() * 1e3;
                     let _ = job.reply.send((resp, Some(Timing { queue_ms, compute_ms, batch: n })));
                 }
@@ -261,10 +274,14 @@ fn error_response(status: StatusCode, body: Value) -> Response {
 
 /// TypeSafe System One endpoint. A body that is not JSON is a 422 `json_invalid` error, as in the TypeSafe API
 /// (with any content type).
-async fn systemone(State(app): State<Arc<App>>, body: axum::body::Bytes) -> Response {
+async fn systemone(
+    State(app): State<Arc<App>>,
+    label: Option<Extension<RequestModel>>,
+    body: axum::body::Bytes,
+) -> Response {
     let arrived = Instant::now();
     match serde_json::from_slice::<Value>(&body) {
-        Ok(v) => decide(app, v, Dialect::TypeSafe, arrived).await,
+        Ok(v) => decide(app, v, Dialect::TypeSafe, arrived, label.map(|Extension(l)| l)).await,
         Err(e) => error_response(StatusCode::UNPROCESSABLE_ENTITY, json_invalid(&body, &e)),
     }
 }
@@ -290,10 +307,14 @@ fn json_invalid(body: &[u8], e: &serde_json::Error) -> Value {
 
 /// Upstream-compatible endpoint (`Server.decide` conventions): any failure, including a body that is not JSON, is a
 /// 422 `{"error": message}`.
-async fn basal(State(app): State<Arc<App>>, body: axum::body::Bytes) -> Response {
+async fn basal(
+    State(app): State<Arc<App>>,
+    label: Option<Extension<RequestModel>>,
+    body: axum::body::Bytes,
+) -> Response {
     let arrived = Instant::now();
     match serde_json::from_slice::<Value>(&body) {
-        Ok(v) if v.is_object() => decide(app, v, Dialect::Upstream, arrived).await,
+        Ok(v) if v.is_object() => decide(app, v, Dialect::Upstream, arrived, label.map(|Extension(l)| l)).await,
         Ok(_) => {
             error_response(StatusCode::UNPROCESSABLE_ENTITY, json!({"error": "request body must be a JSON object"}))
         }
@@ -310,7 +331,24 @@ impl Drop for Inflight<'_> {
     }
 }
 
-async fn decide(app: Arc<App>, body: Value, dialect: Dialect, arrived: Instant) -> Response {
+async fn decide(
+    app: Arc<App>,
+    body: Value,
+    dialect: Dialect,
+    arrived: Instant,
+    label: Option<RequestModel>,
+) -> Response {
+    // The request's model, or the default one when the field is missing or not a string (/v1/systemone then
+    // answers the schema error of the field). Resolved before admission so a 529 also carries the model label;
+    // unknown client-provided names keep the empty label.
+    let model = match body.get("model").and_then(Value::as_str) {
+        Some(m) if app.routes.contains_key(m) => Ok(m),
+        Some(m) => Err(m),
+        None => Ok(app.default_model.as_str()),
+    };
+    if let (Some(label), Ok(m)) = (label, model) {
+        let _ = label.0.set(m.to_string());
+    }
     let slot = Inflight(&app.inflight);
     if app.inflight.fetch_add(1, Ordering::SeqCst) >= app.max_inflight {
         // 529 as the TypeSafe API when it is overloaded; its SDKs (and most HTTP clients) retry 5xx with backoff
@@ -323,22 +361,19 @@ async fn decide(app: Arc<App>, body: Value, dialect: Dialect, arrived: Instant) 
         r.headers_mut().insert(axum::http::header::RETRY_AFTER, HeaderValue::from_static("1"));
         return r;
     }
-    // The request's model, or the default one when the field is missing or not a string (/v1/systemone then
-    // answers the schema error of the field).
-    let model = match body.get("model").and_then(Value::as_str) {
-        Some(m) if app.routes.contains_key(m) => m.to_string(),
-        Some(m) => {
-            return error_body(dialect, basal_core::request::api_usage_error(format!("Unknown model: {m}")));
-        }
-        None => app.default_model.clone(),
+    let model = match model {
+        Ok(m) => m,
+        Err(m) => return error_body(dialect, basal_core::request::api_usage_error(format!("Unknown model: {m}"))),
     };
     let (tx, rx) = oneshot::channel();
-    let sent = app.routes[&model].send(Job { body, dialect, arrived, reply: tx });
+    let admitted = app.metrics.as_ref().map(|metrics| metrics.admitted(model));
+    let sent = app.routes[model].send(Job { body, dialect, arrived, reply: tx });
     let reply = match sent {
         Ok(()) => rx.await.ok(),
         Err(_) => None,
     };
     drop(slot);
+    drop(admitted);
     let Some((result, timing)) = reply else {
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -424,6 +459,11 @@ pub fn serve<B: Backend + Send + 'static>(models: Vec<ServedModel<B>>, opts: Ser
     }
     let default_model = opts.default_model.clone().unwrap_or_else(|| names[0].clone());
     anyhow::ensure!(names.contains(&default_model), "default model {default_model} is not served ({names:?})");
+    let metrics = opts
+        .metrics
+        .then(|| Metrics::new(&names, opts.max_inflight))
+        .transpose()
+        .context("initializing Prometheus metrics")?;
     // One GPU: with several models or a long lane, every engine takes turns through one gate (short batches of any
     // model before long requests, which yield between layers).
     let shared = models.len() > 1 || models.iter().any(|m| m.long_tokens > 0);
@@ -434,12 +474,12 @@ pub fn serve<B: Backend + Send + 'static>(models: Vec<ServedModel<B>>, opts: Ser
         let ServedModel { mut engine, max_batch_tokens, schedule, long_tokens } = m;
         let name = engine.manifest.name.clone();
         let (tx, rx) = mpsc::unbounded_channel();
-        let lane = || Lane::new(schedule, max_batch_tokens);
+        let lane = |kind| Lane::new(schedule, max_batch_tokens, metrics.as_ref().map(|m| m.lane(&name, kind)));
         let long = if long_tokens > 0 {
             let mut le = engine.fork().with_context(|| format!("{name}: second engine for the long lane"))?;
             le.backend.set_gate(gate.clone().unwrap(), false);
             let (ltx, lrx) = std::sync::mpsc::channel();
-            let l = lane();
+            let l = lane("long");
             threads.push(
                 std::thread::Builder::new()
                     .name(format!("{name}-long"))
@@ -453,7 +493,7 @@ pub fn serve<B: Backend + Send + 'static>(models: Vec<ServedModel<B>>, opts: Ser
         if let Some(g) = &gate {
             engine.backend.set_gate(g.clone(), true);
         }
-        let main_lane = lane();
+        let main_lane = lane("main");
         threads.push(
             std::thread::Builder::new()
                 .name(name.clone())
@@ -467,6 +507,7 @@ pub fn serve<B: Backend + Send + 'static>(models: Vec<ServedModel<B>>, opts: Ser
         routes.insert(name, tx);
     }
     let app = Arc::new(App {
+        metrics,
         routes,
         names,
         default_model,
@@ -474,12 +515,15 @@ pub fn serve<B: Backend + Send + 'static>(models: Vec<ServedModel<B>>, opts: Ser
         max_inflight: opts.max_inflight,
         release_date: opts.release_date.clone(),
     });
-    let router = Router::new()
-        .route("/v1/systemone", post(systemone))
-        .route("/v1/basal", post(basal))
-        .route("/v1/models", get(models_list))
-        .route("/health", get(health))
-        .with_state(app);
+    let router = Router::new().route("/v1/systemone", post(systemone)).route("/v1/basal", post(basal));
+    let router = if opts.metrics {
+        router
+            .route_layer(axum::middleware::from_fn_with_state(app.clone(), metrics::observe))
+            .route("/metrics", get(metrics::export))
+    } else {
+        router
+    };
+    let router = router.route("/v1/models", get(models_list)).route("/health", get(health)).with_state(app);
     let router = if opts.access_log { router.layer(axum::middleware::from_fn(access_log)) } else { router };
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     rt.block_on(async move {

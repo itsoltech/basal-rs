@@ -46,5 +46,22 @@ RUN version=$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml) \
  && tar -C /pkg -czf /out/$name.tar.gz $name \
  && cd /out && sha256sum $name.tar.gz > $name.tar.gz.sha256
 
+# Development build for tests on rented GPUs (tools/cloud/basal-cloud.py build): the CUDA binary only, profile release,
+# kernels for CUDA_COMPUTE_CAPS. `docker buildx build -f tools/release/linux.Dockerfile --target dev --output
+# type=local,dest=DIR .` writes DIR/basal-cuda.
+FROM chef AS dev-build
+ARG CUDA_COMPUTE_CAPS=80,89,90
+ENV CUDA_COMPUTE_CAP=80 CUDA_COMPUTE_CAPS=${CUDA_COMPUTE_CAPS}
+COPY --from=planner /src/recipe.json recipe.json
+RUN cargo chef cook --release --features basal-cli/cuda --recipe-path recipe.json
+COPY Cargo.toml Cargo.lock rustfmt.toml ./
+COPY crates crates
+ARG BASAL_GIT_SHA=unknown
+ENV BASAL_GIT_SHA=${BASAL_GIT_SHA}
+RUN cargo build --release --locked --features basal-cli/cuda && mkdir -p /out && cp target/release/basal /out/basal-cuda
+
+FROM scratch AS dev
+COPY --from=dev-build /out/ /
+
 FROM scratch AS out
 COPY --from=build /out/ /

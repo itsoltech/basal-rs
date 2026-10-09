@@ -29,18 +29,28 @@ pub struct Strategy {
     /// Option orders of the groups before the final one: 2 (as written and reversed, as every Basal question) or
     /// 1 (as written; half the prompts, position bias not averaged out). The final group always uses both.
     pub screen_orders: usize,
+    /// Semifinal (without knockout): the `shortlist` strongest options of the first-round fit, when fewer than all,
+    /// are asked once more in groups that each hold strong and weak candidates (round-robin by rank), and the final
+    /// group comes from the fit with the semifinal added. Keeps a correct option that the first round ranks just
+    /// below the final ten.
+    pub shortlist: Option<usize>,
 }
 
 impl Strategy {
     /// 0.1.x: two partitions, final group of the 10 strongest, joint refit.
-    pub const LUCE2: Strategy = Strategy { partitions: 2, keep: None, final_decides: false, screen_orders: 2 };
+    pub const LUCE2: Strategy =
+        Strategy { partitions: 2, keep: None, final_decides: false, screen_orders: 2, shortlist: None };
     /// The default: as [`Strategy::LUCE2`], with one option order in the first round (half its prompts; the same
     /// accuracy on reports/choice-sets).
     pub const DEFAULT: Strategy = Strategy { screen_orders: 1, ..Self::LUCE2 };
 
     /// `luce2`, `luce2-final`, `luce1-final`, `knockout1`..`knockout3`, each optionally with `-1o` (one option order
-    /// before the final group).
+    /// before the final group), then `-sN` (semifinal of the N strongest; not with knockout).
     pub fn parse(s: &str) -> Option<Strategy> {
+        let (s, shortlist) = match s.rsplit_once("-s") {
+            Some((b, k)) if k.parse::<usize>().is_ok_and(|k| k > MAX_OPTIONS) => (b, k.parse().ok()),
+            _ => (s, None),
+        };
         let (base, screen_orders) = match s.strip_suffix("-1o") {
             Some(b) => (b, 1),
             None => (s, 2),
@@ -54,7 +64,10 @@ impl Strategy {
             "knockout3" => (1, Some(3), true),
             _ => return None,
         };
-        Some(Strategy { partitions, keep, final_decides, screen_orders })
+        if keep.is_some() && shortlist.is_some() {
+            return None;
+        }
+        Some(Strategy { partitions, keep, final_decides, screen_orders, shortlist })
     }
 
     pub fn name(&self) -> String {
@@ -64,10 +77,10 @@ impl Strategy {
             (1, Some(k), true) => format!("knockout{k}"),
             (p, k, f) => format!("partitions={p} keep={k:?} final_decides={f}"),
         };
-        if self.screen_orders == 1 {
-            base + "-1o"
-        } else {
-            base
+        let base = if self.screen_orders == 1 { base + "-1o" } else { base };
+        match self.shortlist {
+            Some(k) => format!("{base}-s{k}"),
+            None => base,
         }
     }
 }
@@ -106,9 +119,21 @@ pub enum Round {
     Final(Vec<usize>),
 }
 
-pub fn next_round(s: &Strategy, n: usize, groups: &[Vec<usize>], targets: &[Vec<f64>], last: &[usize]) -> Round {
+/// `rounds`: rounds asked so far (1 after the first).
+pub fn next_round(
+    s: &Strategy,
+    n: usize,
+    groups: &[Vec<usize>],
+    targets: &[Vec<f64>],
+    last: &[usize],
+    rounds: usize,
+) -> Round {
     let Some(keep) = s.keep else {
-        return Round::Final(finalists(&fit_joint(n, groups, targets)));
+        let p = fit_joint(n, groups, targets);
+        return match s.shortlist {
+            Some(k) if rounds == 1 && k < n => Round::Groups(semifinal(&p, k)),
+            _ => Round::Final(finalists(&p)),
+        };
     };
     // knockout: the best of every group of the latest round; with few groups more of each, to fill the final
     let keep = keep.max(MAX_OPTIONS.div_ceil(last.len()));
@@ -201,6 +226,22 @@ fn cholesky_solve(a: &mut [f64], b: &mut [f64], n: usize) -> bool {
         b[i] = v / a[i * n + i];
     }
     true
+}
+
+/// Semifinal groups of the `k` options with the largest joint probability: `ceil(k / MAX_OPTIONS)` groups, rank r in
+/// group `r mod g` (every group gets strong and weak candidates), each in option order.
+pub fn semifinal(p: &[f64], k: usize) -> Vec<Vec<usize>> {
+    let mut idx: Vec<usize> = (0..p.len()).collect();
+    idx.sort_by(|&a, &b| p[b].partial_cmp(&p[a]).unwrap().then(a.cmp(&b)));
+    idx.truncate(k);
+    let g = k.div_ceil(MAX_OPTIONS);
+    (0..g)
+        .map(|j| {
+            let mut grp: Vec<usize> = idx.iter().skip(j).step_by(g).copied().collect();
+            grp.sort_unstable();
+            grp
+        })
+        .collect()
 }
 
 /// The final group: the `MAX_OPTIONS` options with the largest joint probability after the first round, in their

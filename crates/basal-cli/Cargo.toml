@@ -23,6 +23,7 @@ hf-hub = { version = "1", features = ["blocking", "rustls-tls"] }
 clap.workspace = true
 tokio.workspace = true
 axum.workspace = true
+prometheus = { version = "0.14", default-features = false }
 # HTTP (doctor: Hugging Face Hub) and system calls; the versions hf-hub already brings
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 libc = "0.2"
@@ -30,6 +31,9 @@ libloading = "0.8"
 sha2 = "0.10"
 basal-core = { path = "../basal-core" }
 basal-gpu = { path = "../basal-gpu" }
+
+[build-dependencies]
+serde_json.workspace = true
 
 [features]
 cuda = ["basal-gpu/cuda"]

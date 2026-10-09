@@ -1,0 +1,11 @@
+=== 4.5B results 19:28:57
+4.5B A vs B            tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.0; max TV avg 0.0
+4.5B B vs Bpipe        tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.0; max TV avg 0.0
+4.5B fp32 vs B         tokens: 8 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.04892726855468865; max TV avg 0.0028715998209095164
+=== 4.5B time 19:29:48
+=== max results 19:32:20
+max A vs B             tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.0; max TV avg 0.0
+max B vs Bpipe         tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.0; max TV avg 0.0
+max fp32 vs B          tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.3981950837402337; max TV avg 0.010350951555703092
+=== max time 19:33:48
+DONE

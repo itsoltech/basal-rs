@@ -1,0 +1,87 @@
+equivalence n=2560 k=2048: 105 candidates, 3 groups; best single algorithm 1.145
+  group of 98: best member per class 1.000
+  group of  6: best member per class inf
+  group of  1: best member per class inf
+  cand   5 split 1 rows same group   0: <=256 1.055 >=4096 1.665 all 1.280
+  cand  30 split 1 rows same group   0: <=256 1.078 >=4096 1.958 all 1.412
+  cand   1 split 1 rows same group   0: <=256 1.080 >=4096 1.961 all 1.406
+  cand  29 split 1 rows same group   0: <=256 1.083 >=4096 1.535 all 1.257
+  cand  41 split 1 rows same group   0: <=256 1.086 >=4096 1.247 all 1.161
+  cand  17 split 1 rows same group   0: <=256 1.087 >=4096 1.541 all 1.324
+  cand  31 split 1 rows same group   0: <=256 1.090 >=4096 1.761 all 1.348
+  cand  32 split 1 rows same group   0: <=256 1.121 >=4096 1.220 all 1.202
+  cand  19 split 1 rows same group   0: <=256 1.134 >=4096 1.290 all 1.248
+  cand  20 split 1 rows same group   0: <=256 1.137 >=4096 1.208 all 1.189
+  cand  16 split 1 rows same group   0: <=256 1.142 >=4096 1.339 all 1.310
+  cand  51 split 1 rows same group   0: <=256 1.146 >=4096 1.227 all 1.158
+  cand  33 split 1 rows same group   0: <=256 1.153 >=4096 1.172 all 1.174
+  cand  42 split 1 rows same group   0: <=256 1.155 >=4096 1.189 all 1.210
+  cand  43 split 1 rows same group   0: <=256 1.168 >=4096 1.071 all 1.177
+gemm-search invariant n=2560 k=2048: 105 candidates, slowdown vs best per class: mean 1.000, max 1.000
+equivalence n=2048 k=2048: 124 candidates, 4 groups; best single algorithm 1.154
+  group of 108: best member per class 1.000
+  group of 10: best member per class inf
+  group of  4: best member per class inf
+  group of  2: best member per class inf
+  cand  22 split 1 rows same group   0: <=256 1.049 >=4096 1.260 all 1.162
+  cand  46 split 1 rows same group   0: <=256 1.074 >=4096 1.276 all 1.178
+  cand   5 split 1 rows same group   0: <=256 1.081 >=4096 1.941 all 1.378
+  cand  32 split 1 rows same group   0: <=256 1.084 >=4096 1.524 all 1.264
+  cand  58 split 1 rows same group   0: <=256 1.092 >=4096 1.496 all 1.229
+  cand  33 split 1 rows same group   0: <=256 1.106 >=4096 2.011 all 1.432
+  cand   3 split 1 rows same group   0: <=256 1.108 >=4096 1.922 all 1.413
+  cand   2 split 1 rows same group   0: <=256 1.110 >=4096 2.009 all 1.463
+  cand  17 split 1 rows same group   0: <=256 1.118 >=4096 1.680 all 1.401
+  cand  19 split 1 rows same group   0: <=256 1.124 >=4096 1.929 all 1.470
+  cand  50 split 1 rows same group   0: <=256 1.126 >=4096 1.457 all 1.292
+  cand  56 split 1 rows same group   0: <=256 1.138 >=4096 1.191 all 1.154
+  cand  18 split 1 rows same group   0: <=256 1.151 >=4096 1.321 all 1.239
+  cand  48 split 1 rows same group   0: <=256 1.156 >=4096 1.176 all 1.192
+  cand  34 split 1 rows same group   0: <=256 1.157 >=4096 1.182 all 1.183
+gemm-search invariant n=2048 k=2048: 124 candidates, slowdown vs best per class: mean 1.000, max 1.000
+equivalence n=22016 k=2048: 83 candidates, 1 groups; best single algorithm 1.054
+  group of 83: best member per class 1.000
+  cand  55 split 1 rows same group   0: <=256 1.038 >=4096 1.067 all 1.054
+  cand  45 split 1 rows same group   0: <=256 1.048 >=4096 1.109 all 1.086
+  cand  46 split 1 rows same group   0: <=256 1.066 >=4096 1.179 all 1.119
+  cand   7 split 1 rows same group   0: <=256 1.081 >=4096 2.085 all 1.446
+  cand   0 split 1 rows same group   0: <=256 1.085 >=4096 2.129 all 1.469
+  cand  17 split 1 rows same group   0: <=256 1.086 >=4096 1.279 all 1.167
+  cand   2 split 1 rows same group   0: <=256 1.095 >=4096 2.031 all 1.444
+  cand  19 split 1 rows same group   0: <=256 1.103 >=4096 1.439 all 1.156
+  cand  16 split 1 rows same group   0: <=256 1.103 >=4096 1.302 all 1.141
+  cand  21 split 1 rows same group   0: <=256 1.112 >=4096 1.352 all 1.154
+  cand   1 split 1 rows same group   0: <=256 1.120 >=4096 2.034 all 1.482
+  cand   5 split 1 rows same group   0: <=256 1.139 >=4096 1.966 all 1.444
+  cand  18 split 1 rows same group   0: <=256 1.141 >=4096 1.598 all 1.329
+  cand  35 split 1 rows same group   0: <=256 1.143 >=4096 2.271 all 1.501
+  cand  59 split 1 rows same group   0: <=256 1.148 >=4096 1.592 all 1.313
+gemm-search invariant n=22016 k=2048: 83 candidates, slowdown vs best per class: mean 1.000, max 1.000
+equivalence n=2048 k=11008: 130 candidates, 10 groups; best single algorithm 1.229
+  group of 59: best member per class 1.000
+  group of 24: best member per class inf
+  group of 14: best member per class inf
+  group of  1: best member per class inf
+  group of  8: best member per class inf
+  group of 16: best member per class inf
+  group of  2: best member per class inf
+  group of  2: best member per class inf
+  group of  2: best member per class inf
+  group of  2: best member per class inf
+  cand  44 split 1 rows same group   0: <=256 1.065 >=4096 1.550 all 1.269
+  cand  29 split 1 rows same group   0: <=256 1.085 >=4096 1.912 all 1.373
+  cand  48 split 3 rows same group   2: <=256 1.145 >=4096 inf all inf
+  cand  18 split 4 rows same group   4: <=256 1.150 >=4096 inf all inf
+  cand  19 split 3 rows same group   2: <=256 1.151 >=4096 inf all inf
+  cand  32 split 2 rows same group  17: <=256 1.168 >=4096 inf all inf
+  cand  17 split 2 rows same group  17: <=256 1.170 >=4096 inf all inf
+  cand  47 split 2 rows same group  17: <=256 1.173 >=4096 inf all inf
+  cand  56 split 1 rows same group   0: <=256 1.173 >=4096 1.405 all 1.229
+  cand  22 split 3 rows same group   2: <=256 1.176 >=4096 inf all inf
+  cand  23 split 4 rows same group   4: <=256 1.176 >=4096 inf all inf
+  cand  31 split 2 rows same group  17: <=256 1.177 >=4096 inf all inf
+  cand  21 split 3 rows same group   2: <=256 1.179 >=4096 inf all inf
+  cand  20 split 3 rows same group   2: <=256 1.186 >=4096 inf all inf
+  cand   5 split 4 rows same group   4: <=256 1.189 >=4096 inf all inf
+gemm-search invariant n=2048 k=11008: 130 candidates, slowdown vs best per class: mean 1.000, max 1.000
+DIAG-DONE

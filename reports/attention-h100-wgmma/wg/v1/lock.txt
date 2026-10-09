@@ -1,0 +1,2 @@
+GPU clocks set to "(gpuClkMin 1404, gpuClkMax 1404)" for GPU 00000000:01:00.0
+All done.

@@ -1,0 +1,547 @@
+{
+  "set": "reports/choice-sets/timing-set.jsonl",
+  "questions": 200,
+  "strategies": [
+    {
+      "strategy": "luce2",
+      "detail": "Strategy { partitions: 2, keep: None, final_decides: false, screen_orders: 2, shortlist: None }",
+      "sets": {
+        "banking77": {
+          "quality": {
+            "n": 67,
+            "correct": 54,
+            "accuracy": 0.8059701492537313,
+            "nll": 0.7209671645537915,
+            "brier": 0.28104241289428217,
+            "ece_10bin": 0.05956456098076867
+          },
+          "gold_in_final_group": "67/67",
+          "ms_per_question": {
+            "n": 67,
+            "max": 767.61985,
+            "p50": 437.234383,
+            "p95": 456.86814,
+            "p99": 767.61985,
+            "mean": 446.176472880597
+          },
+          "prompts_per_question": {
+            "n": 67,
+            "max": 34.0,
+            "p50": 34.0,
+            "p95": 34.0,
+            "p99": 34.0,
+            "mean": 34.0
+          }
+        },
+        "clinc150": {
+          "quality": {
+            "n": 67,
+            "correct": 58,
+            "accuracy": 0.8656716417910447,
+            "nll": 0.4636154205993417,
+            "brier": 0.208985196497478,
+            "ece_10bin": 0.08706551604054158
+          },
+          "gold_in_final_group": "67/67",
+          "ms_per_question": {
+            "n": 67,
+            "max": 1153.5601179999999,
+            "p50": 689.192303,
+            "p95": 711.3370490000001,
+            "p99": 1153.5601179999999,
+            "mean": 696.1918201044774
+          },
+          "prompts_per_question": {
+            "n": 67,
+            "max": 62.0,
+            "p50": 62.0,
+            "p95": 62.0,
+            "p99": 62.0,
+            "mean": 62.0
+          }
+        },
+        "massive-pl": {
+          "quality": {
+            "n": 66,
+            "correct": 50,
+            "accuracy": 0.7575757575757576,
+            "nll": 0.8973884571833833,
+            "brier": 0.3542618022924974,
+            "ece_10bin": 0.10705182556169046
+          },
+          "gold_in_final_group": "64/66",
+          "ms_per_question": {
+            "n": 66,
+            "max": 512.2320569999999,
+            "p50": 304.44641950000005,
+            "p95": 312.087467,
+            "p99": 512.2320569999999,
+            "mean": 307.79673956060606
+          },
+          "prompts_per_question": {
+            "n": 66,
+            "max": 26.0,
+            "p50": 26.0,
+            "p95": 26.0,
+            "p99": 26.0,
+            "mean": 26.0
+          }
+        }
+      }
+    },
+    {
+      "strategy": "luce2-1o",
+      "detail": "Strategy { partitions: 2, keep: None, final_decides: false, screen_orders: 1, shortlist: None }",
+      "sets": {
+        "banking77": {
+          "quality": {
+            "n": 67,
+            "correct": 54,
+            "accuracy": 0.8059701492537313,
+            "nll": 0.6622366369570283,
+            "brier": 0.26424575607142275,
+            "ece_10bin": 0.04820659488396153
+          },
+          "gold_in_final_group": "67/67",
+          "ms_per_question": {
+            "n": 67,
+            "max": 443.229668,
+            "p50": 275.350201,
+            "p95": 284.779158,
+            "p99": 443.229668,
+            "mean": 276.757121716418
+          },
+          "prompts_per_question": {
+            "n": 67,
+            "max": 18.0,
+            "p50": 18.0,
+            "p95": 18.0,
+            "p99": 18.0,
+            "mean": 18.0
+          }
+        },
+        "clinc150": {
+          "quality": {
+            "n": 67,
+            "correct": 58,
+            "accuracy": 0.8656716417910447,
+            "nll": 0.4483697707328123,
+            "brier": 0.20523527578183304,
+            "ece_10bin": 0.07211784161465992
+          },
+          "gold_in_final_group": "67/67",
+          "ms_per_question": {
+            "n": 67,
+            "max": 637.1088129999999,
+            "p50": 377.754348,
+            "p95": 438.331856,
+            "p99": 637.1088129999999,
+            "mean": 387.06665961194034
+          },
+          "prompts_per_question": {
+            "n": 67,
+            "max": 32.0,
+            "p50": 32.0,
+            "p95": 32.0,
+            "p99": 32.0,
+            "mean": 32.0
+          }
+        },
+        "massive-pl": {
+          "quality": {
+            "n": 66,
+            "correct": 49,
+            "accuracy": 0.7424242424242424,
+            "nll": 1.0027893256068237,
+            "brier": 0.35279443987087616,
+            "ece_10bin": 0.07528049430015082
+          },
+          "gold_in_final_group": "62/66",
+          "ms_per_question": {
+            "n": 66,
+            "max": 288.57683899999995,
+            "p50": 180.868562,
+            "p95": 189.187776,
+            "p99": 288.57683899999995,
+            "mean": 183.12999499999998
+          },
+          "prompts_per_question": {
+            "n": 66,
+            "max": 14.0,
+            "p50": 14.0,
+            "p95": 14.0,
+            "p99": 14.0,
+            "mean": 14.0
+          }
+        }
+      }
+    },
+    {
+      "strategy": "luce1-final-1o",
+      "detail": "Strategy { partitions: 1, keep: None, final_decides: true, screen_orders: 1, shortlist: None }",
+      "sets": {
+        "banking77": {
+          "quality": {
+            "n": 67,
+            "correct": 54,
+            "accuracy": 0.8059701492537313,
+            "nll": 0.6797472494325741,
+            "brier": 0.2620855765992203,
+            "ece_10bin": 0.08925193741820359
+          },
+          "gold_in_final_group": "65/67",
+          "ms_per_question": {
+            "n": 67,
+            "max": 249.84816800000002,
+            "p50": 160.709498,
+            "p95": 166.516937,
+            "p99": 249.84816800000002,
+            "mean": 163.16441941791047
+          },
+          "prompts_per_question": {
+            "n": 67,
+            "max": 10.0,
+            "p50": 10.0,
+            "p95": 10.0,
+            "p99": 10.0,
+            "mean": 10.0
+          }
+        },
+        "clinc150": {
+          "quality": {
+            "n": 67,
+            "correct": 58,
+            "accuracy": 0.8656716417910447,
+            "nll": 0.6293227484110626,
+            "brier": 0.2348948710792992,
+            "ece_10bin": 0.1079175464326933
+          },
+          "gold_in_final_group": "67/67",
+          "ms_per_question": {
+            "n": 67,
+            "max": 348.07183299999997,
+            "p50": 212.190124,
+            "p95": 216.416832,
+            "p99": 348.07183299999997,
+            "mean": 214.56510197014921
+          },
+          "prompts_per_question": {
+            "n": 67,
+            "max": 17.0,
+            "p50": 17.0,
+            "p95": 17.0,
+            "p99": 17.0,
+            "mean": 17.0
+          }
+        },
+        "massive-pl": {
+          "quality": {
+            "n": 66,
+            "correct": 49,
+            "accuracy": 0.7424242424242424,
+            "nll": 1.1078773827596602,
+            "brier": 0.33999484699246824,
+            "ece_10bin": 0.09646327729866863
+          },
+          "gold_in_final_group": "56/66",
+          "ms_per_question": {
+            "n": 66,
+            "max": 170.189251,
+            "p50": 107.492304,
+            "p95": 108.664661,
+            "p99": 170.189251,
+            "mean": 108.53801460606061
+          },
+          "prompts_per_question": {
+            "n": 66,
+            "max": 8.0,
+            "p50": 8.0,
+            "p95": 8.0,
+            "p99": 8.0,
+            "mean": 8.0
+          }
+        }
+      }
+    },
+    {
+      "strategy": "knockout1-1o",
+      "detail": "Strategy { partitions: 1, keep: Some(1), final_decides: true, screen_orders: 1, shortlist: None }",
+      "sets": {
+        "banking77": {
+          "quality": {
+            "n": 67,
+            "correct": 56,
+            "accuracy": 0.835820895522388,
+            "nll": 0.6601857292560273,
+            "brier": 0.25565104702730046,
+            "ece_10bin": 0.06642346822257125
+          },
+          "gold_in_final_group": "66/67",
+          "ms_per_question": {
+            "n": 67,
+            "max": 222.456174,
+            "p50": 199.525026,
+            "p95": 205.517923,
+            "p99": 222.456174,
+            "mean": 199.46047143283585
+          },
+          "prompts_per_question": {
+            "n": 67,
+            "max": 12.0,
+            "p50": 12.0,
+            "p95": 12.0,
+            "p99": 12.0,
+            "mean": 12.0
+          }
+        },
+        "clinc150": {
+          "quality": {
+            "n": 67,
+            "correct": 58,
+            "accuracy": 0.8656716417910447,
+            "nll": 0.5490561825320238,
+            "brier": 0.21779270431869305,
+            "ece_10bin": 0.04509159697197457
+          },
+          "gold_in_final_group": "67/67",
+          "ms_per_question": {
+            "n": 67,
+            "max": 305.510794,
+            "p50": 245.983292,
+            "p95": 254.629488,
+            "p99": 305.510794,
+            "mean": 246.7778947313433
+          },
+          "prompts_per_question": {
+            "n": 67,
+            "max": 19.0,
+            "p50": 19.0,
+            "p95": 19.0,
+            "p99": 19.0,
+            "mean": 19.0
+          }
+        },
+        "massive-pl": {
+          "quality": {
+            "n": 66,
+            "correct": 45,
+            "accuracy": 0.6818181818181818,
+            "nll": 1.139292092628273,
+            "brier": 0.3760549422507217,
+            "ece_10bin": 0.08863652076841452
+          },
+          "gold_in_final_group": "57/66",
+          "ms_per_question": {
+            "n": 66,
+            "max": 149.228833,
+            "p50": 133.231951,
+            "p95": 134.81163800000002,
+            "p99": 149.228833,
+            "mean": 133.69211007575754
+          },
+          "prompts_per_question": {
+            "n": 66,
+            "max": 10.0,
+            "p50": 10.0,
+            "p95": 10.0,
+            "p99": 10.0,
+            "mean": 10.0
+          }
+        }
+      }
+    },
+    {
+      "strategy": "luce2",
+      "detail": "Strategy { partitions: 2, keep: None, final_decides: false, screen_orders: 2, shortlist: None }",
+      "sets": {
+        "banking77": {
+          "quality": {
+            "n": 67,
+            "correct": 54,
+            "accuracy": 0.8059701492537313,
+            "nll": 0.7209671645537915,
+            "brier": 0.28104241289428217,
+            "ece_10bin": 0.05956456098076867
+          },
+          "gold_in_final_group": "67/67",
+          "ms_per_question": {
+            "n": 67,
+            "max": 522.951976,
+            "p50": 514.3022080000001,
+            "p95": 520.213321,
+            "p99": 522.951976,
+            "mean": 514.2824802686565
+          },
+          "prompts_per_question": {
+            "n": 67,
+            "max": 34.0,
+            "p50": 34.0,
+            "p95": 34.0,
+            "p99": 34.0,
+            "mean": 34.0
+          }
+        },
+        "clinc150": {
+          "quality": {
+            "n": 67,
+            "correct": 58,
+            "accuracy": 0.8656716417910447,
+            "nll": 0.4636154205993417,
+            "brier": 0.208985196497478,
+            "ece_10bin": 0.08706551604054158
+          },
+          "gold_in_final_group": "67/67",
+          "ms_per_question": {
+            "n": 67,
+            "max": 824.0284399999999,
+            "p50": 757.5961759999999,
+            "p95": 766.608745,
+            "p99": 824.0284399999999,
+            "mean": 759.2279217462685
+          },
+          "prompts_per_question": {
+            "n": 67,
+            "max": 62.0,
+            "p50": 62.0,
+            "p95": 62.0,
+            "p99": 62.0,
+            "mean": 62.0
+          }
+        },
+        "massive-pl": {
+          "quality": {
+            "n": 66,
+            "correct": 50,
+            "accuracy": 0.7575757575757576,
+            "nll": 0.8973884571833833,
+            "brier": 0.3542618022924974,
+            "ece_10bin": 0.10705182556169046
+          },
+          "gold_in_final_group": "64/66",
+          "ms_per_question": {
+            "n": 66,
+            "max": 332.47382,
+            "p50": 323.00705849999997,
+            "p95": 331.182612,
+            "p99": 332.47382,
+            "mean": 323.31631860606063
+          },
+          "prompts_per_question": {
+            "n": 66,
+            "max": 26.0,
+            "p50": 26.0,
+            "p95": 26.0,
+            "p99": 26.0,
+            "mean": 26.0
+          }
+        }
+      }
+    },
+    {
+      "strategy": "luce2-1o",
+      "detail": "Strategy { partitions: 2, keep: None, final_decides: false, screen_orders: 1, shortlist: None }",
+      "sets": {
+        "banking77": {
+          "quality": {
+            "n": 67,
+            "correct": 54,
+            "accuracy": 0.8059701492537313,
+            "nll": 0.6622366369570283,
+            "brier": 0.26424575607142275,
+            "ece_10bin": 0.04820659488396153
+          },
+          "gold_in_final_group": "67/67",
+          "ms_per_question": {
+            "n": 67,
+            "max": 302.89077199999997,
+            "p50": 283.66938200000004,
+            "p95": 288.536659,
+            "p99": 302.89077199999997,
+            "mean": 280.3813209552239
+          },
+          "prompts_per_question": {
+            "n": 67,
+            "max": 18.0,
+            "p50": 18.0,
+            "p95": 18.0,
+            "p99": 18.0,
+            "mean": 18.0
+          }
+        },
+        "clinc150": {
+          "quality": {
+            "n": 67,
+            "correct": 58,
+            "accuracy": 0.8656716417910447,
+            "nll": 0.4483697707328123,
+            "brier": 0.20523527578183304,
+            "ece_10bin": 0.07211784161465992
+          },
+          "gold_in_final_group": "67/67",
+          "ms_per_question": {
+            "n": 67,
+            "max": 456.11076299999996,
+            "p50": 384.695595,
+            "p95": 394.072994,
+            "p99": 456.11076299999996,
+            "mean": 386.09469334328355
+          },
+          "prompts_per_question": {
+            "n": 67,
+            "max": 32.0,
+            "p50": 32.0,
+            "p95": 32.0,
+            "p99": 32.0,
+            "mean": 32.0
+          }
+        },
+        "massive-pl": {
+          "quality": {
+            "n": 66,
+            "correct": 49,
+            "accuracy": 0.7424242424242424,
+            "nll": 1.0027893256068237,
+            "brier": 0.35279443987087616,
+            "ece_10bin": 0.07528049430015082
+          },
+          "gold_in_final_group": "62/66",
+          "ms_per_question": {
+            "n": 66,
+            "max": 194.719864,
+            "p50": 185.026183,
+            "p95": 192.562429,
+            "p99": 194.719864,
+            "mean": 185.35174784848488
+          },
+          "prompts_per_question": {
+            "n": 66,
+            "max": 14.0,
+            "p50": 14.0,
+            "p95": 14.0,
+            "p99": 14.0,
+            "mean": 14.0
+          }
+        }
+      }
+    }
+  ],
+  "backend": {
+    "backend": "cuda",
+    "device": "NVIDIA GPU through candle Device::new_cuda(0)",
+    "tensor_library": "candle-core 0.11.0 (CUDA; matmul = cuBLAS, no TF32)",
+    "weights": "f16 (converted from bf16, experiment)",
+    "activations": "f16 residual stream, norms and MLP",
+    "attention": "f32 q/k/v (bias + rotate-half RoPE fused kernel, cos/sin from f64 on host); one f32 flash-style kernel for all segments of a forward (online softmax, additive block mask, prefix K/V read from the cache, fully masked key tiles skipped), GQA as stacked query rows",
+    "kernels": "fused: q/k/v and gate/up projections as single GEMMs without bias; bias added in fused kernels (bias+RoPE+head split, bias+SiLU*up, bias+residual)",
+    "readout": "letter rows of lm_head only, f32",
+    "padding": "none: compact token list for GEMM/norm/MLP, attention per packed row (segment)",
+    "attention_kernel": "attn_tree_tc",
+    "gemm": "cuBLASLt, f32 accumulation; algorithm per (N, K, M class: 16 up to 512, then 128) from the --gemm-table search, else the fastest of up to 16 heuristic algorithms timed at first use",
+    "prefix_kv": [
+      53,
+      66
+    ],
+    "state_cache_bytes": 0,
+    "last_layer": "o_proj and MLP of the last layer only at the readout positions"
+  }
+}

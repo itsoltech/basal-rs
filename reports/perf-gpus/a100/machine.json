@@ -1,0 +1,8 @@
+{
+ "gpu_query": "name,driver_version,compute_cap,memory.total,power.limit,power.max_limit,clocks.max.sm,clocks.max.memory,pcie.link.gen.max",
+ "gpu": "NVIDIA A100-SXM4-80GB, 580.126.09, 8.0, 81920 MiB, 400.00 W, 400.00 W, 1410 MHz, 1593 MHz, 4",
+ "cpu": "AMD EPYC 7742 64-Core Processor",
+ "cpus": 16,
+ "kernel": "6.8.0-90-generic",
+ "basal": "basal 0.1.4 (db87ea04, CUDA, kernels for compute capability 80,89,90)"
+}

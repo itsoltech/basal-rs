@@ -1,0 +1,12 @@
+basal: basal-1.5-mini: generating the batch-invariant GEMM table for NVIDIA RTX 6000 Ada Generation (no table; 25 classes x 4 shapes, one-time) -> /data/basal/.cache/gemm/basal-1.5-mini-f16.json
+gemm-search invariant n=2048 k=1536: 48 candidates, slowdown vs best per class: mean 1.000, max 1.001
+gemm-search invariant n=1536 k=1536: 49 candidates, slowdown vs best per class: mean 1.000, max 1.000
+gemm-search invariant n=17920 k=1536: 45 candidates, slowdown vs best per class: mean 1.000, max 1.000
+gemm-search invariant n=1536 k=8960: 44 candidates, slowdown vs best per class: mean 1.003, max 1.031
+basal: basal-1.5-mini: GEMM table done in 136 s
+basal: basal-1.5-mini loaded on the GPU in 4.4s
+basal: 100 GEMM classes from /data/basal/.cache/gemm/basal-1.5-mini-f16.json
+basal: template prefixes precomputed ([53, 66] tokens)
+basal: serving basal-1.5-mini (batch 8192 tokens, Hrrn, long lane above 4096 tokens)
+basal: serving on http://127.0.0.1:8100 (ready 143.9 s after the start)
+basal: shutting down

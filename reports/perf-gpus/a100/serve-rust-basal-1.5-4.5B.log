@@ -1,0 +1,12 @@
+basal: basal-1.5-4.5B: generating the batch-invariant GEMM table for NVIDIA A100-SXM4-80GB (no table; 25 classes x 4 shapes, one-time) -> /data/basal/.cache/gemm/basal-1.5-4.5B-f16.json
+gemm-search invariant n=2560 k=2048: 46 candidates, slowdown vs best per class: mean 1.005, max 1.040
+gemm-search invariant n=2048 k=2048: 46 candidates, slowdown vs best per class: mean 1.006, max 1.046
+gemm-search invariant n=22016 k=2048: 38 candidates, slowdown vs best per class: mean 1.000, max 1.000
+gemm-search invariant n=2048 k=11008: 47 candidates, slowdown vs best per class: mean 1.011, max 1.100
+basal: basal-1.5-4.5B: GEMM table done in 198 s
+basal: basal-1.5-4.5B loaded on the GPU in 10.7s
+basal: 100 GEMM classes from /data/basal/.cache/gemm/basal-1.5-4.5B-f16.json
+basal: template prefixes precomputed ([53, 66] tokens)
+basal: serving basal-1.5-4.5B (batch 8192 tokens, Hrrn, long lane above 4096 tokens)
+basal: serving on http://127.0.0.1:8100 (ready 208.8 s after the start)
+basal: shutting down

@@ -110,6 +110,8 @@ pub struct Engine<B: Backend> {
     pub large_choice: bool,
     /// Rounds and answer of the grouped strategy.
     pub large_choice_strategy: crate::large_choice::Strategy,
+    /// Keep the joint fit after the first round of grouped large choices in [`PlanOutput::first_round`] (evaluation).
+    pub trace_large_choice: bool,
 }
 
 impl<B: Backend> Engine<B> {
@@ -128,6 +130,7 @@ impl<B: Backend> Engine<B> {
             forward_max_tokens: FORWARD_MAX_TOKENS,
             large_choice: true,
             large_choice_strategy: crate::large_choice::Strategy::DEFAULT,
+            trace_large_choice: false,
         })
     }
 
@@ -140,6 +143,7 @@ impl<B: Backend> Engine<B> {
         e.forward_max_tokens = self.forward_max_tokens;
         e.large_choice = self.large_choice;
         e.large_choice_strategy = self.large_choice_strategy;
+        e.trace_large_choice = self.trace_large_choice;
         Ok(e)
     }
 
@@ -318,9 +322,40 @@ impl<B: Backend> Engine<B> {
             }
         }
         let mut plan = self.plan_items(req.items)?;
+        self.check_context(&plan)?;
         plan.evidence_limit = req.facts_limit;
         plan.dialect = dialect;
         Ok(plan)
+    }
+
+    /// Prompts longer than the model's position limit are refused before the forward (422, "maximum context length",
+    /// the marker benchmark runners read as a capacity limit), not left to fail inside the backend (500).
+    fn check_context(&self, plan: &RequestPlan) -> Result<(), DecideError> {
+        let limit = self.manifest.config.max_positions;
+        let mut errs = Vec::new();
+        for p in &plan.prepared {
+            let longest = p.orders.iter().map(|o| o.input_ids.len()).max().unwrap_or(0);
+            if longest > limit {
+                let name = p.item.name.split('#').next().unwrap_or(&p.item.name).to_string();
+                if errs.iter().any(|e: &crate::request::FieldError| e.loc.get(2) == Some(&Value::from(name.clone()))) {
+                    continue;
+                }
+                errs.push(crate::request::FieldError::new(
+                    vec!["body".into(), "questions".into(), name.into()],
+                    format!(
+                        "the prompt has {longest} tokens, more than the maximum context length of {limit} tokens of \
+                         model {}",
+                        self.manifest.name
+                    ),
+                    "context_length_exceeded",
+                ));
+            }
+        }
+        if errs.is_empty() {
+            Ok(())
+        } else {
+            Err(DecideError::Unsupported(errs))
+        }
     }
 
     /// Plan validated items (see [`Engine::plan_request`]).
@@ -418,6 +453,12 @@ impl<B: Backend> Engine<B> {
                         final_p: vec![],
                         tokens: 0,
                         prompts: 0,
+                        rounds: 1,
+                        first_round: self.trace_large_choice.then(|| {
+                            let targets: Vec<Vec<f64>> =
+                                parts.iter().map(|&i| results[off + i].p_avg.clone()).collect();
+                            crate::large_choice::fit_joint(item.options.len(), groups, &targets)
+                        }),
                     });
                 }
             }
@@ -427,11 +468,11 @@ impl<B: Backend> Engine<B> {
             let mut owners = Vec::new();
             for (li, l) in large.iter().enumerate().filter(|(_, l)| l.finalists.is_none()) {
                 let n = l.item.options.len();
-                let (round, last) = match crate::large_choice::next_round(&strategy, n, &l.groups, &l.targets, &l.last)
-                {
-                    crate::large_choice::Round::Final(f) => (vec![f], true),
-                    crate::large_choice::Round::Groups(g) => (g, false),
-                };
+                let (round, last) =
+                    match crate::large_choice::next_round(&strategy, n, &l.groups, &l.targets, &l.last, l.rounds) {
+                        crate::large_choice::Round::Final(f) => (vec![f], true),
+                        crate::large_choice::Round::Groups(g) => (g, false),
+                    };
                 for g in round {
                     let mut sub = l.item.clone();
                     sub.keys = g.iter().map(|&i| l.item.keys[i].clone()).collect();
@@ -447,6 +488,7 @@ impl<B: Backend> Engine<B> {
             for l in large.iter_mut() {
                 if l.finalists.is_none() {
                     l.last.clear();
+                    l.rounds += 1;
                 }
             }
             for (((li, g, last), r), p) in owners.into_iter().zip(res).zip(&prep) {
@@ -469,8 +511,10 @@ impl<B: Backend> Engine<B> {
             let mut final_round_tokens = 0;
             let mut extra_prompts = 0;
             let mut finalists = Vec::with_capacity(plan.questions.len());
+            let mut first_round = Vec::with_capacity(plan.questions.len());
             for q in &plan.questions {
                 let mut fin = None;
+                let mut first = None;
                 match q {
                     QuestionPlan::Direct(i) => {
                         finals.push((plan.prepared[*i].item.clone(), results[off + *i].p_cal.clone()))
@@ -496,16 +540,18 @@ impl<B: Backend> Engine<B> {
                             |x| calibrate(x, t),
                         );
                         fin = Some(f);
+                        first = l.first_round.clone();
                         finals.push((item.clone(), p));
                     }
                 }
                 finalists.push(fin);
+                first_round.push(first);
             }
             let mut evidence = Vec::with_capacity(finals.len());
             for (item, _) in &finals {
                 evidence.push(if item.evidence { Some(self.evidence_for(item, plan.evidence_limit)?) } else { None });
             }
-            outs.push(PlanOutput { finals, final_round_tokens, extra_prompts, finalists, evidence });
+            outs.push(PlanOutput { finals, final_round_tokens, extra_prompts, finalists, first_round, evidence });
         }
         Ok(outs)
     }
@@ -599,6 +645,8 @@ struct Large {
     final_p: Vec<f64>,
     tokens: usize,
     prompts: usize,
+    rounds: usize,
+    first_round: Option<Vec<f64>>,
 }
 
 /// Answers of a planned request: final distribution per question, and the prompt tokens of the rounds after the
@@ -610,6 +658,8 @@ pub struct PlanOutput {
     pub extra_prompts: usize,
     /// Final group of each grouped large choice (same order as `finals`).
     pub finalists: Vec<Option<Vec<usize>>>,
+    /// Joint fit after the first round of each grouped large choice, with [`Engine::trace_large_choice`].
+    pub first_round: Vec<Option<Vec<f64>>>,
     /// Evidence spans per question (same order as `finals`), for questions that asked for them.
     pub evidence: Vec<Option<Value>>,
 }

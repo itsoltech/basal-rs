@@ -73,7 +73,14 @@ rozszerza je przed użyciem (dokładny forward FP32, punkt odniesienia).
   jego przodków oraz własnego bloku, kafelkowane według pozycji klucza w
   prompcie. CUDA: `attn_tree_tc` na tensor cores (mma.sync, operandy f16
   rozbite na część wysoką i niską, czyli dokładność bliska f32) dla f16/bf16,
-  `attn_tree_f32` dla ścieżki f32. Metal: `attn_tree_f32` z `kernels.metal`
+  na H100 (compute capability 9.0, forward f16) `attn_tree_wgp` z tą samą
+  arytmetyką na wgmma, z ładowaniem następnego kafelka K/V w trakcie liczenia
+  bieżącego, i bitowo tym samym wynikiem
+  ([pomiar](../reports/attention-h100-wgmma-2/README.md)); przy krótkich
+  promptach w blokach po 64 zamiast 128 wierszy (`attn_tree_wgp64`, te same
+  bity, [pomiar](../reports/attention-h100-short/README.md)), `attn_tree_f32` dla
+  ścieżki f32. K i V przychodzą z `qkv_rope` od razu rozbite na płaszczyzny
+  f16, a wynik attention od razu jako scalone głowy w dtype forwardu. Metal: `attn_tree_f32` z `kernels.metal`
   na macierzach `simdgroup_float8x8` w f32 (`BASAL_ATT=sdpa`: poprzednie SDPA
   z MLX po całym wierszu z maską, wynik zależny od pakowania).
 - W ostatniej warstwie o_proj i MLP liczą się tylko dla pozycji odczytu, a
@@ -155,6 +162,26 @@ między warstwami, więc krótkie partie dowolnego modelu wyprzedzają długie
 żądania każdego modelu. Silniki różnych modeli nie liczą jednocześnie: GPU
 jest i tak ograniczone mocą, a kolejność decyduje harmonogram zamiast
 sterownika.
+
+### Metryki Prometheus
+
+Metryki są domyślnie wyłączone. `--metrics` lub `metrics: true` w konfiguracji
+włącza rejestr, instrumentację HTTP i torów modelu oraz endpoint `GET /metrics`.
+Bez włączenia rejestr i uchwyty metryk nie powstają, middleware nie jest
+instalowane, a `/metrics` zwraca 404.
+
+Po włączeniu `GET /metrics` eksportuje prywatny rejestr procesu w formacie tekstowym Prometheus
+0.0.4 (`basal-cli/src/serve/metrics.rs`). Middleware obejmuje wyłącznie trasy
+inferencji: mierzy czas od wejścia przed odczytem body do zbudowania odpowiedzi,
+liczy statusy i aktywne handlery. Handler po parsowaniu przypisuje etykietę modelu
+z listy obsługiwanych modeli; pozostałe żądania mają pustą etykietę.
+
+Tory `main` i `long` mają uchwyty do histogramów kolejki i partii. Czas partii
+jest obserwowany raz, a czas kolejki osobno dla każdego żądania uruchomionej
+partii. Liczniki tokenów i pytań sumują `usage` poprawnie zbudowanych odpowiedzi
+na wątku modelu, również gdy klient już nie czeka. Rejestr nie odczytuje GPU;
+scrape nie przechodzi przez kolejkę inferencji. Szczegółowa semantyka i PromQL:
+[Observability](OBSERVABILITY.md).
 
 ## Ograniczenia
 

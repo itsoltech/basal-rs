@@ -1,0 +1,8 @@
+{
+ "gpu_query": "name,driver_version,compute_cap,memory.total,power.limit,power.max_limit,clocks.max.sm,clocks.max.memory,pcie.link.gen.max",
+ "gpu": "NVIDIA RTX 6000 Ada Generation, 580.126.09, 8.9, 49140 MiB, 300.00 W, 300.00 W, 3105 MHz, 10001 MHz, 4",
+ "cpu": "Intel(R) Xeon(R) Gold 6338 CPU @ 2.00GHz",
+ "cpus": 12,
+ "kernel": "6.8.0-90-generic",
+ "basal": "basal 0.1.4 (db87ea04, CUDA, kernels for compute capability 80,89,90)"
+}

@@ -1,0 +1,13 @@
+=== 4.5B results 03:50:17
+4.5B tc vs wg (tree)   tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.0; max TV avg 0.0
+4.5B wg single vs tree tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.0; max TV avg 0.0
+4.5B fp32 vs wg        tokens: 8 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.04892726855468865; max TV avg 0.0028715998209095164
+4.5B fp32 vs tc        tokens: 8 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.04892726855468865; max TV avg 0.0028715998209095164
+=== max results 03:51:20
+max tc vs wg (tree)    tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.0; max TV avg 0.0
+max wg single vs tree  tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.0; max TV avg 0.0
+max fp32 vs wg         tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.3981950837402337; max TV avg 0.010350951555703092
+max fp32 vs tc         tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.3981950837402337; max TV avg 0.010350951555703092
+=== 4.5B time 03:53:30
+=== max time 03:59:50
+DONE

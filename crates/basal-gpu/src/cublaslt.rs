@@ -22,9 +22,17 @@ use candle_core::{CpuStorage, CudaStorage, CustomOp2, DType, Layout, Result, Sha
 
 const CANDIDATES: usize = 16;
 
+/// Version of the batch-invariant search, written into tables (`gemm_search_version`): tables of an older search are
+/// generated again. 2: the heuristic's configurations without split-K are candidates (on Hopper the heuristic sets
+/// cluster and inner shapes the exhaustive search does not), and every candidate's rows are checked to be bitwise the
+/// same at every M class.
+pub const INVARIANT_SEARCH_VERSION: u64 = 2;
+
 /// A configuration and its measured time (ms).
 type Timed = (f64, sys::cublasLtMatmulAlgo_t);
 const WORKSPACE: usize = 32 << 20;
+/// Entries of `Lt::chosen` before it is emptied (distinct M of the batches seen, times 4 weight shapes).
+const CHOSEN_MAX: usize = 4096;
 
 /// Shape class of M: up to 512 rounded up to a multiple of 16, above that to a multiple of 128.
 pub fn m_class(m: usize) -> usize {
@@ -85,6 +93,9 @@ pub struct Lt {
     /// Batch-invariant mode: one algorithm per (N, K, dtype) for every M, without split-K, so that a row's result
     /// does not depend on the other rows of the call. A shape listed here never uses another algorithm.
     invariant: Mutex<HashMap<(usize, usize, DType), ClassAlgos>>,
+    /// The algorithm of `invariant` chosen and accepted by cuBLASLt for an exact (M, N, K, dtype), so that a call
+    /// repeats neither the choice nor `cublasLtMatmulAlgoCheck`; emptied when the table changes.
+    chosen: Mutex<HashMap<(usize, usize, usize, DType), sys::cublasLtMatmulAlgo_t>>,
 }
 
 // SAFETY: the handle and descriptors are only used under the plan/algo locks on candle's single stream.
@@ -123,12 +134,14 @@ impl Lt {
             tuned: Mutex::new(Vec::new()),
             from_table: Mutex::new(0),
             invariant: Mutex::new(HashMap::new()),
+            chosen: Mutex::new(HashMap::new()),
         })
     }
 
     /// Batch-invariant table: for each (N, K, dtype) the algorithms of its M classes, all of them giving bitwise the
     /// same results (one algorithm for every class in tables written before the grouping).
     pub fn load_invariant(&self, entries: &[Tuned]) -> Result<()> {
+        self.chosen.lock().unwrap().clear();
         let mut inv = self.invariant.lock().unwrap();
         for e in entries {
             let list = inv.entry((e.n, e.k, e.dtype)).or_default();
@@ -137,6 +150,21 @@ impl Lt {
             list.dedup_by_key(|(c, _)| *c);
         }
         *self.from_table.lock().unwrap() += entries.len();
+        Ok(())
+    }
+
+    /// Every algorithm of the batch-invariant table is accepted by cuBLASLt for its M class on this GPU (a table
+    /// made on another GPU or cuBLASLt version may hold configurations this one does not have).
+    pub fn validate_invariant(&self) -> Result<()> {
+        let inv = self.invariant.lock().unwrap().clone();
+        for ((n, k, dt), list) in inv {
+            for (mc, a) in list {
+                let p = self.plan_cached(mc, n, k, dt)?;
+                if !self.check(&p, &a) {
+                    candle_core::bail!("cuBLASLt rejects the table's algorithm for M={mc} n={n} k={k} {dt:?}");
+                }
+            }
+        }
         Ok(())
     }
 
@@ -241,7 +269,14 @@ impl Lt {
         // groups of candidates with bitwise identical outputs; the group with the smallest geometric-mean slowdown
         // of its fastest member per class (every class weighs the same) gives one algorithm per class
         // SAFETY: the caller guarantees live buffers large enough for every class on this stream.
-        let group = unsafe { self.equivalence_groups(n, k, dt, w, x, y, classes, &cands, stream)? };
+        let (group, row_invariant) = unsafe { self.equivalence_groups(n, k, dt, w, x, y, classes, &cands, stream)? };
+        let raw = times.clone(); // before the row check (BASAL_GEMM_EQUIV)
+                                 // a candidate whose rows change with M is never chosen
+        for (t, ok) in times.iter_mut().zip(&row_invariant) {
+            if !ok {
+                t.iter_mut().for_each(|v| *v = f64::INFINITY);
+            }
+        }
         let geo = |f: &dyn Fn(usize) -> f64| {
             ((0..classes.len()).map(|ci| (f(ci) / best[ci]).ln()).sum::<f64>() / classes.len() as f64).exp()
         };
@@ -263,6 +298,44 @@ impl Lt {
             for &(r, sc) in &scored {
                 eprintln!("  group of {:2}: best member per class {sc:.3}", group.iter().filter(|&&g| g == r).count());
             }
+            // every candidate: K split, row check, group, geometric-mean slowdown over the classes up to 256 rows and
+            // from 4096 rows (times measured before the row check)
+            let parts = |a: &sys::cublasLtMatmulAlgo_t| -> u32 {
+                let (mut v, mut size) = (0u32, 0usize);
+                // SAFETY: SPLITK_NUM is a u32 configuration value; v and size are valid outputs.
+                unsafe {
+                    sys::cublasLtMatmulAlgoConfigGetAttribute(
+                        a,
+                        sys::cublasLtMatmulAlgoConfigAttributes_t::CUBLASLT_ALGO_CONFIG_SPLITK_NUM,
+                        &mut v as *mut u32 as *mut c_void,
+                        4,
+                        &mut size,
+                    )
+                };
+                v
+            };
+            let part_geo = |ai: usize, keep: &dyn Fn(usize) -> bool| {
+                let cs: Vec<usize> = (0..classes.len()).filter(|&ci| keep(classes[ci])).collect();
+                (cs.iter().map(|&ci| (raw[ai][ci] / best[ci]).ln()).sum::<f64>() / cs.len().max(1) as f64).exp()
+            };
+            let mut rows: Vec<(f64, String)> = (0..cands.len())
+                .map(|ai| {
+                    let small = part_geo(ai, &|m| m <= 256);
+                    let line = format!(
+                        "  cand {ai:3} split {} rows {} group {:3}: <=256 {small:.3} >=4096 {:.3} all {:.3}",
+                        parts(&cands[ai]),
+                        if row_invariant[ai] { "same" } else { "DIFF" },
+                        group[ai],
+                        part_geo(ai, &|m| m >= 4096),
+                        part_geo(ai, &|_| true)
+                    );
+                    (small, line)
+                })
+                .collect();
+            rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+            for (_, line) in rows.iter().take(15) {
+                eprintln!("{line}");
+            }
         }
         let (root, _) =
             scored.iter().copied().filter(|(_, sc)| sc.is_finite()).min_by(|a, b| a.1.total_cmp(&b.1)).ok_or_else(
@@ -278,8 +351,9 @@ impl Lt {
     }
 
     /// Groups of candidates whose outputs are bitwise identical on the same operands at every class (where both are
-    /// valid): the group id of each candidate. Candidates without split-K or sliced K reduce over K in the same
-    /// order and fall into one group.
+    /// valid): the group id of each candidate, and whether its rows are the same at every class (the first m rows
+    /// of its output at the largest class equal its output at class m). Candidates without split-K or sliced K
+    /// reduce over K in the same order and fall into one group.
     ///
     /// # Safety
     /// As [`Lt::run`] for every class: x and y must hold at least max(classes) rows on stream.
@@ -295,10 +369,44 @@ impl Lt {
         classes: &[usize],
         cands: &[sys::cublasLtMatmulAlgo_t],
         stream: &candle_core::cuda_backend::cudarc::driver::CudaStream,
-    ) -> Result<Vec<usize>> {
+    ) -> Result<(Vec<usize>, Vec<bool>)> {
         use candle_core::cuda_backend::cudarc::driver::sys as drv;
+        let fnv = |bytes: &[u8], mut h: u64| -> u64 {
+            for c in bytes.chunks(8) {
+                let mut v = [0u8; 8];
+                v[..c.len()].copy_from_slice(c);
+                h = (h ^ u64::from_le_bytes(v)).wrapping_mul(0x100000001b3);
+            }
+            h
+        };
+        // each candidate at the largest class: hashes of its first m rows for every class m (the output is row-major,
+        // so the first m rows are the first m*n elements); a candidate whose rows depend on M (e.g. a K reduction
+        // split by the size of the problem) is not batch-invariant and is left out
+        let mmax = classes.iter().copied().max().unwrap_or(0);
+        let mut prefix: Vec<Option<Vec<u64>>> = vec![None; cands.len()];
+        {
+            let p = self.plan_cached(mmax, n, k, dt)?;
+            let mut host = vec![0u8; mmax * n * dt.size_in_bytes()];
+            for (ai, a) in cands.iter().enumerate() {
+                if !self.check(&p, a) {
+                    continue;
+                }
+                // SAFETY: the candidate passed the plan check and the caller's buffers cover the largest class.
+                unsafe { self.run(&p, a, w, x, y, stream)? };
+                stream.synchronize().w()?;
+                // SAFETY: y holds mmax*n elements, host has exactly that size, and the stream is synchronized.
+                let r = unsafe { drv::cuMemcpyDtoH_v2(host.as_mut_ptr() as *mut c_void, y, host.len()) };
+                if r != drv::CUresult::CUDA_SUCCESS {
+                    candle_core::bail!("cuBLASLt equivalence: copy failed {r:?}");
+                }
+                prefix[ai] = Some(
+                    classes.iter().map(|&m| fnv(&host[..m * n * dt.size_in_bytes()], 0xcbf29ce484222325)).collect(),
+                );
+            }
+        }
         let mut sig: Vec<Vec<Option<u64>>> = vec![Vec::new(); cands.len()];
-        for &m in classes {
+        let mut row_invariant = vec![true; cands.len()];
+        for (ci, &m) in classes.iter().enumerate() {
             let p = self.plan_cached(m, n, k, dt)?;
             let bytes = m * n * dt.size_in_bytes();
             let mut host = vec![0u8; bytes];
@@ -315,13 +423,17 @@ impl Lt {
                 if r != drv::CUresult::CUDA_SUCCESS {
                     candle_core::bail!("cuBLASLt equivalence: copy failed {r:?}");
                 }
-                let mut h: u64 = 0xcbf29ce484222325;
-                for c in host.chunks(8) {
-                    let mut v = [0u8; 8];
-                    v[..c.len()].copy_from_slice(c);
-                    h = (h ^ u64::from_le_bytes(v)).wrapping_mul(0x100000001b3);
+                let h = fnv(&host, 0xcbf29ce484222325);
+                if prefix[ai].as_ref().is_some_and(|pf| pf[ci] != h) {
+                    row_invariant[ai] = false;
                 }
                 sig[ai].push(Some(h));
+            }
+        }
+        // a candidate whose rows change with M forms no group with others and is never chosen (see invariant_search)
+        for (ai, ok) in row_invariant.iter().enumerate() {
+            if !ok {
+                sig[ai].iter_mut().for_each(|s| *s = None);
             }
         }
         let mut group: Vec<usize> = (0..cands.len()).collect();
@@ -336,7 +448,7 @@ impl Lt {
                 }
             }
         }
-        Ok(group)
+        Ok((group, row_invariant))
     }
 
     /// Use the algorithms of a search table for their classes.
@@ -400,8 +512,8 @@ impl Lt {
         };
         let mut ids = vec![0i32; 128];
         let mut nids = 0;
-        // SAFETY: the handle is valid and ids/nids provide initialized output storage for the requested count.
         st(
+            // SAFETY: the handle is valid and ids/nids provide initialized output storage for the requested count.
             unsafe {
                 sys::cublasLtMatmulAlgoGetIds(self.handle, ct, st32, t, t, t, t, 128, ids.as_mut_ptr(), &mut nids)
             },
@@ -479,8 +591,20 @@ impl Lt {
         let tried = cands.len();
         cands.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         cands.truncate(8);
-        if allow_splitk {
-            for c in heur.iter().take(4) {
+        // the heuristic's configurations: with split-K allowed its first four; without, every one that does not
+        // split K (it sets the cluster and inner shapes of Hopper kernels, which the loop above leaves at defaults)
+        let get = |algo: &sys::cublasLtMatmulAlgo_t, attr: Cfg| -> u32 {
+            let (mut v, mut size) = (0u32, 0usize);
+            // SAFETY: SPLITK_NUM and REDUCTION_SCHEME are u32 configuration values; v and size are valid outputs.
+            unsafe {
+                sys::cublasLtMatmulAlgoConfigGetAttribute(algo, attr, &mut v as *mut u32 as *mut c_void, 4, &mut size)
+            };
+            v
+        };
+        for c in heur.iter().take(if allow_splitk { 4 } else { CANDIDATES }) {
+            let whole_k = get(&c.algo, Cfg::CUBLASLT_ALGO_CONFIG_SPLITK_NUM) <= 1
+                && get(&c.algo, Cfg::CUBLASLT_ALGO_CONFIG_REDUCTION_SCHEME) == 0;
+            if (allow_splitk || whole_k) && !cands.iter().any(|(_, a)| a.data == c.algo.data) {
                 cands.push((0.0, c.algo));
             }
         }
@@ -659,9 +783,10 @@ impl Lt {
                         Mode::Plain => 0,
                         Mode::Search(c) => *c,
                         Mode::Invariant(c, classes) => {
-                            // SAFETY: x holds m >= max(classes) rows, w holds c copies, y holds m*n elements.
-                            let (per_class, ncand) =
-                                unsafe { self.invariant_search(n, k, dt, wp, *c, w_bytes, xp, yp, classes, &stream)? };
+                            let (per_class, ncand) = {
+                                // SAFETY: x holds m >= max(classes) rows, w holds c copies, y holds m*n elements.
+                                unsafe { self.invariant_search(n, k, dt, wp, *c, w_bytes, xp, yp, classes, &stream)? }
+                            };
                             let mut tuned = self.tuned.lock().unwrap();
                             let mut list = Vec::new();
                             for (&mc, (a, ms, best)) in classes.iter().zip(per_class) {
@@ -679,6 +804,7 @@ impl Lt {
                             }
                             list.sort_by_key(|(c, _)| *c);
                             self.invariant.lock().unwrap().insert((n, k, dt), list);
+                            self.chosen.lock().unwrap().clear();
                             0
                         }
                     };
@@ -709,6 +835,11 @@ impl Lt {
         search: usize,
     ) -> Result<()> {
         let p = &self.plan_cached(m, n, k, dt)?;
+        // the algorithm already chosen and accepted by cuBLASLt for this exact problem (batch-invariant table)
+        if let Some(a) = self.chosen.lock().unwrap().get(&(m, n, k, dt)).copied() {
+            // SAFETY: device pointers of the operands and of a fresh output of m*n elements, all on `stream`.
+            return unsafe { self.run(p, &a, w, x, y, stream) };
+        }
         let inv = self.invariant.lock().unwrap().get(&(n, k, dt)).cloned();
         if let Some(list) = inv {
             // the algorithm of the smallest class >= M's class (else the largest), or any other valid one: all of
@@ -719,6 +850,11 @@ impl Lt {
             let Some(a) = order.map(|i| list[i].1).find(|a| self.check(p, a)) else {
                 candle_core::bail!("batch-invariant cuBLASLt algorithms rejected for M={m} (n={n} k={k})");
             };
+            let mut chosen = self.chosen.lock().unwrap();
+            if chosen.len() >= CHOSEN_MAX {
+                chosen.clear(); // M varies with every batch; the cache is a shortcut, not a record
+            }
+            chosen.insert((m, n, k, dt), a);
             // SAFETY: device pointers of the operands and of a fresh output of m*n elements, all on `stream`.
             return unsafe { self.run(p, &a, w, x, y, stream) };
         }

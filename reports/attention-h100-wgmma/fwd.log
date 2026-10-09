@@ -1,0 +1,22 @@
+=== 4.5B results 03:27:36
+4.5B A vs B  tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.0; max TV avg 0.0
+=== max results 03:28:23
+max A vs B   tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.0; max TV avg 0.0
+=== 4.5B time 03:29:30
+=== max time 03:35:44
+=== profiles 03:48:59
+ls: cannot access '/opt/nvidia/nsight-systems/*/bin/nsys': No such file or directory
+ls: cannot access '/opt/nvidia/nsight-compute/*': No such file or directory
+Traceback (most recent call last):
+  File "/work/tools/perf/nsys_forward.py", line 96, in <module>
+    main()
+  File "/work/tools/perf/nsys_forward.py", line 43, in main
+    names = dict(db.execute("SELECT id, value FROM StringIds"))
+sqlite3.OperationalError: no such table: StringIds
+Traceback (most recent call last):
+  File "/work/tools/perf/nsys_forward.py", line 96, in <module>
+    main()
+  File "/work/tools/perf/nsys_forward.py", line 43, in main
+    names = dict(db.execute("SELECT id, value FROM StringIds"))
+sqlite3.OperationalError: no such table: StringIds
+DONE

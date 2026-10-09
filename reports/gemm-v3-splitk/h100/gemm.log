@@ -1,0 +1,17 @@
+=== 4.5B timing 10:28:12
+=== 4.5B invariance 10:34:53
+single-vs-tree-4.5B              tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.0; max TV avg 0.0
+single-vs-budget-4.5B            tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.0; max TV avg 0.0
+fp32-vs-new-4.5B                 tokens: 8 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.04892726855468865; max TV avg 0.0028715998209095164
+=== 4.5B decision set 10:35:45
+decision-set-fp32-vs-old-4.5B    tokens: 0 mismatches; bench argmax avg "899/900", cal "899/900"; max |logit diff| 0.05218731176757885; max TV avg 0.005711566306393828
+decision-set-fp32-vs-new-4.5B    tokens: 0 mismatches; bench argmax avg "899/900", cal "899/900"; max |logit diff| 0.05218731176757885; max TV avg 0.005711566306393828
+=== max timing 10:48:43
+=== max invariance 11:02:44
+single-vs-tree-max               tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.0; max TV avg 0.0
+single-vs-budget-max             tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.0; max TV avg 0.0
+fp32-vs-new-max                  tokens: 0 mismatches; bench argmax avg "44/44", cal "44/44"; max |logit diff| 0.3981950837402337; max TV avg 0.010350951555703092
+=== max decision set 11:04:21
+decision-set-fp32-vs-old-max     tokens: 0 mismatches; bench argmax avg "900/900", cal "900/900"; max |logit diff| 0.13016359619140516; max TV avg 0.00709595099577498
+decision-set-fp32-vs-new-max     tokens: 0 mismatches; bench argmax avg "900/900", cal "900/900"; max |logit diff| 0.13016359619140516; max TV avg 0.00709595099577498
+DONE

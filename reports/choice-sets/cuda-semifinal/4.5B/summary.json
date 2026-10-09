@@ -1,0 +1,373 @@
+{
+  "set": "reports/choice-sets/set.jsonl",
+  "questions": 600,
+  "strategies": [
+    {
+      "strategy": "luce2-1o",
+      "detail": "Strategy { partitions: 2, keep: None, final_decides: false, screen_orders: 1, shortlist: None }",
+      "sets": {
+        "banking77": {
+          "quality": {
+            "n": 200,
+            "correct": 146,
+            "accuracy": 0.73,
+            "nll": 0.8144082131425721,
+            "brier": 0.3417669558874714,
+            "ece_10bin": 0.047046711865183534
+          },
+          "gold_in_final_group": "198/200",
+          "ms_per_question": {
+            "n": 200,
+            "max": 358.775791,
+            "p50": 325.6704635,
+            "p95": 349.176149,
+            "p99": 352.615339,
+            "mean": 327.185776695
+          },
+          "prompts_per_question": {
+            "n": 200,
+            "max": 18.0,
+            "p50": 18.0,
+            "p95": 18.0,
+            "p99": 18.0,
+            "mean": 18.0
+          }
+        },
+        "clinc150": {
+          "quality": {
+            "n": 200,
+            "correct": 174,
+            "accuracy": 0.87,
+            "nll": 0.4935506491302261,
+            "brier": 0.1947765427834549,
+            "ece_10bin": 0.06007614999906846
+          },
+          "gold_in_final_group": "197/200",
+          "ms_per_question": {
+            "n": 200,
+            "max": 549.2605590000001,
+            "p50": 499.707027,
+            "p95": 512.520553,
+            "p99": 544.52064,
+            "mean": 496.6363989949998
+          },
+          "prompts_per_question": {
+            "n": 200,
+            "max": 32.0,
+            "p50": 32.0,
+            "p95": 32.0,
+            "p99": 32.0,
+            "mean": 32.0
+          }
+        },
+        "massive-pl": {
+          "quality": {
+            "n": 200,
+            "correct": 153,
+            "accuracy": 0.765,
+            "nll": 1.0001740576360578,
+            "brier": 0.3462733451455216,
+            "ece_10bin": 0.09012753852908839
+          },
+          "gold_in_final_group": "186/200",
+          "ms_per_question": {
+            "n": 200,
+            "max": 290.552704,
+            "p50": 275.557994,
+            "p95": 283.876057,
+            "p99": 289.724398,
+            "mean": 276.4690839149999
+          },
+          "prompts_per_question": {
+            "n": 200,
+            "max": 14.0,
+            "p50": 14.0,
+            "p95": 14.0,
+            "p99": 14.0,
+            "mean": 14.0
+          }
+        }
+      }
+    },
+    {
+      "strategy": "luce2-1o-s20",
+      "detail": "Strategy { partitions: 2, keep: None, final_decides: false, screen_orders: 1, shortlist: Some(20) }",
+      "sets": {
+        "banking77": {
+          "quality": {
+            "n": 200,
+            "correct": 146,
+            "accuracy": 0.73,
+            "nll": 0.8256775700706197,
+            "brier": 0.3462127836860076,
+            "ece_10bin": 0.06556080237270684
+          },
+          "gold_in_final_group": "198/200",
+          "ms_per_question": {
+            "n": 200,
+            "max": 504.53079,
+            "p50": 446.679987,
+            "p95": 452.682368,
+            "p99": 457.901314,
+            "mean": 442.10160838999974
+          },
+          "prompts_per_question": {
+            "n": 200,
+            "max": 20.0,
+            "p50": 20.0,
+            "p95": 20.0,
+            "p99": 20.0,
+            "mean": 20.0
+          }
+        },
+        "clinc150": {
+          "quality": {
+            "n": 200,
+            "correct": 174,
+            "accuracy": 0.87,
+            "nll": 0.49211438464162066,
+            "brier": 0.1965995821257817,
+            "ece_10bin": 0.0675579412717147
+          },
+          "gold_in_final_group": "197/200",
+          "ms_per_question": {
+            "n": 200,
+            "max": 616.565488,
+            "p50": 567.896608,
+            "p95": 604.99131,
+            "p99": 616.013878,
+            "mean": 568.2641601599998
+          },
+          "prompts_per_question": {
+            "n": 200,
+            "max": 34.0,
+            "p50": 34.0,
+            "p95": 34.0,
+            "p99": 34.0,
+            "mean": 34.0
+          }
+        },
+        "massive-pl": {
+          "quality": {
+            "n": 200,
+            "correct": 148,
+            "accuracy": 0.74,
+            "nll": 0.9743292625340834,
+            "brier": 0.3438873581483785,
+            "ece_10bin": 0.07886217779721219
+          },
+          "gold_in_final_group": "187/200",
+          "ms_per_question": {
+            "n": 200,
+            "max": 354.00690499999996,
+            "p50": 328.2051255,
+            "p95": 340.30164,
+            "p99": 349.476721,
+            "mean": 329.55087776500005
+          },
+          "prompts_per_question": {
+            "n": 200,
+            "max": 16.0,
+            "p50": 16.0,
+            "p95": 16.0,
+            "p99": 16.0,
+            "mean": 16.0
+          }
+        }
+      }
+    },
+    {
+      "strategy": "luce2-1o-s30",
+      "detail": "Strategy { partitions: 2, keep: None, final_decides: false, screen_orders: 1, shortlist: Some(30) }",
+      "sets": {
+        "banking77": {
+          "quality": {
+            "n": 200,
+            "correct": 146,
+            "accuracy": 0.73,
+            "nll": 0.8146487343533415,
+            "brier": 0.34120182184102665,
+            "ece_10bin": 0.056073206584571975
+          },
+          "gold_in_final_group": "198/200",
+          "ms_per_question": {
+            "n": 200,
+            "max": 507.85734699999995,
+            "p50": 474.165393,
+            "p95": 486.051746,
+            "p99": 492.28167900000005,
+            "mean": 470.56093801999987
+          },
+          "prompts_per_question": {
+            "n": 200,
+            "max": 21.0,
+            "p50": 21.0,
+            "p95": 21.0,
+            "p99": 21.0,
+            "mean": 21.0
+          }
+        },
+        "clinc150": {
+          "quality": {
+            "n": 200,
+            "correct": 174,
+            "accuracy": 0.87,
+            "nll": 0.5069645132103653,
+            "brier": 0.2005024740008006,
+            "ece_10bin": 0.07178642083159986
+          },
+          "gold_in_final_group": "197/200",
+          "ms_per_question": {
+            "n": 200,
+            "max": 647.7403499999999,
+            "p50": 576.6806265,
+            "p95": 610.479142,
+            "p99": 634.373372,
+            "mean": 576.8848109749998
+          },
+          "prompts_per_question": {
+            "n": 200,
+            "max": 35.0,
+            "p50": 35.0,
+            "p95": 35.0,
+            "p99": 35.0,
+            "mean": 35.0
+          }
+        },
+        "massive-pl": {
+          "quality": {
+            "n": 200,
+            "correct": 148,
+            "accuracy": 0.74,
+            "nll": 0.9954794061848087,
+            "brier": 0.35326261144657795,
+            "ece_10bin": 0.08796248790256801
+          },
+          "gold_in_final_group": "187/200",
+          "ms_per_question": {
+            "n": 200,
+            "max": 377.095847,
+            "p50": 337.87776499999995,
+            "p95": 348.188021,
+            "p99": 373.441328,
+            "mean": 338.6336105299999
+          },
+          "prompts_per_question": {
+            "n": 200,
+            "max": 17.0,
+            "p50": 17.0,
+            "p95": 17.0,
+            "p99": 17.0,
+            "mean": 17.0
+          }
+        }
+      }
+    },
+    {
+      "strategy": "luce2-1o-s40",
+      "detail": "Strategy { partitions: 2, keep: None, final_decides: false, screen_orders: 1, shortlist: Some(40) }",
+      "sets": {
+        "banking77": {
+          "quality": {
+            "n": 200,
+            "correct": 145,
+            "accuracy": 0.725,
+            "nll": 0.8268470237742096,
+            "brier": 0.34822356604647636,
+            "ece_10bin": 0.06776173808079784
+          },
+          "gold_in_final_group": "197/200",
+          "ms_per_question": {
+            "n": 200,
+            "max": 553.724255,
+            "p50": 482.507568,
+            "p95": 490.327625,
+            "p99": 496.93098299999997,
+            "mean": 478.192847075
+          },
+          "prompts_per_question": {
+            "n": 200,
+            "max": 22.0,
+            "p50": 22.0,
+            "p95": 22.0,
+            "p99": 22.0,
+            "mean": 22.0
+          }
+        },
+        "clinc150": {
+          "quality": {
+            "n": 200,
+            "correct": 174,
+            "accuracy": 0.87,
+            "nll": 0.48998601344884274,
+            "brier": 0.19844520799144708,
+            "ece_10bin": 0.056780590496988276
+          },
+          "gold_in_final_group": "198/200",
+          "ms_per_question": {
+            "n": 200,
+            "max": 651.563313,
+            "p50": 606.146626,
+            "p95": 638.8619199999999,
+            "p99": 644.9919560000001,
+            "mean": 606.2136296149998
+          },
+          "prompts_per_question": {
+            "n": 200,
+            "max": 36.0,
+            "p50": 36.0,
+            "p95": 36.0,
+            "p99": 36.0,
+            "mean": 36.0
+          }
+        },
+        "massive-pl": {
+          "quality": {
+            "n": 200,
+            "correct": 151,
+            "accuracy": 0.755,
+            "nll": 0.9986509324763866,
+            "brier": 0.35871549938750363,
+            "ece_10bin": 0.08973037056256053
+          },
+          "gold_in_final_group": "188/200",
+          "ms_per_question": {
+            "n": 200,
+            "max": 397.334769,
+            "p50": 375.5564925,
+            "p95": 386.345451,
+            "p99": 396.195153,
+            "mean": 375.8302767349998
+          },
+          "prompts_per_question": {
+            "n": 200,
+            "max": 18.0,
+            "p50": 18.0,
+            "p95": 18.0,
+            "p99": 18.0,
+            "mean": 18.0
+          }
+        }
+      }
+    }
+  ],
+  "backend": {
+    "backend": "cuda",
+    "device": "NVIDIA GPU through candle Device::new_cuda(0)",
+    "tensor_library": "candle-core 0.11.0 (CUDA; matmul = cuBLAS, no TF32)",
+    "weights": "f16 (converted from bf16, experiment)",
+    "activations": "f16 residual stream, norms and MLP",
+    "attention": "f32 q/k/v (bias + rotate-half RoPE fused kernel, cos/sin from f64 on host); one f32 flash-style kernel for all segments of a forward (online softmax, additive block mask, prefix K/V read from the cache, fully masked key tiles skipped), GQA as stacked query rows",
+    "kernels": "fused: q/k/v and gate/up projections as single GEMMs without bias; bias added in fused kernels (bias+RoPE+head split, bias+SiLU*up, bias+residual)",
+    "readout": "letter rows of lm_head only, f32",
+    "padding": "none: compact token list for GEMM/norm/MLP, attention per packed row (segment)",
+    "attention_kernel": "attn_tree_tc",
+    "gemm": "cuBLASLt, f32 accumulation, batch-invariant: one algorithm per weight shape for every M, no split-K (--gemm-table from gemm-search --invariant); a row's result does not depend on its batch",
+    "prefix_kv": [
+      53,
+      66
+    ],
+    "state_cache_bytes": 0,
+    "last_layer": "o_proj and MLP of the last layer only at the readout positions"
+  }
+}

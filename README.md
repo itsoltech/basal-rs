@@ -101,6 +101,51 @@ Porównujemy wykonanie tych samych modeli Basal przez dwa silniki inferencji.
 Poniższe wyniki opisują wydajność runtime'u i zgodność z upstream;
 zdolności modeli do podejmowania decyzji są zasługą ich autora.
 
+### Zgodność z upstream FP32
+
+900 pytań z dziewięciu publicznych zbiorów (polskie i angielskie; choice,
+noul, score) wobec forwardu FP32 upstream v1.5.0: liczba tych samych decyzji
+([pomiar](reports/decision-sets/README.md)).
+
+| Model, karta | basal-rs f16 (domyślny) | basal-rs f32 | upstream BF16 (`fast`) |
+|---|---:|---:|---:|
+| basal-1.5-max, A100 | 900/900 | 900/900 | 896/900 |
+| basal-1.5-4.5B, RTX 6000 Ada | 899/900 | 900/900 | 890/900 |
+| basal-1.5-4.5B, A100 | 899/900 | 900/900 | ¹ |
+| basal-1.5-mini, RTX 6000 Ada | 899/900 | 900/900 | 896/900 |
+| basal-1.5-mini, A100 | 900/900 | 900/900 | ¹ |
+
+Jedyne różnice basal-rs f16 to remisy w FP32 (np. 0,503 / 0,497); trafność
+wobec etykiet jest taka sama jak w FP32. ¹ Upstream BF16 dla 4.5B i mini
+mierzony tylko na RTX 6000 Ada.
+
+### Wydajność na kartach NVIDIA
+
+Ta sama metodyka na pięciu wynajętych kartach z fabrycznym limitem mocy,
+upstream v1.5.0 `fast` na tej samej karcie
+([pomiar](reports/perf-gpus/README.md), wszystkie środowiska i
+konfiguracje: [docs/PERFORMANCE.md](docs/PERFORMANCE.md)). basal-1.5-max:
+
+| Karta | Pojedyncza decyzja, mediana: upstream / basal-rs | HTTP, 1 klient, p50 / p99 | HTTP, 32 klientów: żądania/s | HTTP, 32 klientów, p50 / p99 basal-rs | Energia na decyzję |
+|---|---:|---:|---:|---:|---:|
+| H100 80 GB | 14,5 / 17,5 ms | 18 / 21 – 19 / 26 ms | 56 / 85 | 366 / 404 ms | 12,4 / 8,0 J |
+| A100 80 GB | 39,9 / 30,3 ms | 45 / 47 – 36 / 44 ms | 24 / 41 | 778 / 838 ms | 16,8 / 9,6 J |
+| L40S | 43,7 / 42,3 ms | 52 / 62 – 46 / 52 ms | 18 / 36 | 886 / 935 ms | 19,7 / 9,6 J |
+| RTX 6000 Ada | 66,2 / 43,5 ms | 88 / 103 – 53 / 69 ms | 10 / 27 | 1172 / 1244 ms | 29,4 / 11,2 J |
+| RTX A6000 | 78,0 / 50,2 ms | 102 / 107 – 65 / 83 ms | 10 / 21 | 1492 / 1621 ms | 31,1 / 14,1 J |
+
+(upstream / basal-rs, HTTP 1 klient: upstream p50 / p99 – basal-rs p50 /
+p99.) Na wszystkich kartach i modelach basal-rs obsługuje przy 32 klientach
+1,5–2,8 raza więcej żądań niż upstream i zużywa 1,3–2,8 raza mniej energii na
+decyzję (wyjątek: basal-1.5-mini na H100, 0,95 przepustowości). Pojedyncza
+decyzja jest krótsza na kartach do 300 W, porównywalna na L40S i A100, a na
+H100 o 20–35% dłuższa niż w upstream z CUDA graphs. Pod obciążeniem basal-rs
+zwraca na to samo żądanie bitowo tę samą odpowiedź; upstream różni się o do
+0,068 prawdopodobieństwa. Ruch mieszany (dokumenty do 16k tokenów, 1–14
+pytań), basal-1.5-max, 32 klientów: od 121 żądań/min (RTX A6000) do 454 (H100).
+
+### Serwer pomiarów (RTX 6000 Ada)
+
 basal-1.5-max na RTX 6000 Ada z limitem mocy 250 W; upstream v1.5.0
 `basal-serve --mode fast` (BF16, torch.compile, CUDA graphs) na tej samej
 karcie. Szczegóły i dane:
@@ -138,6 +183,8 @@ odpowiedzi co upstream; `facts` jest zgodne co do bajtu na 432 stanach.
 W opisanych pomiarach CUDA z tabelą GEMM niezależną od partii wynik pytania
 nie zależy od tego, z czym trafi do partii (bitowo te same logity
 pojedynczo, w partii i pod obciążeniem HTTP).
+
+### Apple Silicon
 
 Apple Silicon (Metal), pojedyncza decyzja (mediana, metodyka basal-bench)
 wobec upstream v1.5.0 z MLX: ścieżka serwowana (bf16) i ten sam backend w
@@ -276,9 +323,15 @@ Jeden model bez pliku konfiguracji:
 | `POST /v1/basal` | konwencje `Server.decide` upstream v1.5.0: walidacja `to_items`, `confidence = max(p)`, błędy jako 422 `{"error"}` |
 | `GET /v1/models` | lista modeli TypeSafe z polami upstream `mode` i `early_exit` |
 | `GET /health` | gotowość |
+| `GET /metrics` | opcjonalne metryki Prometheus: żądania, opóźnienia, tokeny, kolejka i partie, z podziałem na modele |
 
 Odpowiedzi mają nagłówki `x-basal-queue-ms`, `x-basal-compute-ms` i
 `x-basal-batch-requests`.
+
+Metryki są domyślnie wyłączone. Włącza je `basal serve --metrics` albo
+`metrics: true` w `basal-serve.yml`; endpoint działa na tym samym porcie co API.
+Konfiguracja Prometheusa,
+definicje liczników oraz zapytania p50/p99: [Observability](docs/OBSERVABILITY.md).
 
 ```sh
 curl --fail-with-body localhost:8000/v1/systemone -H 'content-type: application/json' -d '{
@@ -310,7 +363,8 @@ Opcje procesu: `addr` (nadpisywany przez zmienną `BASAL_ADDR`; w obrazie
 `0.0.0.0:8000`), `default_model`, `max_inflight` (1024, limit żądań w
 kolejce i w trakcie wszystkich modeli; nadmiar dostaje 529 z `Retry-After`), `long_slice_ms`
 (100, minimalny czas pracy toru długich żądań między oddaniami GPU),
-`gemm_cache` (`.cache/gemm`).
+`gemm_cache` (`.cache/gemm`), `metrics` (`false`; zbieranie metryk i endpoint
+Prometheus, włączane także flagą `--metrics`).
 
 Tabela GEMM ustala algorytmy cuBLASLt tak, by wynik pytania nie zależał od
 partii: dla każdej klasy liczby wierszy najszybszy algorytm z grupy
@@ -318,10 +372,14 @@ algorytmów dających bitowo te same wyniki
 ([pomiar](reports/rust-cuda-1.5-max/gemm-equiv/README.md)). Zależy od
 modelu (kształtów wag), GPU, wersji cuBLASLt i precyzji. Przy `gemm_table:
 auto` serwer szuka tabeli w `gemm_cache` i generuje ją przy starcie, gdy jej
-nie ma albo powstała na innym GPU lub cuBLASLt (jednorazowo, kilka do
-kilkudziesięciu minut). Tabela z repozytorium
-(`reports/rust-cuda-1.5-max/gemm-equiv/gemm-algos-f16-invariant-groups.json`)
-jest dla basal-1.5-max na RTX 6000 Ada z cuBLASLt 12.9.1. Ręcznie:
+nie ma albo powstała na innym GPU lub cuBLASLt. Najpierw sięga po tabele
+wkompilowane w binarkę ([crates/basal-cli/gemm-tables](crates/basal-cli/gemm-tables):
+H100 PCIe dla 4.5B i max, RTX 6000 Ada dla 4.5B, cuBLASLt 12.9.1, f16), a gdy
+żadna nie pasuje, generuje własną (jednorazowo, kilka do kilkudziesięciu
+minut). Tabelę wygenerowaną dla karty lub modelu spoza tej listy
+`basal gemm-share` wysyła do projektu jako issue (po potwierdzeniu), żeby
+kolejne wydania ją zawierały ([CONTRIBUTING](CONTRIBUTING.pl.md#tabele-gemm)).
+`basal doctor` wypisuje karty z tabelami w binarce. Ręcznie:
 `basal gemm-search --model DIR --invariant --out gemm.json`. Serwer odmawia
 startu z tabelą, która nie obejmuje kształtów wag modelu.
 
@@ -350,6 +408,7 @@ referencją upstream), `bench` i `bench-requests` (pomiary), `gemm-search`.
 - [Instalacja](docs/INSTALL.md): Homebrew, skrypt, `basal doctor` / `setup` / `init` / `update`, ścieżki plików.
 - [Architektura](docs/ARCHITECTURE.md): potok żądania, pakowanie, kernele, harmonogram serwera.
 - [Zgodność API](docs/SYSTEM_ONE.md): TypeSafe System One, endpoint upstream, rozszerzenia basal-1.5.
+- [Wydajność](docs/PERFORMANCE.md): karty NVIDIA, Apple Silicon, limit mocy, długie dokumenty, konfiguracja.
 - [Pomiary](docs/BENCHMARKS.md): metodyka, narzędzia, odtwarzanie wyników.
 - [Raporty](reports/README.md).
 - [Udział w rozwoju](CONTRIBUTING.pl.md) ([English](CONTRIBUTING.md)): budowanie, sprawdzanie zmian, pull requesty; [bezpieczeństwo](SECURITY.md).

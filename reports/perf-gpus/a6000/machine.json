@@ -1,0 +1,8 @@
+{
+ "gpu_query": "name,driver_version,compute_cap,memory.total,power.limit,power.max_limit,clocks.max.sm,clocks.max.memory,pcie.link.gen.max",
+ "gpu": "NVIDIA RTX A6000, 580.126.09, 8.6, 49140 MiB, 300.00 W, 300.00 W, 2100 MHz, 8001 MHz, 3",
+ "cpu": "Intel(R) Xeon(R) CPU E5-2699 v4 @ 2.20GHz",
+ "cpus": 6,
+ "kernel": "6.8.0-90-generic",
+ "basal": "basal 0.1.4 (db87ea04, CUDA, kernels for compute capability 80,89,90)"
+}

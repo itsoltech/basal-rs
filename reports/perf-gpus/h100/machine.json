@@ -1,0 +1,8 @@
+{
+ "gpu_query": "name,driver_version,compute_cap,memory.total,power.limit,power.max_limit,clocks.max.sm,clocks.max.memory,pcie.link.gen.max",
+ "gpu": "NVIDIA H100 80GB HBM3, 535.129.03, 9.0, 81559 MiB, 700.00 W, 700.00 W, 1980 MHz, 2619 MHz, 5",
+ "cpu": "Intel(R) Xeon(R) Platinum 8458P",
+ "cpus": 16,
+ "kernel": "6.2.0-37-generic",
+ "basal": "basal 0.1.4 (db87ea04, CUDA, kernels for compute capability 80,89,90)"
+}

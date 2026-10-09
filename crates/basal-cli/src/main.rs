@@ -19,6 +19,7 @@ mod compare;
 mod config;
 mod doctor;
 mod export;
+mod gemm_share;
 mod large_eval;
 mod paths;
 mod reference;
@@ -70,7 +71,7 @@ pub fn cuda_command(bin: &Path) -> std::process::Command {
 #[cfg(all(target_os = "linux", not(feature = "cuda")))]
 fn delegate_gpu_command() {
     use std::os::unix::process::CommandExt;
-    const GPU: [&str; 10] = [
+    const GPU: [&str; 11] = [
         "decide",
         "export",
         "bench-requests",
@@ -80,6 +81,7 @@ fn delegate_gpu_command() {
         "serve",
         "gemm-search",
         "gemm",
+        "gemm-share",
         "bench",
     ];
     let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
@@ -319,6 +321,19 @@ enum Cmd {
         #[arg(long)]
         check: bool,
     },
+    /// Send the GEMM tables generated on this machine for a GPU this build has none for to the basal-rs project (a
+    /// GitHub issue per table, after a confirmation), so later builds ship them
+    GemmShare {
+        /// Directory of the tables (default: the GEMM cache of `basal serve`)
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Send without asking
+        #[arg(long)]
+        yes: bool,
+        /// Only write the issue text next to each table
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Remove what basal put on this machine: user service, configuration, caches, CUDA libraries, the binaries of a
     /// package installation; with --models also the basal models in the Hugging Face cache
     Uninstall {
@@ -382,6 +397,9 @@ enum Cmd {
         /// in the configuration or BASAL_ACCESS_LOG=1)
         #[arg(long)]
         access_log: bool,
+        /// Enable Prometheus metrics at GET /metrics (also `metrics: true` in the configuration; default: off)
+        #[arg(long)]
+        metrics: bool,
         /// `release_date` reported by GET /v1/models (default: the release date upstream basal v1.5.0 reports)
         #[arg(long, default_value = "2026-10-05")]
         release_date: String,
@@ -666,6 +684,7 @@ fn run() -> Result<()> {
             setup::run(&setup::Options { config, models, force, prefetch, service })?;
         }
         Cmd::Update { version, check } => update::run(version, check)?,
+        Cmd::GemmShare { dir, yes, dry_run } => gemm_share::run(dir, yes, dry_run)?,
         Cmd::Uninstall { models, yes, dry_run } => uninstall::run(&uninstall::Options { models, yes, dry_run })?,
         Cmd::Init { models, out, force } => {
             let models = if models.is_empty() { vec![config::DEFAULT_MODEL.short.to_string()] } else { models };
@@ -706,6 +725,7 @@ fn run() -> Result<()> {
             long_tokens,
             long_slice_ms,
             access_log,
+            metrics,
             release_date,
         } => {
             let access_log = access_log || std::env::var("BASAL_ACCESS_LOG").is_ok_and(|v| !v.is_empty() && v != "0");
@@ -791,6 +811,7 @@ fn run() -> Result<()> {
                 default_model: c.default_model,
                 long_slice_ms: c.long_slice_ms,
                 access_log: access_log || c.access_log,
+                metrics: metrics || c.metrics,
             };
             serve::serve(served, opts)?;
         }

@@ -1,0 +1,15 @@
+{
+ "gpu_query": "name,driver_version,compute_cap,memory.total,power.limit,power.max_limit,clocks.max.sm,clocks.max.memory,pcie.link.gen.max",
+ "gpu": "NVIDIA L40S, 580.126.09, 8.9, 46068 MiB, 350.00 W, 350.00 W, 2520 MHz, 9001 MHz, 4",
+ "cpu": "Intel(R) Xeon(R) Platinum 8462Y+",
+ "cpus": 12,
+ "kernel": "6.8.0-90-generic",
+ "basal": "basal 0.1.4 (db87ea04, CUDA, kernels for compute capability 80,89,90)"
+}
+=== basal-1.5-mini basal-rs 16:08:07
+=== basal-1.5-mini upstream 16:10:37
+=== basal-1.5-4.5B basal-rs 16:14:46
+=== basal-1.5-4.5B upstream 16:19:53
+=== basal-1.5-max basal-rs 16:27:52
+=== basal-1.5-max upstream 16:39:12
+DONE

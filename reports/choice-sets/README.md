@@ -102,10 +102,28 @@ Wnioski:
 Czasy pytań z tabel zbiorczych (`ms_per_question` w `summary.json`)
 porównywać tylko w obrębie jednego przebiegu: ta sama strategia na 4.5B
 (`luce1-final-1o`, 200 pytań banking77) trwała 246 ms w pierwszym przebiegu i
-138 ms w późniejszym, przy tym samym limicie mocy. Liczba promptów na
-pytanie jest miarą kosztu niezależną od warunków. Pomiar czasu wszystkich
-kandydatów w jednym przebiegu (250 W) przerwał twardy reset serwera po 3
-minutach.
+138 ms w późniejszym, przy tym samym limicie mocy (serwer współdzielony z
+innymi usługami).
+
+Pomiar czasu (`timing-cloud/`): wynajęta RTX 6000 Ada (sterownik 580, limit
+300 W, bez innych procesów; [tools/cloud](../../tools/cloud/basal-cloud.py)),
+200 pytań `timing-set.jsonl` (co trzecie z `set.jsonl`), bez tabel GEMM,
+wszystkie strategie w jednym procesie, `luce2` i `luce2-1o` powtórzone na
+końcu. Mediana czasu pytania:
+
+| Model, strategia | banking77 | clinc150 | massive-pl | prompty |
+|---|---:|---:|---:|---|
+| 4.5B `luce2` | 437 / 514 ms | 689 / 758 ms | 304 / 323 ms | 34 / 62 / 26 |
+| 4.5B `luce2-1o` | 275 / 284 ms | 378 / 385 ms | 181 / 185 ms | 18 / 32 / 14 |
+| 4.5B `luce1-final-1o` | 161 ms | 212 ms | 107 ms | 10 / 17 / 8 |
+| 4.5B `knockout1-1o` | 200 ms | 246 ms | 133 ms | 12 / 19 / 10 |
+| max `luce2` | 1122 / 1165 ms | 1576 / 1561 ms | 772 / 770 ms | 34 / 62 / 26 |
+| max `luce2-1o` | 667 / 663 ms | 862 / 853 ms | 430 / 423 ms | 18 / 32 / 14 |
+| max `luce1-final-1o` | 398 ms | 489 ms | 264 ms | 10 / 17 / 8 |
+| max `knockout1-1o` | 490 ms | 556 ms | 326 ms | 12 / 19 / 10 |
+
+(pierwszy / powtórzony przebieg). `luce2-1o` skraca czas pytania 1,6–2,0×
+wobec `luce2`; trafność na tych 200 pytaniach jest ta sama (±1).
 
 ## Czekanie na GPU (CUDA)
 
@@ -123,3 +141,26 @@ sam proces i warunki (`cuda-sync/*.log`; czas procesu z wczytaniem modelu):
 Odpowiedzi są bitowo równe we wszystkich trybach. `blocking` oszczędza ok.
 0,7 rdzenia w czasie pracy GPU kosztem 2,5% czasu pytania; domyślny tryb
 zostaje bez zmian.
+
+## Etykiety, które nie weszły do finału
+
+Pytanie: czy strategia (grupy przed finałem) traci poprawne odpowiedzi.
+`cuda-semifinal/` (2026-10-08, ten sam zestaw, 200 W) zapisuje dla każdego
+pytania pozycję etykiety we wspólnym rozkładzie po pierwszej rundzie
+(`gold_rank_first_round`). Z `luce2-1o` do finału nie weszło 21 (mini), 19
+(4.5B) i 15 (max) etykiet na 600; ich pozycje po pierwszej rundzie to od 12.
+do 58. (połowa poniżej 30.), a jev daje im zwykle prawdopodobieństwo bliskie
+zera (np. „nowy jork” → `transport query`, „system cisco” →
+`recommendation movies`).
+
+Sprawdzenie (`label-in-final/`, Metal): finałowa dziesiątka każdego z tych
+pytań z jedną opcją zastąpioną etykietą, zadana jako zwykłe pytanie z 10
+opcjami. Etykieta wygrywa w 0/21 (mini), 1/19 (4.5B: „nowy jork” →
+`transport query`, p = 0,19) i 0/15 (max). Wejście etykiety do finału
+zmieniłoby więc najwyżej jedną odpowiedź na 600; pozostałe odrzuca sam model.
+
+Półfinał (`-sN`: N najmocniejszych opcji po pierwszej rundzie w dodatkowej
+rundzie przed finałem, 2–4 prompty więcej) wprowadza do finału 1–3 etykiety
+więcej, a trafność zmienia nieregularnie (mini 457 → 457–464, 4.5B 473 →
+468–470, max 495 → 493–498 na 600), przez inny skład finału. Domyślna
+strategia zostaje bez półfinału.

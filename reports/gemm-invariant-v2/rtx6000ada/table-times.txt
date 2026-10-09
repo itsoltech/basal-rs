@@ -1,0 +1,2 @@
+4.5B old table: 245 s
+4.5B new table: 327 s

@@ -1,0 +1,17 @@
+basal: basal-1.5-4.5B loaded on the GPU in 11.1s
+basal: 100 GEMM classes from /data/basal/.cache/gemm/basal-1.5-4.5B-f16.json
+basal: template prefixes precomputed ([53, 66] tokens)
+"ctx-512-q1" q=1 median 31.5 ms
+"ctx-512-q5" q=5 median 64.6 ms
+"ctx-1024-q1" q=1 median 56.1 ms
+"ctx-1024-q5" q=5 median 92.8 ms
+"ctx-1792-q1" q=1 median 100.2 ms
+"ctx-1792-q5" q=5 median 151.5 ms
+"ctx-2048-q1" q=1 median 114.6 ms
+"ctx-2048-q5" q=5 median 170.4 ms
+"ctx-4096-q1" q=1 median 266.6 ms
+"ctx-4096-q5" q=5 median 346.3 ms
+"ctx-8192-q1" q=1 median 620.0 ms
+"ctx-8192-q5" q=5 median 754.0 ms
+"ctx-16384-q1" q=1 median 1743.1 ms
+"ctx-16384-q5" q=5 median 1990.6 ms

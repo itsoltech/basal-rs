@@ -1,0 +1,2 @@
+Loading weights:   0%|          | 0/515 [00:00<?, ?it/s]Loading weights:  62%|██████▏   | 321/515 [00:00<00:00, 3202.92it/s]Loading weights: 100%|██████████| 515/515 [00:00<00:00, 3154.11it/s]
+basal: model /data/hf/hub/models--Remek--basal-1.5-mini/snapshots/1978d0705ce09cd2d7d8d3e87b304468121e7255 mode fast ready in 151s on port 8101

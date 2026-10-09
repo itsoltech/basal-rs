@@ -29,6 +29,32 @@ __device__ void bias_silu_mul(const T *gu, const T *bias, T *out, unsigned I, un
     out[id] = from_f<T>(s * u);
 }
 
+// bias_silu_mul for 2-byte T, 8 consecutive outputs per thread with 16-byte loads and stores (I % 8 == 0, 16-byte
+// aligned operands); the same arithmetic per element, so the same results
+template <typename T>
+__device__ void bias_silu_mul8(const T *gu, const T *bias, T *out, unsigned I, unsigned total8) {
+    unsigned id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (id >= total8) return;
+    unsigned I8 = I / 8;
+    unsigned m = id / I8, i = (id - m * I8) * 8;
+    uint4 gv = *reinterpret_cast<const uint4 *>(gu + (size_t)m * 2 * I + i);
+    uint4 uv = *reinterpret_cast<const uint4 *>(gu + (size_t)m * 2 * I + I + i);
+    uint4 bgv = *reinterpret_cast<const uint4 *>(bias + i);
+    uint4 buv = *reinterpret_cast<const uint4 *>(bias + I + i);
+    const T *g8 = reinterpret_cast<const T *>(&gv), *u8 = reinterpret_cast<const T *>(&uv);
+    const T *bg8 = reinterpret_cast<const T *>(&bgv), *bu8 = reinterpret_cast<const T *>(&buv);
+    uint4 ov;
+    T *o8 = reinterpret_cast<T *>(&ov);
+#pragma unroll
+    for (int e = 0; e < 8; e++) {
+        float g = rt<T>(to_f(g8[e]) + to_f(bg8[e]));
+        float u = rt<T>(to_f(u8[e]) + to_f(bu8[e]));
+        float s = rt<T>(g / (1.0f + expf(-g)));
+        o8[e] = from_f<T>(s * u);
+    }
+    *reinterpret_cast<uint4 *>(out + (size_t)m * I + i) = ov;
+}
+
 // out = T(x + T(y + b)): residual add of a linear output whose bias is still to be added
 template <typename T>
 __device__ void bias_residual(const T *x, const T *y, const T *b, T *out, unsigned H, unsigned total) {
@@ -37,12 +63,62 @@ __device__ void bias_residual(const T *x, const T *y, const T *b, T *out, unsign
     out[id] = from_f<T>(to_f(x[id]) + rt<T>(to_f(y[id]) + to_f(b[id % H])));
 }
 
+// out = [2, M, H]: out[0] = T(x + T(y + b)) as bias_residual, out[1] = RMSNorm(out[0]) * alpha with the arithmetic and
+// summation order of candle's rmsnorm kernel (one block of blockDim.x threads per row, blockDim.x = 32 for H < 1024
+// else 1024, strided partial sums, xor warp reduction, then over the warps), so both outputs are bitwise those of the
+// two separate kernels. One block per row.
+__device__ __forceinline__ float warp_sum_xor(float v) {
+#pragma unroll
+    for (int mask = 16; mask > 0; mask >>= 1) v += __shfl_xor_sync(0xffffffff, v, mask, 32);
+    return v;
+}
+template <typename T>
+__device__ void residual_rmsnorm(const T *x, const T *y, const T *b, const T *alpha, T *out, unsigned H, unsigned M,
+                                 float eps) {
+    const int row = blockIdx.x;
+    const int tid = threadIdx.x;
+    const int bs = blockDim.x;
+    const int ncols = H;
+    T *xo = out + (size_t)row * H;
+    T *no = out + (size_t)M * H + (size_t)row * H;
+    float tmp = 0.0f;
+    for (int col = tid; col < ncols; col += bs) {
+        size_t i = (size_t)row * H + col;
+        T v = from_f<T>(to_f(x[i]) + rt<T>(to_f(y[i]) + to_f(b[col])));
+        xo[col] = v;
+        const float xi = to_f(v);
+        tmp += xi * xi;
+    }
+    tmp = warp_sum_xor(tmp);
+    if (bs > 32) {
+        __shared__ float s_sum[32];
+        int warp_id = tid / 32;
+        int lane_id = tid % 32;
+        if (lane_id == 0) s_sum[warp_id] = tmp;
+        __syncthreads();
+        tmp = s_sum[lane_id];
+        tmp = warp_sum_xor(tmp);
+    }
+    const float mean = tmp / ncols;
+    const float scale = rsqrtf(mean + eps);
+    for (int col = tid; col < ncols; col += bs) {
+        float a = to_f(alpha[col]);
+        no[col] = from_f<T>(scale * to_f(xo[col]) * a);
+    }
+}
+
 // qkv = [B*L, (NH + 2*NKV) * HD] projection without bias. Adds the bias (rounded to T), applies rotate-half RoPE to q
 // and k in f32 with cs = [2, B, L, HD/2] (cos, sin) and writes f32 heads:
 //   out = [q: B, NH, L, HD | k: B, NKV, L, HD | v: B, NKV, L, HD]
+// hl (tensor-core attention, flags & QR_HILO): K and V also as f16 hi / lo planes [K hi | K lo | V hi | V lo] of
+// B*NKV*L*HD each, hi = f16(x), lo = f16(x - hi) as in split_hilo_f32; QR_VLO: also the V lo plane (zero for an f16
+// forward, where the attention skips it); QR_NO_KV32: K and V only in hl, not in out (no prefix capture).
+#define QR_HILO 1u
+#define QR_VLO 2u
+#define QR_NO_KV32 4u
 template <typename T>
 __device__ void qkv_rope(const T *qkv, const T *bias, const float *cs, float *out, unsigned B, unsigned L,
-                         unsigned NH, unsigned NKV, unsigned HD) {
+                         unsigned NH, unsigned NKV, unsigned HD, __half *hl, unsigned flags) {
     unsigned id = blockIdx.x * blockDim.x + threadIdx.x;
     unsigned hd2 = HD / 2;
     unsigned heads = NH + 2 * NKV;
@@ -74,8 +150,22 @@ __device__ void qkv_rope(const T *qkv, const T *bias, const float *cs, float *ou
         base = (size_t)B * (NH + NKV) * L * HD; hh = j - NH - NKV; nh = NKV;
     }
     size_t o = base + ((size_t)(b * nh + hh) * L + l) * HD + d;
-    out[o] = y1;
-    out[o + hd2] = y2;
+    if (j < NH || !(flags & QR_NO_KV32)) {
+        out[o] = y1;
+        out[o + hd2] = y2;
+    }
+    if (j >= NH && (flags & QR_HILO)) {
+        const size_t nk = (size_t)B * NKV * L * HD, i = o - (size_t)B * NH * L * HD;  // i: index in [K | V]
+        const bool isv = i >= nk;
+        __half *hi = hl + (isv ? nk + i : i);  // K hi at i, V hi at 2 nk + (i - nk); lo planes nk further
+        __half h1 = __float2half_rn(y1), h2 = __float2half_rn(y2);
+        hi[0] = h1;
+        hi[hd2] = h2;
+        if (!isv || (flags & QR_VLO)) {
+            hi[nk] = __float2half_rn(y1 - __half2float(h1));
+            hi[nk + hd2] = __float2half_rn(y2 - __half2float(h2));
+        }
+    }
 }
 
 // [B, NH, L, HD] f32 attention output -> [B*L, NH*HD] in T
@@ -100,9 +190,14 @@ __device__ void merge_heads(const float *in, T *out, unsigned B, unsigned L, uns
                                                  unsigned total) {                                                 \
         bias_residual<T>(x, y, b, out, H, total);                                                                  \
     }                                                                                                              \
+    extern "C" __global__ void residual_rmsnorm_##S(const T *x, const T *y, const T *b, const T *alpha, T *out,   \
+                                                    unsigned H, unsigned M, float eps) {                           \
+        residual_rmsnorm<T>(x, y, b, alpha, out, H, M, eps);                                                       \
+    }                                                                                                              \
     extern "C" __global__ void qkv_rope_##S(const T *qkv, const T *bias, const float *cs, float *out, unsigned B,  \
-                                            unsigned L, unsigned NH, unsigned NKV, unsigned HD) {                  \
-        qkv_rope<T>(qkv, bias, cs, out, B, L, NH, NKV, HD);                                                        \
+                                            unsigned L, unsigned NH, unsigned NKV, unsigned HD, __half *hl,        \
+                                            unsigned flags) {                                                      \
+        qkv_rope<T>(qkv, bias, cs, out, B, L, NH, NKV, HD, hl, flags);                                             \
     }                                                                                                              \
     extern "C" __global__ void merge_heads_##S(const float *in, T *out, unsigned B, unsigned L, unsigned NH,       \
                                                unsigned HD) {                                                      \
@@ -112,6 +207,13 @@ __device__ void merge_heads(const float *in, T *out, unsigned B, unsigned L, uns
 INSTANTIATE(float, f32)
 INSTANTIATE(__half, f16)
 INSTANTIATE(__nv_bfloat16, bf16)
+
+#define INSTANTIATE_VEC8(T, S)                                                                                    \
+    extern "C" __global__ void bias_silu_mul8_##S(const T *gu, const T *bias, T *out, unsigned I, unsigned total8) { \
+        bias_silu_mul8<T>(gu, bias, out, I, total8);                                                               \
+    }
+INSTANTIATE_VEC8(__half, f16)
+INSTANTIATE_VEC8(__nv_bfloat16, bf16)
 
 // Attention softmax with the scale and the additive mask fused (f32): s = scores [R, LK] with R = heads * L rows in
 // head-major order (row r is query position r % L), mask = [L, LK] shared by all heads. out = softmax(s * scale + mask)
@@ -361,6 +463,10 @@ extern "C" __global__ void split_hilo_f32(const float *x, __half *out, unsigned 
 // are skipped, which adds exactly nothing. Block: 4 warps, 64 query rows (16 per warp); keys in tiles of 32;
 // fragments are read with ldmatrix (V transposed by ldmatrix.trans). Every row sees the same key tiles in the same
 // order whatever else is packed, so results stay independent of batching.
+// output of the tensor-core attention: f32 heads [NH, T, HD], or merged heads [T, NH * HD] in f16 / bf16
+#define ATT_OUT_F32 0u
+#define ATT_OUT_F16 1u
+#define ATT_OUT_BF16 2u
 #define TC_BM 128  // query rows per block: 8 warps x 16 (32 tokens x 4 heads of a K/V group)
 #define TC_THREADS 256
 #define TC_BN 32
@@ -416,9 +522,9 @@ __device__ __forceinline__ unsigned pack2(__half a, __half b) {
 // QK3: S = Qh·Kh + Qh·Kl + Ql·Kh (f16 hi/lo split, ~f32 products) or only Qh·Kh. PL: P·V with P split into
 // hi/lo (two MMAs) or P rounded to f16 (one MMA). Softmax, accumulation and output stay f32 in every variant.
 template <bool QK3, bool PL>
-__device__ __forceinline__ void attn_tree_tc_body(const float *qkv, const __half *khl, const __half *vhl, float *out,
+__device__ __forceinline__ void attn_tree_tc_body(const float *qkv, const __half *khl, const __half *vhl, void *out,
                                                   const TreeTable &tab, unsigned T, unsigned NH, unsigned NKV,
-                                                  float scale, unsigned v_exact) {
+                                                  float scale, unsigned v_exact, unsigned out_mode) {
     // Shared memory holds one Q plane (hi, then lo) until each warp has its Q fragments in registers, then the K / V
     // tiles: 34 KiB per block.
     extern __shared__ __align__(16) unsigned char smraw[];
@@ -605,12 +711,374 @@ __device__ __forceinline__ void attn_tree_tc_body(const float *qkv, const __half
         unsigned r = r0 + rr2[a];
         if (r >= rows) continue;
         float inv = 1.0f / l[a];
-        float *dst = out + ((size_t)(kvh * rep + r / U.q_len) * T + U.q_off + r % U.q_len) * ATT_HD;
+        const unsigned head = kvh * rep + r / U.q_len, tok = U.q_off + r % U.q_len;
+        if (out_mode == ATT_OUT_F32) {
+            float *dst = (float *)out + ((size_t)head * T + tok) * ATT_HD;
 #pragma unroll
-        for (int dt = 0; dt < ATT_HD / 8; dt++)
-            *reinterpret_cast<float2 *>(dst + dt * 8 + 2 * t4) = make_float2(o[dt][2 * a] * inv, o[dt][2 * a + 1] * inv);
+            for (int dt = 0; dt < ATT_HD / 8; dt++)
+                *reinterpret_cast<float2 *>(dst + dt * 8 + 2 * t4) =
+                    make_float2(o[dt][2 * a] * inv, o[dt][2 * a + 1] * inv);
+        } else {
+            // merged heads [token, NH * HD] in the forward's dtype: what merge_heads makes of the f32 output
+            const size_t at = ((size_t)tok * NH + head) * ATT_HD;
+#pragma unroll
+            for (int dt = 0; dt < ATT_HD / 8; dt++) {
+                const float x0 = o[dt][2 * a] * inv, x1 = o[dt][2 * a + 1] * inv;
+                if (out_mode == ATT_OUT_F16) {
+                    __half *dst = (__half *)out + at + dt * 8 + 2 * t4;
+                    dst[0] = from_f<__half>(x0);
+                    dst[1] = from_f<__half>(x1);
+                } else {
+                    __nv_bfloat16 *dst = (__nv_bfloat16 *)out + at + dt * 8 + 2 * t4;
+                    dst[0] = from_f<__nv_bfloat16>(x0);
+                    dst[1] = from_f<__nv_bfloat16>(x1);
+                }
+            }
+        }
     }
 }
+
+
+#ifdef BASAL_WGMMA
+// Hopper (sm_90a) tree attention with warpgroup MMAs (wgmma): the arithmetic of attn_tree_tc (QK3, PL), the products
+// issued in its order, so that every accumulator sees the same sequence of k16 steps (on H100 the outputs are bitwise
+// those of attn_tree_tc). Operands in shared memory use the layout without swizzle, core matrices of 8 rows x 8 halves
+// (128 bytes): Q hi / lo for the whole block and the K tile K-major (A and B of S = Q K^T), the V tile MN-major as it
+// comes from memory (B of O = P V); P hi / lo are A operands from registers in the fragments of mma.sync. Without the
+// Q fragments in registers a thread needs 127 registers, so two blocks run on an SM.
+__device__ __forceinline__ void wg_fence() { asm volatile("wgmma.fence.sync.aligned;\n" ::: "memory"); }
+__device__ __forceinline__ void wg_commit() { asm volatile("wgmma.commit_group.sync.aligned;\n" ::: "memory"); }
+__device__ __forceinline__ void wg_wait0() { asm volatile("wgmma.wait_group.sync.aligned 0;\n" ::: "memory"); }
+// shared memory written by threads (generic proxy) is read by wgmma (async proxy)
+__device__ __forceinline__ void fence_async_smem() { asm volatile("fence.proxy.async.shared::cta;\n" ::: "memory"); }
+// keeps the compiler from moving reads / writes of accumulators across the asynchronous MMAs
+__device__ __forceinline__ void wg_reg(float &x) { asm volatile("" : "+f"(x)::"memory"); }
+
+// matrix descriptor: no swizzle; lbo: bytes between core matrices along K, sbo: along M / N
+__device__ __forceinline__ unsigned long long wg_desc(const void *smem, unsigned lbo, unsigned sbo) {
+    unsigned long long a = (unsigned long long)__cvta_generic_to_shared(smem);
+    return ((a & 0x3FFFF) >> 4) | ((unsigned long long)(lbo >> 4) << 16) | ((unsigned long long)(sbo >> 4) << 32);
+}
+
+// S += A B, m64n32k16, A and B from shared memory, both K-major
+__device__ __forceinline__ void wgmma_m64n32_ss(float *d, unsigned long long a, unsigned long long b) {
+    asm volatile(
+        "{\n.reg .pred p;\nsetp.ne.b32 p, 1, 0;\n"
+        "wgmma.mma_async.sync.aligned.m64n32k16.f32.f16.f16 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15}, %16, %17, p, 1, 1, 0, 0;\n}\n"
+        : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15])
+        : "l"(a), "l"(b));
+}
+
+// D += A B, m64n128k16, A from registers, B from shared memory in the MN-major layout (imm-trans-b = 1)
+__device__ __forceinline__ void wgmma_m64n128_tb(float *d, const unsigned *a, unsigned long long b) {
+    asm volatile(
+        "{\n.reg .pred p;\nsetp.ne.b32 p, 1, 0;\n"
+        "wgmma.mma_async.sync.aligned.m64n128k16.f32.f16.f16 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19,%20,%21,%22,%23,%24,%25,%26,%27,%28,%29,%30,%31,%32,%33,%34,%35,%36,%37,%38,%39,%40,%41,%42,%43,%44,%45,%46,%47,%48,%49,%50,%51,%52,%53,%54,%55,%56,%57,%58,%59,%60,%61,%62,%63}, {%64,%65,%66,%67}, %68, p, 1, 1, 1;\n}\n"
+        : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]), "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]), "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23]), "+f"(d[24]), "+f"(d[25]), "+f"(d[26]), "+f"(d[27]), "+f"(d[28]), "+f"(d[29]), "+f"(d[30]), "+f"(d[31]), "+f"(d[32]), "+f"(d[33]), "+f"(d[34]), "+f"(d[35]), "+f"(d[36]), "+f"(d[37]), "+f"(d[38]), "+f"(d[39]), "+f"(d[40]), "+f"(d[41]), "+f"(d[42]), "+f"(d[43]), "+f"(d[44]), "+f"(d[45]), "+f"(d[46]), "+f"(d[47]), "+f"(d[48]), "+f"(d[49]), "+f"(d[50]), "+f"(d[51]), "+f"(d[52]), "+f"(d[53]), "+f"(d[54]), "+f"(d[55]), "+f"(d[56]), "+f"(d[57]), "+f"(d[58]), "+f"(d[59]), "+f"(d[60]), "+f"(d[61]), "+f"(d[62]), "+f"(d[63])
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(b));
+}
+
+#define WG_CORE 64  // halves per core matrix (8 x 8)
+// K-major [rows][128 dims] (the K tile as B of S = Q K^T, Q as A): core (row / 8, dim / 8) at (row / 8) * 16 + dim / 8
+__device__ __forceinline__ unsigned wg_k_at(unsigned j, unsigned d) {
+    return ((j / 8) * 16 + d / 8) * WG_CORE + (j % 8) * 8 + d % 8;
+}
+// the V tile [32 keys][128 dims] as B of O = P V (N = dims, K = keys), MN-major: core (dim / 8, key / 8) at
+// (dim / 8) * 4 + key / 8, a core row is one key (8 dims, as in memory)
+__device__ __forceinline__ unsigned wg_v_at(unsigned j, unsigned d) {
+    return ((d / 8) * 4 + j / 8) * WG_CORE + (j % 8) * 8 + d % 8;
+}
+
+// PIPE (f16 forward only, V lo not read): two K / V stages filled by cp.async, the next tile loading while the
+// current one is computed
+// WGS warpgroups per block, 64 query rows each (BM = 64 * WGS): one warpgroup gives twice the blocks of
+// two, for short prompts; a row computes the same either way (the same key tiles in the same order).
+template <bool PIPE, unsigned WGS = 2>
+__device__ __forceinline__ void attn_tree_wg_body(const float *qkv, const __half *khl, const __half *vhl, void *out,
+                                                  const TreeTable &tab, unsigned T, unsigned NH, unsigned NKV,
+                                                  float scale, unsigned v_exact, unsigned out_mode) {
+    // Shared memory: Q hi and lo [128 rows][128 dims] (wg_k_at), then the K hi / lo (wg_k_at) and V hi / lo (wg_v_at)
+    // tiles: 96 KiB per block; PIPE: two stages of K hi / lo and V hi, 112 KiB.
+    constexpr unsigned BM = 64 * WGS, THREADS = 128 * WGS;
+    extern __shared__ __align__(16) unsigned char smraw[];
+    __half *Qs = reinterpret_cast<__half *>(smraw), *Kst = Qs + 2 * BM * ATT_HD;
+    __half *Kh = Kst, *Kl = Kh + TC_BN * ATT_HD;
+    __half *Vh = Kl + TC_BN * ATT_HD, *Vl = Vh + TC_BN * ATT_HD;
+    const unsigned tid = threadIdx.x, w = tid / 32, lane = tid % 32, g = lane >> 2, t4 = lane & 3;
+    const unsigned kvh = blockIdx.y, rep = NH / NKV;
+    const TreeUnit &U = tab.u[tree_unit_of(tab, blockIdx.x)];
+    const unsigned rows = rep * U.q_len, r0 = (blockIdx.x - U.tile0) * BM;
+    unsigned lk = U.np;
+    for (unsigned i = 0; i < U.nr; i++) lk += U.r_len[i];
+    const unsigned base_own = lk - U.r_len[U.nr - 1];
+    const size_t nkv_all = (size_t)NKV * T * ATT_HD, nkv_past = (size_t)NKV * U.np * ATT_HD;
+    const __half *pkh = (const __half *)U.pkh, *pvh = (const __half *)U.pvh;
+    const float *q = qkv;
+    // Q split into f16 hi = f16(x) and lo = f16(x - hi), in place for the whole block (the first tile's fence and
+    // barrier make it visible to wgmma)
+    for (unsigned i = tid; i < BM * ATT_HD; i += THREADS) {
+        unsigned rr = i / ATT_HD, d = i % ATT_HD, r = r0 + rr;
+        float x = r < rows ? q[((size_t)(kvh * rep + r / U.q_len) * T + U.q_off + r % U.q_len) * ATT_HD + d] : 0.f;
+        __half h = __float2half_rn(x);
+        Qs[wg_k_at(rr, d)] = h;
+        Qs[BM * ATT_HD + wg_k_at(rr, d)] = __float2half_rn(x - __half2float(h));
+    }
+    const unsigned rr2[2] = {w * 16 + g, w * 16 + g + 8};
+    bool ok[2];
+    unsigned lim[2];
+    for (int a = 0; a < 2; a++) {
+        unsigned r = r0 + rr2[a];
+        ok[a] = r < rows;
+        lim[a] = ok[a] ? base_own + r % U.q_len : 0;
+    }
+    float o[ATT_HD / 8][4];
+#pragma unroll
+    for (int i = 0; i < ATT_HD / 8; i++) o[i][0] = o[i][1] = o[i][2] = o[i][3] = 0.f;
+    float m[2] = {-INFINITY, -INFINITY}, l[2] = {0.f, 0.f};
+    const unsigned planes = v_exact ? 1 : 2;
+    const float scale2 = scale * 1.4426950408889634f;  // log2(e)
+    // PIPE: the source of the chunk c8 of key j (false past the last key: zeros)
+    auto key_src = [&](unsigned j, unsigned c8, const __half *&ks, const __half *&vs, size_t &plane) {
+        if (j < U.np) {
+            size_t off = ((size_t)kvh * U.np + j) * ATT_HD + c8;
+            ks = pkh + off;
+            vs = pvh + off;
+            plane = nkv_past;
+            return true;
+        }
+        if (j < lk) {
+            unsigned jr = j - U.np, ri = 0;
+            while (jr >= U.r_len[ri]) jr -= U.r_len[ri++];
+            size_t off = ((size_t)kvh * T + U.r_off[ri] + jr) * ATT_HD + c8;
+            ks = khl + off;
+            vs = vhl + off;
+            plane = nkv_all;
+            return true;
+        }
+        ks = khl;
+        vs = vhl;
+        plane = 0;
+        return false;
+    };
+    // PIPE: asynchronous copies of the tile at key j0 into stage st (K hi, K lo, V hi)
+    auto load_stage = [&](unsigned j0, unsigned st) {
+        __half *kh = Kst + st * 3 * TC_BN * ATT_HD, *kl = kh + TC_BN * ATT_HD, *vh = kl + TC_BN * ATT_HD;
+        for (unsigned i = tid; i < TC_BN * (ATT_HD / 8); i += THREADS) {
+            unsigned jj = (i / 128) * 8 + i % 8, c8 = ((i / 8) % 16) * 8;
+            const __half *ks, *vs;
+            size_t plane;
+            const unsigned n = key_src(j0 + jj, c8, ks, vs, plane) ? 16 : 0;
+            cp_async16(kh + wg_k_at(jj, c8), ks, n);
+            cp_async16(kl + wg_k_at(jj, c8), ks + plane, n);
+            cp_async16(vh + wg_v_at(jj, c8), vs, n);
+        }
+    };
+    if (PIPE) {
+        load_stage(0, 0);
+        cp_async_commit();
+    }
+    unsigned tile = 0;
+    for (unsigned j0 = 0; j0 < lk; j0 += TC_BN, tile++) {
+        bool vis = (ok[0] && j0 <= lim[0]) || (ok[1] && j0 <= lim[1]);
+        if (!__syncthreads_or(vis)) break;  // tiles are ordered: none after this one is visible either
+        if (PIPE) {
+            // the stage of the next tile was read by the previous one, which every thread has finished (barrier above)
+            if (j0 + TC_BN < lk) load_stage(j0 + TC_BN, (tile + 1) & 1);
+            cp_async_commit();
+            cp_async_wait<1>();  // this tile's copies (the one group issued before)
+            Kh = Kst + (tile & 1) * 3 * TC_BN * ATT_HD;
+            Kl = Kh + TC_BN * ATT_HD;
+            Vh = Kl + TC_BN * ATT_HD;
+        } else {
+            // 32 keys x 128 dims = 32 x 16 chunks of 8 halves (uint4) per plane; 8 neighbouring threads take 8 keys
+            // of one chunk, so that their K stores fill one core matrix
+            for (unsigned i = tid; i < TC_BN * (ATT_HD / 8); i += THREADS) {
+                unsigned jj = (i / 128) * 8 + i % 8, c8 = ((i / 8) % 16) * 8, j = j0 + jj;
+                uint4 kh = make_uint4(0, 0, 0, 0), kl = kh, vh = kh, vl = kh;
+                const __half *ks = nullptr, *vs = nullptr;
+                size_t plane_k = 0;
+                if (j < U.np) {
+                    size_t off = ((size_t)kvh * U.np + j) * ATT_HD + c8;
+                    ks = pkh + off;
+                    vs = pvh + off;
+                    plane_k = nkv_past;
+                } else if (j < lk) {
+                    unsigned jr = j - U.np, ri = 0;
+                    while (jr >= U.r_len[ri]) jr -= U.r_len[ri++];
+                    size_t off = ((size_t)kvh * T + U.r_off[ri] + jr) * ATT_HD + c8;
+                    ks = khl + off;
+                    vs = vhl + off;
+                    plane_k = nkv_all;
+                }
+                if (ks) {
+                    kh = *reinterpret_cast<const uint4 *>(ks);
+                    kl = *reinterpret_cast<const uint4 *>(ks + plane_k);
+                    vh = *reinterpret_cast<const uint4 *>(vs);
+                    if (planes == 2) vl = *reinterpret_cast<const uint4 *>(vs + plane_k);
+                }
+                *reinterpret_cast<uint4 *>(Kh + wg_k_at(jj, c8)) = kh;
+                *reinterpret_cast<uint4 *>(Kl + wg_k_at(jj, c8)) = kl;
+                *reinterpret_cast<uint4 *>(Vh + wg_v_at(jj, c8)) = vh;
+                if (planes == 2) *reinterpret_cast<uint4 *>(Vl + wg_v_at(jj, c8)) = vl;
+            }
+        }
+        fence_async_smem();
+        __syncthreads();
+        // S = Q K^T: the warpgroup's 64 rows x 32 keys, dims in 8 steps of 16 (hh, hl, lh per step as attn_tree_tc)
+        float s[TC_BN / 8][4];
+#pragma unroll
+        for (int nt = 0; nt < TC_BN / 8; nt++) s[nt][0] = s[nt][1] = s[nt][2] = s[nt][3] = 0.f;
+        float *sf = &s[0][0];
+#pragma unroll
+        for (int e = 0; e < TC_BN / 2; e++) wg_reg(sf[e]);
+        wg_fence();
+#pragma unroll
+        for (int ks = 0; ks < ATT_HD / 16; ks++) {
+            // K: LBO = one core matrix (the next 8 dims), SBO = 16 core matrices (the next 8 keys)
+            const unsigned long long bh = wg_desc(Kh + 2 * ks * WG_CORE, 2 * WG_CORE, 32 * WG_CORE);
+            const unsigned long long bl = wg_desc(Kl + 2 * ks * WG_CORE, 2 * WG_CORE, 32 * WG_CORE);
+            // A: the warpgroup's 64 rows (8 groups of 8 rows, 16 core matrices each)
+            const __half *qw = Qs + (w / 4) * 64 * ATT_HD + 2 * ks * WG_CORE;
+            const unsigned long long ah = wg_desc(qw, 2 * WG_CORE, 32 * WG_CORE);
+            const unsigned long long al = wg_desc(qw + BM * ATT_HD, 2 * WG_CORE, 32 * WG_CORE);
+            wgmma_m64n32_ss(sf, ah, bh);
+            wgmma_m64n32_ss(sf, ah, bl);
+            wgmma_m64n32_ss(sf, al, bh);
+        }
+        wg_commit();
+        wg_wait0();
+#pragma unroll
+        for (int e = 0; e < TC_BN / 2; e++) wg_reg(sf[e]);
+        // online softmax in base 2 (scores scaled by scale * log2(e)): element c of tile nt is row
+        // (c >> 1 ? g + 8 : g), key nt*8 + 2*t4 + (c & 1)
+        float p[TC_BN / 8][4];
+#pragma unroll
+        for (int a = 0; a < 2; a++) {
+            float mt = -INFINITY;
+#pragma unroll
+            for (int nt = 0; nt < TC_BN / 8; nt++)
+#pragma unroll
+                for (int e = 0; e < 2; e++) {
+                    unsigned j = j0 + nt * 8 + 2 * t4 + e;
+                    float x = (ok[a] && j <= lim[a]) ? s[nt][2 * a + e] * scale2 : -INFINITY;
+                    p[nt][2 * a + e] = x;
+                    mt = fmaxf(mt, x);
+                }
+            mt = fmaxf(mt, __shfl_xor_sync(0xffffffffu, mt, 1));
+            mt = fmaxf(mt, __shfl_xor_sync(0xffffffffu, mt, 2));
+            float mn = fmaxf(m[a], mt);
+            float corr = m[a] == -INFINITY ? 0.f : ex2(m[a] - mn);
+            float rs = 0.f;
+#pragma unroll
+            for (int nt = 0; nt < TC_BN / 8; nt++)
+#pragma unroll
+                for (int e = 0; e < 2; e++) {
+                    float y = mn == -INFINITY ? 0.f : ex2(p[nt][2 * a + e] - mn);
+                    p[nt][2 * a + e] = y;
+                    rs += y;
+                }
+            rs += __shfl_xor_sync(0xffffffffu, rs, 1);
+            rs += __shfl_xor_sync(0xffffffffu, rs, 2);
+            l[a] = l[a] * corr + rs;
+            m[a] = mn;
+            if (corr != 1.f) {  // the running maximum changed (multiplying by 1 changes nothing)
+#pragma unroll
+                for (int dt = 0; dt < ATT_HD / 8; dt++) {
+                    o[dt][2 * a] *= corr;
+                    o[dt][2 * a + 1] *= corr;
+                }
+            }
+        }
+        // O += P V: P (64 x 32) as A in 2 k16 steps from the score fragments (ph, pl, then the V lo plane per step as
+        // attn_tree_tc)
+        float *of = &o[0][0];
+        unsigned pha[TC_BN / 16][4], pla[TC_BN / 16][4];
+#pragma unroll
+        for (int kk = 0; kk < TC_BN / 16; kk++) {
+            __half h[8], lo[8];
+            const float pv8[8] = {p[2 * kk][0], p[2 * kk][1], p[2 * kk][2], p[2 * kk][3],
+                                  p[2 * kk + 1][0], p[2 * kk + 1][1], p[2 * kk + 1][2], p[2 * kk + 1][3]};
+#pragma unroll
+            for (int e = 0; e < 8; e++) {
+                h[e] = __float2half_rn(pv8[e]);
+                lo[e] = __float2half_rn(pv8[e] - __half2float(h[e]));
+            }
+            pha[kk][0] = pack2(h[0], h[1]);
+            pha[kk][1] = pack2(h[2], h[3]);
+            pha[kk][2] = pack2(h[4], h[5]);
+            pha[kk][3] = pack2(h[6], h[7]);
+            pla[kk][0] = pack2(lo[0], lo[1]);
+            pla[kk][1] = pack2(lo[2], lo[3]);
+            pla[kk][2] = pack2(lo[4], lo[5]);
+            pla[kk][3] = pack2(lo[6], lo[7]);
+        }
+#pragma unroll
+        for (int e = 0; e < ATT_HD / 2; e++) wg_reg(of[e]);
+        wg_fence();
+#pragma unroll
+        for (int kk = 0; kk < TC_BN / 16; kk++) {
+            // V: LBO = one core matrix (the next 8 keys), SBO = 4 core matrices (the next 8 dims)
+            const unsigned long long bh = wg_desc(Vh + 2 * kk * WG_CORE, 2 * WG_CORE, 8 * WG_CORE);
+            const unsigned long long bl = wg_desc(Vl + 2 * kk * WG_CORE, 2 * WG_CORE, 8 * WG_CORE);
+            wgmma_m64n128_tb(of, pha[kk], bh);
+            wgmma_m64n128_tb(of, pla[kk], bh);
+            if (planes == 2) wgmma_m64n128_tb(of, pha[kk], bl);
+        }
+        wg_commit();
+        wg_wait0();
+#pragma unroll
+        for (int e = 0; e < ATT_HD / 2; e++) wg_reg(of[e]);
+    }
+    if (PIPE) cp_async_wait<0>();  // a prefetched tile after the last visible one
+#pragma unroll
+    for (int a = 0; a < 2; a++) {
+        unsigned r = r0 + rr2[a];
+        if (r >= rows) continue;
+        float inv = 1.0f / l[a];
+        const unsigned head = kvh * rep + r / U.q_len, tok = U.q_off + r % U.q_len;
+        if (out_mode == ATT_OUT_F32) {
+            float *dst = (float *)out + ((size_t)head * T + tok) * ATT_HD;
+#pragma unroll
+            for (int dt = 0; dt < ATT_HD / 8; dt++)
+                *reinterpret_cast<float2 *>(dst + dt * 8 + 2 * t4) =
+                    make_float2(o[dt][2 * a] * inv, o[dt][2 * a + 1] * inv);
+        } else {
+            // merged heads [token, NH * HD] in the forward's dtype: what merge_heads makes of the f32 output
+            const size_t at = ((size_t)tok * NH + head) * ATT_HD;
+#pragma unroll
+            for (int dt = 0; dt < ATT_HD / 8; dt++) {
+                const float x0 = o[dt][2 * a] * inv, x1 = o[dt][2 * a + 1] * inv;
+                if (out_mode == ATT_OUT_F16) {
+                    __half *dst = (__half *)out + at + dt * 8 + 2 * t4;
+                    dst[0] = from_f<__half>(x0);
+                    dst[1] = from_f<__half>(x1);
+                } else {
+                    __nv_bfloat16 *dst = (__nv_bfloat16 *)out + at + dt * 8 + 2 * t4;
+                    dst[0] = from_f<__nv_bfloat16>(x0);
+                    dst[1] = from_f<__nv_bfloat16>(x1);
+                }
+            }
+        }
+    }
+}
+
+
+extern "C" __global__ void __launch_bounds__(TC_THREADS, 2)
+    attn_tree_wg(const float *qkv, const __half *khl, const __half *vhl, void *out, TreeTable tab, unsigned T, unsigned NH,
+                 unsigned NKV, float scale, unsigned v_exact, unsigned out_mode) {
+    attn_tree_wg_body<false>(qkv, khl, vhl, out, tab, T, NH, NKV, scale, v_exact, out_mode);
+}
+extern "C" __global__ void __launch_bounds__(TC_THREADS, 2)
+    attn_tree_wgp(const float *qkv, const __half *khl, const __half *vhl, void *out, TreeTable tab, unsigned T,
+                  unsigned NH, unsigned NKV, float scale, unsigned v_exact, unsigned out_mode) {
+    attn_tree_wg_body<true>(qkv, khl, vhl, out, tab, T, NH, NKV, scale, v_exact, out_mode);
+}
+extern "C" __global__ void __launch_bounds__(128, 2)
+    attn_tree_wgp64(const float *qkv, const __half *khl, const __half *vhl, void *out, TreeTable tab, unsigned T,
+                    unsigned NH, unsigned NKV, float scale, unsigned v_exact, unsigned out_mode) {
+    attn_tree_wg_body<true, 1>(qkv, khl, vhl, out, tab, T, NH, NKV, scale, v_exact, out_mode);
+}
+#endif  // BASAL_WGMMA
 
 template <bool QK3, bool PL>
 __device__ __forceinline__ void attn_tree_tc_pipe_body(const float *qkv, const __half *khl, const __half *vhl, float *out,
@@ -933,11 +1401,11 @@ __device__ __forceinline__ void attn_tree_tc_pipe_body(const float *qkv, const _
 }
 
 
-#define ATTN_TC_ENTRY(name, qk3, pl)                                                                                 \
-    extern "C" __global__ void __launch_bounds__(TC_THREADS)                                                       \
-        name(const float *qkv, const __half *khl, const __half *vhl, float *out, TreeTable tab, unsigned T,          \
-             unsigned NH, unsigned NKV, float scale, unsigned v_exact) {                                           \
-        attn_tree_tc_body<qk3, pl>(qkv, khl, vhl, out, tab, T, NH, NKV, scale, v_exact);                           \
+#define ATTN_TC_ENTRY(name, qk3, pl)                                                                                  \
+    extern "C" __global__ void __launch_bounds__(TC_THREADS)                                                          \
+        name(const float *qkv, const __half *khl, const __half *vhl, void *out, TreeTable tab, unsigned T,            \
+             unsigned NH, unsigned NKV, float scale, unsigned v_exact, unsigned out_mode) {                           \
+        attn_tree_tc_body<qk3, pl>(qkv, khl, vhl, out, tab, T, NH, NKV, scale, v_exact, out_mode);                    \
     }
 ATTN_TC_ENTRY(attn_tree_tc, true, true)
 ATTN_TC_ENTRY(attn_tree_tc_pv1, true, false)

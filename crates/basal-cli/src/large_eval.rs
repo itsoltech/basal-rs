@@ -112,6 +112,8 @@ pub(crate) struct Answered {
     pub(crate) tokens: usize,
     pub(crate) ms: f64,
     pub(crate) finalists: Option<Vec<usize>>,
+    /// Joint fit after the first round (with `Engine::trace_large_choice`).
+    pub(crate) first_round: Option<Vec<f64>>,
 }
 
 /// Run planned items one by one (each item = one shared-prefix tree forward per round) and return the answer.
@@ -128,7 +130,7 @@ pub(crate) fn answer<B: Backend>(engine: &mut Engine<B>, item: Item, duty: f64) 
     if duty < 1.0 {
         std::thread::sleep(std::time::Duration::from_secs_f64(ms / 1e3 * (1.0 / duty.max(0.05) - 1.0)));
     }
-    Ok(Answered { p, prompts, tokens, ms, finalists: out.finalists.remove(0) })
+    Ok(Answered { p, prompts, tokens, ms, finalists: out.finalists.remove(0), first_round: out.first_round.remove(0) })
 }
 
 pub fn eval<B: Backend>(
