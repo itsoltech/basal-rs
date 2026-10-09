@@ -9,9 +9,24 @@
 # reports/reference-1.5-max-fp32`. Writes WG_OUT (default out/wg), which must not exist.
 # Variant syntax: attention[:norm[:silu_block[:wgp_load]]], e.g. "auto:::original auto:::coalesced".
 # Empty norm/block uses current defaults; use "auto::1024" to pin the original SiLU launch.
+# Values the runtime does not read are rejected before the GPU is touched (it would run the defaults instead).
 set -euo pipefail
 cd /work
 export HF_HOME=/data/hf BASAL_HOME=/data/basal BASAL_NO_UPDATE_CHECK=1
+read -ra VS <<< "${WG_VARIANTS:-tc wg}"
+if [ ${#VS[@]} -eq 0 ]; then echo "WG_VARIANTS is empty" >&2; exit 1; fi
+first=${VS[0]}; last=${VS[-1]}
+reject() { echo "WG_VARIANTS: $2 in '$1' (attention[:norm[:silu_block[:wgp_load]]])" >&2; exit 1; }
+# values read by crates/basal-gpu (fused.rs, lib.rs); auto and default name the defaults
+for v in "${VS[@]}"; do
+  colons=${v//[^:]/}
+  if [ ${#colons} -gt 3 ]; then reject "$v" "more than four fields"; fi
+  IFS=: read -r att norm block load <<< "$v"
+  case $att in ''|auto|simt|tc|tc-pv1|tc-qk1|tc-f16|tc-pipe|wg|wgp|wgp64) ;; *) reject "$v" "unknown attention '$att'" ;; esac
+  case $norm in ''|register) ;; *) reject "$v" "unknown norm '$norm'" ;; esac
+  case $block in ''|128|256|512|1024) ;; *) reject "$v" "unknown SiLU block '$block'" ;; esac
+  case $load in ''|default|original|coalesced|sw128) ;; *) reject "$v" "unknown WGP load '$load'" ;; esac
+done
 O=${WG_OUT:-out/wg}
 if [ -e "$O" ]; then echo "output already exists: $O" >&2; exit 1; fi
 mkdir -p "$O"
@@ -25,8 +40,6 @@ nvidia-smi --query-gpu=name,driver_version,compute_cap,power.limit,clocks.max.sm
 basal-dev --version > "$O/version.txt" 2>&1
 sha256sum /opt/basal-dev/basal-cuda > "$O/binary.sha256"
 GPU=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)
-read -ra VS <<< "${WG_VARIANTS:-tc wg}"
-first=${VS[0]}; last=${VS[-1]}
 run() {
   local v=$1 att norm block load; shift
   IFS=: read -r att norm block load <<< "$v"

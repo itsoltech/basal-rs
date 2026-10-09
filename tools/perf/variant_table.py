@@ -4,7 +4,7 @@ requests-V-R.json (variant V, repetition R) in DIR:
   python3 tools/perf/variant_table.py DIR BASE V1 [V2 ...] [--skip N]
 
 Per variant the median over the repetitions (after the first N, warm-up on a cold GPU) of the per-run medians (single
-decision: `lat2_ms`; ladder: `median_ms` per request), and its ratio to BASE.
+decision: `lat2_ms`; throughput: `dec_s`; ladder: `median_ms` per request), and its ratio to BASE.
 """
 import glob
 import json
