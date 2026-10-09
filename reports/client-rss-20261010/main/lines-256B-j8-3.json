@@ -1,0 +1,94 @@
+{
+  "name": "lines-256B-j8",
+  "repeat": 3,
+  "jobs": 8,
+  "kind": "lines",
+  "response_bytes": 72,
+  "status": 200,
+  "slow_first": false,
+  "server_delay_s": 0,
+  "elapsed_s": 2.0242282500257716,
+  "output_records": 5000,
+  "output_errors": 0,
+  "output_bytes": 1878890,
+  "time_to_first_output_s": 0.5209076669998467,
+  "phases": [
+    {
+      "bytes": 256,
+      "records": 5000,
+      "records_total": 5000,
+      "elapsed_s": 0.4046177910058759,
+      "records_per_s": 12357.340955201324,
+      "wall_ms_per_record": 0.08092355820117518,
+      "drained_at_s": 0.9199882500106469,
+      "idle_rss_bytes": 14614528
+    }
+  ],
+  "rss_samples": [
+    {
+      "at_s": 0.021194542001467198,
+      "rss_bytes": 6766592
+    },
+    {
+      "at_s": 0.1409666250110604,
+      "rss_bytes": 12173312
+    },
+    {
+      "at_s": 0.2659321670071222,
+      "rss_bytes": 12173312
+    },
+    {
+      "at_s": 0.38478208403103054,
+      "rss_bytes": 12173312
+    },
+    {
+      "at_s": 0.5081611250061542,
+      "rss_bytes": 12173312
+    },
+    {
+      "at_s": 0.6198172090225853,
+      "rss_bytes": 14614528
+    },
+    {
+      "at_s": 0.7267156669986434,
+      "rss_bytes": 14614528
+    },
+    {
+      "at_s": 0.8363689590478316,
+      "rss_bytes": 14614528
+    },
+    {
+      "at_s": 0.9474001670023426,
+      "rss_bytes": 14614528
+    },
+    {
+      "at_s": 1.060156374995131,
+      "rss_bytes": 14614528
+    },
+    {
+      "at_s": 1.182685959036462,
+      "rss_bytes": 14614528
+    },
+    {
+      "at_s": 1.2916307920240797,
+      "rss_bytes": 14614528
+    },
+    {
+      "at_s": 1.4024681250448339,
+      "rss_bytes": 14614528
+    },
+    {
+      "at_s": 1.5123549590352923,
+      "rss_bytes": 14614528
+    },
+    {
+      "at_s": 1.6242631670320407,
+      "rss_bytes": 14614528
+    }
+  ],
+  "leak_scan": null,
+  "exit_code": 0,
+  "peak_rss_bytes": 14827520,
+  "cpu_user_s": 0.251799,
+  "cpu_system_s": 0.237581
+}

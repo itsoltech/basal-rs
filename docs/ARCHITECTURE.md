@@ -16,6 +16,14 @@ HTTP (axum, tokio)
 | `basal-gpu` | loader safetensors, forward Llama na candle 0.11, fuzje (`fused.rs`, kernele `kernels.cu` i `kernels.metal`), GEMM przez cuBLASLt (`cublaslt.rs`) lub port GEMM MLX (`gemm.rs`, Metal), głowica `evidence_head.pt` |
 | `basal-cli` | polecenie `basal`, serwer (`serve.rs`), eksport i porównania z referencją, pomiary |
 
+`basal client` składa requesty z pytań CLI lub szablonu, albo przyjmuje pełne requesty System One.
+`client/input.rs` czyta rekordy z limitem rozmiaru, `client/request.rs` składa i waliduje requesty przez `basal-core`,
+`client/http.rs` obsługuje HTTP (połączenia, timeouty, ograniczone ponowienia), a `client.rs` steruje wykonaniem
+i wyjściem. Liczba oczekujących/wykonywanych/buforowanych rekordów HTTP jest ograniczona przez `--jobs`.
+W trybie lokalnym jeden `Engine` przetwarza rekordy kolejno; ładowanie i inferencja odbywają się poza executorem
+Tokio, bez serwera i jego harmonogramu. Wybór tabel GEMM używa konfiguracji `serve`. Kontrakt promptu i odpowiedzi
+pozostaje w `basal-core`. Interfejs i przykłady: [CLIENT.md](CLIENT.md).
+
 ## Kontrakt promptu
 
 Prompt, szablon czatu, heurystyka języka (polskie znaki), serializacja stanu,

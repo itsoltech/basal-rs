@@ -1,0 +1,98 @@
+{
+  "name": "lines-256B-j8",
+  "repeat": 2,
+  "jobs": 8,
+  "kind": "lines",
+  "response_bytes": 72,
+  "status": 200,
+  "slow_first": false,
+  "server_delay_s": 0,
+  "elapsed_s": 2.022824249987025,
+  "output_records": 5000,
+  "output_errors": 0,
+  "output_bytes": 1878890,
+  "time_to_first_output_s": 0.5157634579809383,
+  "phases": [
+    {
+      "bytes": 256,
+      "records": 5000,
+      "records_total": 5000,
+      "elapsed_s": 0.48877954098861665,
+      "records_per_s": 10229.560733836948,
+      "wall_ms_per_record": 0.09775590819772333,
+      "drained_at_s": 1.0032127909944393,
+      "idle_rss_bytes": 14794752
+    }
+  ],
+  "rss_samples": [
+    {
+      "at_s": 0.007019750017207116,
+      "rss_bytes": 5472256
+    },
+    {
+      "at_s": 0.11968758300645277,
+      "rss_bytes": 12124160
+    },
+    {
+      "at_s": 0.2258743749698624,
+      "rss_bytes": 12124160
+    },
+    {
+      "at_s": 0.3400685410015285,
+      "rss_bytes": 12124160
+    },
+    {
+      "at_s": 0.4548743750201538,
+      "rss_bytes": 12124160
+    },
+    {
+      "at_s": 0.56737908301875,
+      "rss_bytes": 14647296
+    },
+    {
+      "at_s": 0.6848698749672621,
+      "rss_bytes": 14794752
+    },
+    {
+      "at_s": 0.8067988749826327,
+      "rss_bytes": 14794752
+    },
+    {
+      "at_s": 0.9300952500198036,
+      "rss_bytes": 14794752
+    },
+    {
+      "at_s": 1.042045624984894,
+      "rss_bytes": 14794752
+    },
+    {
+      "at_s": 1.1535461659659632,
+      "rss_bytes": 14794752
+    },
+    {
+      "at_s": 1.2787674160208553,
+      "rss_bytes": 14794752
+    },
+    {
+      "at_s": 1.3904301659786142,
+      "rss_bytes": 14794752
+    },
+    {
+      "at_s": 1.5062422080081888,
+      "rss_bytes": 14794752
+    },
+    {
+      "at_s": 1.6241324580041692,
+      "rss_bytes": 14794752
+    },
+    {
+      "at_s": 1.7415911249700002,
+      "rss_bytes": 14794752
+    }
+  ],
+  "leak_scan": null,
+  "exit_code": 0,
+  "peak_rss_bytes": 15040512,
+  "cpu_user_s": 0.239621,
+  "cpu_system_s": 0.236055
+}

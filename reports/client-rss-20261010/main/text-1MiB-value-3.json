@@ -1,0 +1,54 @@
+{
+  "name": "text-1MiB-value",
+  "repeat": 3,
+  "jobs": 1,
+  "kind": "text",
+  "response_bytes": 72,
+  "status": 200,
+  "slow_first": false,
+  "server_delay_s": 0,
+  "elapsed_s": 1.0471460000262596,
+  "output_records": 1,
+  "output_errors": 0,
+  "output_bytes": 5,
+  "time_to_first_output_s": 0.5466327919857576,
+  "phases": [
+    {
+      "bytes": 1048576,
+      "records": 1,
+      "records_total": 1,
+      "elapsed_s": 0.025276917032897472,
+      "records_per_s": 39.56178669647557,
+      "wall_ms_per_record": 25.276917032897472,
+      "drained_at_s": 0.5466476670117117,
+      "idle_rss_bytes": null
+    }
+  ],
+  "rss_samples": [
+    {
+      "at_s": 0.021602583001367748,
+      "rss_bytes": 6356992
+    },
+    {
+      "at_s": 0.14074708300177008,
+      "rss_bytes": 12009472
+    },
+    {
+      "at_s": 0.2604587919777259,
+      "rss_bytes": 12009472
+    },
+    {
+      "at_s": 0.3778600830119103,
+      "rss_bytes": 12009472
+    },
+    {
+      "at_s": 0.4990968750207685,
+      "rss_bytes": 12009472
+    }
+  ],
+  "leak_scan": null,
+  "exit_code": 0,
+  "peak_rss_bytes": 18923520,
+  "cpu_user_s": 0.03039,
+  "cpu_system_s": 0.009073
+}

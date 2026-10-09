@@ -1,0 +1,22 @@
+{
+  "questions": {
+    "department": {
+      "type": "choice",
+      "instructions": "Do którego działu skierować zgłoszenie? Kieruj według oczekiwanego rozwiązania sprawy. Jeśli brakuje informacji, wybierz other.",
+      "criteria": {
+        "returns": "Zwrot pieniędzy, reklamacja lub wymiana produktu",
+        "support": "Pomoc w konfiguracji lub korzystaniu z produktu",
+        "sales": "Pytania przed zakupem",
+        "other": "Inna sprawa lub za mało informacji"
+      }
+    },
+    "urgent": {
+      "type": "noul",
+      "instructions": "Czy zgłoszenie wymaga pilnej reakcji?",
+      "criteria": {
+        "true": "Opisuje bieżące zagrożenie bezpieczeństwa lub awarię blokującą pracę",
+        "false": "Zwykła sprawa bez takiego zagrożenia lub blokady"
+      }
+    }
+  }
+}
