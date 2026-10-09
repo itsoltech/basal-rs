@@ -50,3 +50,6 @@ Opis projektu: [README.md](README.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.
 - Nie modyfikuj checkoutów upstream w `.baseline/`.
 - Repozytorium nie zawiera danych pozwalających zidentyfikować maszyny, na
   których wykonano pomiary (adresy, ścieżki, nazwy hostów).
+- Pomiary na wynajętym GPU: [docs/CLOUD.md](docs/CLOUD.md). Przed każdą sesją
+  zapytaj użytkownika o budżet i kartę; kwot ani kosztów sesji nie zapisuj w
+  repozytorium. Po pomiarze usuń maszynę i pilnuj jej w trakcie pracy.

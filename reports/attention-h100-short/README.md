@@ -43,5 +43,4 @@ auto/wg.log)).
 | 512–16384 tok. | 0,994–1,013 | 0,992–1,011 |
 
 Pełne tabele: [auto/tables-4.5B.md](auto/tables-4.5B.md), [auto/tables-max.md](auto/tables-max.md),
-[forced/tables-4.5B.md](forced/tables-4.5B.md), [forced/tables-max.md](forced/tables-max.md). Koszt sesji (razem z
-pomiarem GEMM v3): ~$4,75.
+[forced/tables-4.5B.md](forced/tables-4.5B.md), [forced/tables-max.md](forced/tables-max.md).

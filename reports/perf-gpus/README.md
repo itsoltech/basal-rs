@@ -118,4 +118,4 @@ tor (podział na klasy w `mixed-rust-*.json`).
 - H100 przez biblioteki zgodności na sterowniku 535, nie na 580.
 - Upstream w ruchu mieszanym nie był mierzony na tych kartach.
 
-Koszt sesji: ok. $8 (pięć maszyn, 35–80 minut każda).
+Czas sesji: pięć maszyn, 35–80 minut każda.

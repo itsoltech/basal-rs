@@ -2,7 +2,7 @@
 
 Data: 2026-10-09. Wynajęta H100 PCIe (Hyperstack, 350 W, sterownik 570 z biblioteką zgodności CUDA 12.9),
 biblioteki CUDA 12.9.1 z `basal setup`, tabele GEMM z binarki. Build `bfe4e05` z wariantem `wgp` (drzewo robocze),
-[run-wg-cloud.sh](../../tools/perf/run-wg-cloud.sh) z `WG_VARIANTS="tc wg wgp"`. Koszt sesji ~$4,7.
+[run-wg-cloud.sh](../../tools/perf/run-wg-cloud.sh) z `WG_VARIANTS="tc wg wgp"`.
 
 - `tc`: `attn_tree_tc` (mma.sync).
 - `wg`: `attn_tree_wg` w wersji z `main` (`bfe4e05`, [attention-h100-wgmma](../attention-h100-wgmma/README.md)),

@@ -64,4 +64,4 @@ jak w [decision-sets](../decision-sets/README.md); na H100 `polemo2-in-85`,
 0,476 / 0,473, jak na A100). „8 mismatches” tokenów przy 44 przykładach to znane różnice
 formatu eksportu pytań `multi` z [compat-1.5-small](../compat-1.5-small/README.md).
 
-Koszt sesji: ~$4 (H100 Scaleway $3,30/h i RTX 6000 Ada $0,97/h, ok. 1 h).
+Czas sesji: ok. 1 h (H100 Scaleway i RTX 6000 Ada).

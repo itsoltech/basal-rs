@@ -1,6 +1,6 @@
 # Attention na wgmma (Hopper) i forward z mniejszą liczbą kerneli na H100
 
-Data: 2026-10-09. Wynajęta H100 PCIe (Massed Compute, 350 W, sterownik 580), jedna sesja (~1,6 h, ~$4,3).
+Data: 2026-10-09. Wynajęta H100 PCIe (Massed Compute, 350 W, sterownik 580), jedna sesja (~1,6 h).
 Modele basal-1.5-4.5B i max, f16, tabele GEMM z binarki dla tej karty.
 
 ## Forward z commitu `b892eee` wobec `4cf07da`

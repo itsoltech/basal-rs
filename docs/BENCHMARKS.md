@@ -100,7 +100,8 @@ python3 tools/cloud/basal-cloud.py down
 
 Każda maszyna ma w Shadeform automatyczne usunięcie po zadanym czasie i
 kwocie. Raporty z takiej maszyny podają kartę, sterownik i limit mocy, bez
-adresu maszyny.
+adresu maszyny. Zasady sesji (budżet, pilnowanie maszyny, skrypty pomiarowe,
+pułapki sterowników i profilerów): [CLOUD.md](CLOUD.md).
 
 ## Warunki
 

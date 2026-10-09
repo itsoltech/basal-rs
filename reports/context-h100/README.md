@@ -86,4 +86,4 @@ odpowiedź może zależeć od tego, z czym pytanie trafi do partii); zgodność 
 FP32 bez tabeli sprawdzona na A100 w
 [decision-sets](../decision-sets/README.md) (899–900/900).
 
-Koszt sesji: ~$2 (45 minut).
+Czas sesji: 45 minut.
