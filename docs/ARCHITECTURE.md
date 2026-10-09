@@ -73,9 +73,10 @@ rozszerza je przed użyciem (dokładny forward FP32, punkt odniesienia).
   jego przodków oraz własnego bloku, kafelkowane według pozycji klucza w
   prompcie. CUDA: `attn_tree_tc` na tensor cores (mma.sync, operandy f16
   rozbite na część wysoką i niską, czyli dokładność bliska f32) dla f16/bf16,
-  na H100 (compute capability 9.0, forward f16) `attn_tree_wg` z tą samą
-  arytmetyką na wgmma i bitowo tym samym wynikiem
-  ([pomiar](../reports/attention-h100-wgmma/README.md)), `attn_tree_f32` dla
+  na H100 (compute capability 9.0, forward f16) `attn_tree_wgp` z tą samą
+  arytmetyką na wgmma, z ładowaniem następnego kafelka K/V w trakcie liczenia
+  bieżącego, i bitowo tym samym wynikiem
+  ([pomiar](../reports/attention-h100-wgmma-2/README.md)), `attn_tree_f32` dla
   ścieżki f32. K i V przychodzą z `qkv_rope` od razu rozbite na płaszczyzny
   f16, a wynik attention od razu jako scalone głowy w dtype forwardu. Metal: `attn_tree_f32` z `kernels.metal`
   na macierzach `simdgroup_float8x8` w f32 (`BASAL_ATT=sdpa`: poprzednie SDPA

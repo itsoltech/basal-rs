@@ -818,11 +818,15 @@ impl CustomOp3 for AttentionTree<'_> {
             k @ "attn_tree_tc_pipe" => (k, 128, 256, TC_SMEM),
             // Q hi / lo of 128 rows, then the K / V tiles
             k @ "attn_tree_wg" => (k, 128, 256, (2 * 128 * 128 + 4 * 32 * 128) * 2),
+            // Q hi / lo, then two stages of K hi / lo and V hi
+            k @ "attn_tree_wgp" => (k, 128, 256, (2 * 128 * 128 + 2 * 3 * 32 * 128) * 2),
             k => (k, 128, 256, TC_SMEM / 2),
         };
         let f = match (name, cu::ptx_90a()) {
-            ("attn_tree_wg", Some(ptx)) => dev.get_or_load_custom_func(name, "basal_fused_90a", ptx)?,
-            ("attn_tree_wg", None) => {
+            ("attn_tree_wg" | "attn_tree_wgp", Some(ptx)) => {
+                dev.get_or_load_custom_func(name, "basal_fused_90a", ptx)?
+            }
+            ("attn_tree_wg" | "attn_tree_wgp", None) => {
                 candle_core::bail!("BASAL_ATT={name} needs a Hopper GPU (compute capability 9.0)")
             }
             _ => dev.get_or_load_custom_func(name, "basal_fused", cu::ptx())?,
@@ -830,7 +834,7 @@ impl CustomOp3 for AttentionTree<'_> {
         if smem > 0 {
             use candle_core::cuda_backend::cudarc::driver::sys::CUfunction_attribute;
             f.set_attribute(CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, smem as i32).w()?;
-            if name == "attn_tree_wg" {
+            if name.starts_with("attn_tree_wg") {
                 // the largest shared memory carveout: two blocks of 96 KiB per SM
                 f.set_attribute(CUfunction_attribute::CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT, 100).w()?;
             }
@@ -910,9 +914,10 @@ impl CustomOp3 for AttentionTree<'_> {
 }
 
 /// Tensor-core attention kernel: `tc` (Q·K with f16 hi/lo operands, three MMAs, and P split into hi/lo for P·V:
-/// products close to f32), on compute capability 9.0 the same with Hopper warpgroup MMAs (`wg`, bitwise the same
-/// outputs on H100); `BASAL_ATT` selects one for A/B: `tc`, `wg`, `tc-pv1` (P rounded to f16), `tc-qk1` (Q·K from
-/// the f16 hi parts only), `tc-f16` (both), `tc-pipe`. Softmax, accumulation and output are f32 in every variant.
+/// products close to f32), on compute capability 9.0 the same with Hopper warpgroup MMAs and the next K / V tile
+/// loading during the current one (`wgp`; `wg` without that overlap; both bitwise the same outputs on H100);
+/// `BASAL_ATT` selects one for A/B: `tc`, `wg`, `wgp`, `tc-pv1` (P rounded to f16), `tc-qk1` (Q·K from the f16 hi
+/// parts only), `tc-f16` (both), `tc-pipe`. Softmax, accumulation and output are f32 in every variant.
 #[cfg(feature = "cuda")]
 pub fn tc_kernel() -> &'static str {
     static K: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
@@ -923,7 +928,8 @@ pub fn tc_kernel() -> &'static str {
         Ok("tc-f16") => "attn_tree_tc_f16",
         Ok("tc-pipe") => "attn_tree_tc_pipe",
         Ok("wg") => "attn_tree_wg",
-        _ if cu::ptx_90a().is_some() => "attn_tree_wg",
+        Ok("wgp") => "attn_tree_wgp",
+        _ if cu::ptx_90a().is_some() => "attn_tree_wgp",
         _ => "attn_tree_tc",
     })
 }
@@ -944,6 +950,7 @@ pub fn attention_tree(
     // the tensor-core kernels (except tc-pipe) write merged heads themselves, bitwise as merge_heads would
     let in_kernel = merge
         .filter(|&dt| tc.is_some() && tc_kernel() != "attn_tree_tc_pipe" && matches!(dt, DType::F16 | DType::BF16));
+    let att = std::env::var("BASAL_ATT");
     let op = AttentionTree {
         units,
         total: d.l,
@@ -951,12 +958,12 @@ pub fn attention_tree(
         nkv: d.nkv,
         scale,
         tc: tc.is_some(),
-        tc_kernel: match tc_kernel() {
-            // measured on H100 for f16 forwards; a bf16 forward (V lo plane) keeps tc unless `BASAL_ATT=wg`
-            "attn_tree_wg" if !tc.is_some_and(|t| t.2) && std::env::var("BASAL_ATT").as_deref() != Ok("wg") => {
-                "attn_tree_tc"
-            }
-            k => k,
+        // the Hopper kernels are measured for f16 forwards: a bf16 forward (V lo plane) keeps tc unless BASAL_ATT asks
+        // for wg / wgp; wgp has no V lo stage, so wg runs instead
+        tc_kernel: match (tc_kernel(), tc.is_some_and(|t| t.2), matches!(att.as_deref(), Ok("wg" | "wgp"))) {
+            ("attn_tree_wg" | "attn_tree_wgp", false, false) => "attn_tree_tc",
+            ("attn_tree_wgp", false, true) => "attn_tree_wg",
+            (k, _, _) => k,
         },
         v_exact: tc.is_some_and(|t| t.2),
         merged: in_kernel,

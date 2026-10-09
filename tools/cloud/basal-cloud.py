@@ -71,7 +71,8 @@ if [ "$drv" -lt 575 ]; then
 fi
 curl --fail -sSL -o /tmp/install.sh https://raw.githubusercontent.com/itsoltech/basal-rs/main/install.sh
 sh /tmp/install.sh --prefix /opt/basal-release --no-setup
-/opt/basal-release/bin/basal --color never setup
+# --force: the CUDA 12.9.1 libraries even when the image has its own (GEMM tables are per cuBLASLt version)
+/opt/basal-release/bin/basal --color never setup --force
 for m in ${BASAL_PREFETCH:-4.5B}; do /opt/basal-release/bin/basal --color never setup --prefetch --model "$m"; done
 mkdir -p /opt/basal-dev /work && chmod 1777 /opt/basal-dev /work
 cat > /usr/local/bin/basal-dev <<'SH'

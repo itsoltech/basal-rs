@@ -1,0 +1,1 @@
+basal 0.1.4 (bfe4e05a, CUDA, kernels for compute capability 80,89,90)

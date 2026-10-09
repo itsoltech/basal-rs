@@ -1,9 +1,10 @@
 #!/bin/bash
-# Profiles of the pushed build (basal-dev) on a rented GPU (tools/cloud/basal-cloud.py), basal-1.5-4.5B, for the
-# attention kernels PROF_ATT (BASAL_ATT values, default "tc"): Nsight Systems on single decisions and ladder requests
-# (GPU time per kernel category and idle gaps, tools/perf/nsys_forward.py), Nsight Compute (full set) on one
-# attention launch at 4096 and 16384 tokens. Installs Nsight Systems and Compute from the CUDA apt repository when
-# missing (sudo). Run in /work after tools/perf/run-forward-cloud.sh (its ladder and tables). Writes out/prof/.
+# Profiles of the pushed build (basal-dev) on a rented GPU (tools/cloud/basal-cloud.py), basal-1.5-4.5B: Nsight Systems
+# on single decisions and ladder requests (GPU time per kernel category and idle gaps, tools/perf/nsys_forward.py) with
+# the default attention, Nsight Compute (full set) on one attention launch of a forward of 4096 and of 16384 tokens for
+# the kernels PROF_ATT (BASAL_ATT values, default "tc"). Installs Nsight Systems and Compute from the CUDA apt
+# repository when missing (sudo). Run in /work after tools/perf/run-wg-cloud.sh (its ladder and tables). Writes
+# out/prof/.
 cd /work
 export HF_HOME=/data/hf BASAL_HOME=/data/basal BASAL_NO_UPDATE_CHECK=1
 O=out/prof
@@ -23,28 +24,33 @@ fi
 nsys --version > $O/nsight-versions.txt 2>&1; ncu --version >> $O/nsight-versions.txt 2>&1
 dir=/data/hf/hub/models--Remek--basal-1.5-4.5B/snapshots/784a683bfadcc8865238fc0fc74a83b4000269bc
 REF=reports/reference-basal-1.5-4.5B-fp32
-T=$(awk '$1 == "4.5B" {print $3}' out/fwd/tables.txt)
-L=out/fwd/ladder-4.5B/requests.jsonl
+GPU=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)
+slug=$(echo "$GPU" | tr 'A-Z' 'a-z' | tr -cs 'a-z0-9' '-' | sed 's/-$//')
+T=crates/basal-cli/gemm-tables/$slug--basal-1.5-4.5B--f16--cublaslt120901.json
+[ -f $T ] || T=out/wg/table-4.5B.json
+L=out/wg/ladder-4.5B/requests.jsonl
 P="nsys profile -t cuda --cuda-memory-usage=false --force-overwrite=true"
+$P -o $O/bench basal-dev --color never bench --model $dir --gemm-table $T --reference $REF --out $O/bench.json \
+  --lat-n 20 > /dev/null 2>&1
+for id in ctx-512-q1 ctx-1792-q1 ctx-4096-q1; do
+  awk -v id="\"id\": \"$id\"" 'index($0, id)' $L > $O/$id.jsonl
+  $P -o $O/$id basal-dev --color never bench-requests --model $dir --gemm-table $T --requests $O/$id.jsonl --reps 4 \
+    --out $O/$id.json > /dev/null 2>&1
+done
+for r in $O/*.nsys-rep; do
+  nsys export -t sqlite --force-overwrite=true -o ${r%.nsys-rep}.sqlite $r > /dev/null 2>&1
+  python3 tools/perf/nsys_forward.py ${r%.nsys-rep}.sqlite > ${r%.nsys-rep}.md 2>&1
+done
+NCU=$(command -v ncu)
 for v in ${PROF_ATT:-tc}; do
-  BASAL_ATT=$v $P -o $O/bench-$v basal-dev --color never bench --model $dir --gemm-table $T --reference $REF \
-    --out $O/bench-$v.json --lat-n 20 > /dev/null 2>&1
-  for id in ctx-512-q1 ctx-1792-q1 ctx-4096-q1; do
-    awk -v id="\"id\": \"$id\"" 'index($0, id)' $L > $O/$id.jsonl
-    BASAL_ATT=$v $P -o $O/$id-$v basal-dev --color never bench-requests --model $dir --gemm-table $T \
-      --requests $O/$id.jsonl --reps 4 --out $O/$id-$v.json > /dev/null 2>&1
-  done
-  for r in $O/*-$v.nsys-rep; do
-    nsys export -t sqlite --force-overwrite=true -o ${r%.nsys-rep}.sqlite $r > /dev/null 2>&1
-    python3 tools/perf/nsys_forward.py ${r%.nsys-rep}.sqlite > ${r%.nsys-rep}.md 2>&1
-  done
   for id in ctx-4096-q1 ctx-16384-q1; do
     awk -v id="\"id\": \"$id\"" 'index($0, id)' $L > $O/$id.jsonl
+    # launch 200: past the template prefixes and the warm-up, inside a forward of the request
     sudo -n env "PATH=$PATH" HF_HOME=$HF_HOME BASAL_HOME=$BASAL_HOME BASAL_NO_UPDATE_CHECK=1 BASAL_ATT=$v \
-      timeout 1800 ncu --set full -k regex:attn_tree -c 1 --launch-skip 40 -o $O/ncu-$id-$v -f \
-      $(command -v basal-dev) --color never bench-requests --model $dir --gemm-table $T --requests $O/$id.jsonl \
-      --reps 1 --out /tmp/ncu.json > $O/ncu-$id-$v.log 2>&1
-    ncu --import $O/ncu-$id-$v.ncu-rep --page details > $O/ncu-$id-$v.txt 2>&1
+      LD_LIBRARY_PATH=/data/basal/.local/cuda/12.9.1/lib timeout 1800 $NCU --set full -k regex:attn_tree -c 1 \
+      --launch-skip 200 -o $O/ncu-$id-$v -f /opt/basal-dev/basal-cuda --color never bench-requests --model $dir \
+      --gemm-table $T --requests $O/$id.jsonl --reps 1 --out /tmp/ncu-$id-$v.json > $O/ncu-$id-$v.log 2>&1
+    $NCU --import "$(ls $O/ncu-$id-$v.ncu-rep* | head -1)" --page details > $O/ncu-$id-$v.txt 2>&1
   done
 done
 rm -f $O/*.sqlite

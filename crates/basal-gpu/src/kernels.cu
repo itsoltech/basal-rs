@@ -789,14 +789,17 @@ __device__ __forceinline__ unsigned wg_v_at(unsigned j, unsigned d) {
     return ((d / 8) * 4 + j / 8) * WG_CORE + (j % 8) * 8 + d % 8;
 }
 
+// PIPE (f16 forward only, V lo not read): two K / V stages filled by cp.async, the next tile loading while the
+// current one is computed
+template <bool PIPE>
 __device__ __forceinline__ void attn_tree_wg_body(const float *qkv, const __half *khl, const __half *vhl, void *out,
                                                   const TreeTable &tab, unsigned T, unsigned NH, unsigned NKV,
                                                   float scale, unsigned v_exact, unsigned out_mode) {
     // Shared memory: Q hi and lo [128 rows][128 dims] (wg_k_at), then the K hi / lo (wg_k_at) and V hi / lo (wg_v_at)
-    // tiles: 96 KiB per block.
+    // tiles: 96 KiB per block; PIPE: two stages of K hi / lo and V hi, 112 KiB.
     extern __shared__ __align__(16) unsigned char smraw[];
-    __half *Qs = reinterpret_cast<__half *>(smraw);
-    __half *Kh = Qs + 2 * TC_BM * ATT_HD, *Kl = Kh + TC_BN * ATT_HD;
+    __half *Qs = reinterpret_cast<__half *>(smraw), *Kst = Qs + 2 * TC_BM * ATT_HD;
+    __half *Kh = Kst, *Kl = Kh + TC_BN * ATT_HD;
     __half *Vh = Kl + TC_BN * ATT_HD, *Vl = Vh + TC_BN * ATT_HD;
     const unsigned tid = threadIdx.x, w = tid / 32, lane = tid % 32, g = lane >> 2, t4 = lane & 3;
     const unsigned kvh = blockIdx.y, rep = NH / NKV;
@@ -831,39 +834,90 @@ __device__ __forceinline__ void attn_tree_wg_body(const float *qkv, const __half
     float m[2] = {-INFINITY, -INFINITY}, l[2] = {0.f, 0.f};
     const unsigned planes = v_exact ? 1 : 2;
     const float scale2 = scale * 1.4426950408889634f;  // log2(e)
-    for (unsigned j0 = 0; j0 < lk; j0 += TC_BN) {
+    // PIPE: the source of the chunk c8 of key j (false past the last key: zeros)
+    auto key_src = [&](unsigned j, unsigned c8, const __half *&ks, const __half *&vs, size_t &plane) {
+        if (j < U.np) {
+            size_t off = ((size_t)kvh * U.np + j) * ATT_HD + c8;
+            ks = pkh + off;
+            vs = pvh + off;
+            plane = nkv_past;
+            return true;
+        }
+        if (j < lk) {
+            unsigned jr = j - U.np, ri = 0;
+            while (jr >= U.r_len[ri]) jr -= U.r_len[ri++];
+            size_t off = ((size_t)kvh * T + U.r_off[ri] + jr) * ATT_HD + c8;
+            ks = khl + off;
+            vs = vhl + off;
+            plane = nkv_all;
+            return true;
+        }
+        ks = khl;
+        vs = vhl;
+        plane = 0;
+        return false;
+    };
+    // PIPE: asynchronous copies of the tile at key j0 into stage st (K hi, K lo, V hi)
+    auto load_stage = [&](unsigned j0, unsigned st) {
+        __half *kh = Kst + st * 3 * TC_BN * ATT_HD, *kl = kh + TC_BN * ATT_HD, *vh = kl + TC_BN * ATT_HD;
+        for (unsigned i = tid; i < TC_BN * (ATT_HD / 8); i += TC_THREADS) {
+            unsigned jj = (i / 128) * 8 + i % 8, c8 = ((i / 8) % 16) * 8;
+            const __half *ks, *vs;
+            size_t plane;
+            const unsigned n = key_src(j0 + jj, c8, ks, vs, plane) ? 16 : 0;
+            cp_async16(kh + wg_k_at(jj, c8), ks, n);
+            cp_async16(kl + wg_k_at(jj, c8), ks + plane, n);
+            cp_async16(vh + wg_v_at(jj, c8), vs, n);
+        }
+    };
+    if (PIPE) {
+        load_stage(0, 0);
+        cp_async_commit();
+    }
+    unsigned tile = 0;
+    for (unsigned j0 = 0; j0 < lk; j0 += TC_BN, tile++) {
         bool vis = (ok[0] && j0 <= lim[0]) || (ok[1] && j0 <= lim[1]);
         if (!__syncthreads_or(vis)) break;  // tiles are ordered: none after this one is visible either
-        // 32 keys x 128 dims = 32 x 16 chunks of 8 halves (uint4) per plane; 8 neighbouring threads take 8 keys of one
-        // chunk, so that their K stores fill one core matrix
-        for (unsigned i = tid; i < TC_BN * (ATT_HD / 8); i += TC_THREADS) {
-            unsigned jj = (i / 128) * 8 + i % 8, c8 = ((i / 8) % 16) * 8, j = j0 + jj;
-            uint4 kh = make_uint4(0, 0, 0, 0), kl = kh, vh = kh, vl = kh;
-            const __half *ks = nullptr, *vs = nullptr;
-            size_t plane_k = 0;
-            if (j < U.np) {
-                size_t off = ((size_t)kvh * U.np + j) * ATT_HD + c8;
-                ks = pkh + off;
-                vs = pvh + off;
-                plane_k = nkv_past;
-            } else if (j < lk) {
-                unsigned jr = j - U.np, ri = 0;
-                while (jr >= U.r_len[ri]) jr -= U.r_len[ri++];
-                size_t off = ((size_t)kvh * T + U.r_off[ri] + jr) * ATT_HD + c8;
-                ks = khl + off;
-                vs = vhl + off;
-                plane_k = nkv_all;
+        if (PIPE) {
+            // the stage of the next tile was read by the previous one, which every thread has finished (barrier above)
+            if (j0 + TC_BN < lk) load_stage(j0 + TC_BN, (tile + 1) & 1);
+            cp_async_commit();
+            cp_async_wait<1>();  // this tile's copies (the one group issued before)
+            Kh = Kst + (tile & 1) * 3 * TC_BN * ATT_HD;
+            Kl = Kh + TC_BN * ATT_HD;
+            Vh = Kl + TC_BN * ATT_HD;
+        } else {
+            // 32 keys x 128 dims = 32 x 16 chunks of 8 halves (uint4) per plane; 8 neighbouring threads take 8 keys
+            // of one chunk, so that their K stores fill one core matrix
+            for (unsigned i = tid; i < TC_BN * (ATT_HD / 8); i += TC_THREADS) {
+                unsigned jj = (i / 128) * 8 + i % 8, c8 = ((i / 8) % 16) * 8, j = j0 + jj;
+                uint4 kh = make_uint4(0, 0, 0, 0), kl = kh, vh = kh, vl = kh;
+                const __half *ks = nullptr, *vs = nullptr;
+                size_t plane_k = 0;
+                if (j < U.np) {
+                    size_t off = ((size_t)kvh * U.np + j) * ATT_HD + c8;
+                    ks = pkh + off;
+                    vs = pvh + off;
+                    plane_k = nkv_past;
+                } else if (j < lk) {
+                    unsigned jr = j - U.np, ri = 0;
+                    while (jr >= U.r_len[ri]) jr -= U.r_len[ri++];
+                    size_t off = ((size_t)kvh * T + U.r_off[ri] + jr) * ATT_HD + c8;
+                    ks = khl + off;
+                    vs = vhl + off;
+                    plane_k = nkv_all;
+                }
+                if (ks) {
+                    kh = *reinterpret_cast<const uint4 *>(ks);
+                    kl = *reinterpret_cast<const uint4 *>(ks + plane_k);
+                    vh = *reinterpret_cast<const uint4 *>(vs);
+                    if (planes == 2) vl = *reinterpret_cast<const uint4 *>(vs + plane_k);
+                }
+                *reinterpret_cast<uint4 *>(Kh + wg_k_at(jj, c8)) = kh;
+                *reinterpret_cast<uint4 *>(Kl + wg_k_at(jj, c8)) = kl;
+                *reinterpret_cast<uint4 *>(Vh + wg_v_at(jj, c8)) = vh;
+                if (planes == 2) *reinterpret_cast<uint4 *>(Vl + wg_v_at(jj, c8)) = vl;
             }
-            if (ks) {
-                kh = *reinterpret_cast<const uint4 *>(ks);
-                kl = *reinterpret_cast<const uint4 *>(ks + plane_k);
-                vh = *reinterpret_cast<const uint4 *>(vs);
-                if (planes == 2) vl = *reinterpret_cast<const uint4 *>(vs + plane_k);
-            }
-            *reinterpret_cast<uint4 *>(Kh + wg_k_at(jj, c8)) = kh;
-            *reinterpret_cast<uint4 *>(Kl + wg_k_at(jj, c8)) = kl;
-            *reinterpret_cast<uint4 *>(Vh + wg_v_at(jj, c8)) = vh;
-            if (planes == 2) *reinterpret_cast<uint4 *>(Vl + wg_v_at(jj, c8)) = vl;
         }
         fence_async_smem();
         __syncthreads();
@@ -972,6 +1026,7 @@ __device__ __forceinline__ void attn_tree_wg_body(const float *qkv, const __half
 #pragma unroll
         for (int e = 0; e < ATT_HD / 2; e++) wg_reg(of[e]);
     }
+    if (PIPE) cp_async_wait<0>();  // a prefetched tile after the last visible one
 #pragma unroll
     for (int a = 0; a < 2; a++) {
         unsigned r = r0 + rr2[a];
@@ -1008,7 +1063,12 @@ __device__ __forceinline__ void attn_tree_wg_body(const float *qkv, const __half
 extern "C" __global__ void __launch_bounds__(TC_THREADS, 2)
     attn_tree_wg(const float *qkv, const __half *khl, const __half *vhl, void *out, TreeTable tab, unsigned T, unsigned NH,
                  unsigned NKV, float scale, unsigned v_exact, unsigned out_mode) {
-    attn_tree_wg_body(qkv, khl, vhl, out, tab, T, NH, NKV, scale, v_exact, out_mode);
+    attn_tree_wg_body<false>(qkv, khl, vhl, out, tab, T, NH, NKV, scale, v_exact, out_mode);
+}
+extern "C" __global__ void __launch_bounds__(TC_THREADS, 2)
+    attn_tree_wgp(const float *qkv, const __half *khl, const __half *vhl, void *out, TreeTable tab, unsigned T,
+                  unsigned NH, unsigned NKV, float scale, unsigned v_exact, unsigned out_mode) {
+    attn_tree_wg_body<true>(qkv, khl, vhl, out, tab, T, NH, NKV, scale, v_exact, out_mode);
 }
 #endif  // BASAL_WGMMA
 
