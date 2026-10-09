@@ -95,7 +95,11 @@ mod metal {
 
 #[cfg(feature = "cuda")]
 pub(crate) mod cu {
-    use candle_core::cuda_backend::cudarc::driver::LaunchConfig;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    use candle_core::cuda_backend::cudarc::driver::{CudaFunction, CudaStream, LaunchArgs, LaunchConfig};
+    use candle_core::cuda_backend::{CudaDevice, DeviceId};
 
     // PTX: [(compute capability, PTX)], ascending (build.rs)
     include!(concat!(env!("OUT_DIR"), "/kernels_ptx.rs"));
@@ -125,6 +129,43 @@ pub(crate) mod cu {
     /// One thread per element of `n`.
     pub fn cfg(n: usize) -> LaunchConfig {
         LaunchConfig::for_num_elems(n as u32)
+    }
+
+    /// A kernel of a module and the device's stream to launch it on.
+    pub struct Kernel {
+        func: CudaFunction,
+        stream: std::sync::Arc<CudaStream>,
+        /// looked up now for the first time on this device: function attributes are still to be set
+        pub fresh: bool,
+    }
+
+    impl std::ops::Deref for Kernel {
+        type Target = CudaFunction;
+        fn deref(&self) -> &CudaFunction {
+            &self.func
+        }
+    }
+
+    impl Kernel {
+        pub fn builder(&self) -> LaunchArgs<'_> {
+            self.stream.launch_builder(&self.func)
+        }
+    }
+
+    type Funcs = HashMap<(DeviceId, &'static str, String), CudaFunction>;
+    static FUNCS: std::sync::OnceLock<Mutex<Funcs>> = std::sync::OnceLock::new();
+
+    /// The kernel `name` of `module` (loaded from `ptx` the first time), looked up once per device: candle's
+    /// `get_or_load_custom_func` asks the driver for the function on every call, several hundred times per forward.
+    pub fn func(dev: &CudaDevice, name: &str, module: &'static str, ptx: &'static str) -> candle_core::Result<Kernel> {
+        let key = (dev.id(), module, name.to_string());
+        let mut funcs = FUNCS.get_or_init(Default::default).lock().unwrap();
+        let fresh = !funcs.contains_key(&key);
+        if fresh {
+            let f = dev.get_or_load_custom_func(name, module, ptx)?.into_cuda_function();
+            funcs.insert(key.clone(), f);
+        }
+        Ok(Kernel { func: funcs[&key].clone(), stream: dev.cuda_stream(), fresh })
     }
 }
 
@@ -189,7 +230,7 @@ impl CustomOp2 for BiasSiluMul {
             // 8 outputs per thread with 16-byte accesses when the layout allows it (same arithmetic per element)
             let vec8 = S != "f32" && i % 8 == 0 && go % 8 == 0 && bo % 8 == 0;
             let name = if vec8 { format!("bias_silu_mul8_{S}") } else { format!("bias_silu_mul_{S}") };
-            let f = dev.get_or_load_custom_func(&name, "basal_fused", cu::ptx())?;
+            let f = cu::func(&dev, &name, "basal_fused", cu::ptx())?;
             let mut a = f.builder();
             let threads = if vec8 { total / 8 } else { total };
             let (i_, n_) = (i as u32, threads as u32);
@@ -288,7 +329,7 @@ impl CustomOp3 for ResidualRmsNorm {
             let (xv, yv, bv, av) = (view!(x, T, xo), view!(y, T, yo), view!(b, T, bo), view!(acs, T, ao));
             // SAFETY: the kernel writes all 2 * m * h elements (both halves of every row).
             let out = unsafe { dev.alloc::<T>(2 * m * h)? };
-            let f = dev.get_or_load_custom_func(&format!("residual_rmsnorm_{S}"), "basal_fused", cu::ptx())?;
+            let f = cu::func(&dev, &format!("residual_rmsnorm_{S}"), "basal_fused", cu::ptx())?;
             let mut a = f.builder();
             let (h_, m_, eps) = (h as u32, m as u32, self.eps);
             a.arg(&xv).arg(&yv).arg(&bv).arg(&av).arg(&out).arg(&h_).arg(&m_).arg(&eps);
@@ -339,7 +380,7 @@ impl CustomOp3 for BiasResidual {
             let (xv, yv, bv) = (view!(x, T, xo), view!(y, T, yo), view!(b, T, bo));
             // SAFETY: every element is written by the kernel.
             let out = unsafe { dev.alloc::<T>(total)? };
-            let f = dev.get_or_load_custom_func(&format!("bias_residual_{S}"), "basal_fused", cu::ptx())?;
+            let f = cu::func(&dev, &format!("bias_residual_{S}"), "basal_fused", cu::ptx())?;
             let mut a = f.builder();
             let (h_, n_) = (h as u32, total as u32);
             a.arg(&xv).arg(&yv).arg(&bv).arg(&out).arg(&h_).arg(&n_);
@@ -432,7 +473,7 @@ impl CustomOp3 for QkvRope {
         let out = unsafe { dev.alloc::<f32>(n)? };
         by_dtype!(qkv.dtype(), |T, S| {
             let (qv, bv) = (view!(qkv, T, qo), view!(b, T, bo));
-            let f = dev.get_or_load_custom_func(&format!("qkv_rope_{S}"), "basal_fused", cu::ptx())?;
+            let f = cu::func(&dev, &format!("qkv_rope_{S}"), "basal_fused", cu::ptx())?;
             let mut a = f.builder();
             let c = [d.b as u32, d.l as u32, d.nh as u32, d.nkv as u32, d.hd as u32];
             a.arg(&qv).arg(&bv).arg(&csv).arg(&out).arg(&c[0]).arg(&c[1]).arg(&c[2]).arg(&c[3]).arg(&c[4]);
@@ -531,7 +572,7 @@ impl CustomOp1 for MergeHeads {
         let st = by_dtype!(dt, |T, S| {
             // SAFETY: every element is written by the kernel.
             let out = unsafe { dev.alloc::<T>(n)? };
-            let f = dev.get_or_load_custom_func(&format!("merge_heads_{S}"), "basal_fused", cu::ptx())?;
+            let f = cu::func(&dev, &format!("merge_heads_{S}"), "basal_fused", cu::ptx())?;
             let mut a = f.builder();
             let c = [d.b as u32, d.l as u32, d.nh as u32, d.hd as u32];
             a.arg(&xv).arg(&out).arg(&c[0]).arg(&c[1]).arg(&c[2]).arg(&c[3]);
@@ -592,7 +633,7 @@ impl CustomOp2 for MaskedSoftmax {
         let (sv, mv) = (view!(s, f32, contiguous(sl, "scores")?), view!(m, f32, contiguous(ml, "mask")?));
         // SAFETY: every element is written by the kernel.
         let out = unsafe { dev.alloc::<f32>(n)? };
-        let f = dev.get_or_load_custom_func("masked_softmax_f32", "basal_fused", cu::ptx())?;
+        let f = cu::func(&dev, "masked_softmax_f32", "basal_fused", cu::ptx())?;
         let mut a = f.builder();
         let (l_, lk_) = (self.l as u32, lk as u32);
         a.arg(&sv).arg(&mv).arg(&out).arg(&l_).arg(&lk_).arg(&self.scale);
@@ -667,7 +708,7 @@ impl CustomOp3 for LetterLogits {
         let out = unsafe { dev.alloc::<f32>(r * u)? };
         by_dtype!(h.dtype(), |T, S| {
             let hv = view!(h, T, ho);
-            let f = dev.get_or_load_custom_func(&format!("letter_logits_{S}"), "basal_fused", cu::ptx())?;
+            let f = cu::func(&dev, &format!("letter_logits_{S}"), "basal_fused", cu::ptx())?;
             let mut a = f.builder();
             let c = [r as u32, u as u32, hd as u32];
             a.arg(&hv).arg(&wv).arg(&iv).arg(&out).arg(&c[0]).arg(&c[1]).arg(&c[2]);
@@ -823,15 +864,13 @@ impl CustomOp3 for AttentionTree<'_> {
             k => (k, 128, 256, TC_SMEM / 2),
         };
         let f = match (name, cu::ptx_90a()) {
-            ("attn_tree_wg" | "attn_tree_wgp", Some(ptx)) => {
-                dev.get_or_load_custom_func(name, "basal_fused_90a", ptx)?
-            }
+            ("attn_tree_wg" | "attn_tree_wgp", Some(ptx)) => cu::func(&dev, name, "basal_fused_90a", ptx)?,
             ("attn_tree_wg" | "attn_tree_wgp", None) => {
                 candle_core::bail!("BASAL_ATT={name} needs a Hopper GPU (compute capability 9.0)")
             }
-            _ => dev.get_or_load_custom_func(name, "basal_fused", cu::ptx())?,
+            _ => cu::func(&dev, name, "basal_fused", cu::ptx())?,
         };
-        if smem > 0 {
+        if smem > 0 && f.fresh {
             use candle_core::cuda_backend::cudarc::driver::sys::CUfunction_attribute;
             f.set_attribute(CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, smem as i32).w()?;
             if name.starts_with("attn_tree_wg") {
@@ -1150,7 +1189,7 @@ impl CustomOp1 for SplitHiLo {
         let xv = view!(x, f32, contiguous(xl, "x")?);
         // SAFETY: both planes are written by the kernel.
         let out = unsafe { dev.alloc::<half::f16>(2 * n)? };
-        let f = dev.get_or_load_custom_func("split_hilo_f32", "basal_fused", cu::ptx())?;
+        let f = cu::func(&dev, "split_hilo_f32", "basal_fused", cu::ptx())?;
         let mut a = f.builder();
         let n64 = n as u64;
         a.arg(&xv).arg(&out).arg(&n64);

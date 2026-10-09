@@ -31,6 +31,8 @@ pub const INVARIANT_SEARCH_VERSION: u64 = 2;
 /// A configuration and its measured time (ms).
 type Timed = (f64, sys::cublasLtMatmulAlgo_t);
 const WORKSPACE: usize = 32 << 20;
+/// Entries of `Lt::chosen` before it is emptied (distinct M of the batches seen, times 4 weight shapes).
+const CHOSEN_MAX: usize = 4096;
 
 /// Shape class of M: up to 512 rounded up to a multiple of 16, above that to a multiple of 128.
 pub fn m_class(m: usize) -> usize {
@@ -91,6 +93,9 @@ pub struct Lt {
     /// Batch-invariant mode: one algorithm per (N, K, dtype) for every M, without split-K, so that a row's result
     /// does not depend on the other rows of the call. A shape listed here never uses another algorithm.
     invariant: Mutex<HashMap<(usize, usize, DType), ClassAlgos>>,
+    /// The algorithm of `invariant` chosen and accepted by cuBLASLt for an exact (M, N, K, dtype), so that a call
+    /// repeats neither the choice nor `cublasLtMatmulAlgoCheck`; emptied when the table changes.
+    chosen: Mutex<HashMap<(usize, usize, usize, DType), sys::cublasLtMatmulAlgo_t>>,
 }
 
 // SAFETY: the handle and descriptors are only used under the plan/algo locks on candle's single stream.
@@ -129,12 +134,14 @@ impl Lt {
             tuned: Mutex::new(Vec::new()),
             from_table: Mutex::new(0),
             invariant: Mutex::new(HashMap::new()),
+            chosen: Mutex::new(HashMap::new()),
         })
     }
 
     /// Batch-invariant table: for each (N, K, dtype) the algorithms of its M classes, all of them giving bitwise the
     /// same results (one algorithm for every class in tables written before the grouping).
     pub fn load_invariant(&self, entries: &[Tuned]) -> Result<()> {
+        self.chosen.lock().unwrap().clear();
         let mut inv = self.invariant.lock().unwrap();
         for e in entries {
             let list = inv.entry((e.n, e.k, e.dtype)).or_default();
@@ -758,6 +765,7 @@ impl Lt {
                             }
                             list.sort_by_key(|(c, _)| *c);
                             self.invariant.lock().unwrap().insert((n, k, dt), list);
+                            self.chosen.lock().unwrap().clear();
                             0
                         }
                     };
@@ -788,6 +796,11 @@ impl Lt {
         search: usize,
     ) -> Result<()> {
         let p = &self.plan_cached(m, n, k, dt)?;
+        // the algorithm already chosen and accepted by cuBLASLt for this exact problem (batch-invariant table)
+        if let Some(a) = self.chosen.lock().unwrap().get(&(m, n, k, dt)).copied() {
+            // SAFETY: device pointers of the operands and of a fresh output of m*n elements, all on `stream`.
+            return unsafe { self.run(p, &a, w, x, y, stream) };
+        }
         let inv = self.invariant.lock().unwrap().get(&(n, k, dt)).cloned();
         if let Some(list) = inv {
             // the algorithm of the smallest class >= M's class (else the largest), or any other valid one: all of
@@ -798,6 +811,11 @@ impl Lt {
             let Some(a) = order.map(|i| list[i].1).find(|a| self.check(p, a)) else {
                 candle_core::bail!("batch-invariant cuBLASLt algorithms rejected for M={m} (n={n} k={k})");
             };
+            let mut chosen = self.chosen.lock().unwrap();
+            if chosen.len() >= CHOSEN_MAX {
+                chosen.clear(); // M varies with every batch; the cache is a shortcut, not a record
+            }
+            chosen.insert((m, n, k, dt), a);
             // SAFETY: device pointers of the operands and of a fresh output of m*n elements, all on `stream`.
             return unsafe { self.run(p, &a, w, x, y, stream) };
         }

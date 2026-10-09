@@ -1330,6 +1330,13 @@ pub fn check_gemm_table(v: &Value) -> Result<()> {
     bail!("GEMM tables need the CUDA backend ({})", v["gpu"])
 }
 
+/// `BASAL_HOST_TIMING` is set: every CUDA readout reports its host preparation, enqueue and wait times (stderr).
+#[cfg(feature = "cuda")]
+fn host_timing() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("BASAL_HOST_TIMING").is_some())
+}
+
 /// RoPE cos and sin of position `pos` for every frequency.
 fn rope_angles(inv_freq: &[f64], pos: f64, cos: &mut [f32], sin: &mut [f32]) {
     for (j, f) in inv_freq.iter().enumerate() {
@@ -1549,7 +1556,19 @@ impl Backend for GpuBackend {
         let logits: Vec<Vec<f32>> = if cuda_readout {
             #[cfg(feature = "cuda")]
             {
-                fused::letter_logits(&hidden.contiguous()?, &self.lm_head, &ids_t)?.to_vec2()?
+                let lt = fused::letter_logits(&hidden.contiguous()?, &self.lm_head, &ids_t)?;
+                let enqueued = Instant::now();
+                let v = lt.to_vec2()?;
+                if host_timing() {
+                    // BASAL_HOST_TIMING: host preparation, enqueueing of the forward, wait for the GPU and the copy
+                    eprintln!(
+                        "host-timing rows {b} prepare {:.3} ms enqueue {:.3} ms wait {:.3} ms",
+                        (t1 - t0).as_secs_f64() * 1e3,
+                        (enqueued - t1).as_secs_f64() * 1e3,
+                        enqueued.elapsed().as_secs_f64() * 1e3
+                    );
+                }
+                v
             }
             #[cfg(not(feature = "cuda"))]
             unreachable!()
