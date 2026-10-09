@@ -1,0 +1,2 @@
+Process 7818: 1911 nodes malloced for 2781 KB
+Process 7818: 0 leaks for 0 total leaked bytes.

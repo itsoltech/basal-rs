@@ -1,0 +1,182 @@
+[
+  {
+    "name": "soak-120k-j8",
+    "repeat": 1,
+    "jobs": 8,
+    "kind": "lines",
+    "response_bytes": 72,
+    "status": 200,
+    "slow_first": false,
+    "server_delay_s": 0,
+    "elapsed_s": 17.056987875024788,
+    "output_records": 120000,
+    "output_errors": 0,
+    "output_bytes": 45248890,
+    "time_to_first_output_s": 0.5189355839975178,
+    "phases": [
+      {
+        "bytes": 256,
+        "records": 20000,
+        "records_total": 20000,
+        "elapsed_s": 1.9603047500131652,
+        "records_per_s": 10202.495300725912,
+        "wall_ms_per_record": 0.09801523750065826,
+        "drained_at_s": 2.468241000024136,
+        "idle_rss_bytes": 14843904
+      },
+      {
+        "bytes": 256,
+        "records": 20000,
+        "records_total": 40000,
+        "elapsed_s": 1.967017415969167,
+        "records_per_s": 10167.678149481875,
+        "wall_ms_per_record": 0.09835087079845835,
+        "drained_at_s": 5.240665999997873,
+        "idle_rss_bytes": 14827520
+      },
+      {
+        "bytes": 256,
+        "records": 20000,
+        "records_total": 60000,
+        "elapsed_s": 1.5942323749768548,
+        "records_per_s": 12545.222587322229,
+        "wall_ms_per_record": 0.07971161874884274,
+        "drained_at_s": 7.640021750004962,
+        "idle_rss_bytes": 14827520
+      },
+      {
+        "bytes": 256,
+        "records": 20000,
+        "records_total": 80000,
+        "elapsed_s": 1.6623088750056922,
+        "records_per_s": 12031.458353328899,
+        "wall_ms_per_record": 0.08311544375028461,
+        "drained_at_s": 10.107408334035426,
+        "idle_rss_bytes": 14827520.0
+      },
+      {
+        "bytes": 256,
+        "records": 20000,
+        "records_total": 100000,
+        "elapsed_s": 1.6778951669693924,
+        "records_per_s": 11919.695815158655,
+        "wall_ms_per_record": 0.08389475834846963,
+        "drained_at_s": 12.590430916985497,
+        "idle_rss_bytes": 14843904.0
+      },
+      {
+        "bytes": 256,
+        "records": 20000,
+        "records_total": 120000,
+        "elapsed_s": 1.6760004590032622,
+        "records_per_s": 11933.170956226493,
+        "wall_ms_per_record": 0.08380002295016312,
+        "drained_at_s": 15.071553958987352,
+        "idle_rss_bytes": 14860288
+      }
+    ],
+    "leak_scan": {
+      "exit_code": 0,
+      "output_file": "soak-120k-j8-1.leaks.txt"
+    },
+    "exit_code": 0,
+    "peak_rss_bytes": 15089664,
+    "cpu_user_s": 6.001371,
+    "cpu_system_s": 6.338037
+  },
+  {
+    "name": "large-small-cycles-j8",
+    "repeat": 1,
+    "jobs": 8,
+    "kind": "jsonl",
+    "response_bytes": 72,
+    "status": 200,
+    "slow_first": false,
+    "server_delay_s": 0,
+    "elapsed_s": 9.542773958004545,
+    "output_records": 16192,
+    "output_errors": 0,
+    "output_bytes": 219917786,
+    "time_to_first_output_s": 0.5152296669548377,
+    "phases": [
+      {
+        "bytes": 1024,
+        "records": 1000,
+        "records_total": 1000,
+        "elapsed_s": 0.10050016699824482,
+        "records_per_s": 9950.232222175953,
+        "wall_ms_per_record": 0.10050016699824482,
+        "drained_at_s": 0.6096241250052117,
+        "idle_rss_bytes": 14696448
+      },
+      {
+        "bytes": 1048576,
+        "records": 64,
+        "records_total": 1064,
+        "elapsed_s": 0.23872458300320432,
+        "records_per_s": 268.09136786361444,
+        "wall_ms_per_record": 3.7300716094250674,
+        "drained_at_s": 1.6485903749708086,
+        "idle_rss_bytes": 68845568.0
+      },
+      {
+        "bytes": 1024,
+        "records": 5000,
+        "records_total": 6064,
+        "elapsed_s": 0.40871308400528505,
+        "records_per_s": 12233.520764741032,
+        "wall_ms_per_record": 0.08174261680105702,
+        "drained_at_s": 2.8624572919798084,
+        "idle_rss_bytes": 68911104.0
+      },
+      {
+        "bytes": 1048576,
+        "records": 64,
+        "records_total": 6128,
+        "elapsed_s": 0.23631299997214228,
+        "records_per_s": 270.8272503313175,
+        "wall_ms_per_record": 3.692390624564723,
+        "drained_at_s": 3.903870541951619,
+        "idle_rss_bytes": 84344832
+      },
+      {
+        "bytes": 1024,
+        "records": 5000,
+        "records_total": 11128,
+        "elapsed_s": 0.42996562499320135,
+        "records_per_s": 11628.836607761517,
+        "wall_ms_per_record": 0.08599312499864027,
+        "drained_at_s": 5.138985124998726,
+        "idle_rss_bytes": 84459520
+      },
+      {
+        "bytes": 1048576,
+        "records": 64,
+        "records_total": 11192,
+        "elapsed_s": 0.27718512498540804,
+        "records_per_s": 230.8926209635859,
+        "wall_ms_per_record": 4.331017577897001,
+        "drained_at_s": 6.226274999964517,
+        "idle_rss_bytes": 90865664
+      },
+      {
+        "bytes": 1024,
+        "records": 5000,
+        "records_total": 16192,
+        "elapsed_s": 0.4360510829719715,
+        "records_per_s": 11466.546455799975,
+        "wall_ms_per_record": 0.08721021659439429,
+        "drained_at_s": 7.472721499972977,
+        "idle_rss_bytes": 90865664
+      }
+    ],
+    "leak_scan": {
+      "exit_code": 0,
+      "output_file": "large-small-cycles-j8-1.leaks.txt"
+    },
+    "exit_code": 0,
+    "peak_rss_bytes": 91045888,
+    "cpu_user_s": 3.952001,
+    "cpu_system_s": 0.978305
+  }
+]

@@ -238,6 +238,9 @@ do `NO_PROXY` (np. `127.0.0.1,localhost`), aby requesty nie przechodziły przez 
   30 s kończy request błędem zamiast skracać czas wymagany przez serwer. Walidacja 400/422 nie jest ponawiana.
 - `--max-input-bytes` ogranicza rekord i szablon (domyślnie 2 MiB, maksymalnie 64 MiB); odpowiedź HTTP ma limit
   16 MiB. Limit klienta nie zwiększa limitu HTTP serwera/proxy ani kontekstu modelu. Nie ma automatycznego obcinania.
+  Dla dużych rekordów/odpowiedzi użyj małego `--jobs`; `--value` pozwala pominąć kopertę wejściową, gdy potrzebna
+  jest jedna odpowiedź. Zmierzony koszt RSS, plateau po dużych porcjach i ograniczenia pomiaru opisuje
+  [raport pamięci klienta HTTP](../reports/client-rss-20261010/README.md).
 - Pamięć HTTP rośnie z `--jobs`: każdy z najwyżej `--jobs` rekordów w toku trzyma zakodowany request, odpowiedź
   (do 16 MiB) oraz sparsowany rekord wejściowy, jeśli trafia on do koperty. JSON po sparsowaniu zajmuje zwykle
   więcej niż jego tekst. Przy `--jobs 1` klient działa na jednym wątku runtime Tokio.

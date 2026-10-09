@@ -1,0 +1,102 @@
+{
+  "name": "lines-256B-j1",
+  "repeat": 1,
+  "jobs": 1,
+  "kind": "lines",
+  "response_bytes": 72,
+  "status": 200,
+  "slow_first": false,
+  "server_delay_s": 0,
+  "elapsed_s": 2.018815708986949,
+  "output_records": 5000,
+  "output_errors": 0,
+  "output_bytes": 1878890,
+  "time_to_first_output_s": 0.5148731670342386,
+  "phases": [
+    {
+      "bytes": 256,
+      "records": 5000,
+      "records_total": 5000,
+      "elapsed_s": 0.5920579580124468,
+      "records_per_s": 8445.119151484972,
+      "wall_ms_per_record": 0.11841159160248935,
+      "drained_at_s": 1.1042303750291467,
+      "idle_rss_bytes": 13844480
+    }
+  ],
+  "rss_samples": [
+    {
+      "at_s": 0.009063792007509619,
+      "rss_bytes": 2392064
+    },
+    {
+      "at_s": 0.1250367920147255,
+      "rss_bytes": 12075008
+    },
+    {
+      "at_s": 0.25060237501747906,
+      "rss_bytes": 12075008
+    },
+    {
+      "at_s": 0.3744600000209175,
+      "rss_bytes": 12075008
+    },
+    {
+      "at_s": 0.4985047500231303,
+      "rss_bytes": 12075008
+    },
+    {
+      "at_s": 0.6058797920122743,
+      "rss_bytes": 13828096
+    },
+    {
+      "at_s": 0.7105583749944344,
+      "rss_bytes": 13828096
+    },
+    {
+      "at_s": 0.8152664169901982,
+      "rss_bytes": 13828096
+    },
+    {
+      "at_s": 0.9201605420093983,
+      "rss_bytes": 13844480
+    },
+    {
+      "at_s": 1.0248254170292057,
+      "rss_bytes": 13844480
+    },
+    {
+      "at_s": 1.1338215420255437,
+      "rss_bytes": 13844480
+    },
+    {
+      "at_s": 1.2501121670356952,
+      "rss_bytes": 13844480
+    },
+    {
+      "at_s": 1.379484709003009,
+      "rss_bytes": 13844480
+    },
+    {
+      "at_s": 1.5034398750285618,
+      "rss_bytes": 13844480
+    },
+    {
+      "at_s": 1.6202049590065144,
+      "rss_bytes": 13844480
+    },
+    {
+      "at_s": 1.7390959589974955,
+      "rss_bytes": 13844480
+    },
+    {
+      "at_s": 1.8627799170208164,
+      "rss_bytes": 13844480
+    }
+  ],
+  "leak_scan": null,
+  "exit_code": 0,
+  "peak_rss_bytes": 14106624,
+  "cpu_user_s": 0.152176,
+  "cpu_system_s": 0.13285
+}

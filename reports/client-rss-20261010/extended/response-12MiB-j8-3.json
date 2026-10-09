@@ -1,0 +1,108 @@
+{
+  "name": "response-12MiB-j8",
+  "repeat": 3,
+  "jobs": 8,
+  "kind": "lines",
+  "response_bytes": 12582997,
+  "status": 200,
+  "slow_first": false,
+  "server_delay_s": 0,
+  "elapsed_s": 2.54484833299648,
+  "output_records": 32,
+  "output_errors": 0,
+  "output_bytes": 402665558,
+  "time_to_first_output_s": 0.5938650830066763,
+  "phases": [
+    {
+      "bytes": 256,
+      "records": 32,
+      "input_record_bytes": 257,
+      "records_total": 32,
+      "elapsed_s": 0.787657417007722,
+      "records_per_s": 40.62679955654665,
+      "wall_ms_per_record": 24.61429428149131,
+      "drained_at_s": 1.305662458005827,
+      "idle_rss_bytes": 232194048
+    }
+  ],
+  "rss_samples": [
+    {
+      "at_s": 0.011947416001930833,
+      "rss_bytes": 5619712
+    },
+    {
+      "at_s": 0.12772870803019032,
+      "rss_bytes": 12156928
+    },
+    {
+      "at_s": 0.24702424998395145,
+      "rss_bytes": 12156928
+    },
+    {
+      "at_s": 0.3636545410263352,
+      "rss_bytes": 12156928
+    },
+    {
+      "at_s": 0.4873416660120711,
+      "rss_bytes": 12156928
+    },
+    {
+      "at_s": 0.6015775409759954,
+      "rss_bytes": 164331520
+    },
+    {
+      "at_s": 0.7269289580290206,
+      "rss_bytes": 155959296
+    },
+    {
+      "at_s": 0.8440441249986179,
+      "rss_bytes": 227459072
+    },
+    {
+      "at_s": 0.9718110000248998,
+      "rss_bytes": 227459072
+    },
+    {
+      "at_s": 1.1005446250201203,
+      "rss_bytes": 231735296
+    },
+    {
+      "at_s": 1.2267642910010181,
+      "rss_bytes": 232194048
+    },
+    {
+      "at_s": 1.3411275830003433,
+      "rss_bytes": 232194048
+    },
+    {
+      "at_s": 1.449945166008547,
+      "rss_bytes": 232194048
+    },
+    {
+      "at_s": 1.5691211660159752,
+      "rss_bytes": 232194048
+    },
+    {
+      "at_s": 1.6907590830232948,
+      "rss_bytes": 232194048
+    },
+    {
+      "at_s": 1.7985527080018073,
+      "rss_bytes": 232194048
+    },
+    {
+      "at_s": 1.9214622500003316,
+      "rss_bytes": 232194048
+    },
+    {
+      "at_s": 2.0543916249880567,
+      "rss_bytes": 232194048
+    }
+  ],
+  "leak_scan": null,
+  "heap_snapshot": null,
+  "exit_code": 0,
+  "peak_rss_bytes": 232423424,
+  "cpu_user_s": 0.297966,
+  "cpu_system_s": 0.192628
+}

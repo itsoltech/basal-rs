@@ -1,0 +1,2 @@
+Process 6999: 1920 nodes malloced for 717 KB
+Process 6999: 0 leaks for 0 total leaked bytes.

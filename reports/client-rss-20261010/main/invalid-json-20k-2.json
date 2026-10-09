@@ -1,0 +1,90 @@
+{
+  "name": "invalid-json-20k",
+  "repeat": 2,
+  "jobs": 8,
+  "kind": "invalid",
+  "response_bytes": 72,
+  "status": 200,
+  "slow_first": false,
+  "server_delay_s": 0,
+  "elapsed_s": 2.01069116697181,
+  "output_records": 20000,
+  "output_errors": 20000,
+  "output_bytes": 2448890,
+  "time_to_first_output_s": 0.5246693340013735,
+  "phases": [
+    {
+      "bytes": 0,
+      "records": 20000,
+      "records_total": 20000,
+      "elapsed_s": 0.3465502499602735,
+      "records_per_s": 57711.68828270268,
+      "wall_ms_per_record": 0.017327512498013675,
+      "drained_at_s": 0.8684639589628205,
+      "idle_rss_bytes": 12500992
+    }
+  ],
+  "rss_samples": [
+    {
+      "at_s": 0.017538541986141354,
+      "rss_bytes": 6766592
+    },
+    {
+      "at_s": 0.14542999997502193,
+      "rss_bytes": 12222464
+    },
+    {
+      "at_s": 0.2631186670041643,
+      "rss_bytes": 12222464
+    },
+    {
+      "at_s": 0.38598241697764024,
+      "rss_bytes": 12222464
+    },
+    {
+      "at_s": 0.5144647500128485,
+      "rss_bytes": 12222464
+    },
+    {
+      "at_s": 0.6273871670127846,
+      "rss_bytes": 12484608
+    },
+    {
+      "at_s": 0.7442677500075661,
+      "rss_bytes": 12500992
+    },
+    {
+      "at_s": 0.860616541991476,
+      "rss_bytes": 12500992
+    },
+    {
+      "at_s": 0.9780086249811575,
+      "rss_bytes": 12500992
+    },
+    {
+      "at_s": 1.0971517500001937,
+      "rss_bytes": 12500992
+    },
+    {
+      "at_s": 1.2175150419934653,
+      "rss_bytes": 12500992
+    },
+    {
+      "at_s": 1.346992083999794,
+      "rss_bytes": 12500992
+    },
+    {
+      "at_s": 1.4776566670043394,
+      "rss_bytes": 12500992
+    },
+    {
+      "at_s": 1.6074292919947766,
+      "rss_bytes": 12500992
+    }
+  ],
+  "leak_scan": null,
+  "exit_code": 1,
+  "peak_rss_bytes": 12877824,
+  "cpu_user_s": 0.093578,
+  "cpu_system_s": 0.22806099999999999
+}

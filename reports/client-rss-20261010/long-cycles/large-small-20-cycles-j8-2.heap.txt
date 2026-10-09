@@ -1,0 +1,8 @@
+Physical footprint:         48.1M
+Physical footprint (peak):  76.1M
+MALLOC ZONE                         SIZE       SIZE       SIZE       SIZE      COUNT  ALLOCATED  FRAG SIZE  % FRAG   COUNT
+===========                      =======  =========  =========  =========  =========  =========  =========  ======  ======
+DefaultMallocZone      91.2M      65.0M      61.0M         0K       1467      2770K      58.3M     96%      25
+objc-class_rw_t          32K        32K        32K         0K        444        10K        22K     68%       2
+===========                      =======  =========  =========  =========  =========  =========  =========  ======  ======
+TOTAL                              91.2M      65.0M      61.0M         0K       1911      2781K      58.3M     96%      27

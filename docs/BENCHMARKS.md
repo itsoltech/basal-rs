@@ -67,6 +67,10 @@ istniejącej ścieżki.
 | `tools/bench/make_long_states.py` | żądania o dokumentach 1k–16k tokenów |
 | `tools/bench/make_mixed.py` | ruch mieszany: krótkie stany, wiele pytań, rozszerzenia 1.5, dokumenty do 16k |
 | `tools/bench/split_requests.py` | rozbicie żądań wielopytaniowych na pojedyncze pytania o ten sam stan |
+| `tools/perf/client_rss.py` | RSS procesu `basal client` z osobnym syntetycznym serwerem HTTP: szczyt z kernela, próbki w trakcie pracy, pamięć po opróżnieniu kolejki; na macOS opcjonalne skany `leaks` i podsumowanie stref malloc |
+
+Pomiar pamięci klienta HTTP i jego ograniczenia: [reports/client-rss-20261010](../reports/client-rss-20261010/README.md).
+Nie obejmuje pamięci lokalnego modelu ani jakości inferencji. Skrypt jest ręcznym narzędziem pomiarowym poza CI.
 
 Przykład obciążenia serwera:
 

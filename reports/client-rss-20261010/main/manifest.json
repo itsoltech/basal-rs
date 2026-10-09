@@ -1,0 +1,33 @@
+{
+  "tool": "tools/perf/client_rss.py",
+  "os": "Darwin",
+  "os_version": "27.0.1",
+  "architecture": "arm64",
+  "python": "3.14.7",
+  "binary_sha256": "4e3ad35dc877c854c43daa4e98ef5461bceafc925631d11033a8859201532107",
+  "git_commit": "273150c7c665af4fa2718328fdcc4009ffa3b4f7",
+  "repeats": 3,
+  "cases": [
+    "text-64B-value",
+    "text-1MiB-value",
+    "lines-256B-j1",
+    "jsonl-1MiB-j1",
+    "lines-256B-j8",
+    "jsonl-1MiB-j8",
+    "lines-256B-j32",
+    "jsonl-1MiB-j32",
+    "jsonl-1KiB-j8",
+    "response-1MiB-j8",
+    "slow-first-1MiB-j32",
+    "paced-1MiB-j32",
+    "invalid-json-20k",
+    "http-503-5k",
+    "oversize-then-small",
+    "soak-120k-j8",
+    "large-small-cycles-j8"
+  ],
+  "leaks_scan": false,
+  "peak_method": "os.wait4 ru_maxrss (macOS bytes, Linux KiB converted to bytes)",
+  "samples_method": "ps RSS KiB converted to bytes, nominal interval 100 ms",
+  "limits": "Synthetic HTTP fixture; no inference, GPU, local Engine, TLS, or quality measurement. Throughput is fixture/driver limited; wall_ms_per_record is amortized batch time, not request latency. No allocator/live-allocation instrumentation."
+}

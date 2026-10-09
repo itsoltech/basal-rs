@@ -1,0 +1,2 @@
+Process 10111: 1920 nodes malloced for 2784 KB
+Process 10111: 0 leaks for 0 total leaked bytes.

@@ -1,0 +1,108 @@
+{
+  "name": "response-12MiB-j1",
+  "repeat": 2,
+  "jobs": 1,
+  "kind": "lines",
+  "response_bytes": 12582997,
+  "status": 200,
+  "slow_first": false,
+  "server_delay_s": 0,
+  "elapsed_s": 2.531207334017381,
+  "output_records": 32,
+  "output_errors": 0,
+  "output_bytes": 402665558,
+  "time_to_first_output_s": 0.5571747500216588,
+  "phases": [
+    {
+      "bytes": 256,
+      "records": 32,
+      "input_record_bytes": 257,
+      "records_total": 32,
+      "elapsed_s": 0.7153727919794619,
+      "records_per_s": 44.73192209540827,
+      "wall_ms_per_record": 22.355399749358185,
+      "drained_at_s": 1.232734958990477,
+      "idle_rss_bytes": 45383680
+    }
+  ],
+  "rss_samples": [
+    {
+      "at_s": 0.010711708979215473,
+      "rss_bytes": 5619712
+    },
+    {
+      "at_s": 0.12322424998274073,
+      "rss_bytes": 12075008
+    },
+    {
+      "at_s": 0.2391966669820249,
+      "rss_bytes": 12075008
+    },
+    {
+      "at_s": 0.362410000001546,
+      "rss_bytes": 12075008
+    },
+    {
+      "at_s": 0.47670229198411107,
+      "rss_bytes": 12075008
+    },
+    {
+      "at_s": 0.6033137500053272,
+      "rss_bytes": 43335680
+    },
+    {
+      "at_s": 0.7144482500152662,
+      "rss_bytes": 43794432
+    },
+    {
+      "at_s": 0.8368891670252196,
+      "rss_bytes": 44498944
+    },
+    {
+      "at_s": 0.96637608401943,
+      "rss_bytes": 44531712
+    },
+    {
+      "at_s": 1.0812072500120848,
+      "rss_bytes": 45350912
+    },
+    {
+      "at_s": 1.1958333340007812,
+      "rss_bytes": 45383680
+    },
+    {
+      "at_s": 1.3129504169919528,
+      "rss_bytes": 45383680
+    },
+    {
+      "at_s": 1.4257476250058971,
+      "rss_bytes": 45383680
+    },
+    {
+      "at_s": 1.5501142090070061,
+      "rss_bytes": 45383680
+    },
+    {
+      "at_s": 1.6765815840335563,
+      "rss_bytes": 45383680
+    },
+    {
+      "at_s": 1.8025367920054123,
+      "rss_bytes": 45383680
+    },
+    {
+      "at_s": 1.919729291985277,
+      "rss_bytes": 45383680
+    },
+    {
+      "at_s": 2.042463959020097,
+      "rss_bytes": 45383680
+    }
+  ],
+  "leak_scan": null,
+  "heap_snapshot": null,
+  "exit_code": 0,
+  "peak_rss_bytes": 45613056,
+  "cpu_user_s": 0.256611,
+  "cpu_system_s": 0.11248599999999999
+}

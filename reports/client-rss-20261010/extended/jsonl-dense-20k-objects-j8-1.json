@@ -1,0 +1,100 @@
+{
+  "name": "jsonl-dense-20k-objects-j8",
+  "repeat": 1,
+  "jobs": 8,
+  "kind": "jsonl",
+  "response_bytes": 72,
+  "status": 200,
+  "slow_first": false,
+  "server_delay_s": 0,
+  "elapsed_s": 2.192350917030126,
+  "output_records": 32,
+  "output_errors": 0,
+  "output_bytes": 20128726,
+  "time_to_first_output_s": 0.5801948340376839,
+  "phases": [
+    {
+      "bytes": 0,
+      "records": 32,
+      "input_record_bytes": 628908,
+      "records_total": 32,
+      "elapsed_s": 0.37240262498380616,
+      "records_per_s": 85.92850279020324,
+      "wall_ms_per_record": 11.637582030743943,
+      "drained_at_s": 0.8788938340148889,
+      "idle_rss_bytes": 92979200.0
+    }
+  ],
+  "rss_samples": [
+    {
+      "at_s": 0.005710959027055651,
+      "rss_bytes": 5324800
+    },
+    {
+      "at_s": 0.11545437504537404,
+      "rss_bytes": 12156928
+    },
+    {
+      "at_s": 0.2213047090335749,
+      "rss_bytes": 12156928
+    },
+    {
+      "at_s": 0.332016083993949,
+      "rss_bytes": 12156928
+    },
+    {
+      "at_s": 0.4419891250436194,
+      "rss_bytes": 12156928
+    },
+    {
+      "at_s": 0.5519253340316936,
+      "rss_bytes": 47464448
+    },
+    {
+      "at_s": 0.6662703340407461,
+      "rss_bytes": 85393408
+    },
+    {
+      "at_s": 0.7847513339947909,
+      "rss_bytes": 95502336
+    },
+    {
+      "at_s": 0.8943494590348564,
+      "rss_bytes": 92979200
+    },
+    {
+      "at_s": 1.004868084040936,
+      "rss_bytes": 92979200
+    },
+    {
+      "at_s": 1.114784042001702,
+      "rss_bytes": 92979200
+    },
+    {
+      "at_s": 1.2255921250325628,
+      "rss_bytes": 92979200
+    },
+    {
+      "at_s": 1.3309286670410074,
+      "rss_bytes": 92979200
+    },
+    {
+      "at_s": 1.4407388750114478,
+      "rss_bytes": 92979200
+    },
+    {
+      "at_s": 1.5604379170108587,
+      "rss_bytes": 92979200
+    },
+    {
+      "at_s": 1.6783923750044778,
+      "rss_bytes": 92979200
+    }
+  ],
+  "leak_scan": null,
+  "heap_snapshot": null,
+  "exit_code": 0,
+  "peak_rss_bytes": 95846400,
+  "cpu_user_s": 0.7920689999999999,
+  "cpu_system_s": 0.041790999999999995
+}
