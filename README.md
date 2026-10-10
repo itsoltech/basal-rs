@@ -13,6 +13,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-818cf8?style=flat-square" alt="Licencja Apache-2.0"></a>
   <a href="#budowanie"><img src="https://img.shields.io/badge/backend-CUDA-76b900?style=flat-square" alt="Backend CUDA"></a>
   <a href="#budowanie"><img src="https://img.shields.io/badge/backend-Metal-a7b4c8?style=flat-square" alt="Backend Metal"></a>
+  <a href="docs/INTEL.md"><img src="https://img.shields.io/badge/backend-Intel_Arc-0071c5?style=flat-square" alt="Backend Intel Arc"></a>
 </p>
 
 <p align="center">
@@ -30,13 +31,14 @@ Zdolności decyzyjne i jakość odpowiedzi pochodzą z tych modeli.
 **Nasz wkład to silnik inferencji i serwer w Rust**, rozwijane przez
 [IT SOL](https://github.com/itsoltech): wykonanie obliczeń na GPU, optymalizacja
 pakowania żądań, kernele i harmonogram serwera. Backend CUDA (NVIDIA,
-sprawdzony na RTX 6000 Ada) i Metal (Apple Silicon, sprawdzony na M1 Pro i M2 Max).
+sprawdzony na RTX 6000 Ada), Metal (Apple Silicon, sprawdzony na M1 Pro i M2 Max)
+oraz [Intel Arc przez Vulkan](docs/INTEL.md) (Linux, Meteor Lake).
 Serwer implementuje istniejący kontrakt API **TypeSafe System One** oraz
 endpoint zgodny z serwerem upstream. Atrybucję portowanych elementów Basala
 i modeli bazowych zawiera [NOTICE](NOTICE).
 
-Rozwijamy ten silnik, by ułatwiać korzystanie z polskich modeli na NVIDIA
-i Apple Silicon oraz wspierać rozwój polskiego AI.
+Rozwijamy ten silnik, by ułatwiać korzystanie z polskich modeli na NVIDIA,
+Apple Silicon i Intel Arc oraz wspierać rozwój polskiego AI.
 
 Runtime odtwarza protokół decyzyjny upstream: ten sam prompt, te same
 token IDs, oba porządki opcji, uśrednienie i kalibracja z `CALIBRATION.json`.
@@ -75,7 +77,7 @@ Docker: [niżej](#uruchomienie-w-dockerze). Wymagania, ścieżki i szczegóły:
 ## Co wnosi silnik basal-rs
 
 - **Wspólny stan liczony raz** — drzewo prefiksów współdzieli obliczenia między pytaniami i żądaniami w partii.
-- **Dwa backendy GPU** — własne kernele CUDA i Metal, bez środowiska Pythona w runtime.
+- **Trzy backendy GPU** — własne kernele CUDA, Metal i Intel Vulkan, bez środowiska Pythona w runtime.
 - **Serwowanie istniejących API** — kontrakt TypeSafe System One i konwencje serwera Basal; kilka modeli w jednym procesie.
 - **Jawne pomiary** — porównania z upstream FP32, opóźnienia i przepustowość wraz z danymi w [reports/](reports/README.md).
 
@@ -257,6 +259,9 @@ Rust stable (sprawdzony na 1.95).
 # Metal (macOS)
 cargo build --release
 
+# Intel Arc (Linux, loader Vulkan i sterownik Intel Mesa)
+cargo build --locked --release --features basal-cli/intel
+
 # CUDA (Linux, sm_89; obraz z toolkitem: tools/cuda/Dockerfile)
 docker build -t basal-dev:cuda tools/cuda
 docker run -d --name basal-dev --gpus all --ipc=host -v "$PWD":/work -w /work basal-dev:cuda sleep infinity
@@ -268,6 +273,10 @@ dla architektur z `CUDA_COMPUTE_CAPS` (domyślnie 80, 89 i 90; bez niej
 `CUDA_COMPUTE_CAP` wybiera jedną, a kernele candle kompilują się dla
 `CUDA_COMPUTE_CAP`). Przy starcie runtime ładuje PTX najwyższej architektury nie
 wyższej niż karta. Obraz `basal-dev:cuda` ustawia `CUDA_COMPUTE_CAP=89`.
+
+Intel wymaga osobnego buildu z `basal-cli/intel`, obsługuje forward `f16`
+i nie potrzebuje CUDA ani oneAPI. Instrukcje, ograniczenia i pomiary:
+[Intel Arc](docs/INTEL.md). Gotowe paczki wydania i obraz Docker nadal dotyczą CUDA/Metal.
 
 ## Model
 

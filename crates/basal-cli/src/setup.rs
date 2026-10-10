@@ -1,6 +1,6 @@
 //! `basal setup`: prepare this machine for `basal serve`.
 //!
-//! - Linux: the CUDA 12 runtime libraries the CUDA build links (cudart, cuBLAS, cuBLASLt, cuRAND), downloaded from
+//! - Linux without the Intel backend: the CUDA 12 runtime libraries the CUDA build links (cudart, cuBLAS, cuBLASLt, cuRAND), downloaded from
 //!   NVIDIA's redistributable archives (`developer.download.nvidia.com/compute/cuda/redist`, SHA-256 from NVIDIA's
 //!   manifest) into the user data directory, unless the system already has them. Only the NVIDIA driver has to be
 //!   installed by the administrator. `basal` runs the CUDA build with that directory on `LD_LIBRARY_PATH`.
@@ -37,7 +37,7 @@ pub struct Options {
 }
 
 pub fn run(o: &Options) -> Result<()> {
-    if cfg!(target_os = "linux") {
+    if cfg!(target_os = "linux") && basal_gpu::BUILD_BACKEND != "Intel Arc (Vulkan)" {
         cuda_libraries(o.force)?;
     }
     if o.prefetch {

@@ -450,7 +450,7 @@ fn run_local(
     Ok(u8::from(failed))
 }
 
-fn load_local(args: &ClientArgs, name: &str) -> Result<basal_core::Engine<basal_gpu::GpuBackend>> {
+fn load_local(args: &ClientArgs, name: &str) -> Result<basal_core::Engine<crate::GpuBackend>> {
     let mut model = crate::config::model_ref(name)?;
     model.dtype = args.dtype.clone();
     if let Some(table) = &args.gemm_table {

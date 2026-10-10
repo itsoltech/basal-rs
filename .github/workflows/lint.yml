@@ -49,8 +49,13 @@ jobs:
         include:
           - backend: Linux without GPU
             runner: ubuntu-24.04
+            features: ""
+          - backend: Intel Vulkan
+            runner: ubuntu-24.04
+            features: "--features basal-cli/intel"
           - backend: Metal
             runner: macos-14
+            features: ""
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     steps:
@@ -65,11 +70,11 @@ jobs:
         with:
           key: quality-${{ matrix.backend }}
       - name: Clippy (workspace, all targets)
-        run: cargo clippy --locked --workspace --release --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --release --all-targets ${{ matrix.features }} -- -D warnings
       - name: Documentation (including private items)
         env:
           RUSTDOCFLAGS: "-D warnings"
-        run: cargo doc --locked --workspace --release --no-deps --document-private-items
+        run: cargo doc --locked --workspace --release --no-deps --document-private-items ${{ matrix.features }}
 
   cuda:
     name: Rust (CUDA)

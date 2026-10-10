@@ -61,6 +61,13 @@ Metodyka: [docs/BENCHMARKS.md](../docs/BENCHMARKS.md).
 | [metal-m2-max-tree](metal-m2-max-tree/README.md) | M2 Max: attention po jednostkach drzewa (wynik niezależny od pakowania) wobec SDPA, wczytywanie basal-1.5-max; CUDA bez zmian |
 | `reference-basal-1.5-{max,4.5B,mini}-{mlx,mlx-q8,mlx-f16}` | eksporty upstream v1.5.0 MLX na M1 Pro |
 
+## Intel Arc (Vulkan)
+
+| Katalog | Zawartość |
+|---|---|
+| [intel-arc-meteor-lake-2026-10-10](intel-arc-meteor-lake-2026-10-10/README.md) | mini, 4.5B i max: zgodność z FP32, HTTP, dobór GEMM, poprawki ładowania i kolejki oraz ograniczenia pamięci |
+| [intel-arc-meteor-lake-refactor-2026-10-11](intel-arc-meteor-lake-refactor-2026-10-11/README.md) | refaktor bez mapowania checkpointu: bitowa zgodność mini, 4.5B i max (w tym Tree), czas ładowania, odrzucony wariant GEMM |
+
 ## API
 
 | Katalog | Zawartość |
