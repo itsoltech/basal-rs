@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{ensure, Context, Result};
-use basal_core::{Backend, Engine};
+use basal_core::{Backend, DecideError, Engine};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -130,10 +130,15 @@ fn embedded(manifest: &Value, name: &str, data: &str, sha256: &str) -> Result<Ve
     replay(records)
 }
 
-pub(super) fn prepare<B: Backend>(raw: Vec<RawRequest>, engine: &Engine<B>, shuffle: bool) -> Result<Workload> {
+pub(super) fn prepare<B: Backend>(
+    raw: Vec<RawRequest>,
+    engine: &Engine<B>,
+    shuffle: bool,
+) -> Result<(Workload, Value)> {
     // Repeated synthetic requests share their encoded payload and token metadata.
     let mut pool: BTreeMap<[u8; 32], Arc<Request>> = BTreeMap::new();
     let mut out = Vec::with_capacity(raw.len());
+    let mut skipped = Vec::new();
     for mut r in raw {
         r.body["model"] = json!(engine.manifest.name);
         let body = serde_json::to_vec(&r.body)?;
@@ -152,7 +157,17 @@ pub(super) fn prepare<B: Backend>(raw: Vec<RawRequest>, engine: &Engine<B>, shuf
                 input_tokens: p.input_tokens,
             })
         } else {
-            let plan = engine.plan_request(&r.body).with_context(|| format!("planning benchmark request {}", r.id))?;
+            let plan = match engine.plan_request(&r.body) {
+                Ok(plan) => plan,
+                Err(DecideError::Unsupported(errors))
+                    if !errors.is_empty() && errors.iter().all(|e| e.kind == "context_length_exceeded") =>
+                {
+                    // Keep the whole request intact: removing individual questions would change the workload.
+                    skipped.push(json!({"id": r.id, "class": r.class, "detail": errors}));
+                    continue;
+                }
+                Err(error) => return Err(error).with_context(|| format!("planning benchmark request {}", r.id)),
+            };
             let input_tokens = plan.prepared.iter().flat_map(|p| &p.orders).map(|o| o.input_ids.len()).sum();
             let questions = r.body["questions"].as_object().context("questions object")?.len();
             let p = Arc::new(Request { id: r.id, class: r.class, body: Arc::new(body), key, questions, input_tokens });
@@ -164,10 +179,11 @@ pub(super) fn prepare<B: Backend>(raw: Vec<RawRequest>, engine: &Engine<B>, shuf
     if shuffle {
         out.sort_by_cached_key(|r| Sha256::digest(format!("mixed-v1/7/{}", r.id)).to_vec());
     }
-    Ok(out)
+    let description = description(&out, &skipped);
+    Ok((out, description))
 }
 
-pub(super) fn description(requests: &Workload) -> Value {
+fn description(requests: &Workload, skipped: &[Value]) -> Value {
     let mut classes: BTreeMap<&str, usize> = BTreeMap::new();
     for r in requests {
         *classes.entry(&r.class).or_default() += 1;
@@ -177,7 +193,9 @@ pub(super) fn description(requests: &Workload) -> Value {
     for r in requests {
         hash.update(r.key);
     }
-    json!({"requests": requests.len(), "unique_payloads": unique, "classes": classes, "ordered_payloads_sha256": format!("{:x}", hash.finalize()),
+    json!({"source_requests": requests.len() + skipped.len(), "requests": requests.len(),
+        "skipped_requests": skipped.len(), "skipped": skipped,
+        "unique_payloads": unique, "classes": classes, "ordered_payloads_sha256": format!("{:x}", hash.finalize()),
         "payload_bytes": super::latency(&requests.iter().map(|r| r.body.len() as f64).collect::<Vec<_>>()),
         "input_tokens_both_orders": super::latency(&requests.iter().map(|r| r.input_tokens as f64).collect::<Vec<_>>())})
 }

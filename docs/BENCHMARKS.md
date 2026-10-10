@@ -138,6 +138,23 @@ pokazuje liczbę różnych payloadów. To profil obciążenia, a nie zestaw
 oceny jakości. Osadzony mixed wymaga funkcji basal-1.5. Dla danych własnej
 aplikacji należy użyć `--requests`.
 
+Przed rozgrzewką benchmark waliduje pełne prompty dla wybranego modelu.
+Requesty przekraczające jego limit kontekstu (`context_length_exceeded`)
+są pomijane w całości, także gdy limit przekracza tylko jedno pytanie.
+Dotyczy to osadzonego profilu i `--requests`; inne błędy planowania nadal
+przerywają benchmark. Nazwa klasy nie decyduje o pominięciu: np. mini może
+obsłużyć krótsze requesty `doc-4k-8k`, ale odrzucić dokumenty około 8k
+po dodaniu pytania i szablonu promptu. Pusty workload po filtrowaniu
+kończy komendę błędem bez uruchamiania pomiaru.
+
+Raport `workloads.*` zawiera `source_requests`, `skipped_requests` oraz
+listę `skipped` z ID, klasą i szczegółami błędów. `requests`, statystyki
+rozmiarów i `ordered_payloads_sha256` opisują wyłącznie zachowany zestaw,
+używany przy każdym poziomie concurrency. Pominięcia nie są błędami HTTP
+i nie wchodzą do statystyk pomiaru. Przy porównywaniu modeli należy używać
+wspólnego zestawu obsługiwanych requestów; filtrowanie może zmienić udziały
+klas i liczbę mierzonych requestów.
+
 Do pomiaru wystarcza sama binarka:
 
 ```sh
@@ -151,7 +168,8 @@ klas i unikalnych ID z manifestu. `--scenario sequential` uruchamia tylko
 bazową fazę, `--scenario mixed` tylko profil mieszany, `all` oba, np.
 `basal benchmark --model 4.5B --scenario mixed --concurrency 1,8,32 --json
 --out benchmark-4.5B.json`. Domyślny pełny benchmark to 5400 mierzonych
-requestów (900 + 5 × 900) oraz rozgrzewka.
+requestów (900 + 5 × 900) oraz rozgrzewka, o ile wszystkie requesty mieszczą
+się w kontekście wybranego modelu.
 
 Teksty 900 pytań pochodzą z publicznych zbiorów o własnych licencjach,
 w tym niekomercyjnych lub badawczych (źródła w

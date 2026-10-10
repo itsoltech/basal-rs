@@ -264,16 +264,20 @@ fn execute(
     loaded?;
     let monitor = Monitor::start(guard, engine.backend.memory_probe())?;
     let mut workloads = Vec::new();
+    report["workloads"] = json!({});
     if options.scenario != Scenario::Mixed {
-        workloads.push(("sequential", workload::prepare(raw.sequential, &engine, false)?, vec![1]));
+        let (work, description) = workload::prepare(raw.sequential, &engine, false)?;
+        report["workloads"]["sequential"] = description;
+        workloads.push(("sequential", work, vec![1]));
     }
     if options.scenario != Scenario::Sequential {
-        workloads.push(("mixed", workload::prepare(raw.mixed, &engine, true)?, options.concurrency.clone()));
+        let (work, description) = workload::prepare(raw.mixed, &engine, true)?;
+        report["workloads"]["mixed"] = description;
+        workloads.push(("mixed", work, options.concurrency.clone()));
     }
-    report["workloads"] = json!(workloads
-        .iter()
-        .map(|(name, work, _)| (*name, workload::description(work)))
-        .collect::<std::collections::BTreeMap<_, _>>());
+    for (name, work, _) in &workloads {
+        ensure!(!work.is_empty(), "benchmark workload {name}: no requests within the model context limit");
+    }
     let server = Server::start(engine, options)?;
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let mut phases = Vec::new();
@@ -332,6 +336,13 @@ fn print_summary(report: &Value) {
     let display =
         |v: &Value, divisor: f64| v.as_f64().map(|v| format!("{:.2}", v / divisor)).unwrap_or_else(|| "n/a".into());
     println!("benchmark: {}", report["status"].as_str().unwrap_or("error"));
+    if let Some(workloads) = report["workloads"].as_object() {
+        for (name, work) in workloads {
+            if work["skipped_requests"].as_u64().is_some_and(|count| count > 0) {
+                println!("{name}: skipped {} requests exceeding the model context limit", work["skipped_requests"]);
+            }
+        }
+    }
     if let Some(phases) = report["phases"].as_array() {
         for p in phases {
             println!(
