@@ -1,4 +1,7 @@
-//! basal-1.0 forward on a GPU through candle: Apple Metal (matmul = candle's port of the MLX steel GEMM kernels,
+//! Basal inference on Metal, CUDA or Intel Vulkan. The optional `intel` module implements an independent
+//! FP16 Vulkan forward; the following describes the Candle-based Metal/CUDA implementation.
+//!
+//! Forward on Apple Metal (matmul = candle's port of the MLX steel GEMM kernels,
 //! MLX attention) or, with the `cuda` feature, NVIDIA CUDA (cuBLAS GEMM, fused kernels from kernels.cu, attention from
 //! candle ops). The forward code is shared; only the kernels behind the fused ops, GEMM and attention differ.
 //!
@@ -31,6 +34,8 @@ use serde_json::{json, Value};
 #[cfg(feature = "cuda")]
 mod cublaslt;
 mod fused;
+#[cfg(all(feature = "intel", not(target_os = "macos")))]
+pub mod intel;
 mod memory;
 pub use memory::{gpu_memory, GpuMemory, GpuMemoryProbe};
 #[cfg(target_os = "macos")]
@@ -42,7 +47,9 @@ use fused::HeadDims;
 pub const BUILD_BACKEND: &str = concat!("CUDA, kernels for compute capability ", env!("BASAL_CUDA_COMPUTE_CAPS"));
 #[cfg(all(not(feature = "cuda"), target_os = "macos"))]
 pub const BUILD_BACKEND: &str = "Metal";
-#[cfg(all(not(feature = "cuda"), not(target_os = "macos")))]
+#[cfg(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos")))]
+pub const BUILD_BACKEND: &str = "Intel Arc (Vulkan)";
+#[cfg(all(not(feature = "intel"), not(feature = "cuda"), not(target_os = "macos")))]
 pub const BUILD_BACKEND: &str = "no GPU backend";
 
 /// Apple GPU of this machine: name and the memory Metal recommends as one process's working set (bytes).

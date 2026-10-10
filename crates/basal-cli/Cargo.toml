@@ -37,3 +37,4 @@ serde_json.workspace = true
 
 [features]
 cuda = ["basal-gpu/cuda"]
+intel = ["basal-gpu/intel"]
