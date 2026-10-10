@@ -31,6 +31,8 @@ use serde_json::{json, Value};
 #[cfg(feature = "cuda")]
 mod cublaslt;
 mod fused;
+mod memory;
+pub use memory::{gpu_memory, GpuMemory, GpuMemoryProbe};
 #[cfg(target_os = "macos")]
 pub mod gemm;
 use fused::HeadDims;

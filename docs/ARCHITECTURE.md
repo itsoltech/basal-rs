@@ -182,6 +182,21 @@ między warstwami, więc krótkie partie dowolnego modelu wyprzedzają długie
 jest i tak ograniczone mocą, a kolejność decyduje harmonogram zamiast
 sterownika.
 
+### Pomiar scenariuszy HTTP
+
+`basal benchmark` uruchamia ten sam router i scheduler na prywatnym,
+wcześniej zajętym listenerze loopback z portem przydzielonym przez system.
+Własny klient HTTP wykonuje fazę sekwencyjną i profil mieszany przy
+zadanej współbieżności; nie symuluje partii przez bezpośrednie `Engine::run`.
+Domyślne workloady są osadzone w binarce (`include_str!` z
+`crates/basal-cli/benchmark-data/v2`); przed ładowaniem modelu komenda
+porównuje ich SHA-256 ze stałymi z locka profilu i liczniki z manifestem.
+Payloady planuje `Engine::plan_request` raz na unikalne body, przed fazami.
+Właściciel serwera przekazuje sygnał zamknięcia, anuluje klientów i czeka
+na zakończenie workerów GPU. Zwykłe `serve` nadal używa SIGINT/SIGTERM.
+Monitor pamięci działa na osobnym wątku z uchwytem do rzeczywistego
+urządzenia silnika. Metodyka i ograniczenia: [Pomiary](BENCHMARKS.md).
+
 ### Metryki Prometheus
 
 Metryki są domyślnie wyłączone. `--metrics` lub `metrics: true` w konfiguracji

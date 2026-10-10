@@ -7,6 +7,7 @@
 //!   basal export        --model DIR --inputs DIR --out DIR             per-item results in the reference format (Metal)
 //!   basal compare       --a DIR --b DIR --out FILE                     tokens, numerics, decisions, quality
 //!   basal bench         --model DIR --reference DIR --out FILE         latency / throughput (Metal)
+//!   basal benchmark     --model REF [--requests FILE] [--json]         sequential and mixed concurrent HTTP traffic
 //!   basal doctor        [--json]                                       what this machine has / lacks for serve
 //!   basal setup         [--prefetch] [--service]                       CUDA libraries (Linux), configuration
 //!   basal update        [--version X] [--check]                        newest release over this installation
@@ -15,6 +16,7 @@
 //!   basal serve         [--model REF]... | [--config FILE]             HTTP server (default: ./basal-serve.yml)
 
 mod bench;
+mod benchmark;
 mod choice_set;
 mod client;
 mod compare;
@@ -73,7 +75,7 @@ pub fn cuda_command(bin: &Path) -> std::process::Command {
 #[cfg(all(target_os = "linux", not(feature = "cuda")))]
 fn delegate_gpu_command() {
     use std::os::unix::process::CommandExt;
-    const GPU: [&str; 11] = [
+    const GPU: [&str; 12] = [
         "decide",
         "export",
         "bench-requests",
@@ -85,6 +87,7 @@ fn delegate_gpu_command() {
         "gemm",
         "gemm-share",
         "bench",
+        "benchmark",
     ];
     let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
     if !args.get(1).and_then(|a| a.to_str()).is_some_and(|c| GPU.contains(&c)) {
@@ -153,6 +156,15 @@ struct GpuArgs {
 enum Cmd {
     /// Use decisions in pipes and scripts: HTTP by default, --local loads a model once
     Client(Box<client::ClientArgs>),
+    /// Measure sequential and mixed concurrent HTTP traffic on this hardware
+    Benchmark {
+        #[command(flatten)]
+        m: ModelArgs,
+        #[command(flatten)]
+        g: GpuArgs,
+        #[command(flatten)]
+        options: benchmark::Options,
+    },
     /// Answer one System One request and print the response
     Decide {
         #[command(flatten)]
@@ -574,6 +586,7 @@ fn run() -> Result<()> {
                 std::process::exit(i32::from(code));
             }
         }
+        Cmd::Benchmark { m, g, options } => benchmark::run(&m, &g, &options)?,
         Cmd::Decide { m, g, request, timing } => {
             let body = read_request(&request)?;
             let mut engine = gpu_engine(&m, &g)?;

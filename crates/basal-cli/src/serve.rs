@@ -452,6 +452,25 @@ async fn health(State(app): State<Arc<App>>) -> Json<Value> {
 }
 
 pub fn serve<B: Backend + Send + 'static>(models: Vec<ServedModel<B>>, opts: ServeOptions) -> Result<()> {
+    serve_inner(models, opts, None)
+}
+
+/// Run the same HTTP router and GPU scheduler on an owned listener, stopped by its benchmark owner.
+pub(crate) fn serve_benchmark<B: Backend + Send + 'static>(
+    models: Vec<ServedModel<B>>,
+    opts: ServeOptions,
+    listener: std::net::TcpListener,
+    stop: oneshot::Receiver<()>,
+) -> Result<()> {
+    listener.set_nonblocking(true).context("benchmark listener")?;
+    serve_inner(models, opts, Some((listener, stop)))
+}
+
+fn serve_inner<B: Backend + Send + 'static>(
+    models: Vec<ServedModel<B>>,
+    opts: ServeOptions,
+    owned: Option<(std::net::TcpListener, oneshot::Receiver<()>)>,
+) -> Result<()> {
     anyhow::ensure!(!models.is_empty(), "no models to serve");
     let names: Vec<String> = models.iter().map(|m| m.engine.manifest.name.clone()).collect();
     for (i, n) in names.iter().enumerate() {
@@ -468,81 +487,101 @@ pub fn serve<B: Backend + Send + 'static>(models: Vec<ServedModel<B>>, opts: Ser
     // model before long requests, which yield between layers).
     let shared = models.len() > 1 || models.iter().any(|m| m.long_tokens > 0);
     let gate = shared.then(|| Arc::new(Gate::new(std::time::Duration::from_millis(opts.long_slice_ms))));
-    let mut routes = HashMap::new();
     let mut threads = Vec::new();
-    for m in models {
-        let ServedModel { mut engine, max_batch_tokens, schedule, long_tokens } = m;
-        let name = engine.manifest.name.clone();
-        let (tx, rx) = mpsc::unbounded_channel();
-        let lane = |kind| Lane::new(schedule, max_batch_tokens, metrics.as_ref().map(|m| m.lane(&name, kind)));
-        let long = if long_tokens > 0 {
-            let mut le = engine.fork().with_context(|| format!("{name}: second engine for the long lane"))?;
-            le.backend.set_gate(gate.clone().unwrap(), false);
-            let (ltx, lrx) = std::sync::mpsc::channel();
-            let l = lane("long");
+    let result = (|| -> Result<()> {
+        let mut routes = HashMap::new();
+        for m in models {
+            let ServedModel { mut engine, max_batch_tokens, schedule, long_tokens } = m;
+            let name = engine.manifest.name.clone();
+            let (tx, rx) = mpsc::unbounded_channel();
+            let lane = |kind| Lane::new(schedule, max_batch_tokens, metrics.as_ref().map(|m| m.lane(&name, kind)));
+            let long = if long_tokens > 0 {
+                let mut le = engine.fork().with_context(|| format!("{name}: second engine for the long lane"))?;
+                le.backend.set_gate(gate.clone().unwrap(), false);
+                let (ltx, lrx) = std::sync::mpsc::channel();
+                let l = lane("long");
+                threads.push(
+                    std::thread::Builder::new()
+                        .name(format!("{name}-long"))
+                        .spawn(move || long_lane(le, lrx, l))
+                        .context("starting a long-lane thread")?,
+                );
+                Some((ltx, long_tokens))
+            } else {
+                None
+            };
+            if let Some(g) = &gate {
+                engine.backend.set_gate(g.clone(), true);
+            }
+            let main_lane = lane("main");
             threads.push(
                 std::thread::Builder::new()
-                    .name(format!("{name}-long"))
-                    .spawn(move || long_lane(le, lrx, l))
-                    .context("starting a long-lane thread")?,
+                    .name(name.clone())
+                    .spawn(move || scheduler(engine, rx, main_lane, long))
+                    .context("starting a GPU thread")?,
             );
-            Some((ltx, long_tokens))
-        } else {
-            None
-        };
-        if let Some(g) = &gate {
-            engine.backend.set_gate(g.clone(), true);
+            crate::note!(
+                "serving {name} (batch {max_batch_tokens} tokens, {schedule:?}{})",
+                if long_tokens > 0 { format!(", long lane above {long_tokens} tokens") } else { String::new() }
+            );
+            routes.insert(name, tx);
         }
-        let main_lane = lane("main");
-        threads.push(
-            std::thread::Builder::new()
-                .name(name.clone())
-                .spawn(move || scheduler(engine, rx, main_lane, long))
-                .context("starting a GPU thread")?,
-        );
-        crate::note!(
-            "serving {name} (batch {max_batch_tokens} tokens, {schedule:?}{})",
-            if long_tokens > 0 { format!(", long lane above {long_tokens} tokens") } else { String::new() }
-        );
-        routes.insert(name, tx);
+        let app = Arc::new(App {
+            metrics,
+            routes,
+            names,
+            default_model,
+            inflight: AtomicUsize::new(0),
+            max_inflight: opts.max_inflight,
+            release_date: opts.release_date.clone(),
+        });
+        let router = Router::new().route("/v1/systemone", post(systemone)).route("/v1/basal", post(basal));
+        let router = if opts.metrics {
+            router
+                .route_layer(axum::middleware::from_fn_with_state(app.clone(), metrics::observe))
+                .route("/metrics", get(metrics::export))
+        } else {
+            router
+        };
+        let router = router.route("/v1/models", get(models_list)).route("/health", get(health)).with_state(app);
+        let router = if opts.access_log { router.layer(axum::middleware::from_fn(access_log)) } else { router };
+        let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+        rt.block_on(async move {
+            let (listener, stop) = match owned {
+                Some((listener, stop)) => (tokio::net::TcpListener::from_std(listener)?, Some(stop)),
+                None => (
+                    tokio::net::TcpListener::bind(opts.addr).await.with_context(|| format!("binding {}", opts.addr))?,
+                    None,
+                ),
+            };
+            crate::done!(
+                "serving on http://{} (ready {:.1} s after the start{})",
+                listener.local_addr()?,
+                crate::started().elapsed().as_secs_f64(),
+                if opts.access_log { "; access log on" } else { "" }
+            );
+            let shutdown = async move {
+                match stop {
+                    Some(stop) => {
+                        let _ = stop.await;
+                    }
+                    None => shutdown_signal().await,
+                }
+            };
+            axum::serve(listener, router).with_graceful_shutdown(shutdown).await.context("HTTP server")
+        })?;
+        // The router and with it every job queue are gone: the GPU threads finish their batch, return and drop their
+        // engines (CUDA resources) before the process exits.
+        drop(rt);
+        Ok(())
+    })();
+    // On setup / HTTP errors the closure also drops all queue senders before any worker is joined.
+    let mut panicked = false;
+    for thread in threads {
+        panicked |= thread.join().is_err();
     }
-    let app = Arc::new(App {
-        metrics,
-        routes,
-        names,
-        default_model,
-        inflight: AtomicUsize::new(0),
-        max_inflight: opts.max_inflight,
-        release_date: opts.release_date.clone(),
-    });
-    let router = Router::new().route("/v1/systemone", post(systemone)).route("/v1/basal", post(basal));
-    let router = if opts.metrics {
-        router
-            .route_layer(axum::middleware::from_fn_with_state(app.clone(), metrics::observe))
-            .route("/metrics", get(metrics::export))
-    } else {
-        router
-    };
-    let router = router.route("/v1/models", get(models_list)).route("/health", get(health)).with_state(app);
-    let router = if opts.access_log { router.layer(axum::middleware::from_fn(access_log)) } else { router };
-    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-    rt.block_on(async move {
-        let listener =
-            tokio::net::TcpListener::bind(opts.addr).await.with_context(|| format!("binding {}", opts.addr))?;
-        crate::done!(
-            "serving on http://{} (ready {:.1} s after the start{})",
-            opts.addr,
-            crate::started().elapsed().as_secs_f64(),
-            if opts.access_log { "; access log on" } else { "" }
-        );
-        axum::serve(listener, router).with_graceful_shutdown(shutdown_signal()).await.context("HTTP server")
-    })?;
-    // The router and with it every job queue are gone: the GPU threads finish their batch, return and drop their
-    // engines (CUDA resources) before the process exits.
-    drop(rt);
-    for t in threads {
-        let _ = t.join();
-    }
+    result?;
+    anyhow::ensure!(!panicked, "GPU worker panicked");
     Ok(())
 }
 
