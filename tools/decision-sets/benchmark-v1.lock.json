@@ -1,0 +1,13 @@
+{
+  "profile": "public_900_and_synthetic_mixed_v1",
+  "public_set_sha256": "5b701fe861d626b3983928d3e5e168e452bbf6ba4137d75c76597e71e7691291",
+  "fixture_sha256": {
+    "tools/bench/long_states.jsonl": "38f3d7f8685e2f8a469ef31dade00c7ad7fbb3526137d59f6ca8d4142fa1e348",
+    "tools/reference/requests_fanout.jsonl": "e445dee30aca3fffe04387dac82eae8c7c543ca5152239422c237fcf78955a19",
+    "tools/reference/systemone_cases_1.5.jsonl": "6213aed79a053e553cd707b9e24029fb6acf3343a1d7c3b18e134a94880add9a"
+  },
+  "workload_sha256": {
+    "sequential.jsonl": "64f8d09a636e948b318e0bde5907b4f943e020d8250b98710649bb359972aadc",
+    "mixed.jsonl": "a84ff31879701b31b3319a70aec45d05c6ecc5420f42ed25da37046a9605ea26"
+  }
+}

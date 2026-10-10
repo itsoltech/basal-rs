@@ -22,7 +22,7 @@ candle-nn = { version = "=0.11.0" }
 safetensors = "0.8"
 half = "2"
 clap = { version = "4", features = ["derive"] }
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "net", "signal", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "net", "signal", "macros", "time"] }
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
 
 [workspace.lints.rust]

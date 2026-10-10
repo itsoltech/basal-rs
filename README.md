@@ -400,13 +400,28 @@ basal client --template examples/client/routing.json --state examples/client/tic
 Pytania bez pliku, formaty wejścia, JSONL, `act`, warunki Bash oraz gotowe skrypty:
 [Klient do automatyzacji](docs/CLIENT.md).
 
+`benchmark` pokazuje, jak sprzęt radzi sobie z ruchem sekwencyjnym i
+mieszanym przez rzeczywisty serwer HTTP. Wystarcza sama binarka:
+
+```sh
+basal benchmark --model mini --json --out benchmark-mini.json
+```
+
+Komenda mierzy minimum, p50 i p99 odpowiedzi, czas kolejki, requesty/s,
+błędy oraz RAM/VRAM i CPU dla każdego poziomu współbieżności (domyślnie
+1, 4, 8, 16 i 32 klientów). 900 publicznych pytań i profil mieszany są
+osadzone w binarce; profil mieszany obejmuje krótkie payloady, wiele pytań
+i dokumenty około 1–16 tys. tokenów. `--requests FILE` pozwala odtwarzać
+payloady własnej aplikacji. Scenariusze, dane i pola JSON:
+[Pomiary](docs/BENCHMARKS.md#dobór-modelu-na-własnej-maszynie).
+
 ## Struktura
 
 | Katalog | Zawartość |
 |---|---|
 | `crates/basal-core` | kontrakt System One, prompt, tokenizer, pakowanie, decyzje, `facts`, `evidence`, silnik i trait `Backend` |
 | `crates/basal-gpu` | forward Llama na candle z własnymi kernelami CUDA i Metal, cuBLASLt, attention po węzłach drzewa |
-| `crates/basal-cli` | polecenie `basal` i serwer HTTP |
+| `crates/basal-cli` | polecenie `basal` i serwer HTTP; `benchmark-data/` z danymi `basal benchmark` osadzanymi w binarce |
 | `docker/`, `docker-compose.yml`, `serve.yml` | obraz do uruchamiania serwera i domyślna konfiguracja modeli |
 | `tools/cuda` | obraz deweloperski CUDA (budowanie, pomiary, upstream) |
 | `tools/reference` | eksport referencji z upstream, zestawy żądań |
@@ -429,4 +444,7 @@ Pytania bez pliku, formaty wejścia, JSONL, `act`, warunki Bash oraz gotowe skry
 
 Apache-2.0. Kod portuje zachowanie [rkinas/basal](https://github.com/rkinas/basal)
 (Apache-2.0); atrybucja w [NOTICE](NOTICE). Wagi modeli mają własne licencje
-na Hugging Face.
+na Hugging Face. Teksty pytań osadzone dla `basal benchmark`
+(`crates/basal-cli/benchmark-data`) pochodzą z publicznych zbiorów o własnych
+licencjach, w tym niekomercyjnych lub badawczych
+([źródła](tools/decision-sets/build.py)).

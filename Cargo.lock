@@ -251,6 +251,7 @@ dependencies = [
  "half",
  "objc2-metal",
  "safetensors 0.8.0",
+ "serde",
  "serde_json",
 ]
 
