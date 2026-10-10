@@ -66,6 +66,7 @@ Każdy skrypt opisuje w nagłówku, co mierzy, jakie ścieżki trzeba wcześniej
 | `tools/perf/run-ab.sh` | A/B dwóch buildów i wariantu attention |
 | `tools/perf/run-wg-cloud.sh` | warianty attention jednego buildu (`WG_VARIANTS`), eksporty wobec FP32 i siebie nawzajem |
 | `tools/perf/run-gemm-check.sh` | zmiana wyszukiwania tabel GEMM: stara i nowa tabela, heurystyka, zestaw decyzji |
+| `tools/perf/run-gemm-tables-cloud.sh` | brakujące tabele f16 z zainstalowanego wydania: generowanie, bajtowa zgodność single/tree/budget, 44 i 900 pytań wobec FP32, benchmark i krótka drabina kontekstu |
 | `tools/perf/run-profile-cloud.sh` | Nsight Systems: kategorie kerneli, timeline i API; opcjonalnie Nsight Compute dla wskazanego uruchomienia attention |
 | `tools/perf/run-parity-cloud.sh` | identyczność bajtowa eksportów dwóch buildów: single/tree/budget, cache prefiksu i cache stanu |
 | `tools/perf/run-http-variants-cloud.sh` | HTTP A/B/B/A jednego buildu: pełne odpowiedzi, latency, throughput, energia i VRAM |
@@ -116,6 +117,17 @@ Prześlij dane na maszynę przed uruchomieniem. `PROF_LADDER`, `PARITY_INPUT_45B
 `PARITY_INPUT_MAX` i `HTTP_REQUESTS` wskazują wejścia spoza raportów w Git.
 Historyczne wejścia kampanii są w lokalnym archiwum jej autora.
 Uruchamiaj pomiary kolejno, bez innych zadań GPU; katalog wyniku musi być nowy.
+
+`run-gemm-tables-cloud.sh` korzysta z zainstalowanego wydania w
+`/opt/basal-release/libexec/basal/basal-cuda`; przed sesją sprawdź zgodność jego
+kodu wyszukiwania i runtime'u z checkoutem. `GEMM_MODELS="mini 4.5B max"` wybiera
+modele mieszczące się w VRAM, a `GEMM_OUT` wskazuje nowy katalog wyniku.
+Runner wymaga wszystkich trzech referencji 44 przykładów oraz referencji
+900 pytań w `.cache/cloud/refs` wymienionych w nagłówku. Pole `source` wskazuje
+raport kampanii z 2026-10-10; przy kolejnej kampanii zmień je przed dodaniem tabel.
+Marker `VALIDATED` powstaje osobno dla każdego modelu po zakończeniu wszystkich
+kroków. Przed dodaniem tabeli przejrzyj również różnice względem FP32: marker
+potwierdza wykonanie porównania, a nie brak różnic numerycznych wobec FP32.
 
 Do `reports/` zapisuj krótkie wyniki i zakres weryfikacji. Pełne eksporty, logi
 i profile pobieraj do ignorowanego `.cache/` i archiwizuj poza Gitem.

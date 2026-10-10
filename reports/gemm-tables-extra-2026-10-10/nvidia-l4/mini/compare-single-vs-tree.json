@@ -1,0 +1,2031 @@
+{
+  "a": "out/gemm-extra/mini/export-single",
+  "b": "out/gemm-extra/mini/export-tree",
+  "sign": "differences are b - a",
+  "missing": [],
+  "tokens": {
+    "orders_compared": 132,
+    "mismatches": [],
+    "known_deviations": []
+  },
+  "bench": {
+    "items": 44,
+    "letter_logit_diff": {
+      "n": 268,
+      "max": 0.0,
+      "p50": 0.0,
+      "p95": 0.0,
+      "p99": 0.0,
+      "mean": 0.0
+    },
+    "order_prob_diff": {
+      "n": 268,
+      "max": 0.0,
+      "p50": 0.0,
+      "p95": 0.0,
+      "p99": 0.0,
+      "mean": 0.0
+    },
+    "avg_prob_diff": {
+      "n": 134,
+      "max": 0.0,
+      "p50": 0.0,
+      "p95": 0.0,
+      "p99": 0.0,
+      "mean": 0.0
+    },
+    "cal_prob_diff": {
+      "n": 134,
+      "max": 0.0,
+      "p50": 0.0,
+      "p95": 0.0,
+      "p99": 0.0,
+      "mean": 0.0
+    },
+    "tv_avg": {
+      "n": 44,
+      "max": 0.0,
+      "p50": 0.0,
+      "p95": 0.0,
+      "p99": 0.0,
+      "mean": 0.0
+    },
+    "tv_cal": {
+      "n": 44,
+      "max": 0.0,
+      "p50": 0.0,
+      "p95": 0.0,
+      "p99": 0.0,
+      "mean": 0.0
+    },
+    "argmax_agreement_avg": "44/44",
+    "argmax_agreement_cal": "44/44",
+    "flips_avg": [],
+    "flips_cal": []
+  },
+  "quality": {
+    "a_avg": {
+      "n": 44,
+      "correct": 31,
+      "accuracy": 0.7045454545454546,
+      "nll": 0.9881990089112894,
+      "brier": 0.4357872089320567,
+      "ece_10bin": 0.1756906025508393
+    },
+    "b_avg": {
+      "n": 44,
+      "correct": 31,
+      "accuracy": 0.7045454545454546,
+      "nll": 0.9881990089112894,
+      "brier": 0.4357872089320567,
+      "ece_10bin": 0.1756906025508393
+    },
+    "a_cal": {
+      "n": 44,
+      "correct": 31,
+      "accuracy": 0.7045454545454546,
+      "nll": 0.8977888432093596,
+      "brier": 0.43055047251362466,
+      "ece_10bin": 0.15468446066510338
+    },
+    "b_cal": {
+      "n": 44,
+      "correct": 31,
+      "accuracy": 0.7045454545454546,
+      "nll": 0.8977888432093596,
+      "brier": 0.43055047251362466,
+      "ece_10bin": 0.15468446066510338
+    }
+  },
+  "systemone": {
+    "numeric_identical_tokens": {
+      "items": 22,
+      "letter_logit_diff": {
+        "n": 104,
+        "max": 0.0,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "mean": 0.0
+      },
+      "order_prob_diff": {
+        "n": 104,
+        "max": 0.0,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "mean": 0.0
+      },
+      "avg_prob_diff": {
+        "n": 52,
+        "max": 0.0,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "mean": 0.0
+      },
+      "cal_prob_diff": {
+        "n": 52,
+        "max": 0.0,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "mean": 0.0
+      },
+      "tv_avg": {
+        "n": 22,
+        "max": 0.0,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "mean": 0.0
+      },
+      "tv_cal": {
+        "n": 22,
+        "max": 0.0,
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
+        "mean": 0.0
+      },
+      "argmax_agreement_avg": "22/22",
+      "argmax_agreement_cal": "22/22",
+      "flips_avg": [],
+      "flips_cal": []
+    },
+    "cases": [
+      {
+        "id": "so-structured-state",
+        "error_a": {
+          "detail": {
+            "error_type": "api_usage_error",
+            "message": "Unknown model: basal-1.0-4.5B"
+          }
+        },
+        "error_b": {
+          "detail": {
+            "error_type": "api_usage_error",
+            "message": "Unknown model: basal-1.0-4.5B"
+          }
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "so-array-state-en",
+        "error_a": {
+          "detail": {
+            "error_type": "api_usage_error",
+            "message": "Unknown model: basal-1.0-4.5B"
+          }
+        },
+        "error_b": {
+          "detail": {
+            "error_type": "api_usage_error",
+            "message": "Unknown model: basal-1.0-4.5B"
+          }
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "so-null-and-missing-instructions",
+        "error_a": {
+          "detail": "Noul question must have criteria or instructions: missing"
+        },
+        "error_b": {
+          "detail": "Noul question must have criteria or instructions: missing"
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "so-empty-structures",
+        "error_a": {
+          "detail": {
+            "error_type": "api_usage_error",
+            "message": "Unknown model: basal-1.0-4.5B"
+          }
+        },
+        "error_b": {
+          "detail": {
+            "error_type": "api_usage_error",
+            "message": "Unknown model: basal-1.0-4.5B"
+          }
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "so-duplicate-descriptions-hide",
+        "error_a": {
+          "detail": {
+            "error_type": "api_usage_error",
+            "message": "Unknown model: basal-1.0-4.5B"
+          }
+        },
+        "error_b": {
+          "detail": {
+            "error_type": "api_usage_error",
+            "message": "Unknown model: basal-1.0-4.5B"
+          }
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "so-unicode",
+        "error_a": {
+          "detail": {
+            "error_type": "api_usage_error",
+            "message": "Unknown model: basal-1.0-4.5B"
+          }
+        },
+        "error_b": {
+          "detail": {
+            "error_type": "api_usage_error",
+            "message": "Unknown model: basal-1.0-4.5B"
+          }
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "so-polish-from-instructions",
+        "error_a": {
+          "detail": {
+            "error_type": "api_usage_error",
+            "message": "Unknown model: basal-1.0-4.5B"
+          }
+        },
+        "error_b": {
+          "detail": {
+            "error_type": "api_usage_error",
+            "message": "Unknown model: basal-1.0-4.5B"
+          }
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "so-ten-options",
+        "error_a": {
+          "detail": {
+            "error_type": "api_usage_error",
+            "message": "Unknown model: basal-1.0-4.5B"
+          }
+        },
+        "error_b": {
+          "detail": {
+            "error_type": "api_usage_error",
+            "message": "Unknown model: basal-1.0-4.5B"
+          }
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "so-score-two-levels",
+        "error_a": {
+          "detail": {
+            "error_type": "api_usage_error",
+            "message": "Unknown model: basal-1.0-4.5B"
+          }
+        },
+        "error_b": {
+          "detail": {
+            "error_type": "api_usage_error",
+            "message": "Unknown model: basal-1.0-4.5B"
+          }
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "so-score-one-level",
+        "error_a": {
+          "detail": {
+            "error_type": "api_usage_error",
+            "message": "Unknown model: basal-1.0-4.5B"
+          }
+        },
+        "error_b": {
+          "detail": {
+            "error_type": "api_usage_error",
+            "message": "Unknown model: basal-1.0-4.5B"
+          }
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "so-eleven-options",
+        "error_a": {
+          "detail": {
+            "error_type": "api_usage_error",
+            "message": "Unknown model: basal-1.0-4.5B"
+          }
+        },
+        "error_b": {
+          "detail": {
+            "error_type": "api_usage_error",
+            "message": "Unknown model: basal-1.0-4.5B"
+          }
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "so-unknown-type",
+        "error_a": {
+          "detail": {
+            "error_type": "api_usage_error",
+            "message": "Unknown model: basal-1.0-4.5B"
+          }
+        },
+        "error_b": {
+          "detail": {
+            "error_type": "api_usage_error",
+            "message": "Unknown model: basal-1.0-4.5B"
+          }
+        },
+        "deviation": "unknown type is a validation error; upstream treats it as choice",
+        "items": []
+      },
+      {
+        "id": "so-missing-type",
+        "error_a": {
+          "detail": [
+            {
+              "type": "union_tag_not_found",
+              "loc": [
+                "body",
+                "questions",
+                "q"
+              ],
+              "msg": "Unable to extract tag using discriminator 'type'",
+              "input": {
+                "instructions": "?",
+                "criteria": [
+                  "a",
+                  "b"
+                ]
+              },
+              "ctx": {
+                "discriminator": "'type'"
+              }
+            }
+          ]
+        },
+        "error_b": {
+          "detail": [
+            {
+              "type": "union_tag_not_found",
+              "loc": [
+                "body",
+                "questions",
+                "q"
+              ],
+              "msg": "Unable to extract tag using discriminator 'type'",
+              "input": {
+                "instructions": "?",
+                "criteria": [
+                  "a",
+                  "b"
+                ]
+              },
+              "ctx": {
+                "discriminator": "'type'"
+              }
+            }
+          ]
+        },
+        "deviation": "missing type is a validation error; upstream defaults to choice",
+        "items": []
+      },
+      {
+        "id": "m15-multi-pl",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "topics",
+            "tokens_identical": true,
+            "tv_cal": 0.0,
+            "answer": {
+              "type_a": "multi",
+              "type_b": "multi",
+              "max_abs_prob_diff": 0.0,
+              "confidence_a": null,
+              "confidence_b": null,
+              "fields_same": true,
+              "type_same": true,
+              "selected_same": true,
+              "threshold_same": true,
+              "set_confidence_diff": 0.0
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-multi-en-list",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "issues",
+            "tokens_identical": true,
+            "tv_cal": 0.0,
+            "answer": {
+              "type_a": "multi",
+              "type_b": "multi",
+              "max_abs_prob_diff": 0.0,
+              "confidence_a": null,
+              "confidence_b": null,
+              "fields_same": true,
+              "type_same": true,
+              "selected_same": true,
+              "threshold_same": true,
+              "set_confidence_diff": 0.0
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-multi-min",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "t",
+            "tokens_identical": true,
+            "tv_cal": 0.0,
+            "answer": {
+              "type_a": "multi",
+              "type_b": "multi",
+              "max_abs_prob_diff": 0.0,
+              "confidence_a": null,
+              "confidence_b": null,
+              "fields_same": true,
+              "type_same": true,
+              "selected_same": true,
+              "threshold_same": true,
+              "set_confidence_diff": 0.0
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-act-short",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "fraud",
+            "tokens_identical": true,
+            "tv_cal": 0.0,
+            "answer": {
+              "type_a": "act",
+              "type_b": "act",
+              "max_abs_prob_diff": 0.0,
+              "confidence_a": 0.9131142223149712,
+              "confidence_b": 0.9131142223149712,
+              "confidence_diff": 0.0,
+              "fields_same": true,
+              "type_same": true,
+              "action_same": true,
+              "answer_same": true,
+              "calibration_same": true,
+              "expected_costs_keys_same": true,
+              "expected_costs_max_abs_diff": 0.0
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-act-full",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "route",
+            "tokens_identical": true,
+            "tv_cal": 0.0,
+            "answer": {
+              "type_a": "act",
+              "type_b": "act",
+              "max_abs_prob_diff": 0.0,
+              "confidence_a": 0.8499776413023914,
+              "confidence_b": 0.8499776413023914,
+              "confidence_diff": 0.0,
+              "fields_same": true,
+              "type_same": true,
+              "action_same": true,
+              "refused_same": true,
+              "answer_same": true,
+              "calibration_same": true,
+              "expected_costs_keys_same": true,
+              "expected_costs_max_abs_diff": 0.0
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-act-maxerr-005",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "refund",
+            "tokens_identical": true,
+            "tv_cal": 0.0,
+            "answer": {
+              "type_a": "act",
+              "type_b": "act",
+              "max_abs_prob_diff": 0.0,
+              "confidence_a": 0.9566894160409966,
+              "confidence_b": 0.9566894160409966,
+              "confidence_diff": 0.0,
+              "fields_same": true,
+              "type_same": true,
+              "action_same": true,
+              "answer_same": true,
+              "calibration_same": true,
+              "expected_costs_keys_same": true,
+              "expected_costs_max_abs_diff": 0.0
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-act-no-threshold",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "fit",
+            "tokens_identical": true,
+            "tv_cal": 0.0,
+            "answer": {
+              "type_a": "act",
+              "type_b": "act",
+              "max_abs_prob_diff": 0.0,
+              "confidence_a": 0.6275299862590723,
+              "confidence_b": 0.6275299862590723,
+              "confidence_diff": 0.0,
+              "fields_same": true,
+              "type_same": true,
+              "action_same": true,
+              "answer_same": true,
+              "calibration_same": true,
+              "max_error_same": true,
+              "expected_costs_keys_same": true,
+              "expected_costs_max_abs_diff": 0.0
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-mixed",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "dept",
+            "tokens_identical": true,
+            "tv_cal": 0.0,
+            "answer": {
+              "type_a": "choice",
+              "type_b": "choice",
+              "max_abs_prob_diff": 0.0,
+              "choice_a": "logistics",
+              "choice_b": "logistics",
+              "choice_same": true,
+              "confidence_a": 0.9600531612441632,
+              "confidence_b": 0.9600531612441632,
+              "confidence_diff": 0.0,
+              "fields_same": true,
+              "type_same": true
+            }
+          },
+          {
+            "item": "refund",
+            "tokens_identical": true,
+            "tv_cal": 0.0,
+            "answer": {
+              "type_a": "noul",
+              "type_b": "noul",
+              "max_abs_prob_diff": null,
+              "noul_diff": 0.0,
+              "confidence_a": null,
+              "confidence_b": null,
+              "fields_same": true,
+              "type_same": true
+            }
+          },
+          {
+            "item": "urgency",
+            "tokens_identical": true,
+            "tv_cal": 0.0,
+            "answer": {
+              "type_a": "score",
+              "type_b": "score",
+              "max_abs_prob_diff": 0.0,
+              "score_diff": 0.0,
+              "confidence_a": 0.6876293634317843,
+              "confidence_b": 0.6876293634317843,
+              "confidence_diff": 0.0,
+              "fields_same": true,
+              "legend_same": true,
+              "type_same": true
+            }
+          },
+          {
+            "item": "tags",
+            "tokens_identical": true,
+            "tv_cal": 0.0,
+            "answer": {
+              "type_a": "multi",
+              "type_b": "multi",
+              "max_abs_prob_diff": 0.0,
+              "confidence_a": null,
+              "confidence_b": null,
+              "fields_same": true,
+              "type_same": true,
+              "selected_same": true,
+              "threshold_same": true,
+              "set_confidence_diff": 0.0
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-evidence-noul",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "form",
+            "tokens_identical": true,
+            "tv_cal": 0.0,
+            "answer": {
+              "type_a": "noul",
+              "type_b": "noul",
+              "max_abs_prob_diff": null,
+              "noul_diff": 0.0,
+              "confidence_a": null,
+              "confidence_b": null,
+              "fields_same": true,
+              "type_same": true,
+              "evidence_spans_same": true,
+              "evidence_first_same": true,
+              "evidence_max_abs_probability_diff": 0.0,
+              "evidence_a": [
+                [
+                  53,
+                  245,
+                  " Najemca może wypowiedzieć umowę z zachowaniem trzymiesięcznego okresu wypowiedzenia ze skutkiem na koniec miesiąca kalendarzowego. Wypowiedzenie wymaga formy pisemnej pod rygorem nieważności."
+                ],
+                [
+                  245,
+                  328,
+                  " Kaucja wynosi 6 000 zł i podlega zwrotowi w terminie 30 dni od dnia zwrotu lokalu."
+                ]
+              ],
+              "evidence_b": [
+                [
+                  53,
+                  245,
+                  " Najemca może wypowiedzieć umowę z zachowaniem trzymiesięcznego okresu wypowiedzenia ze skutkiem na koniec miesiąca kalendarzowego. Wypowiedzenie wymaga formy pisemnej pod rygorem nieważności."
+                ],
+                [
+                  245,
+                  328,
+                  " Kaucja wynosi 6 000 zł i podlega zwrotowi w terminie 30 dni od dnia zwrotu lokalu."
+                ]
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-evidence-choice-en",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "cause",
+            "tokens_identical": true,
+            "tv_cal": 0.0,
+            "answer": {
+              "type_a": "choice",
+              "type_b": "choice",
+              "max_abs_prob_diff": 0.0,
+              "choice_a": "tls",
+              "choice_b": "tls",
+              "choice_same": true,
+              "confidence_a": 0.9989559328455886,
+              "confidence_b": 0.9989559328455886,
+              "confidence_diff": 0.0,
+              "fields_same": true,
+              "type_same": true,
+              "evidence_spans_same": true,
+              "evidence_first_same": true,
+              "evidence_max_abs_probability_diff": 0.0,
+              "evidence_a": [
+                [
+                  123,
+                  261,
+                  "er identified an expired TLS certificate on the load balancer and rotated it at 14:37. Traffic recovered fully by 14:41. No data was lost."
+                ],
+                [
+                  1,
+                  68,
+                  "ncident report: At 14:02 the payment API started returning HTTP 503"
+                ],
+                [
+                  68,
+                  104,
+                  " for all merchants in the EU region."
+                ]
+              ],
+              "evidence_b": [
+                [
+                  123,
+                  261,
+                  "er identified an expired TLS certificate on the load balancer and rotated it at 14:37. Traffic recovered fully by 14:41. No data was lost."
+                ],
+                [
+                  1,
+                  68,
+                  "ncident report: At 14:02 the payment API started returning HTTP 503"
+                ],
+                [
+                  68,
+                  104,
+                  " for all merchants in the EU region."
+                ]
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-evidence-score-act",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "urgency",
+            "tokens_identical": true,
+            "tv_cal": 0.0,
+            "answer": {
+              "type_a": "score",
+              "type_b": "score",
+              "max_abs_prob_diff": 0.0,
+              "score_diff": 0.0,
+              "confidence_a": 0.6792116523575973,
+              "confidence_b": 0.6792116523575973,
+              "confidence_diff": 0.0,
+              "fields_same": true,
+              "legend_same": true,
+              "type_same": true,
+              "evidence_spans_same": true,
+              "evidence_first_same": true,
+              "evidence_max_abs_probability_diff": 0.0,
+              "evidence_a": [
+                [
+                  19,
+                  99,
+                  " od trzech dni nie działa terminal płatniczy w naszym sklepie, tracimy sprzedaż."
+                ],
+                [
+                  0,
+                  18,
+                  "Zgłoszenie klienta"
+                ]
+              ],
+              "evidence_b": [
+                [
+                  19,
+                  99,
+                  " od trzech dni nie działa terminal płatniczy w naszym sklepie, tracimy sprzedaż."
+                ],
+                [
+                  0,
+                  18,
+                  "Zgłoszenie klienta"
+                ]
+              ]
+            }
+          },
+          {
+            "item": "route",
+            "tokens_identical": true,
+            "tv_cal": 0.0,
+            "answer": {
+              "type_a": "act",
+              "type_b": "act",
+              "max_abs_prob_diff": 0.0,
+              "confidence_a": 0.9759091680648022,
+              "confidence_b": 0.9759091680648022,
+              "confidence_diff": 0.0,
+              "fields_same": true,
+              "type_same": true,
+              "action_same": true,
+              "answer_same": true,
+              "calibration_same": true,
+              "evidence_spans_same": true,
+              "evidence_first_same": true,
+              "evidence_max_abs_probability_diff": 0.0,
+              "evidence_a": [
+                [
+                  19,
+                  99,
+                  " od trzech dni nie działa terminal płatniczy w naszym sklepie, tracimy sprzedaż."
+                ],
+                [
+                  0,
+                  19,
+                  "Zgłoszenie klienta:"
+                ]
+              ],
+              "evidence_b": [
+                [
+                  19,
+                  99,
+                  " od trzech dni nie działa terminal płatniczy w naszym sklepie, tracimy sprzedaż."
+                ],
+                [
+                  0,
+                  19,
+                  "Zgłoszenie klienta:"
+                ]
+              ],
+              "expected_costs_keys_same": true,
+              "expected_costs_max_abs_diff": 0.0
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-evidence-long",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "cards",
+            "tokens_identical": true,
+            "tv_cal": 0.0,
+            "answer": {
+              "type_a": "noul",
+              "type_b": "noul",
+              "max_abs_prob_diff": null,
+              "noul_diff": 0.0,
+              "confidence_a": null,
+              "confidence_b": null,
+              "fields_same": true,
+              "type_same": true,
+              "evidence_spans_same": true,
+              "evidence_first_same": true,
+              "evidence_max_abs_probability_diff": 0.0,
+              "evidence_a": [
+                [
+                  338,
+                  483,
+                  " Po tym terminie wygasają bez możliwości przywrócenia. §5. 100 punktów można wymienić na bon o wartości 10 zł. Bonu nie można wymienić na gotówkę"
+                ],
+                [
+                  491,
+                  643,
+                  "lep może zmienić regulamin z 14-dniowym wyprzedzeniem, informując uczestników e-mailem. §7. Reklamacje dotyczące punktów rozpatrywane są w ciągu 30 dni."
+                ],
+                [
+                  39,
+                  282,
+                  " Program prowadzi Sklep XYZ sp. z o.o. §2. Uczestnikiem może zostać osoba pełnoletnia posiadająca konto w sklepie. §3. Za każde wydane 10 zł uczestnik otrzymuje 1 punkt. Punkty nie przysługują za zakup kart podarunkowych ani za koszty dostawy."
+                ]
+              ],
+              "evidence_b": [
+                [
+                  338,
+                  483,
+                  " Po tym terminie wygasają bez możliwości przywrócenia. §5. 100 punktów można wymienić na bon o wartości 10 zł. Bonu nie można wymienić na gotówkę"
+                ],
+                [
+                  491,
+                  643,
+                  "lep może zmienić regulamin z 14-dniowym wyprzedzeniem, informując uczestników e-mailem. §7. Reklamacje dotyczące punktów rozpatrywane są w ciągu 30 dni."
+                ],
+                [
+                  39,
+                  282,
+                  " Program prowadzi Sklep XYZ sp. z o.o. §2. Uczestnikiem może zostać osoba pełnoletnia posiadająca konto w sklepie. §3. Za każde wydane 10 zł uczestnik otrzymuje 1 punkt. Punkty nie przysługują za zakup kart podarunkowych ani za koszty dostawy."
+                ]
+              ]
+            }
+          },
+          {
+            "item": "cash",
+            "tokens_identical": true,
+            "tv_cal": 0.0,
+            "answer": {
+              "type_a": "noul",
+              "type_b": "noul",
+              "max_abs_prob_diff": null,
+              "noul_diff": 0.0,
+              "confidence_a": null,
+              "confidence_b": null,
+              "fields_same": true,
+              "type_same": true,
+              "evidence_spans_same": true,
+              "evidence_first_same": true,
+              "evidence_max_abs_probability_diff": 0.0,
+              "evidence_a": [
+                [
+                  338,
+                  483,
+                  " Po tym terminie wygasają bez możliwości przywrócenia. §5. 100 punktów można wymienić na bon o wartości 10 zł. Bonu nie można wymienić na gotówkę"
+                ],
+                [
+                  491,
+                  643,
+                  "lep może zmienić regulamin z 14-dniowym wyprzedzeniem, informując uczestników e-mailem. §7. Reklamacje dotyczące punktów rozpatrywane są w ciągu 30 dni."
+                ],
+                [
+                  0,
+                  282,
+                  "Regulamin programu lojalnościowego. §1. Program prowadzi Sklep XYZ sp. z o.o. §2. Uczestnikiem może zostać osoba pełnoletnia posiadająca konto w sklepie. §3. Za każde wydane 10 zł uczestnik otrzymuje 1 punkt. Punkty nie przysługują za zakup kart podarunkowych ani za koszty dostawy."
+                ]
+              ],
+              "evidence_b": [
+                [
+                  338,
+                  483,
+                  " Po tym terminie wygasają bez możliwości przywrócenia. §5. 100 punktów można wymienić na bon o wartości 10 zł. Bonu nie można wymienić na gotówkę"
+                ],
+                [
+                  491,
+                  643,
+                  "lep może zmienić regulamin z 14-dniowym wyprzedzeniem, informując uczestników e-mailem. §7. Reklamacje dotyczące punktów rozpatrywane są w ciągu 30 dni."
+                ],
+                [
+                  0,
+                  282,
+                  "Regulamin programu lojalnościowego. §1. Program prowadzi Sklep XYZ sp. z o.o. §2. Uczestnikiem może zostać osoba pełnoletnia posiadająca konto w sklepie. §3. Za każde wydane 10 zł uczestnik otrzymuje 1 punkt. Punkty nie przysługują za zakup kart podarunkowych ani za koszty dostawy."
+                ]
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-facts-dates",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "ontime",
+            "tokens_identical": true,
+            "tv_cal": 0.0,
+            "answer": {
+              "type_a": "noul",
+              "type_b": "noul",
+              "max_abs_prob_diff": null,
+              "noul_diff": 0.0,
+              "confidence_a": null,
+              "confidence_b": null,
+              "fields_same": true,
+              "type_same": true
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-facts-amounts",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "fits",
+            "tokens_identical": true,
+            "tv_cal": 0.0,
+            "answer": {
+              "type_a": "noul",
+              "type_b": "noul",
+              "max_abs_prob_diff": null,
+              "noul_diff": 0.0,
+              "confidence_a": null,
+              "confidence_b": null,
+              "fields_same": true,
+              "type_same": true
+            }
+          },
+          {
+            "item": "level",
+            "tokens_identical": true,
+            "tv_cal": 0.0,
+            "answer": {
+              "type_a": "score",
+              "type_b": "score",
+              "max_abs_prob_diff": 0.0,
+              "score_diff": 0.0,
+              "confidence_a": 0.4450802003435739,
+              "confidence_b": 0.4450802003435739,
+              "confidence_diff": 0.0,
+              "fields_same": true,
+              "legend_same": true,
+              "type_same": true
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-facts-euro-evidence",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "board",
+            "tokens_identical": true,
+            "tv_cal": 0.0,
+            "answer": {
+              "type_a": "noul",
+              "type_b": "noul",
+              "max_abs_prob_diff": null,
+              "noul_diff": 0.0,
+              "confidence_a": null,
+              "confidence_b": null,
+              "fields_same": true,
+              "type_same": true,
+              "evidence_spans_same": true,
+              "evidence_first_same": true,
+              "evidence_max_abs_probability_diff": 0.0,
+              "evidence_a": [
+                [
+                  6,
+                  32,
+                  "kt opiewa na 120 000 euro."
+                ],
+                [
+                  32,
+                  167,
+                  " Kurs rozliczeniowy: 1 EUR = 4,3150 zł. Limit zatwierdzenia przez kierownika wynosi 500 000,00 zł; powyżej wymagana jest zgoda zarządu."
+                ]
+              ],
+              "evidence_b": [
+                [
+                  6,
+                  32,
+                  "kt opiewa na 120 000 euro."
+                ],
+                [
+                  32,
+                  167,
+                  " Kurs rozliczeniowy: 1 EUR = 4,3150 zł. Limit zatwierdzenia przez kierownika wynosi 500 000,00 zł; powyżej wymagana jest zgoda zarządu."
+                ]
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "id": "m15-facts-none",
+        "error_a": null,
+        "error_b": null,
+        "deviation": null,
+        "items": [
+          {
+            "item": "t",
+            "tokens_identical": true,
+            "tv_cal": 0.0,
+            "answer": {
+              "type_a": "choice",
+              "type_b": "choice",
+              "max_abs_prob_diff": 0.0,
+              "choice_a": "up",
+              "choice_b": "up",
+              "choice_same": true,
+              "confidence_a": 0.9921393887313328,
+              "confidence_b": 0.9921393887313328,
+              "confidence_diff": 0.0,
+              "fields_same": true,
+              "type_same": true
+            }
+          }
+        ]
+      },
+      {
+        "id": "cx-01-ticket-fan-out",
+        "error_a": {
+          "detail": {
+            "error_type": "api_usage_error",
+            "message": "Unknown model: basal-1.0-4.5B"
+          }
+        },
+        "error_b": {
+          "detail": {
+            "error_type": "api_usage_error",
+            "message": "Unknown model: basal-1.0-4.5B"
+          }
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "cx-02-web-agent",
+        "error_a": {
+          "detail": {
+            "error_type": "api_usage_error",
+            "message": "Unknown model: basal-1.0-4.5B"
+          }
+        },
+        "error_b": {
+          "detail": {
+            "error_type": "api_usage_error",
+            "message": "Unknown model: basal-1.0-4.5B"
+          }
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "cx-03-deadline-decomposed",
+        "error_a": {
+          "detail": {
+            "error_type": "api_usage_error",
+            "message": "Unknown model: basal-1.0-4.5B"
+          }
+        },
+        "error_b": {
+          "detail": {
+            "error_type": "api_usage_error",
+            "message": "Unknown model: basal-1.0-4.5B"
+          }
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "cx-04-loan-triage",
+        "error_a": {
+          "detail": {
+            "error_type": "api_usage_error",
+            "message": "Unknown model: basal-1.0-4.5B"
+          }
+        },
+        "error_b": {
+          "detail": {
+            "error_type": "api_usage_error",
+            "message": "Unknown model: basal-1.0-4.5B"
+          }
+        },
+        "deviation": null,
+        "items": []
+      },
+      {
+        "id": "cx-05-guard-check",
+        "error_a": {
+          "detail": {
+            "error_type": "api_usage_error",
+            "message": "Unknown model: basal-1.0-4.5B"
+          }
+        },
+        "error_b": {
+          "detail": {
+            "error_type": "api_usage_error",
+            "message": "Unknown model: basal-1.0-4.5B"
+          }
+        },
+        "deviation": null,
+        "items": []
+      }
+    ]
+  },
+  "upstream_endpoint": [
+    {
+      "id": "so-structured-state",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": []
+    },
+    {
+      "id": "so-array-state-en",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": []
+    },
+    {
+      "id": "so-null-and-missing-instructions",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": []
+    },
+    {
+      "id": "so-empty-structures",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": []
+    },
+    {
+      "id": "so-duplicate-descriptions-hide",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": []
+    },
+    {
+      "id": "so-unicode",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": []
+    },
+    {
+      "id": "so-polish-from-instructions",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": []
+    },
+    {
+      "id": "so-ten-options",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": []
+    },
+    {
+      "id": "so-score-two-levels",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": []
+    },
+    {
+      "id": "so-score-one-level",
+      "error_upstream": null,
+      "error_ours": "question \"alarm\": 1 options (supported: 2..10)",
+      "errors_agree": false,
+      "questions": []
+    },
+    {
+      "id": "so-eleven-options",
+      "error_upstream": null,
+      "error_ours": "question \"cat\": 11 options (supported: 2..10)",
+      "errors_agree": false,
+      "questions": []
+    },
+    {
+      "id": "so-unknown-type",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": []
+    },
+    {
+      "id": "so-missing-type",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": []
+    },
+    {
+      "id": "m15-multi-pl",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "topics",
+          "diff": {
+            "type_a": "multi",
+            "type_b": "multi",
+            "max_abs_prob_diff": 0.0,
+            "confidence_a": null,
+            "confidence_b": null,
+            "fields_same": true,
+            "type_same": true,
+            "selected_same": true,
+            "threshold_same": true,
+            "set_confidence_diff": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "id": "m15-multi-en-list",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "issues",
+          "diff": {
+            "type_a": "multi",
+            "type_b": "multi",
+            "max_abs_prob_diff": 0.0,
+            "confidence_a": null,
+            "confidence_b": null,
+            "fields_same": true,
+            "type_same": true,
+            "selected_same": true,
+            "threshold_same": true,
+            "set_confidence_diff": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "id": "m15-multi-min",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "t",
+          "diff": {
+            "type_a": "multi",
+            "type_b": "multi",
+            "max_abs_prob_diff": 0.0,
+            "confidence_a": null,
+            "confidence_b": null,
+            "fields_same": true,
+            "type_same": true,
+            "selected_same": true,
+            "threshold_same": true,
+            "set_confidence_diff": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "id": "m15-act-short",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "fraud",
+          "diff": {
+            "type_a": "act",
+            "type_b": "act",
+            "max_abs_prob_diff": 0.0,
+            "confidence_a": 0.9131142223149712,
+            "confidence_b": 0.9131142223149712,
+            "confidence_diff": 0.0,
+            "fields_same": true,
+            "type_same": true,
+            "action_same": true,
+            "answer_same": true,
+            "calibration_same": true,
+            "expected_costs_keys_same": true,
+            "expected_costs_max_abs_diff": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "id": "m15-act-full",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "route",
+          "diff": {
+            "type_a": "act",
+            "type_b": "act",
+            "max_abs_prob_diff": 0.0,
+            "confidence_a": 0.8499776413023914,
+            "confidence_b": 0.8499776413023914,
+            "confidence_diff": 0.0,
+            "fields_same": true,
+            "type_same": true,
+            "action_same": true,
+            "refused_same": true,
+            "answer_same": true,
+            "calibration_same": true,
+            "expected_costs_keys_same": true,
+            "expected_costs_max_abs_diff": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "id": "m15-act-maxerr-005",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "refund",
+          "diff": {
+            "type_a": "act",
+            "type_b": "act",
+            "max_abs_prob_diff": 0.0,
+            "confidence_a": 0.9566894160409966,
+            "confidence_b": 0.9566894160409966,
+            "confidence_diff": 0.0,
+            "fields_same": true,
+            "type_same": true,
+            "action_same": true,
+            "answer_same": true,
+            "calibration_same": true,
+            "expected_costs_keys_same": true,
+            "expected_costs_max_abs_diff": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "id": "m15-act-no-threshold",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "fit",
+          "diff": {
+            "type_a": "act",
+            "type_b": "act",
+            "max_abs_prob_diff": 0.0,
+            "confidence_a": 0.6275299862590723,
+            "confidence_b": 0.6275299862590723,
+            "confidence_diff": 0.0,
+            "fields_same": true,
+            "type_same": true,
+            "action_same": true,
+            "answer_same": true,
+            "calibration_same": true,
+            "max_error_same": true,
+            "expected_costs_keys_same": true,
+            "expected_costs_max_abs_diff": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "id": "m15-mixed",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "dept",
+          "diff": {
+            "type_a": "choice",
+            "type_b": "choice",
+            "max_abs_prob_diff": 0.0,
+            "choice_a": "logistics",
+            "choice_b": "logistics",
+            "choice_same": true,
+            "confidence_a": 0.9600531612441632,
+            "confidence_b": 0.9733687741627756,
+            "confidence_diff": 0.013315612918612385,
+            "fields_same": true,
+            "type_same": true
+          }
+        },
+        {
+          "question": "refund",
+          "diff": {
+            "type_a": "noul",
+            "type_b": "noul",
+            "max_abs_prob_diff": null,
+            "noul_diff": 0.0,
+            "confidence_a": null,
+            "confidence_b": 0.8521454775253464,
+            "fields_same": false,
+            "type_same": true
+          }
+        },
+        {
+          "question": "tags",
+          "diff": {
+            "type_a": "multi",
+            "type_b": "multi",
+            "max_abs_prob_diff": 0.0,
+            "confidence_a": null,
+            "confidence_b": null,
+            "fields_same": true,
+            "type_same": true,
+            "selected_same": true,
+            "threshold_same": true,
+            "set_confidence_diff": 0.0
+          }
+        },
+        {
+          "question": "urgency",
+          "diff": {
+            "type_a": "score",
+            "type_b": "score",
+            "max_abs_prob_diff": 0.0,
+            "score_diff": 0.0,
+            "confidence_a": 0.6876293634317843,
+            "confidence_b": 0.8473606467153719,
+            "confidence_diff": 0.15973128328358766,
+            "fields_same": true,
+            "legend_same": true,
+            "type_same": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "m15-evidence-noul",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "form",
+          "diff": {
+            "type_a": "noul",
+            "type_b": "noul",
+            "max_abs_prob_diff": null,
+            "noul_diff": 0.0,
+            "confidence_a": null,
+            "confidence_b": 0.9884283786518027,
+            "fields_same": false,
+            "type_same": true,
+            "evidence_spans_same": true,
+            "evidence_first_same": true,
+            "evidence_max_abs_probability_diff": 0.0,
+            "evidence_a": [
+              [
+                53,
+                245,
+                " Najemca może wypowiedzieć umowę z zachowaniem trzymiesięcznego okresu wypowiedzenia ze skutkiem na koniec miesiąca kalendarzowego. Wypowiedzenie wymaga formy pisemnej pod rygorem nieważności."
+              ],
+              [
+                245,
+                328,
+                " Kaucja wynosi 6 000 zł i podlega zwrotowi w terminie 30 dni od dnia zwrotu lokalu."
+              ]
+            ],
+            "evidence_b": [
+              [
+                53,
+                245,
+                " Najemca może wypowiedzieć umowę z zachowaniem trzymiesięcznego okresu wypowiedzenia ze skutkiem na koniec miesiąca kalendarzowego. Wypowiedzenie wymaga formy pisemnej pod rygorem nieważności."
+              ],
+              [
+                245,
+                328,
+                " Kaucja wynosi 6 000 zł i podlega zwrotowi w terminie 30 dni od dnia zwrotu lokalu."
+              ]
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "m15-evidence-choice-en",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "cause",
+          "diff": {
+            "type_a": "choice",
+            "type_b": "choice",
+            "max_abs_prob_diff": 0.0,
+            "choice_a": "tls",
+            "choice_b": "tls",
+            "choice_same": true,
+            "confidence_a": 0.9989559328455886,
+            "confidence_b": 0.9993039552303925,
+            "confidence_diff": 0.00034802238480391434,
+            "fields_same": true,
+            "type_same": true,
+            "evidence_spans_same": true,
+            "evidence_first_same": true,
+            "evidence_max_abs_probability_diff": 0.0,
+            "evidence_a": [
+              [
+                123,
+                261,
+                "er identified an expired TLS certificate on the load balancer and rotated it at 14:37. Traffic recovered fully by 14:41. No data was lost."
+              ],
+              [
+                1,
+                68,
+                "ncident report: At 14:02 the payment API started returning HTTP 503"
+              ],
+              [
+                68,
+                104,
+                " for all merchants in the EU region."
+              ]
+            ],
+            "evidence_b": [
+              [
+                123,
+                261,
+                "er identified an expired TLS certificate on the load balancer and rotated it at 14:37. Traffic recovered fully by 14:41. No data was lost."
+              ],
+              [
+                1,
+                68,
+                "ncident report: At 14:02 the payment API started returning HTTP 503"
+              ],
+              [
+                68,
+                104,
+                " for all merchants in the EU region."
+              ]
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "m15-evidence-score-act",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "route",
+          "diff": {
+            "type_a": "act",
+            "type_b": "act",
+            "max_abs_prob_diff": 0.0,
+            "confidence_a": 0.9759091680648022,
+            "confidence_b": 0.9759091680648022,
+            "confidence_diff": 0.0,
+            "fields_same": true,
+            "type_same": true,
+            "action_same": true,
+            "answer_same": true,
+            "calibration_same": true,
+            "evidence_spans_same": true,
+            "evidence_first_same": true,
+            "evidence_max_abs_probability_diff": 0.0,
+            "evidence_a": [
+              [
+                19,
+                99,
+                " od trzech dni nie działa terminal płatniczy w naszym sklepie, tracimy sprzedaż."
+              ],
+              [
+                0,
+                19,
+                "Zgłoszenie klienta:"
+              ]
+            ],
+            "evidence_b": [
+              [
+                19,
+                99,
+                " od trzech dni nie działa terminal płatniczy w naszym sklepie, tracimy sprzedaż."
+              ],
+              [
+                0,
+                19,
+                "Zgłoszenie klienta:"
+              ]
+            ],
+            "expected_costs_keys_same": true,
+            "expected_costs_max_abs_diff": 0.0
+          }
+        },
+        {
+          "question": "urgency",
+          "diff": {
+            "type_a": "score",
+            "type_b": "score",
+            "max_abs_prob_diff": 0.0,
+            "score_diff": 0.0,
+            "confidence_a": 0.6792116523575973,
+            "confidence_b": 0.7284969138073528,
+            "confidence_diff": 0.049285261449755535,
+            "fields_same": true,
+            "legend_same": true,
+            "type_same": true,
+            "evidence_spans_same": true,
+            "evidence_first_same": true,
+            "evidence_max_abs_probability_diff": 0.0,
+            "evidence_a": [
+              [
+                19,
+                99,
+                " od trzech dni nie działa terminal płatniczy w naszym sklepie, tracimy sprzedaż."
+              ],
+              [
+                0,
+                18,
+                "Zgłoszenie klienta"
+              ]
+            ],
+            "evidence_b": [
+              [
+                19,
+                99,
+                " od trzech dni nie działa terminal płatniczy w naszym sklepie, tracimy sprzedaż."
+              ],
+              [
+                0,
+                18,
+                "Zgłoszenie klienta"
+              ]
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "m15-evidence-long",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "cards",
+          "diff": {
+            "type_a": "noul",
+            "type_b": "noul",
+            "max_abs_prob_diff": null,
+            "noul_diff": 0.0,
+            "confidence_a": null,
+            "confidence_b": 0.9928668849571086,
+            "fields_same": false,
+            "type_same": true,
+            "evidence_spans_same": true,
+            "evidence_first_same": true,
+            "evidence_max_abs_probability_diff": 0.0,
+            "evidence_a": [
+              [
+                338,
+                483,
+                " Po tym terminie wygasają bez możliwości przywrócenia. §5. 100 punktów można wymienić na bon o wartości 10 zł. Bonu nie można wymienić na gotówkę"
+              ],
+              [
+                491,
+                643,
+                "lep może zmienić regulamin z 14-dniowym wyprzedzeniem, informując uczestników e-mailem. §7. Reklamacje dotyczące punktów rozpatrywane są w ciągu 30 dni."
+              ],
+              [
+                39,
+                282,
+                " Program prowadzi Sklep XYZ sp. z o.o. §2. Uczestnikiem może zostać osoba pełnoletnia posiadająca konto w sklepie. §3. Za każde wydane 10 zł uczestnik otrzymuje 1 punkt. Punkty nie przysługują za zakup kart podarunkowych ani za koszty dostawy."
+              ]
+            ],
+            "evidence_b": [
+              [
+                338,
+                483,
+                " Po tym terminie wygasają bez możliwości przywrócenia. §5. 100 punktów można wymienić na bon o wartości 10 zł. Bonu nie można wymienić na gotówkę"
+              ],
+              [
+                491,
+                643,
+                "lep może zmienić regulamin z 14-dniowym wyprzedzeniem, informując uczestników e-mailem. §7. Reklamacje dotyczące punktów rozpatrywane są w ciągu 30 dni."
+              ],
+              [
+                39,
+                282,
+                " Program prowadzi Sklep XYZ sp. z o.o. §2. Uczestnikiem może zostać osoba pełnoletnia posiadająca konto w sklepie. §3. Za każde wydane 10 zł uczestnik otrzymuje 1 punkt. Punkty nie przysługują za zakup kart podarunkowych ani za koszty dostawy."
+              ]
+            ]
+          }
+        },
+        {
+          "question": "cash",
+          "diff": {
+            "type_a": "noul",
+            "type_b": "noul",
+            "max_abs_prob_diff": null,
+            "noul_diff": 0.0,
+            "confidence_a": null,
+            "confidence_b": 0.9908507412156915,
+            "fields_same": false,
+            "type_same": true,
+            "evidence_spans_same": true,
+            "evidence_first_same": true,
+            "evidence_max_abs_probability_diff": 0.0,
+            "evidence_a": [
+              [
+                338,
+                483,
+                " Po tym terminie wygasają bez możliwości przywrócenia. §5. 100 punktów można wymienić na bon o wartości 10 zł. Bonu nie można wymienić na gotówkę"
+              ],
+              [
+                491,
+                643,
+                "lep może zmienić regulamin z 14-dniowym wyprzedzeniem, informując uczestników e-mailem. §7. Reklamacje dotyczące punktów rozpatrywane są w ciągu 30 dni."
+              ],
+              [
+                0,
+                282,
+                "Regulamin programu lojalnościowego. §1. Program prowadzi Sklep XYZ sp. z o.o. §2. Uczestnikiem może zostać osoba pełnoletnia posiadająca konto w sklepie. §3. Za każde wydane 10 zł uczestnik otrzymuje 1 punkt. Punkty nie przysługują za zakup kart podarunkowych ani za koszty dostawy."
+              ]
+            ],
+            "evidence_b": [
+              [
+                338,
+                483,
+                " Po tym terminie wygasają bez możliwości przywrócenia. §5. 100 punktów można wymienić na bon o wartości 10 zł. Bonu nie można wymienić na gotówkę"
+              ],
+              [
+                491,
+                643,
+                "lep może zmienić regulamin z 14-dniowym wyprzedzeniem, informując uczestników e-mailem. §7. Reklamacje dotyczące punktów rozpatrywane są w ciągu 30 dni."
+              ],
+              [
+                0,
+                282,
+                "Regulamin programu lojalnościowego. §1. Program prowadzi Sklep XYZ sp. z o.o. §2. Uczestnikiem może zostać osoba pełnoletnia posiadająca konto w sklepie. §3. Za każde wydane 10 zł uczestnik otrzymuje 1 punkt. Punkty nie przysługują za zakup kart podarunkowych ani za koszty dostawy."
+              ]
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "m15-facts-dates",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "ontime",
+          "diff": {
+            "type_a": "noul",
+            "type_b": "noul",
+            "max_abs_prob_diff": null,
+            "noul_diff": 0.0,
+            "confidence_a": null,
+            "confidence_b": 0.9435144056526835,
+            "fields_same": false,
+            "type_same": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "m15-facts-amounts",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "fits",
+          "diff": {
+            "type_a": "noul",
+            "type_b": "noul",
+            "max_abs_prob_diff": null,
+            "noul_diff": 0.0,
+            "confidence_a": null,
+            "confidence_b": 0.7439645482796844,
+            "fields_same": false,
+            "type_same": true
+          }
+        },
+        {
+          "question": "level",
+          "diff": {
+            "type_a": "score",
+            "type_b": "score",
+            "max_abs_prob_diff": 0.0,
+            "score_diff": 0.0,
+            "confidence_a": 0.4450802003435739,
+            "confidence_b": 0.6300534668957161,
+            "confidence_diff": 0.1849732665521422,
+            "fields_same": true,
+            "legend_same": true,
+            "type_same": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "m15-facts-euro-evidence",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "board",
+          "diff": {
+            "type_a": "noul",
+            "type_b": "noul",
+            "max_abs_prob_diff": null,
+            "noul_diff": 0.0,
+            "confidence_a": null,
+            "confidence_b": 0.892707758787698,
+            "fields_same": false,
+            "type_same": true,
+            "evidence_spans_same": true,
+            "evidence_first_same": true,
+            "evidence_max_abs_probability_diff": 0.0,
+            "evidence_a": [
+              [
+                6,
+                32,
+                "kt opiewa na 120 000 euro."
+              ],
+              [
+                32,
+                167,
+                " Kurs rozliczeniowy: 1 EUR = 4,3150 zł. Limit zatwierdzenia przez kierownika wynosi 500 000,00 zł; powyżej wymagana jest zgoda zarządu."
+              ]
+            ],
+            "evidence_b": [
+              [
+                6,
+                32,
+                "kt opiewa na 120 000 euro."
+              ],
+              [
+                32,
+                167,
+                " Kurs rozliczeniowy: 1 EUR = 4,3150 zł. Limit zatwierdzenia przez kierownika wynosi 500 000,00 zł; powyżej wymagana jest zgoda zarządu."
+              ]
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "m15-facts-none",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": [
+        {
+          "question": "t",
+          "diff": {
+            "type_a": "choice",
+            "type_b": "choice",
+            "max_abs_prob_diff": 0.0,
+            "choice_a": "up",
+            "choice_b": "up",
+            "choice_same": true,
+            "confidence_a": 0.9921393887313328,
+            "confidence_b": 0.9947595924875552,
+            "confidence_diff": 0.0026202037562224056,
+            "fields_same": true,
+            "type_same": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "cx-01-ticket-fan-out",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": []
+    },
+    {
+      "id": "cx-02-web-agent",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": []
+    },
+    {
+      "id": "cx-03-deadline-decomposed",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": []
+    },
+    {
+      "id": "cx-04-loan-triage",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": []
+    },
+    {
+      "id": "cx-05-guard-check",
+      "error_upstream": null,
+      "error_ours": null,
+      "errors_agree": true,
+      "questions": []
+    }
+  ]
+}

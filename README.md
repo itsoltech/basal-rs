@@ -374,7 +374,10 @@ modelu (kształtów wag), GPU, wersji cuBLASLt i precyzji. Przy `gemm_table:
 auto` serwer szuka tabeli w `gemm_cache` i generuje ją przy starcie, gdy jej
 nie ma albo powstała na innym GPU lub cuBLASLt. Najpierw sięga po tabele
 wkompilowane w binarkę ([crates/basal-cli/gemm-tables](crates/basal-cli/gemm-tables):
-H100 PCIe dla 4.5B i max, RTX 6000 Ada dla 4.5B, cuBLASLt 12.9.1, f16), a gdy
+H100 PCIe, RTX 6000 Ada, L40S, RTX A6000, A100-SXM4-80GB, L40 i RTX PRO 6000
+Blackwell Server Edition dla mini, 4.5B i max; L4, A10 i RTX A5000 dla mini i 4.5B;
+cuBLASLt 12.9.1, f16; [pierwsza część weryfikacji](reports/gemm-tables-2026-10-10/README.md)
+i [rozszerzenie](reports/gemm-tables-extra-2026-10-10/README.md)), a gdy
 żadna nie pasuje, generuje własną (jednorazowo, kilka do kilkudziesięciu
 minut). Tabelę wygenerowaną dla karty lub modelu spoza tej listy
 `basal gemm-share` wysyła do projektu jako issue (po potwierdzeniu), żeby
