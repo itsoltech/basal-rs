@@ -3,6 +3,12 @@
 - `basal-rs-banner.svg` — polski baner README z autorstwem modeli i silnika, edytowalny SVG bez zewnętrznych fontów i zasobów.
 - `social-preview.png` — grafika podglądu udostępnianego linku, 1280 × 640 px.
 
+Paleta odpowiada landing page basal-rs: żółty IT SOL (`#f4ad00`, jaśniejszy
+`#ffc23d`) oznacza silnik i jego backendy, lawenda (`#bdcaff`) modele Basal
+Remka Kinasa. Tło używa `#0a0f17` i `#0d1420`, a panel `#111a28`.
+Social preview to baner SVG wyśrodkowany na tle `#0a0f17`, z marginesami
+110 px nad i pod banerem.
+
 Opis repozytorium na GitHubie:
 
 > Rust inference engine for Basal models by Remek Kinas. GPU execution and HTTP serving with CUDA & Metal backends. Benchmarks against upstream.
