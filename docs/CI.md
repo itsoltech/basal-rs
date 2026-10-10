@@ -1,13 +1,15 @@
 # Kontrole jakości Rust w CI
 
 [lint.yml](../.github/workflows/lint.yml) uruchamia się dla każdego PR oraz po zmianach kodu lub konfiguracji CI na
-`main`. Check `lint` jest zbiorczą bramką: wymaga sukcesu wszystkich poniższych jobów, także obu wariantów macierzy
+`main`. Check `lint` jest zbiorczą bramką: wymaga sukcesu wszystkich poniższych jobów, także wszystkich wariantów macierzy
 Rust. Błąd, anulowanie lub pominięcie wymaganego joba oznacza błąd bramki. Nowszy commit anuluje poprzedni przebieg.
 
 ## Kontrole automatyczne
 
 - **Formatowanie:** `cargo fmt --all --check` dla całego workspace.
 - **Linux bez GPU oraz Metal:** Clippy dla wszystkich crate'ów i targetów na Linux oraz Apple Silicon.
+- **Intel Vulkan:** osobny wariant Linux z `--features basal-cli/intel`; Clippy i Rustdoc bez GPU.
+  Build parsuje i waliduje wszystkie kernele WGSL przez przypiętą Naga; runtime i numeryka wymagają pomiarów na karcie.
 - **CUDA:** Clippy ze wszystkimi features na Linux z toolkitem CUDA 12.9.1. Kompilacja nie wymaga GPU;
   `CUDA_COMPUTE_CAP=80` ustala architekturę kerneli Candle, a `CUDA_COMPUTE_CAPS=80,89,90` sprawdza kompilację
   własnych kerneli PTX dla wszystkich architektur dystrybuowanych w wydaniu.
@@ -73,6 +75,13 @@ export CUDA_COMPUTE_CAP=80
 export CUDA_COMPUTE_CAPS=80,89,90
 cargo clippy --locked --workspace --release --all-targets --all-features -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --release --all-features --no-deps --document-private-items
+```
+
+Na Linux dla Intel (kompilacja nie wymaga sterownika ani fizycznej karty):
+
+```sh
+cargo clippy --locked --workspace --release --all-targets --features basal-cli/intel -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --release --features basal-cli/intel --no-deps --document-private-items
 ```
 
 ## Przegląd i ograniczenia

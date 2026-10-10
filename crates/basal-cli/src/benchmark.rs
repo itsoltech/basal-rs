@@ -10,9 +10,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::GpuBackend;
 use anyhow::{ensure, Context, Result};
 use basal_core::{Backend, Engine, ModelManifest};
-use basal_gpu::GpuBackend;
 use clap::{Args, ValueEnum};
 use serde_json::{json, Value};
 use tokio::sync::oneshot;

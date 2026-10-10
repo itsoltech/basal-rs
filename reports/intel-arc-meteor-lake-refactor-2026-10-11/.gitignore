@@ -1,0 +1,4 @@
+# Preserve local measurement data without versioning it (reports/README.md).
+*
+!.gitignore
+!README.md

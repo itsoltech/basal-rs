@@ -40,7 +40,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use basal_core::pack::Packed;
 use basal_core::{Backend, DecideError, Engine, ModelManifest};
-use basal_gpu::{GpuBackend, Kernels, Precision, Readout};
+#[cfg(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos")))]
+use basal_gpu::intel::IntelBackend as GpuBackend;
+#[cfg(not(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos"))))]
+use basal_gpu::GpuBackend;
+use basal_gpu::{Kernels, Precision, Readout};
 use clap::{Args, Parser, Subcommand};
 use serde_json::{json, Value};
 
@@ -101,7 +105,7 @@ fn delegate_gpu_command() {
 }
 
 #[derive(Parser)]
-#[command(name = "basal", version = version(), styles = term::help_styles(), about = "Runtime of basal decision models (Rust; CUDA and Metal)")]
+#[command(name = "basal", version = version(), styles = term::help_styles(), about = "Runtime of basal decision models (Rust; CUDA, Metal and Intel Vulkan)")]
 struct Cli {
     /// Colours in the output: auto (a terminal, without NO_COLOR), always, never
     #[arg(long, global = true, value_enum, default_value_t = term::ColorMode::Auto)]
@@ -306,7 +310,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Prepare this machine for `basal serve`: on Linux the CUDA libraries (from NVIDIA), the user configuration;
+    /// Prepare this machine for `basal serve`: CUDA libraries for Linux CUDA builds, the user configuration;
     /// optionally the models and a user service
     Setup {
         /// Configuration file (instead of BASAL_CONFIG or basal-serve.yml in the working directory)
@@ -512,6 +516,8 @@ fn gpu_engine(m: &ModelArgs, g: &GpuArgs) -> Result<Engine<GpuBackend>> {
 }
 
 fn gpu_engine_at(dir: &Path, g: &GpuArgs) -> Result<Engine<GpuBackend>> {
+    #[cfg(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos")))]
+    anyhow::ensure!(g.state_cache_mb == 0, "Intel state cache is not implemented; use --state-cache-mb 0");
     let manifest = ModelManifest::load(dir)?;
     let readout = match g.readout.as_str() {
         "f32" => Readout::F32,

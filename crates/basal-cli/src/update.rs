@@ -127,6 +127,9 @@ fn install() -> Result<Install> {
 
 /// `basal update [--version X] [--check]`.
 pub fn run(version: Option<String>, check: bool) -> Result<()> {
+    if !check && basal_gpu::BUILD_BACKEND == "Intel Arc (Vulkan)" {
+        bail!("Intel builds have no release package yet; in the repository run `git pull && cargo build --locked --release --features basal-cli/intel`, then replace your installed Intel binary if needed");
+    }
     let current = env!("CARGO_PKG_VERSION");
     let want = match version {
         Some(v) => v.trim_start_matches('v').to_string(),
@@ -237,6 +240,9 @@ pub fn notice() -> Option<String> {
 
 /// How to update this installation.
 pub fn how() -> &'static str {
+    if basal_gpu::BUILD_BACKEND == "Intel Arc (Vulkan)" {
+        return "`git pull && cargo build --locked --release --features basal-cli/intel`";
+    }
     match install() {
         Ok(Install::Homebrew) => "`brew upgrade basal-rs`",
         Ok(Install::Container) => "`docker compose pull`",

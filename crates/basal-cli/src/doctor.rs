@@ -192,6 +192,38 @@ fn memory_bytes() -> Option<u64> {
 
 /// GPU checks; returns the memory available to the models (bytes) when known.
 fn gpu(r: &mut Report) -> Option<u64> {
+    #[cfg(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos")))]
+    if basal_gpu::BUILD_BACKEND == "Intel Arc (Vulkan)" {
+        match basal_gpu::intel::info() {
+            Ok(info) => {
+                r.ok("gpu", format!("{}; Intel Vulkan, {}", info.name, info.driver));
+                match basal_gpu::gpu_memory() {
+                    Ok(memory) => {
+                        if memory.unified {
+                            r.info("gpu", "GPU shares host RAM; weights and activations compete with the desktop");
+                        }
+                        r.info(
+                            "gpu",
+                            format!(
+                                "Vulkan heap budget: {:.1} GiB available",
+                                memory.available_bytes as f64 / 1073741824.0
+                            ),
+                        );
+                        return Some(memory.available_bytes);
+                    }
+                    Err(e) => r.warn(
+                        "gpu",
+                        format!("Vulkan memory telemetry unavailable: {e:#}"),
+                        "update the Intel Vulkan driver to support VK_EXT_memory_budget",
+                    ),
+                }
+            }
+            Err(e) => {
+                r.fail("gpu", format!("{e:#}"), "install Vulkan loader and Intel Mesa driver (Arch: vulkan-intel)")
+            }
+        }
+        return None;
+    }
     if cfg!(target_os = "macos") {
         if std::env::consts::ARCH != "aarch64" {
             r.fail("gpu", "Intel Mac: the Metal backend needs Apple Silicon (M1 or newer)", "use an Apple Silicon Mac");
