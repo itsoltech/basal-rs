@@ -2,6 +2,8 @@
 //! rows -> backend letter logits -> averaged, calibrated distributions -> System One answers.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{bail, Result};
@@ -47,6 +49,26 @@ pub trait Backend {
     /// Share the device with another engine through `gate` (urgent lane, or preemptible between layers).
     /// Default: ignored.
     fn set_gate(&mut self, _gate: std::sync::Arc<crate::gate::Gate>, _urgent: bool) {}
+    /// Readiness of this backend's device, shared with its forks. Default: not reported.
+    fn device_health(&self) -> Option<DeviceHealth> {
+        None
+    }
+}
+
+/// Readiness flag shared by a backend and its observers. Once marked lost, the device cannot run requests until
+/// the model is loaded again; request errors, a failed allocation or a timeout do not mark it.
+#[derive(Clone, Debug, Default)]
+pub struct DeviceHealth(Arc<AtomicBool>);
+
+impl DeviceHealth {
+    /// Record a permanent device loss. Lock-free, so it may be called from a driver callback.
+    pub fn mark_lost(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    pub fn is_lost(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]

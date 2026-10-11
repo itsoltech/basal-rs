@@ -51,6 +51,8 @@ pub const BUILD_BACKEND: &str = "Metal";
 pub const BUILD_BACKEND: &str = "Intel Arc (Vulkan)";
 #[cfg(all(not(feature = "intel"), not(feature = "cuda"), not(target_os = "macos")))]
 pub const BUILD_BACKEND: &str = "no GPU backend";
+/// This build runs the Intel Vulkan backend (`intel` on Linux without `cuda`). [`BUILD_BACKEND`] is for display only.
+pub const INTEL_BACKEND: bool = cfg!(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos")));
 
 /// Apple GPU of this machine: name and the memory Metal recommends as one process's working set (bytes).
 #[cfg(target_os = "macos")]

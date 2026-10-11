@@ -37,7 +37,7 @@ pub struct Options {
 }
 
 pub fn run(o: &Options) -> Result<()> {
-    if cfg!(target_os = "linux") && basal_gpu::BUILD_BACKEND != "Intel Arc (Vulkan)" {
+    if cfg!(target_os = "linux") && !basal_gpu::INTEL_BACKEND {
         cuda_libraries(o.force)?;
     }
     if o.prefetch {

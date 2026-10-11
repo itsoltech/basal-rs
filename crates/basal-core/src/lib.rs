@@ -14,6 +14,6 @@ pub mod pyjson;
 pub mod request;
 pub mod tokenize;
 
-pub use engine::{Backend, Batching, Engine, ItemResult, Prepared};
+pub use engine::{Backend, Batching, DeviceHealth, Engine, ItemResult, Prepared};
 pub use manifest::ModelManifest;
 pub use request::{DecideError, Item, QType};

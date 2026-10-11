@@ -67,6 +67,7 @@ Metodyka: [docs/BENCHMARKS.md](../docs/BENCHMARKS.md).
 |---|---|
 | [intel-arc-meteor-lake-2026-10-10](intel-arc-meteor-lake-2026-10-10/README.md) | mini, 4.5B i max: zgodność z FP32, HTTP, dobór GEMM, poprawki ładowania i kolejki oraz ograniczenia pamięci |
 | [intel-arc-meteor-lake-refactor-2026-10-11](intel-arc-meteor-lake-refactor-2026-10-11/README.md) | refaktor bez mapowania checkpointu: bitowa zgodność mini, 4.5B i max (w tym Tree), czas ładowania, odrzucony wariant GEMM |
+| [intel-arc-meteor-lake-fixes-2026-10-11](intel-arc-meteor-lake-fixes-2026-10-11/README.md) | wybór dGPU, `/health` 503 po utracie urządzenia, loader bez kopii tensora, jedno urządzenie w `doctor`: bitowa zgodność mini, 4.5B i max |
 
 ## API
 

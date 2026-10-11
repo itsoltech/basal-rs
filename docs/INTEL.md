@@ -17,6 +17,13 @@ compute oraz dostęp do urządzenia renderowania. Na Arch sterownikiem jest
 pakiet `vulkan-intel`. Diagnostyka pamięci dodatkowo wymaga
 `VK_EXT_memory_budget`.
 
+Backend wybiera spośród fizycznych GPU Intel spełniających te wymagania
+kartę osobną przed zintegrowaną; przy kilku równorzędnych pierwszą
+w kolejności zgłoszonej przez Vulkan. Renderery programowe i GPU innych
+producentów nie są używane, a brak zgodnego urządzenia kończy się błędem
+z powodem odrzucenia każdego GPU Intel. `basal doctor` pokazuje wybrane
+urządzenie i budżet jego pamięci. Wybór urządzenia nie ma opcji CLI.
+
 ```sh
 cargo build --locked --release --features basal-cli/intel
 ./target/release/basal doctor --model .models/basal-1.5-mini --json
@@ -60,7 +67,12 @@ jest scratch zależny od liczby tokenów, używany ponownie przez wszystkie wars
 Backend czeka na zakończenie każdej warstwy, aby ograniczyć kolejkę poleceń GPU
 i umożliwić przekazanie karty krótkim requestom. Po zgłoszeniu utraty urządzenia
 kolejne operacje zwracają błąd; model wymaga ponownego uruchomienia.
+`GET /health` serwera odpowiada wtedy 503 `{"status":"device_lost"}` z nazwami
+modeli w `lost_models`, więc supervisor może zrestartować proces. Błędy
+pojedynczych requestów, alokacji i timeouty nie zmieniają odpowiedzi `/health`.
 
+Loader konwertuje BF16 na FP16 porcjami po 8 MiB prosto do zmapowanego bufora,
+bez kopii całego tensora w RAM.
 Na zintegrowanej karcie z `MAPPABLE_PRIMARY_BUFFERS` loader zapisuje wagi
 bezpośrednio do docelowych alokacji we współdzielonej pamięci. Pozostała ścieżka
 kończy transfer po każdej warstwie, aby nie zatrzymywać drugiej kopii wszystkich wag
