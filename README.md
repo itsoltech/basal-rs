@@ -32,7 +32,10 @@ Zdolności decyzyjne i jakość odpowiedzi pochodzą z tych modeli.
 [IT SOL](https://github.com/itsoltech): wykonanie obliczeń na GPU, optymalizacja
 pakowania żądań, kernele i harmonogram serwera. Backend CUDA (NVIDIA,
 sprawdzony na RTX 6000 Ada), Metal (Apple Silicon, sprawdzony na M1 Pro i M2 Max)
-oraz [Intel Arc przez Vulkan](docs/INTEL.md) (Linux, Meteor Lake).
+oraz [Intel Arc przez Vulkan](docs/INTEL.md) (Linux; pomiary wyłącznie na zintegrowanym
+Arc Meteor Lake). Inne karty Arc nie mają jeszcze potwierdzonej poprawności;
+[sprawdzony sprzęt i zakres weryfikacji](docs/INTEL.md#sprawdzony-sprzęt-i-zakres-weryfikacji)
+opisujemy osobno.
 Serwer implementuje istniejący kontrakt API **TypeSafe System One** oraz
 endpoint zgodny z serwerem upstream. Atrybucję portowanych elementów Basala
 i modeli bazowych zawiera [NOTICE](NOTICE).
