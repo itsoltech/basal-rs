@@ -70,6 +70,7 @@ Każdy skrypt opisuje w nagłówku, co mierzy, jakie ścieżki trzeba wcześniej
 | `tools/perf/run-profile-cloud.sh` | Nsight Systems: kategorie kerneli, timeline i API; opcjonalnie Nsight Compute dla wskazanego uruchomienia attention |
 | `tools/perf/run-parity-cloud.sh` | identyczność bajtowa eksportów dwóch buildów: single/tree/budget, cache prefiksu i cache stanu |
 | `tools/perf/run-http-variants-cloud.sh` | HTTP A/B/B/A jednego buildu: pełne odpowiedzi, latency, throughput, energia i VRAM |
+| `tools/perf/run-multigpu-cloud.py` | modele na osobnych GPU (dwie identyczne karty): `doctor` i odrzucane konfiguracje, eksporty baseline i kandydata na GPU 0 i 1 (bajtowo i `basal compare`), jedno API z dwoma modelami na dwóch GPU i na jednym, odwrócone `CUDA_VISIBLE_DEVICES`, zamknięcie serwera |
 | `tools/decision-sets/run-cloud.sh` | zestaw decyzji wobec upstream FP32 |
 
 ## Pilnowanie maszyny
@@ -128,6 +129,18 @@ raport kampanii z 2026-10-10; przy kolejnej kampanii zmień je przed dodaniem ta
 Marker `VALIDATED` powstaje osobno dla każdego modelu po zakończeniu wszystkich
 kroków. Przed dodaniem tabeli przejrzyj również różnice względem FP32: marker
 potwierdza wykonanie porównania, a nie brak różnic numerycznych wobec FP32.
+
+`run-multigpu-cloud.py` wymaga maszyny z dwiema identycznymi kartami NVIDIA,
+binarek baseline (bez `--device`) i kandydata, `tools/bench/long_states.jsonl`,
+tabel GEMM z `crates/basal-cli/gemm-tables` dla tej karty (wyszukiwania GEMM nie
+uruchamia), `crates/basal-cli/src/config.rs` (przypięte rewizje modeli), katalogu
+`--inputs` z `bench.jsonl` i `systemone.jsonl` oraz wag `--models` (domyślnie
+`4.5B mini`) w `/data/hf`. Uruchamiaj go w `/work`:
+`python3 tools/perf/run-multigpu-cloud.py --base /opt/basal-dev/basal-cuda-base --candidate /opt/basal-dev/basal-cuda --inputs KATALOG --out out/multigpu`.
+Wszystkim procesom ustawia `CUDA_DEVICE_ORDER=PCI_BUS_ID`. Każde sprawdzenie
+zapisuje jako PASS, FAIL lub GAP w `checks.txt`; kod wyjścia 1 oznacza co najmniej
+jedno FAIL. Czasy, telemetria `nvidia-smi` osobno dla każdej karty i przedziały
+obliczeń z nagłówków odpowiedzi są tylko obserwacją, nie dowodem przyspieszenia.
 
 Do `reports/` zapisuj krótkie wyniki i zakres weryfikacji. Pełne eksporty, logi
 i profile pobieraj do ignorowanego `.cache/` i archiwizuj poza Gitem.

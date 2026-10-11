@@ -76,12 +76,13 @@ fn snapshot(dev: &Device) -> Result<GpuMemory> {
     }
 }
 
-/// Inspect the selected GPU before loading weights. Creates a device context, without a model forward.
-pub fn gpu_memory() -> Result<GpuMemory> {
+/// Inspect GPU `device` ([`crate::gpu_device`]; Intel: the adapter the backend selects, device 0 only) before loading
+/// weights. Creates a device context, without a model forward.
+pub fn gpu_memory(device: usize) -> Result<GpuMemory> {
     #[cfg(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos")))]
-    return crate::intel::memory();
+    return crate::intel::memory(device);
     #[cfg(not(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos"))))]
-    snapshot(&crate::gpu_device()?)
+    snapshot(&crate::gpu_device(device)?)
 }
 
 impl crate::GpuBackend {

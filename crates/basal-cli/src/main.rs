@@ -154,6 +154,18 @@ struct GpuArgs {
     /// CUDA: cuBLASLt algorithm table from `basal gemm-search` (classes not in it are tuned at first use)
     #[arg(long)]
     gemm_table: Option<PathBuf>,
+    /// GPU: CUDA device ordinal among the GPUs visible to this process (CUDA_VISIBLE_DEVICES renumbers them); Metal
+    /// and Intel: 0 only. Default 0. `basal serve`: the device of every --model (a configuration file sets `device`
+    /// per model instead)
+    #[arg(long)]
+    device: Option<usize>,
+}
+
+impl GpuArgs {
+    /// The GPU ordinal (`--device`, default 0).
+    fn device(&self) -> usize {
+        self.device.unwrap_or(0)
+    }
 }
 
 #[derive(Subcommand)]
@@ -386,7 +398,7 @@ enum Cmd {
     Serve {
         /// YAML file with the served models and their options (serve.example.yml); replaces the model, GPU and
         /// admission options below. Default: BASAL_CONFIG, else basal-serve.yml in the working directory
-        #[arg(long, conflicts_with_all = ["models", "gemm_table"])]
+        #[arg(long, conflicts_with_all = ["models", "gemm_table", "device"])]
         config: Option<PathBuf>,
         /// Model to serve: name (owner Remek; mini, 4.5B, max), owner/name, @revision, or a local directory; repeat
         /// for several (the options below apply to each). Without --model and a configuration file: basal-1.5-4.5B
@@ -443,6 +455,9 @@ enum Cmd {
         /// batch it runs in
         #[arg(long)]
         invariant: bool,
+        /// CUDA device ordinal to search on (the table is valid for GPUs of its name)
+        #[arg(long, default_value_t = 0)]
+        device: usize,
     },
     /// GEMM micro-benchmark on the projection shapes (diagnostic)
     Gemm {
@@ -452,6 +467,9 @@ enum Cmd {
         m: Vec<usize>,
         #[arg(long, default_value_t = 20)]
         reps: usize,
+        /// GPU ordinal
+        #[arg(long, default_value_t = 0)]
+        device: usize,
     },
     /// Compare two exports (reference or runtime): tokens, decisions, logit and probability differences, answers
     Compare {
@@ -524,9 +542,15 @@ fn gpu_engine_at(dir: &Path, g: &GpuArgs) -> Result<Engine<GpuBackend>> {
         "bf16" => Readout::Bf16Rounded,
         r => bail!("unknown readout {r:?} (f32, bf16)"),
     };
-    let backend =
-        GpuBackend::load(dir, &manifest.config, Precision::parse(&g.dtype)?, readout, Kernels::parse(&g.kernels)?)?;
-    crate::done!("{} loaded on the GPU in {:.1}s", manifest.name, backend.load_s);
+    let backend = GpuBackend::load(
+        dir,
+        &manifest.config,
+        Precision::parse(&g.dtype)?,
+        readout,
+        Kernels::parse(&g.kernels)?,
+        g.device(),
+    )?;
+    crate::done!("{} loaded on GPU {} in {:.1}s", manifest.name, g.device(), backend.load_s);
     let mut backend = backend;
     if let Some(p) = &g.gemm_table {
         let n = backend.load_gemm_table(p)?;
@@ -784,10 +808,17 @@ fn run() -> Result<()> {
                     config::DEFAULT_MODEL.repo
                 ),
             }
-            if !matches!(source, config::Source::File(_)) {
+            if matches!(source, config::Source::File(_)) {
+                // the file's models have their own devices; a device of the command line would be ignored
+                anyhow::ensure!(
+                    g.device.is_none(),
+                    "--device applies to --model; with a configuration file set `device` per model in it"
+                );
+            } else {
                 // models from the command line: the options of the command line
                 for m in &mut c.models {
                     m.dtype = g.dtype.clone();
+                    m.device = g.device();
                     m.gemm_table = match &g.gemm_table {
                         Some(t) => t.display().to_string(),
                         None => "auto".into(),
@@ -806,10 +837,18 @@ fn run() -> Result<()> {
             // model files (local or downloaded), then GEMM tables (a search needs no model weights in GPU memory),
             // then the models
             let dirs: Vec<PathBuf> = c.models.iter().map(config::model_dir).collect::<Result<_>>()?;
+            let manifests: Vec<ModelManifest> = dirs.iter().map(|d| ModelManifest::load(d)).collect::<Result<_>>()?;
+            // one engine per model name (the `model` field of requests) before any GEMM search or load
+            for (i, m) in manifests.iter().enumerate() {
+                anyhow::ensure!(
+                    manifests[..i].iter().all(|o| o.name != m.name),
+                    "model {} configured twice (one model is served on one device)",
+                    m.name
+                );
+            }
             let mut tables = Vec::new();
-            for (mc, dir) in c.models.iter().zip(&dirs) {
-                let manifest = ModelManifest::load(dir)?;
-                tables.push(config::gemm_table(mc, &manifest, &c.gemm_cache)?);
+            for (mc, manifest) in c.models.iter().zip(&manifests) {
+                tables.push(config::gemm_table(mc, manifest, &c.gemm_cache)?);
             }
             let mut served = Vec::new();
             for ((mc, table), dir) in c.models.iter().zip(tables).zip(dirs) {
@@ -821,6 +860,7 @@ fn run() -> Result<()> {
                     state_cache_mb: mc.state_cache_mb,
                     tree_max_tokens: mc.tree_max_tokens,
                     gemm_table: table.clone(),
+                    device: Some(mc.device),
                 };
                 let engine = gpu_engine_at(&dir, &mg)?;
                 if let Some(t) = &table {
@@ -828,6 +868,7 @@ fn run() -> Result<()> {
                 }
                 served.push(serve::ServedModel {
                     engine,
+                    device: mc.device,
                     max_batch_tokens: mc.max_batch_tokens,
                     schedule: mc.schedule,
                     long_tokens: mc.long_tokens,
@@ -850,7 +891,7 @@ fn run() -> Result<()> {
             };
             serve::serve(served, opts)?;
         }
-        Cmd::GemmSearch { m, dtype, out, max_m, m_classes, invariant } => {
+        Cmd::GemmSearch { m, dtype, out, max_m, m_classes, invariant, device } => {
             #[cfg(feature = "cuda")]
             {
                 let classes: Vec<usize> = if !m_classes.is_empty() {
@@ -861,19 +902,19 @@ fn run() -> Result<()> {
                     (16..=512).step_by(16).chain((640..=max_m).step_by(128)).collect()
                 };
                 let shapes = basal_gpu::projection_shapes(&ModelManifest::load(&m.dir()?)?.config);
-                let t = basal_gpu::gemm_search(&classes, &shapes, &dtype, invariant)?;
+                let t = basal_gpu::gemm_search(&classes, &shapes, &dtype, invariant, device)?;
                 write_json(&out, &t)?;
             }
             #[cfg(not(feature = "cuda"))]
             bail!(
-                "gemm-search needs a CUDA build ({}, {dtype}, {}, {max_m}, {m_classes:?}, {invariant})",
+                "gemm-search needs a CUDA build ({}, {dtype}, {}, {max_m}, {m_classes:?}, {invariant}, {device})",
                 m.model,
                 out.display()
             );
         }
-        Cmd::Gemm { dtype, m, reps } => {
+        Cmd::Gemm { dtype, m, reps, device } => {
             let shapes = [(2048, 2560), (2048, 2048), (2048, 11008), (11008, 2048)];
-            for r in basal_gpu::gemm_microbench(&m, &shapes, &dtype, reps)? {
+            for r in basal_gpu::gemm_microbench(&m, &shapes, &dtype, reps, device)? {
                 println!("{r}");
             }
         }
@@ -922,7 +963,7 @@ fn run() -> Result<()> {
             // GPU condition probe before and after: the same GEMM (f16, 480x2048 @ 11008x2048^T). A drop between the
             // two marks throttling or outside load during the run.
             let probe = || -> Result<f64> {
-                let r = basal_gpu::gemm_microbench(&[480], &[(2048, 11008)], "f16", 30)?;
+                let r = basal_gpu::gemm_microbench(&[480], &[(2048, 11008)], "f16", 30, g.device())?;
                 Ok(r.iter().filter_map(|x| x["tflops"].as_f64()).fold(0.0, f64::max))
             };
             let before = probe()?;

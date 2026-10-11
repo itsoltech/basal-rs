@@ -249,20 +249,19 @@ impl PrefixKv {
     }
 }
 
-/// The GPU of this build: CUDA device 0 with the `cuda` feature, otherwise the Metal device (macOS).
 /// Weight shapes (N, K) of the projection GEMMs of a model: qkv, o, gate|up, down.
 pub fn projection_shapes(c: &LlamaConfig) -> Vec<(usize, usize)> {
     let (h, qd, kvd, i) = (c.hidden, c.heads * c.head_dim, c.kv_heads * c.head_dim, c.intermediate);
     vec![(qd + 2 * kvd, h), (h, qd), (2 * i, h), (h, i)]
 }
 
-/// Name of the GPU (CUDA device 0), as recorded in GEMM tables.
-pub fn gpu_name() -> Result<String> {
+/// Name of CUDA device `device` ([`gpu_device`]), as recorded in GEMM tables.
+pub fn gpu_name(device: usize) -> Result<String> {
     #[cfg(feature = "cuda")]
-    if let Device::Cuda(d) = gpu_device()? {
+    if let Device::Cuda(d) = gpu_device(device)? {
         return Ok(d.cuda_stream().context().name()?);
     }
-    bail!("gpu_name: CUDA only")
+    bail!("gpu_name: CUDA only (device {device})")
 }
 
 /// Version of the batch-invariant GEMM search of this build (CUDA; 0 without cuBLASLt), as recorded in GEMM tables.
@@ -283,9 +282,9 @@ pub fn cublaslt_version() -> Option<usize> {
 
 /// How a host thread waits for the GPU (`BASAL_CUDA_SYNC`): `auto` (driver default: spins while there are more cores
 /// than GPUs, a full core busy during every wait), `spin`, `yield` or `blocking` (sleeps until the GPU signals; frees
-/// the core, a wake-up per synchronisation). Set on the primary context before it is created.
+/// the core, a wake-up per synchronisation). Set on the primary context of `device` before it is created.
 #[cfg(feature = "cuda")]
-fn set_cuda_sync() -> Result<()> {
+fn set_cuda_sync(device: usize) -> Result<()> {
     use candle_core::cuda_backend::cudarc::driver::{result, sys};
     use sys::CUctx_flags_enum as F;
     let flag = match std::env::var("BASAL_CUDA_SYNC").as_deref() {
@@ -296,17 +295,30 @@ fn set_cuda_sync() -> Result<()> {
         Ok(v) => anyhow::bail!("BASAL_CUDA_SYNC={v:?}: auto, spin, yield or blocking"),
     };
     result::init()?;
-    let dev = result::device::get(0)?;
-    // SAFETY: a valid device; the flags apply to its primary context, retained afterwards by candle
+    let dev = result::device::get(i32::try_from(device)?)?;
+    // SAFETY: a valid device (the caller checked the ordinal against the device count); the flags apply to its
+    // primary context, retained afterwards by candle
     unsafe { sys::cuDevicePrimaryCtxSetFlags_v2(dev, flag as u32).result()? };
     Ok(())
 }
 
-pub fn gpu_device() -> Result<Device> {
+/// The GPU `device` of this build: with the `cuda` feature the CUDA device of that ordinal, an index among the GPUs
+/// visible to this process (the driver orders all GPUs, by default fastest first or by PCI bus with
+/// `CUDA_DEVICE_ORDER=PCI_BUS_ID`; `CUDA_VISIBLE_DEVICES` then selects, reorders and renumbers them from 0), otherwise
+/// the Metal device (macOS), which is only device 0. Every call creates a new candle device (its own handles and
+/// kernel caches) on the GPU's primary context.
+pub fn gpu_device(device: usize) -> Result<Device> {
     #[cfg(feature = "cuda")]
     {
-        set_cuda_sync().context("BASAL_CUDA_SYNC")?;
-        let dev = Device::new_cuda(0).context("CUDA device 0")?;
+        use candle_core::cuda_backend::cudarc::driver::CudaContext;
+        let count = CudaContext::device_count().context("counting CUDA devices")?;
+        ensure!(
+            device < usize::try_from(count).unwrap_or(0),
+            "CUDA device {device} does not exist: this process sees {count} CUDA device(s), numbered from 0 \
+             (CUDA_VISIBLE_DEVICES selects and renumbers them)"
+        );
+        set_cuda_sync(device).context("BASAL_CUDA_SYNC")?;
+        let dev = Device::new_cuda(device).with_context(|| format!("CUDA device {device}"))?;
         if let Device::Cuda(d) = &dev {
             // cudarc creates two CUDA events for every allocation, which it records and waits on only when the context
             // has streams of its own (`is_in_multi_stream_mode`); candle and this crate use only the per-thread default
@@ -322,9 +334,9 @@ pub fn gpu_device() -> Result<Device> {
             // the PTX of the highest compiled architecture not above the GPU's (build.rs, CUDA_COMPUTE_CAPS)
             ensure!(
                 fused::cu::select(cap).is_some(),
-                "this build has kernels for CUDA compute capability {} and newer, but {} is {major}.{minor} (a \
-                 build with CUDA_COMPUTE_CAPS={major}{minor} may run if the kernels support it; the release packages \
-                 and images need 8.0 or newer)",
+                "this build has kernels for CUDA compute capability {} and newer, but {} (CUDA device {device}) is \
+                 {major}.{minor} (a build with CUDA_COMPUTE_CAPS={major}{minor} may run if the kernels support it; \
+                 the release packages and images need 8.0 or newer)",
                 env!("BASAL_CUDA_COMPUTE_CAPS"),
                 ctx.name()?
             );
@@ -332,13 +344,18 @@ pub fn gpu_device() -> Result<Device> {
         Ok(dev)
     }
     #[cfg(all(not(feature = "cuda"), target_os = "macos"))]
-    return Device::new_metal(0).context("Metal device");
+    {
+        ensure!(device == 0, "device {device}: the Metal backend runs on device 0 (the system GPU) only");
+        Device::new_metal(0).context("Metal device")
+    }
     #[cfg(all(not(feature = "cuda"), not(target_os = "macos")))]
-    bail!("no GPU backend in this build (macOS: Metal; Linux: build with --features cuda)")
+    bail!("no GPU backend in this build for device {device} (macOS: Metal; Linux: build with --features cuda)")
 }
 
 pub struct GpuBackend {
     dev: Device,
+    /// The ordinal `dev` was opened with ([`gpu_device`]).
+    device: usize,
     /// Precomputed prefixes (prompt template up to the state, and with a state cache the shared prefix of recent
     /// single-row forwards); a row that starts with one of them skips its tokens.
     prefixes: Vec<PrefixKv>,
@@ -509,9 +526,10 @@ impl GpuBackend {
         precision: Precision,
         readout: Readout,
         kernels: Kernels,
+        device: usize,
     ) -> Result<Self> {
         let t0 = Instant::now();
-        let dev = gpu_device()?;
+        let dev = gpu_device(device)?;
         let path = model_dir.join("model.safetensors");
         // SAFETY: the checkpoint file is not modified while mapped.
         let st = unsafe { MmapedSafetensors::new(&path) }.with_context(|| format!("mapping {}", path.display()))?;
@@ -671,20 +689,17 @@ impl GpuBackend {
             },
             gate: None,
             dev,
+            device,
         })
     }
 
     /// CUDA attention kernel of this forward precision.
-    fn attention_kernel(&self) -> &'static str {
+    fn attention_kernel(&self) -> Result<&'static str> {
         #[cfg(feature = "cuda")]
-        if self.dev.is_cuda() {
-            return if self.tc_attention() { fused::tc_kernel() } else { "attn_tree_f32" };
+        if let Device::Cuda(d) = &self.dev {
+            return if self.tc_attention() { Ok(fused::tc_kernel(d)?) } else { Ok("attn_tree_f32") };
         }
-        if self.tree_attention() {
-            "attn_tree_f32"
-        } else {
-            "sdpa"
-        }
+        Ok(if self.tree_attention() { "attn_tree_f32" } else { "sdpa" })
     }
 
     /// Attention by tree units, invariant to packing: always on CUDA; on Metal unless `BASAL_ATT=sdpa` (the MLX SDPA
@@ -1316,9 +1331,9 @@ fn table_entries(v: &Value) -> Result<Vec<cublaslt::Tuned>> {
     Ok(entries)
 }
 
-/// A batch-invariant GEMM table (e.g. one shipped with the build) is usable on this GPU: same GPU name and cuBLASLt
-/// version, and cuBLASLt accepts every algorithm at its M class.
-pub fn check_gemm_table(v: &Value) -> Result<()> {
+/// A batch-invariant GEMM table (e.g. one shipped with the build) is usable on GPU `device`: same GPU name and
+/// cuBLASLt version, and cuBLASLt accepts every algorithm at its M class there.
+pub fn check_gemm_table(v: &Value, device: usize) -> Result<()> {
     #[cfg(feature = "cuda")]
     {
         ensure!(
@@ -1328,7 +1343,7 @@ pub fn check_gemm_table(v: &Value) -> Result<()> {
             cublaslt::version()
         );
         ensure!(v["invariant"].as_bool() == Some(true), "not a batch-invariant table");
-        let dev = gpu_device()?;
+        let dev = gpu_device(device)?;
         let Device::Cuda(d) = &dev else { bail!("not a CUDA device") };
         let here = d.cuda_stream().context().name()?;
         ensure!(v["gpu"].as_str() == Some(here.as_str()), "table for {}, this GPU is {here}", v["gpu"]);
@@ -1338,7 +1353,7 @@ pub fn check_gemm_table(v: &Value) -> Result<()> {
         Ok(())
     }
     #[cfg(not(feature = "cuda"))]
-    bail!("GEMM tables need the CUDA backend ({})", v["gpu"])
+    bail!("GEMM tables need the CUDA backend ({}, device {device})", v["gpu"])
 }
 
 /// `BASAL_HOST_TIMING` is set: every CUDA readout reports its host preparation, enqueue and wait times (stderr).
@@ -1399,6 +1414,7 @@ impl Backend for GpuBackend {
         ensure!(self.profile.is_none() && self.residual_max.is_none(), "fork: diagnostics are per backend");
         Ok(Self {
             dev: self.dev.clone(),
+            device: self.device,
             prefixes: self.prefixes.iter().filter(|p| p.pinned).cloned().collect(),
             state_cache_bytes: self.state_cache_bytes,
             clock: 0,
@@ -1443,7 +1459,7 @@ impl Backend for GpuBackend {
         let cuda = self.dev.is_cuda();
         json!({
             "backend": if cuda { "cuda" } else { "metal" },
-            "device": if cuda { "NVIDIA GPU through candle Device::new_cuda(0)" } else { "Apple GPU through candle Device::new_metal(0)" },
+            "device": if cuda { format!("NVIDIA GPU through candle Device::new_cuda({})", self.device) } else { format!("Apple GPU through candle Device::new_metal({})", self.device) },
             "tensor_library": if cuda { "candle-core 0.11.0 (CUDA; matmul = cuBLAS, no TF32)" } else { "candle-core 0.11.0 (Metal; matmul = MLX steel GEMM port)" },
             "weights": match self.precision {
                 Precision::Bf16 => "bf16 (checkpoint)",
@@ -1469,7 +1485,7 @@ impl Backend for GpuBackend {
                 Kernels::Fused => "none: compact token list for GEMM/norm/MLP, attention per packed row (segment)",
                 Kernels::Candle => "rows padded on the right to the longest packed row of a chunk",
             },
-            "attention_kernel": self.attention_kernel(),
+            "attention_kernel": self.attention_kernel().unwrap_or("unknown"),
             "gemm": if cuda { self.gemm_desc() } else { "MLX steel GEMM (candle); 32-row tiles when M mod 64 is in 1..=32 and M <= 600" },
             "prefix_kv": self.prefixes.iter().filter(|p| p.pinned).map(|p| p.ids.len()).collect::<Vec<_>>(),
             "state_cache_bytes": self.state_cache_bytes,
@@ -1623,10 +1639,16 @@ impl Backend for GpuBackend {
     }
 }
 
-/// Time `x[m,k] @ w[n,k]^T` on the GPU for the projection shapes of the model (synchronised, after warm-up).
+/// Time `x[m,k] @ w[n,k]^T` on GPU `device` for the projection shapes of the model (synchronised, after warm-up).
 /// Returns `(m, k, n, dtype, ms, TFLOP/s)` rows. Diagnostic for comparing GEMM kernels with MLX / cuBLAS.
-pub fn gemm_microbench(ms: &[usize], shapes: &[(usize, usize)], dtype: &str, reps: usize) -> Result<Vec<Value>> {
-    let dev = gpu_device()?;
+pub fn gemm_microbench(
+    ms: &[usize],
+    shapes: &[(usize, usize)],
+    dtype: &str,
+    reps: usize,
+    device: usize,
+) -> Result<Vec<Value>> {
+    let dev = gpu_device(device)?;
     let dt = match dtype {
         "bf16" => DType::BF16,
         "f16" => DType::F16,
@@ -1726,10 +1748,16 @@ pub fn gemm_tune(ms: &[usize], shapes: &[(usize, usize)], dtype: &str, reps: usi
 }
 
 /// Exhaustive cuBLASLt configuration search for the projection shapes `(n, k)` at every M class in `m_classes`
-/// (CUDA, f16 or bf16), on random operands. Returns the table (JSON) for `--gemm-table`.
+/// (CUDA, f16 or bf16), on random operands on GPU `device`. Returns the table (JSON) for `--gemm-table`.
 #[cfg(feature = "cuda")]
-pub fn gemm_search(m_classes: &[usize], shapes: &[(usize, usize)], dtype: &str, invariant: bool) -> Result<Value> {
-    let dev = gpu_device()?;
+pub fn gemm_search(
+    m_classes: &[usize],
+    shapes: &[(usize, usize)],
+    dtype: &str,
+    invariant: bool,
+    device: usize,
+) -> Result<Value> {
+    let dev = gpu_device(device)?;
     let dt = match dtype {
         "bf16" => DType::BF16,
         "f16" => DType::F16,

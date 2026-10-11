@@ -117,7 +117,7 @@ struct Server {
 }
 
 impl Server {
-    fn start(engine: Engine<GpuBackend>, options: &Options) -> Result<Self> {
+    fn start(engine: Engine<GpuBackend>, device: usize, options: &Options) -> Result<Self> {
         let listener =
             std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).context("binding benchmark listener")?;
         let addr = listener.local_addr()?;
@@ -132,6 +132,7 @@ impl Server {
         };
         let model = ServedModel {
             engine,
+            device,
             max_batch_tokens: options.max_batch_tokens,
             schedule: options.schedule,
             long_tokens: options.long_tokens,
@@ -224,7 +225,7 @@ fn execute(
     report: &mut Value,
 ) -> Result<()> {
     let host = host_memory()?;
-    let gpu = basal_gpu::gpu_memory()?;
+    let gpu = basal_gpu::gpu_memory(g.device())?;
     report["device"] = json!(gpu);
     let mut guard = Guard::new(host.clone(), &gpu, options);
     let first = guard.check(&host, &gpu, 0);
@@ -233,13 +234,14 @@ fn execute(
     let dir = model.dir()?;
     let checkpoint_bytes = std::fs::metadata(dir.join("model.safetensors")).context("checkpoint size")?.len();
     report["model"]["checkpoint_bytes"] = json!(checkpoint_bytes);
-    let preflight = guard.check(&host_memory()?, &basal_gpu::gpu_memory()?, checkpoint_bytes);
+    let preflight = guard.check(&host_memory()?, &basal_gpu::gpu_memory(g.device())?, checkpoint_bytes);
     report["resources"] = guard.report();
     preflight?;
     // Same automatic / bundled GEMM selection as serve, without ambient server configuration.
     let mut config = crate::config::model_ref(&model.model)?;
     report["model"]["resolved_revision"] = json!(config.revision);
     config.dtype = g.dtype.clone();
+    config.device = g.device();
     if let Some(table) = &g.gemm_table {
         config.gemm_table = table.to_string_lossy().into_owned();
     }
@@ -278,7 +280,7 @@ fn execute(
     for (name, work, _) in &workloads {
         ensure!(!work.is_empty(), "benchmark workload {name}: no requests within the model context limit");
     }
-    let server = Server::start(engine, options)?;
+    let server = Server::start(engine, g.device(), options)?;
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let mut phases = Vec::new();
     report["status"] = json!("running");

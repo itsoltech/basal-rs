@@ -17,8 +17,9 @@
 //!
 //! Several models (`basal serve --config FILE`, [`crate::config`]) run in one process: each has its own engine,
 //! queue and long lane, requests go to the model named in their `model` field (/v1/basal: the default model when the
-//! field is missing), and all engines take turns on the GPU through one gate, so short batches of any model go
-//! before long requests.
+//! field is missing). The engines of the models on one GPU (`device`) take turns on it through one gate, so short
+//! batches of any of them go before long requests; models on different GPUs have separate gates and run at the same
+//! time.
 //!
 //! Timing headers (not part of the System One body): `x-basal-queue-ms` (arrival to the start of its batch),
 //! `x-basal-compute-ms` (planning + forwards of its batch), `x-basal-batch-requests`.
@@ -66,6 +67,8 @@ pub struct ServeOptions {
 /// One served model: its engine and admission options.
 pub struct ServedModel<B: Backend> {
     pub engine: Engine<B>,
+    /// GPU ordinal the engine was loaded on: engines with the same ordinal share one gate.
+    pub device: usize,
     pub max_batch_tokens: usize,
     pub schedule: Schedule,
     /// Requests above this many packed tokens run in a second lane that yields the GPU between layers (0 = one lane).
@@ -498,23 +501,32 @@ fn serve_inner<B: Backend + Send + 'static>(
         .then(|| Metrics::new(&names, opts.max_inflight))
         .transpose()
         .context("initializing Prometheus metrics")?;
-    // One GPU: with several models or a long lane, every engine takes turns through one gate (short batches of any
-    // model before long requests, which yield between layers).
-    let shared = models.len() > 1 || models.iter().any(|m| m.long_tokens > 0);
-    let gate = shared.then(|| Arc::new(Gate::new(std::time::Duration::from_millis(opts.long_slice_ms))));
+    // Per GPU: with several models or a long lane on it, every engine on that GPU takes turns through its gate (short
+    // batches of any of its models before long requests, which yield between layers). GPUs do not wait for each other.
+    let mut gates: HashMap<usize, Arc<Gate>> = HashMap::new();
+    for m in &models {
+        let on_device = models.iter().filter(|o| o.device == m.device).count();
+        if on_device > 1 || m.long_tokens > 0 {
+            gates
+                .entry(m.device)
+                .or_insert_with(|| Arc::new(Gate::new(std::time::Duration::from_millis(opts.long_slice_ms))));
+        }
+    }
     let mut threads = Vec::new();
     let result = (|| -> Result<()> {
         let mut routes = HashMap::new();
         let mut readiness = Vec::new();
         for m in models {
-            let ServedModel { mut engine, max_batch_tokens, schedule, long_tokens } = m;
+            let ServedModel { mut engine, device, max_batch_tokens, schedule, long_tokens } = m;
             let name = engine.manifest.name.clone();
+            let gate = gates.get(&device);
             let mut devices: Vec<DeviceHealth> = engine.backend.device_health().into_iter().collect();
             let (tx, rx) = mpsc::unbounded_channel();
             let lane = |kind| Lane::new(schedule, max_batch_tokens, metrics.as_ref().map(|m| m.lane(&name, kind)));
             let long = if long_tokens > 0 {
                 let mut le = engine.fork().with_context(|| format!("{name}: second engine for the long lane"))?;
-                le.backend.set_gate(gate.clone().unwrap(), false);
+                let gate = gate.context("the long lane needs the gate of its GPU")?;
+                le.backend.set_gate(gate.clone(), false);
                 devices.extend(le.backend.device_health());
                 let (ltx, lrx) = std::sync::mpsc::channel();
                 let l = lane("long");
@@ -528,7 +540,7 @@ fn serve_inner<B: Backend + Send + 'static>(
             } else {
                 None
             };
-            if let Some(g) = &gate {
+            if let Some(g) = gate {
                 engine.backend.set_gate(g.clone(), true);
             }
             let main_lane = lane("main");
@@ -539,7 +551,7 @@ fn serve_inner<B: Backend + Send + 'static>(
                     .context("starting a GPU thread")?,
             );
             crate::note!(
-                "serving {name} (batch {max_batch_tokens} tokens, {schedule:?}{})",
+                "serving {name} on GPU {device} (batch {max_batch_tokens} tokens, {schedule:?}{})",
                 if long_tokens > 0 { format!(", long lane above {long_tokens} tokens") } else { String::new() }
             );
             readiness.push((name.clone(), devices));

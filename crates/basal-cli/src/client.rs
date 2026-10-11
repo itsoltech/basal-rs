@@ -111,6 +111,9 @@ pub(super) struct ClientArgs {
     /// Local CUDA GEMM table (default: same automatic table selection as serve)
     #[arg(long, requires = "local")]
     gemm_table: Option<PathBuf>,
+    /// Local GPU: CUDA device ordinal among the visible GPUs (Metal and Intel: 0)
+    #[arg(long, default_value_t = 0, requires = "local")]
+    device: usize,
 }
 
 #[derive(Serialize)]
@@ -453,6 +456,7 @@ fn run_local(
 fn load_local(args: &ClientArgs, name: &str) -> Result<basal_core::Engine<crate::GpuBackend>> {
     let mut model = crate::config::model_ref(name)?;
     model.dtype = args.dtype.clone();
+    model.device = args.device;
     if let Some(table) = &args.gemm_table {
         model.gemm_table = table.display().to_string();
     }
@@ -467,6 +471,7 @@ fn load_local(args: &ClientArgs, name: &str) -> Result<basal_core::Engine<crate:
         state_cache_mb: 0,
         tree_max_tokens: basal_core::engine::TREE_MAX_TOKENS,
         gemm_table: table.clone(),
+        device: Some(args.device),
     };
     let engine = crate::gpu_engine_at(&dir, &gpu)?;
     if let Some(table) = table {

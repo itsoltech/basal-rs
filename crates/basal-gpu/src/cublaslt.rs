@@ -82,6 +82,9 @@ struct Plan {
 type ClassAlgos = Vec<(usize, sys::cublasLtMatmulAlgo_t)>;
 
 pub struct Lt {
+    /// The context of the GPU this handle, its workspace and its algorithm choices belong to: made current before
+    /// cuBLASLt calls that are not preceded by an allocation on it (candle's allocations make it current).
+    ctx: std::sync::Arc<candle_core::cuda_backend::cudarc::driver::CudaContext>,
     handle: sys::cublasLtHandle_t,
     workspace: CudaSlice<u8>,
     plans: Mutex<HashMap<(usize, usize, usize, DType), Plan>>,
@@ -98,7 +101,8 @@ pub struct Lt {
     chosen: Mutex<HashMap<(usize, usize, usize, DType), sys::cublasLtMatmulAlgo_t>>,
 }
 
-// SAFETY: the handle and descriptors are only used under the plan/algo locks on candle's single stream.
+// SAFETY: the handle and descriptors are only used under the plan/algo locks on candle's single stream. An `Lt`
+// belongs to one GPU (`ctx`) and is shared only by the engines of one model on that GPU.
 unsafe impl Send for Lt {}
 // SAFETY: shared access uses the same plan/algo locks and single candle stream as owned access.
 unsafe impl Sync for Lt {}
@@ -121,12 +125,15 @@ fn data_type(dt: DType) -> Result<sys::cudaDataType> {
 
 impl Lt {
     pub fn new(dev: &candle_core::CudaDevice) -> Result<Self> {
+        let ctx = dev.cuda_stream().context().clone();
+        ctx.bind_to_thread().w()?;
         let mut handle = std::ptr::null_mut();
         // SAFETY: plain handle creation.
         st(unsafe { sys::cublasLtCreate(&mut handle) }, "create")?;
         // SAFETY: scratch memory for cuBLASLt, never read by us.
         let workspace = unsafe { dev.alloc::<u8>(WORKSPACE)? };
         Ok(Self {
+            ctx,
             handle,
             workspace,
             plans: Mutex::new(HashMap::new()),
@@ -156,6 +163,7 @@ impl Lt {
     /// Every algorithm of the batch-invariant table is accepted by cuBLASLt for its M class on this GPU (a table
     /// made on another GPU or cuBLASLt version may hold configurations this one does not have).
     pub fn validate_invariant(&self) -> Result<()> {
+        self.ctx.bind_to_thread().w()?;
         let inv = self.invariant.lock().unwrap().clone();
         for ((n, k, dt), list) in inv {
             for (mc, a) in list {

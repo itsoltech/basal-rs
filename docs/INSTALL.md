@@ -69,8 +69,21 @@ Bez instalacji na hoście: obraz `ghcr.io/itsoltech/basal-rs`
 | `./model`, `/ścieżka`, `~/model` | lokalny katalog modelu |
 
 Kilka `--model` serwuje kilka modeli w jednym procesie. Opcje GPU i kolejki
-z linii poleceń (`--dtype`, `--max-batch-tokens` itd.) dotyczą wtedy każdego
-z nich.
+z linii poleceń (`--dtype`, `--device`, `--max-batch-tokens` itd.) dotyczą wtedy
+każdego z nich. Różne GPU dla różnych modeli ustawia plik konfiguracji
+(`device` przy modelu); `--device` razem z plikiem konfiguracji kończy się
+błędem. `--device N` (domyślnie 0) wybiera GPU także w pozostałych
+poleceniach GPU (m.in. `decide`, `export`, `bench`, `benchmark`, `profile`,
+`gemm-search`, `client --local`). To indeks
+urządzenia CUDA widoczny dla procesu. CUDA najpierw ustawia wszystkie karty w
+kolejności: domyślnie od najszybszej, co może różnić się od numerów
+`nvidia-smi`, a z `CUDA_DEVICE_ORDER=PCI_BUS_ID` według szyny PCI, jak
+`nvidia-smi`. Potem `CUDA_VISIBLE_DEVICES` wybiera karty z tej listy, ustawia
+je w podanej kolejności i numeruje od 0, więc np. przy `PCI_BUS_ID` i
+`CUDA_VISIBLE_DEVICES=1,0` numer 0 to karta 1 `nvidia-smi`. `basal doctor`
+uruchomiony z tym samym środowiskiem co `basal serve` wypisuje te numery
+(`CUDA device N`) z nazwą, pamięcią i compute capability karty i według nich
+sprawdza modele. Metal i Intel przyjmują tylko 0.
 
 Bez `--model` model wskazuje plik konfiguracji, szukany w tej kolejności:
 `--config PLIK`, `BASAL_CONFIG`, `basal-serve.yml` w bieżącym katalogu. Bez
@@ -84,7 +97,7 @@ zastępują plik.
 
 | Polecenie | Działanie |
 |---|---|
-| `basal doctor [--model REF \| --config PLIK] [--json]` | system, GPU, sterownik i biblioteki CUDA, konfiguracja, modele w cache lub do pobrania, pamięć GPU i dysk, dostęp do Hugging Face, port; przy każdym problemie sposób naprawy |
+| `basal doctor [--model REF \| --config PLIK] [--json]` | system, GPU (inwentarz `nvidia-smi` i urządzenia CUDA widoczne dla procesu), sterownik i biblioteki CUDA, konfiguracja, modele w cache lub do pobrania, pamięć i compute capability GPU każdego `device`, dysk, dostęp do Hugging Face, port; przy każdym problemie sposób naprawy |
 | `basal setup [--model REF \| --config PLIK] [--prefetch] [--service] [--force]` | biblioteki CUDA (Linux), opcjonalnie pobranie modeli i usługa użytkownika (systemd, launchd) z tymi modelami lub plikiem; plików konfiguracji nie zapisuje |
 | `basal init [--model REF]... [--out PLIK] [--force]` | `basal-serve.yml` z wybranymi modelami |
 | `basal serve [--model REF]... [--config PLIK] [--addr ADRES] [--access-log] [--metrics]` | serwer; modele jak w [Modele](#modele); log podaje czas pobrania lub odczytu modelu z cache, ładowania na GPU i gotowości; `--access-log` (albo `access_log: true`, `BASAL_ACCESS_LOG=1`) dopisuje linię na żądanie: `[POST] 200 /v1/systemone 31 ms (queue 0.5 ms, compute 30 ms, batch 1)`; `--metrics` (albo `metrics: true`) włącza domyślnie wyłączone [metryki Prometheus](OBSERVABILITY.md) |

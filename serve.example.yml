@@ -20,11 +20,19 @@ models:
     # (results may depend on the batch). Otherwise the path of a `basal gemm-search --invariant` table.
     gemm_table: reports/rust-cuda-1.5-max/gemm-equiv/gemm-algos-f16-invariant-groups.json
     dtype: f16                     # f16 (default), bf16, f32
+    # GPU of the model (default 0): CUDA device ordinal visible to the process. CUDA first orders all GPUs (by
+    # default fastest first, which may differ from nvidia-smi; CUDA_DEVICE_ORDER=PCI_BUS_ID: PCI order, as
+    # nvidia-smi), then CUDA_VISIBLE_DEVICES selects, reorders and renumbers them from 0. `basal doctor`, run with
+    # the same environment, lists the ordinals. Models on one device take turns on it, models on different
+    # devices run at the same time. One model is loaded once, on one GPU. Metal and Intel: 0 only.
+    device: 0
     max_batch_tokens: 8192         # packed tokens of one batch
     schedule: hrrn                 # hrrn (default) or fifo
     long_tokens: 4096              # requests above this run in the model's long lane (0: none)
     state_cache_mb: 0              # cross-request state cache (0: off)
 
   - path: .models/basal-1.5-4.5B   # or a local model directory
+    # device: 1                    # e.g. 4.5B and mini on a second GPU
 
   - path: .models/basal-1.5-mini
+    # device: 1

@@ -195,12 +195,31 @@ samymi tensorami, więc wyniki nie zależą od toru ani przerw. Krótkie żądan
 nie czekają w ten sposób na kilkusekundowy forward długiego dokumentu.
 
 Kilka modeli w jednym procesie (`basal serve --config`): każdy ma własny
-silnik, kolejkę i tor długich żądań, a wszystkie silniki korzystają z jednego
-`gate`. Główne tory wszystkich modeli są pilne, tory długich żądań oddają GPU
-między warstwami, więc krótkie partie dowolnego modelu wyprzedzają długie
-żądania każdego modelu. Silniki różnych modeli nie liczą jednocześnie: GPU
-jest i tak ograniczone mocą, a kolejność decyduje harmonogram zamiast
-sterownika.
+silnik, kolejkę i tor długich żądań. Model jest przypisany do jednego GPU
+(`device`, domyślnie 0); silniki wszystkich modeli tego samego GPU, łącznie z
+ich torami długich żądań, korzystają z jednego `gate` tego GPU. Główne tory są
+pilne, tory długich żądań oddają GPU między warstwami, więc krótkie partie
+dowolnego modelu wyprzedzają długie żądania każdego modelu tego GPU. Silniki
+na jednym GPU nie liczą jednocześnie: GPU jest i tak ograniczone mocą, a
+kolejność decyduje harmonogram zamiast sterownika. Różne GPU mają osobne
+`gate` i liczą jednocześnie; limit `max_inflight`, router HTTP i `/health`
+pozostają wspólne dla procesu.
+
+Tożsamością GPU w harmonogramie jest numer `device` z konfiguracji, czyli
+indeks CUDA widoczny dla procesu (po `CUDA_VISIBLE_DEVICES`), a nie
+identyfikator urządzenia candle: każde `Device::new_cuda` tworzy nowy
+identyfikator na tym samym GPU. Ten sam numer wybiera kontekst CUDA przy
+ładowaniu, tabelę GEMM (nazwa karty, wyszukiwanie i walidacja algorytmów
+cuBLASLt na tym GPU) oraz pomiar pamięci w `basal benchmark`. `basal doctor`
+pyta sterownik CUDA (`libcuda.so.1`, bez tworzenia kontekstu) o urządzenia
+widoczne dla swojego procesu i według tych numerów sprawdza pamięć oraz
+compute capability GPU każdego `device`; lista `nvidia-smi` jest tylko
+inwentarzem maszyny, bo jej numeracja może różnić się od CUDA. Gdy sterownika
+nie da się zapytać, doctor nie ocenia urządzeń modeli. Wybór PTX, kernela attention
+(Hopper albo nie) i liczba SM są zapamiętywane osobno dla każdego GPU, więc
+karty różnych architektur w jednym procesie nie dziedziczą wyboru pierwszej.
+Model nie ma replik ani podziału między GPU; ta sama nazwa modelu dwa razy
+kończy się błędem przed ładowaniem. Metal i Intel obsługują tylko GPU 0.
 
 ### Pomiar scenariuszy HTTP
 
@@ -240,7 +259,13 @@ scrape nie przechodzi przez kolejkę inferencji. Szczegółowa semantyka i PromQ
 ## Ograniczenia
 
 - Score powyżej 10 poziomów i pytania z jedną opcją kończą się jawnym błędem.
-- Tabela GEMM jest specyficzna dla karty i wersji cuBLASLt.
+- Tabela GEMM jest specyficzna dla karty i wersji cuBLASLt. Plik w
+  `gemm_cache` jest nazwany modelem i precyzją, bez karty: przeniesienie
+  modelu na GPU innego typu generuje tabelę od nowa i zastępuje poprzednią.
+- 4.5B i mini na dwóch RTX 6000 Ada: bitowa zgodność z wersją sprzed zmiany,
+  przypisanie urządzeń i ruch równoległy sprawdzone
+  ([raport](../reports/multigpu-placement-2026-10-11/README.md)). Nie zmierzono
+  skalowania przepustowości ani pracy kart różnych architektur razem.
 - Metal sprawdzony na M1 Pro (32 GB) z basal-1.0-4.5B i trzema modelami
   basal-1.5 ([pomiar](../reports/metal-m1-pro-1.5/README.md)) oraz na M2 Max
   (32 GB) z trzema modelami basal-1.5

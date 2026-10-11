@@ -11,6 +11,7 @@
 //!     gemm_table: auto             # auto (default) | none | path of a `basal gemm-search` table
 //!   - path: .models/basal-1.5-mini # or a local model directory
 //!     long_tokens: 0
+//!     device: 1                    # CUDA device (default 0); models on one device take turns on it
 //! ```
 //!
 //! A model is addressed by the name in its `basal.json` (the `model` field of requests).
@@ -78,6 +79,11 @@ pub struct ModelConfig {
     /// f16 (default), bf16 or f32.
     #[serde(default = "default_dtype")]
     pub dtype: String,
+    /// GPU of the model: the CUDA device ordinal, an index among the GPUs visible to the process (after
+    /// `CUDA_VISIBLE_DEVICES`; `basal doctor` lists them). Models on one device take turns on it; models on different
+    /// devices run at the same time. Metal and Intel: 0 only.
+    #[serde(default)]
+    pub device: usize,
     /// `auto`: the table of this model and GPU from `gemm_cache`, generated when missing or not valid here; `none`:
     /// algorithms timed at first use (results may depend on the batch); otherwise the path of a table.
     #[serde(default = "default_gemm_table")]
@@ -450,8 +456,8 @@ impl hf_hub::progress::ProgressHandler for DownloadLog {
 }
 
 /// GEMM table of a model: `None` for `gemm_table: none` and on builds without CUDA; for `auto` the cached table of
-/// this model, dtype, GPU and cuBLASLt version, generated (one-time, minutes to an hour) when it is missing, was made
-/// on another GPU or cuBLASLt, or does not cover the model's weight shapes.
+/// this model, dtype, GPU (the model's `device`) and cuBLASLt version, generated (one-time, minutes to an hour) on
+/// that GPU when it is missing, was made on another GPU or cuBLASLt, or does not cover the model's weight shapes.
 pub fn gemm_table(m: &ModelConfig, manifest: &ModelManifest, cache: &Path) -> Result<Option<PathBuf>> {
     match m.gemm_table.as_str() {
         "none" => return Ok(None),
@@ -461,7 +467,7 @@ pub fn gemm_table(m: &ModelConfig, manifest: &ModelManifest, cache: &Path) -> Re
     let Some(version) = basal_gpu::cublaslt_version() else {
         return Ok(None); // Metal: no cuBLASLt tables
     };
-    let gpu = basal_gpu::gpu_name()?;
+    let gpu = basal_gpu::gpu_name(m.device)?;
     let shapes = basal_gpu::projection_shapes(&manifest.config);
     let path = cache.join(format!("{}-{}.json", manifest.name, m.dtype));
     let problem = match std::fs::read_to_string(&path) {
@@ -478,7 +484,7 @@ pub fn gemm_table(m: &ModelConfig, manifest: &ModelManifest, cache: &Path) -> Re
             if table_problem(&v, version, &gpu, &m.dtype, &shapes).is_some() {
                 continue;
             }
-            match basal_gpu::check_gemm_table(&v) {
+            match basal_gpu::check_gemm_table(&v, m.device) {
                 Ok(()) => {
                     std::fs::create_dir_all(cache).with_context(|| format!("creating {}", crate::term::P(&cache)))?;
                     let tmp = path.with_extension("json.tmp");
@@ -493,14 +499,16 @@ pub fn gemm_table(m: &ModelConfig, manifest: &ModelManifest, cache: &Path) -> Re
     }
     if let Some(why) = problem {
         crate::progress!(
-            "{}: generating the batch-invariant GEMM table for {gpu} ({why}; {} classes x {} shapes, one-time) -> {}",
+            "{}: generating the batch-invariant GEMM table for {gpu} (device {}; {why}; {} classes x {} shapes, \
+             one-time) -> {}",
             manifest.name,
+            m.device,
             INVARIANT_CLASSES.len(),
             shapes.len(),
             crate::term::P(&path)
         );
         let t = std::time::Instant::now();
-        let mut table = search(&shapes, &m.dtype)?;
+        let mut table = search(&shapes, &m.dtype, m.device)?;
         // for `basal gemm-share`: which build and model made the table
         table["model"] = Value::from(manifest.name.clone());
         table["basal"] = Value::from(format!("{} ({})", env!("CARGO_PKG_VERSION"), env!("BASAL_GIT_SHA")));
@@ -557,11 +565,11 @@ fn table_problem(v: &Value, version: usize, gpu: &str, dtype: &str, shapes: &[(u
     }
 }
 
-fn search(shapes: &[(usize, usize)], dtype: &str) -> Result<Value> {
+fn search(shapes: &[(usize, usize)], dtype: &str, device: usize) -> Result<Value> {
     #[cfg(feature = "cuda")]
-    return basal_gpu::gemm_search(&INVARIANT_CLASSES, shapes, dtype, true);
+    return basal_gpu::gemm_search(&INVARIANT_CLASSES, shapes, dtype, true, device);
     #[cfg(not(feature = "cuda"))]
-    bail!("GEMM search needs a CUDA build ({shapes:?}, {dtype})")
+    bail!("GEMM search needs a CUDA build ({shapes:?}, {dtype}, device {device})")
 }
 
 /// Refuse a GEMM table that leaves weight shapes of the model to run-time algorithm choice.

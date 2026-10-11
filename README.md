@@ -314,9 +314,26 @@ models:
 Żądanie trafia do modelu z pola `model` (nazwa z `basal.json` modelu);
 `/v1/basal` bez tego pola trafia do `default_model`, a nieznana nazwa daje
 błąd 422 z listą obsługiwanych modeli. Każdy model ma własną kolejkę i tor
-długich żądań; wszystkie dzielą GPU tak, że krótkie partie dowolnego modelu
-idą przed długimi żądaniami. Pamięć GPU to suma wag modeli (bf16/f16:
-1.5-max ~23 GB, 1.5-4.5B ~9,5 GB, 1.5-mini ~3,2 GB) plus aktywacje.
+długich żądań; modele na tym samym GPU dzielą je tak, że krótkie partie
+dowolnego z nich idą przed długimi żądaniami. Pamięć GPU to suma wag modeli
+tego GPU (bf16/f16: 1.5-max ~23 GB, 1.5-4.5B ~9,5 GB, 1.5-mini ~3,2 GB) plus
+aktywacje.
+
+Na CUDA klucz `device` przypisuje model do GPU (domyślnie 0), np. max na
+jednej karcie, a 4.5B i mini na drugiej. Modele na różnych GPU liczą
+jednocześnie, za tym samym API i z tymi samymi nazwami modeli. Każdy model
+jest ładowany raz, na jednym GPU: nie ma replik tego samego modelu ani
+podziału modelu między karty. Numer to indeks CUDA widoczny dla procesu.
+Kolejność wszystkich kart ustala `CUDA_DEVICE_ORDER` (domyślna może różnić się
+od `nvidia-smi`, `PCI_BUS_ID` daje kolejność PCI jak `nvidia-smi`), a
+`CUDA_VISIBLE_DEVICES` wybiera z niej karty, zmienia ich kolejność i numeruje
+od 0. `basal doctor` z tym
+samym środowiskiem wypisuje numery CUDA kart i według nich sprawdza pamięć
+modeli. Metal i Intel obsługują tylko `device: 0`.
+Działanie 4.5B i mini na dwóch RTX 6000 Ada, bitową zgodność z wersją
+sprzed zmiany oraz ruch równoległy sprawdzono na sprzęcie
+([raport](reports/multigpu-placement-2026-10-11/README.md)); pomiar nie
+wyznacza skalowania przepustowości ani zachowania kart różnych architektur.
 
 Jeden model bez pliku konfiguracji:
 
@@ -363,6 +380,7 @@ wiersza poleceń, np. `--max-batch-tokens`):
 | `path` | | lokalny katalog modelu (zamiast `repo`) |
 | `gemm_table` | `auto` | tabela algorytmów cuBLASLt (opis niżej); `none`: algorytmy dobierane przy pierwszym użyciu, wynik może zależeć od partii; albo ścieżka tabeli |
 | `dtype` | `f16` | `f16`, `bf16` albo `f32` (referencja numeryczna, wolna) |
+| `device` | 0 | GPU modelu: indeks urządzenia CUDA widoczny dla procesu; modele z tym samym `device` dzielą GPU, z różnymi liczą jednocześnie; Metal i Intel: tylko 0 |
 | `max_batch_tokens` | 8192 | tokeny jednej partii, liczone po współdzieleniu prefiksów |
 | `schedule` | `hrrn` | kolejność przyjmowania żądań: `hrrn` (krótkie przed długimi, bez zagłodzenia) albo `fifo` |
 | `long_tokens` | 4096 | żądania powyżej tej liczby tokenów idą do toru długich żądań, który oddaje GPU krótkim partiom między warstwami; `0` wyłącza |

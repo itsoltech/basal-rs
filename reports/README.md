@@ -13,6 +13,7 @@ Metodyka: [docs/BENCHMARKS.md](../docs/BENCHMARKS.md).
 |---|---|
 | [inference-campaign-2026-10-09](inference-campaign-2026-10-09/README.md) | H100 i RTX 6000 Ada: SiLU, RMSNorm, cache stanów, budżet partii i harmonogram; zgodność wyników, latency i throughput |
 | [inference-profile-h100-2026-10-09](inference-profile-h100-2026-10-09/README.md) | H100: Nsight Systems/Compute, SW128 w WGMMA, bitowa zgodność, latency/throughput oraz HTTP A/B/B/A |
+| [multigpu-placement-2026-10-11](multigpu-placement-2026-10-11/README.md) | 4.5B i mini na dwóch RTX 6000 Ada: bitowa zgodność, przypisanie modeli do GPU, ruch równoległy i widoczność CUDA |
 
 ## basal-1.5-max
 
