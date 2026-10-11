@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{bail, ensure, Context, Result};
-use basal_core::{gate::Gate, manifest::LlamaConfig, pack::Packed, Backend};
+use basal_core::{gate::Gate, manifest::LlamaConfig, pack::Packed, Backend, DeviceHealth};
 use candle_core::{Device, Tensor};
 use serde_json::{json, Value};
 use wgpu::Buffer;
@@ -165,22 +165,29 @@ impl IntelBackend {
         let h = c.hidden;
         let q = (c.heads + 2 * c.kv_heads) * c.head_dim;
         let i = c.intermediate;
+        // Concatenate the tensors in order, converted chunk by chunk into the mapped buffer.
         let mut load = |names: &[String], shapes: &[Vec<usize>]| -> Result<Buffer> {
-            let mut data = Vec::<u16>::new();
+            let mut tensors = Vec::with_capacity(names.len());
             for (name, shape) in names.iter().zip(shapes) {
-                let tensor = checkpoint.bf16(name, shape)?;
+                tensors.push(checkpoint.bf16(name, shape)?);
                 used.insert(name.clone());
-                let elements = shape.iter().product::<usize>();
-                ensure!(
-                    ((data.len() + elements) as u64) * 2 <= gpu.limits.max_storage_buffer_binding_size,
-                    "weight tensor exceeds the Vulkan storage binding limit"
-                );
-                data.try_reserve(elements)?;
-                checkpoint.read_chunks(tensor, &mut chunk, |bytes| {
-                    data.extend(bytes.chunks_exact(2).map(|b| f16_bits(bf16(b))));
-                })?;
             }
-            gpu.upload(&names[0], &data)
+            // F16 has the size of BF16, so the converted tensors fill the buffer exactly.
+            let bytes = tensors.iter().map(|t| t.bytes()).sum();
+            gpu.upload_with(&names[0], bytes, |mut mapped| {
+                let mut offset = 0;
+                for &tensor in &tensors {
+                    checkpoint.read_chunks(tensor, &mut chunk, |data| {
+                        for value in data.chunks_exact_mut(2) {
+                            let bits = f16_bits(bf16(value));
+                            value.copy_from_slice(&bits.to_le_bytes());
+                        }
+                        mapped.slice(offset..offset + data.len()).copy_from_slice(data);
+                        offset += data.len();
+                    })?;
+                }
+                Ok(())
+            })
         };
         // Shaders index a bias by output column, so one zero buffer of the widest projection serves every layer.
         let zero_bias = if c.bias { None } else { Some(gpu.upload("zero bias", &vec![0u16; q.max(2 * i)])?) };
@@ -488,6 +495,9 @@ impl Backend for IntelBackend {
     fn set_gate(&mut self, gate: Arc<Gate>, urgent: bool) {
         self.gate = Some((gate, urgent));
     }
+    fn device_health(&self) -> Option<DeviceHealth> {
+        Some(self.gpu.health.clone())
+    }
     fn has_evidence(&self) -> bool {
         self.weights.evidence.is_some()
     }
@@ -567,16 +577,19 @@ impl Backend for IntelBackend {
     }
 }
 
-/// Name and driver of the Intel Vulkan device the backend would select.
+/// Name, driver and memory budget of the Intel Vulkan device the backend would select.
 pub struct DeviceInfo {
     pub name: String,
     pub driver: String,
+    /// An error when the driver does not provide the optional memory telemetry.
+    pub memory: Result<GpuMemory>,
 }
 
-/// Inspect the selected Intel Vulkan device before loading a model.
+/// Inspect the selected Intel Vulkan device before loading a model, through one device.
 pub fn info() -> std::result::Result<DeviceInfo, IntelError> {
     let gpu = Gpu::new().map_err(IntelError::Device)?;
-    Ok(DeviceInfo { name: gpu.info.name.clone(), driver: gpu.info.driver_info.clone() })
+    let memory = telemetry::Probe::new(&gpu.device, &gpu.info).snapshot();
+    Ok(DeviceInfo { name: gpu.info.name.clone(), driver: gpu.info.driver_info.clone(), memory })
 }
 
 #[cfg(all(not(feature = "cuda"), not(target_os = "macos")))]

@@ -26,6 +26,12 @@ pub(super) struct Bf16 {
     bytes: usize,
 }
 
+impl Bf16 {
+    pub fn bytes(self) -> usize {
+        self.bytes
+    }
+}
+
 impl Checkpoint {
     pub fn open(path: &Path) -> Result<Self> {
         let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
@@ -56,8 +62,8 @@ impl Checkpoint {
         self.metadata.offset_keys()
     }
 
-    /// Pass the whole tensor to `sink` in chunks of complete BF16 values, reusing `buffer`.
-    pub fn read_chunks(&self, tensor: Bf16, buffer: &mut Vec<u8>, mut sink: impl FnMut(&[u8])) -> Result<()> {
+    /// Pass the whole tensor to `sink` in consecutive chunks of complete BF16 values, reusing `buffer`.
+    pub fn read_chunks(&self, tensor: Bf16, buffer: &mut Vec<u8>, mut sink: impl FnMut(&mut [u8])) -> Result<()> {
         buffer.resize(CHUNK_BYTES.min(tensor.bytes), 0);
         let mut done = 0;
         while done < tensor.bytes {

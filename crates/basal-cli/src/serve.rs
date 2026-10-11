@@ -40,7 +40,7 @@ use basal_core::engine::{plan_response, RequestPlan};
 use basal_core::gate::Gate;
 use basal_core::pack::TrieSize;
 use basal_core::request::Dialect;
-use basal_core::{Backend, DecideError, Engine};
+use basal_core::{Backend, DecideError, DeviceHealth, Engine};
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot};
 
@@ -92,6 +92,8 @@ struct App {
     /// Job queue of every served model, by name.
     routes: HashMap<String, mpsc::UnboundedSender<Job>>,
     names: Vec<String>,
+    /// Device readiness reported by each model's engines (none when its backend does not report it).
+    health: Vec<(String, Vec<DeviceHealth>)>,
     default_model: String,
     inflight: AtomicUsize,
     max_inflight: usize,
@@ -447,8 +449,21 @@ async fn shutdown_signal() {
     crate::note!("shutting down");
 }
 
-async fn health(State(app): State<Arc<App>>) -> Json<Value> {
-    Json(json!({"status": "ok", "models": app.names, "default_model": app.default_model}))
+/// Readiness: 200, or 503 once a model's device is permanently lost (its requests fail until a restart).
+async fn health(State(app): State<Arc<App>>) -> Response {
+    let lost: Vec<&str> = app
+        .health
+        .iter()
+        .filter(|(_, devices)| devices.iter().any(DeviceHealth::is_lost))
+        .map(|(name, _)| name.as_str())
+        .collect();
+    if lost.is_empty() {
+        return Json(json!({"status": "ok", "models": app.names, "default_model": app.default_model})).into_response();
+    }
+    error_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        json!({"status": "device_lost", "models": app.names, "default_model": app.default_model, "lost_models": lost}),
+    )
 }
 
 pub fn serve<B: Backend + Send + 'static>(models: Vec<ServedModel<B>>, opts: ServeOptions) -> Result<()> {
@@ -490,14 +505,17 @@ fn serve_inner<B: Backend + Send + 'static>(
     let mut threads = Vec::new();
     let result = (|| -> Result<()> {
         let mut routes = HashMap::new();
+        let mut readiness = Vec::new();
         for m in models {
             let ServedModel { mut engine, max_batch_tokens, schedule, long_tokens } = m;
             let name = engine.manifest.name.clone();
+            let mut devices: Vec<DeviceHealth> = engine.backend.device_health().into_iter().collect();
             let (tx, rx) = mpsc::unbounded_channel();
             let lane = |kind| Lane::new(schedule, max_batch_tokens, metrics.as_ref().map(|m| m.lane(&name, kind)));
             let long = if long_tokens > 0 {
                 let mut le = engine.fork().with_context(|| format!("{name}: second engine for the long lane"))?;
                 le.backend.set_gate(gate.clone().unwrap(), false);
+                devices.extend(le.backend.device_health());
                 let (ltx, lrx) = std::sync::mpsc::channel();
                 let l = lane("long");
                 threads.push(
@@ -524,12 +542,14 @@ fn serve_inner<B: Backend + Send + 'static>(
                 "serving {name} (batch {max_batch_tokens} tokens, {schedule:?}{})",
                 if long_tokens > 0 { format!(", long lane above {long_tokens} tokens") } else { String::new() }
             );
+            readiness.push((name.clone(), devices));
             routes.insert(name, tx);
         }
         let app = Arc::new(App {
             metrics,
             routes,
             names,
+            health: readiness,
             default_model,
             inflight: AtomicUsize::new(0),
             max_inflight: opts.max_inflight,

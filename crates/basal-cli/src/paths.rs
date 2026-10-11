@@ -51,7 +51,7 @@ pub fn data_dir() -> PathBuf {
 /// The CUDA build of the Linux package next to this binary (`PREFIX/libexec/basal/basal-cuda` for
 /// `PREFIX/bin/basal`), when present.
 pub fn cuda_binary() -> Option<PathBuf> {
-    if basal_gpu::BUILD_BACKEND == "Intel Arc (Vulkan)" {
+    if basal_gpu::INTEL_BACKEND {
         return None;
     }
     let exe = std::env::current_exe().ok()?.canonicalize().ok()?;

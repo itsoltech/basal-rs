@@ -1,10 +1,12 @@
 //! Vulkan resources. A backend owns its command encoders; immutable buffers and pipelines may be shared.
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, ensure, Context, Result};
+use basal_core::DeviceHealth;
+
+const INTEL_VENDOR: u32 = 0x8086;
+const REQUIRED_FEATURES: wgpu::Features = wgpu::Features::SHADER_F16.union(wgpu::Features::SUBGROUP);
 
 pub(super) struct Gpu {
     pub device: wgpu::Device,
@@ -12,7 +14,8 @@ pub(super) struct Gpu {
     pub info: wgpu::AdapterInfo,
     pub limits: wgpu::Limits,
     pub direct_upload: bool,
-    lost: Arc<AtomicBool>,
+    /// Set by the device-lost callback; the device is never used again afterwards.
+    pub health: DeviceHealth,
     pipelines: BTreeMap<&'static str, wgpu::ComputePipeline>,
 }
 
@@ -22,26 +25,28 @@ impl Gpu {
         desc.backends = wgpu::Backends::VULKAN;
         let instance = wgpu::Instance::new(desc);
         let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::VULKAN));
-        let adapter = adapters
-            .into_iter()
-            .find(|a| {
-                let i = a.get_info();
-                i.vendor == 0x8086
-                    && matches!(i.device_type, wgpu::DeviceType::IntegratedGpu | wgpu::DeviceType::DiscreteGpu)
-            })
-            .context("no Intel Vulkan GPU; install a Vulkan loader and the Intel Mesa driver (Arch: vulkan-intel)")?;
-        let info = adapter.get_info();
-        let mut features = wgpu::Features::SHADER_F16 | wgpu::Features::SUBGROUP;
-        ensure!(
-            adapter.features().contains(features),
-            "{} requires Vulkan shaderFloat16 and compute subgroups",
-            info.name
-        );
-        ensure!(
-            info.subgroup_max_size <= 64 && info.subgroup_min_size >= 8,
-            "unsupported Intel subgroup size {}",
-            info.subgroup_max_size
-        );
+        let mut chosen: Option<(u8, wgpu::Adapter, wgpu::AdapterInfo)> = None;
+        let mut rejected = Vec::new();
+        for adapter in adapters {
+            let info = adapter.get_info();
+            let Some(rank) = preference(&info) else { continue };
+            if let Err(reason) = supported(&adapter, &info) {
+                rejected.push(format!("{}: {reason}", info.name));
+                continue;
+            }
+            // Strictly better only: equally preferred devices keep the enumeration order.
+            if chosen.as_ref().is_none_or(|(best, ..)| rank < *best) {
+                chosen = Some((rank, adapter, info));
+            }
+        }
+        let Some((_, adapter, info)) = chosen else {
+            ensure!(
+                !rejected.is_empty(),
+                "no Intel Vulkan GPU; install a Vulkan loader and the Intel Mesa driver (Arch: vulkan-intel)"
+            );
+            bail!("no supported Intel Vulkan GPU: {}", rejected.join("; "));
+        };
+        let mut features = REQUIRED_FEATURES;
         // On a unified-memory GPU, map the final allocation instead of retaining a second staging copy.
         // Discrete cards keep device-local weights and use bounded staging uploads during model loading.
         let direct_upload = info.device_type == wgpu::DeviceType::IntegratedGpu
@@ -58,16 +63,16 @@ impl Gpu {
             ..Default::default()
         }))
         .context("creating Intel Vulkan device")?;
-        let lost = Arc::new(AtomicBool::new(false));
-        let flag = Arc::clone(&lost);
-        device.set_device_lost_callback(move |_, _| flag.store(true, Ordering::Release));
-        Ok(Self { device, queue, info, limits, direct_upload, lost, pipelines: BTreeMap::new() })
+        let health = DeviceHealth::default();
+        let flag = health.clone();
+        device.set_device_lost_callback(move |_, _| flag.mark_lost());
+        Ok(Self { device, queue, info, limits, direct_upload, health, pipelines: BTreeMap::new() })
     }
 
     /// Catch validation, allocation and driver errors instead of wgpu's default panic handler.
     /// Scopes are thread-local in wgpu 30; a fork on another worker cannot consume these errors.
     pub fn checked<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
-        ensure!(!self.lost.load(Ordering::Acquire), "Intel Vulkan device lost; restart the model");
+        ensure!(!self.health.is_lost(), "Intel Vulkan device lost; restart the model");
         let scopes = [wgpu::ErrorFilter::Validation, wgpu::ErrorFilter::OutOfMemory, wgpu::ErrorFilter::Internal]
             .map(|filter| self.device.push_error_scope(filter));
         let result = f();
@@ -106,11 +111,30 @@ impl Gpu {
 
     pub fn upload<T: bytemuck::Pod>(&self, label: &str, data: &[T]) -> Result<wgpu::Buffer> {
         let bytes = bytemuck::cast_slice(data);
-        self.check_size(bytes.len() as u64)?;
-        self.initialized(label, bytes, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC)
+        self.upload_with(label, bytes.len(), |mut mapped| {
+            mapped.copy_from_slice(bytes);
+            Ok(())
+        })
     }
 
-    fn initialized(&self, label: &str, bytes: &[u8], usage: wgpu::BufferUsages) -> Result<wgpu::Buffer> {
+    /// A storage buffer of `bytes` bytes whose contents `fill` writes into the mapped allocation.
+    pub fn upload_with(
+        &self,
+        label: &str,
+        bytes: usize,
+        fill: impl FnOnce(wgpu::WriteOnly<'_, [u8]>) -> Result<()>,
+    ) -> Result<wgpu::Buffer> {
+        self.check_size(bytes as u64)?;
+        self.initialized(label, bytes, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, fill)
+    }
+
+    fn initialized(
+        &self,
+        label: &str,
+        bytes: usize,
+        usage: wgpu::BufferUsages,
+        fill: impl FnOnce(wgpu::WriteOnly<'_, [u8]>) -> Result<()>,
+    ) -> Result<wgpu::Buffer> {
         let usage = if self.direct_upload { usage | wgpu::BufferUsages::MAP_WRITE } else { usage };
         // create_buffer_init maps before the caller can inspect an OOM error and panics on an invalid buffer.
         // Finish the allocation error scope first, then use the fallible mapped-range API.
@@ -118,20 +142,23 @@ impl Gpu {
             .checked(|| {
                 Ok(self.device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some(label),
-                    size: (bytes.len() as u64).next_multiple_of(4),
+                    size: (bytes as u64).next_multiple_of(4),
                     usage,
                     mapped_at_creation: true,
                 }))
             })
-            .with_context(|| format!("allocating Intel buffer {label} ({} bytes)", bytes.len()))?;
-        {
-            let mut mapped = buffer.get_mapped_range_mut(..).context("mapping Intel upload")?;
-            mapped.slice(..bytes.len()).copy_from_slice(bytes);
-        }
-        self.checked(|| {
+            .with_context(|| format!("allocating Intel buffer {label} ({bytes} bytes)"))?;
+        // The view is dropped before unmap. Unmap also after a failed fill, so that no mapping outlives the error.
+        let filled = buffer
+            .get_mapped_range_mut(..)
+            .context("mapping Intel upload")
+            .and_then(|mut mapped| fill(mapped.slice(..bytes)));
+        let unmapped = self.checked(|| {
             buffer.unmap();
             Ok(())
-        })?;
+        });
+        filled?;
+        unmapped?;
         Ok(buffer)
     }
 
@@ -174,7 +201,10 @@ impl Gpu {
             "{name}: dispatch {groups:?} exceeds device limits"
         );
         let pipeline = self.pipelines.get(name).with_context(|| format!("missing kernel {name}"))?;
-        let uniform = self.initialized(name, bytemuck::cast_slice(&params), wgpu::BufferUsages::UNIFORM)?;
+        let uniform = self.initialized(name, size_of_val(&params), wgpu::BufferUsages::UNIFORM, |mut mapped| {
+            mapped.copy_from_slice(bytemuck::cast_slice(&params));
+            Ok(())
+        })?;
         let entries: Vec<_> = buffers
             .iter()
             .copied()
@@ -207,7 +237,7 @@ impl Gpu {
     }
 
     pub fn sync(&self) -> Result<()> {
-        ensure!(!self.lost.load(Ordering::Acquire), "Intel Vulkan device lost; restart the model");
+        ensure!(!self.health.is_lost(), "Intel Vulkan device lost; restart the model");
         // wgpu 30 routes DeviceLost from poll to a fatal handler instead of returning PollError.
         // Its loss callback marks this device unusable before the fatal-handler panic, which occurs
         // after core locks have been released. The callback itself only sets an atomic flag.
@@ -222,7 +252,7 @@ impl Gpu {
                     .downcast_ref::<String>()
                     .map(String::as_str)
                     .or_else(|| payload.downcast_ref::<&str>().copied());
-                if self.lost.load(Ordering::Acquire)
+                if self.health.is_lost()
                     && message
                         .is_some_and(|s| s.contains("Error in Device::poll:") && s.contains("Parent device is lost"))
                 {
@@ -231,7 +261,7 @@ impl Gpu {
                 std::panic::resume_unwind(payload);
             }
         };
-        ensure!(!self.lost.load(Ordering::Acquire), "Intel Vulkan device lost; restart the model");
+        ensure!(!self.health.is_lost(), "Intel Vulkan device lost; restart the model");
         Ok(())
     }
 
@@ -261,4 +291,24 @@ impl Gpu {
             Ok(bytes)
         })
     }
+}
+
+/// Discrete before integrated GPUs; software renderers, virtual GPUs and other vendors are never used.
+fn preference(info: &wgpu::AdapterInfo) -> Option<u8> {
+    match (info.vendor, info.device_type) {
+        (INTEL_VENDOR, wgpu::DeviceType::DiscreteGpu) => Some(0),
+        (INTEL_VENDOR, wgpu::DeviceType::IntegratedGpu) => Some(1),
+        _ => None,
+    }
+}
+
+/// Whether the kernels can run on `adapter`: FP16 arithmetic and subgroups of 8 to 64 lanes.
+fn supported(adapter: &wgpu::Adapter, info: &wgpu::AdapterInfo) -> std::result::Result<(), String> {
+    if !adapter.features().contains(REQUIRED_FEATURES) {
+        return Err("requires Vulkan shaderFloat16 and compute subgroups".into());
+    }
+    if info.subgroup_min_size < 8 || info.subgroup_max_size > 64 {
+        return Err(format!("unsupported subgroup sizes {}..={}", info.subgroup_min_size, info.subgroup_max_size));
+    }
+    Ok(())
 }
