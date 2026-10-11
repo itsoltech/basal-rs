@@ -73,6 +73,7 @@ Każdy skrypt opisuje w nagłówku, co mierzy, jakie ścieżki trzeba wcześniej
 | `tools/perf/run-multigpu-cloud.py` | modele na osobnych GPU (dwie identyczne karty): `doctor` i odrzucane konfiguracje, eksporty baseline i kandydata na GPU 0 i 1 (bajtowo i `basal compare`), jedno API z dwoma modelami na dwóch GPU i na jednym, odwrócone `CUDA_VISIBLE_DEVICES`, zamknięcie serwera |
 | `tools/perf/run-isolation-cloud.py` | wpływ obciążonego 4.5B na GPU 0 na mini na GPU 1 w jednym API (identyczny ruch mini: zamknięta pętla i otwarty napływ według stałego harmonogramu, A/B/B/A) oraz mini na jednej karcie w binarce sprzed i po przypisaniu urządzeń |
 | `tools/perf/run-replicas-cloud.py` | repliki jednego modelu (`replica_devices`) na dwóch identycznych kartach: eksporty binarki rozmieszczenia i kandydata na GPU 0 i 1, odrzucane konfiguracje, zgodność odpowiedzi HTTP, routing i metryki replik, admission 529, rozłączeni klienci, `CUDA_VISIBLE_DEVICES`, zamknięcie; wydajność jednej i dwóch replik A/B/B/A |
+| `tools/perf/run-w8a16-cloud.py` | opcjonalne wagi `q8_0` (W8A16) na dwóch identycznych kartach: tor `none` bajtowo wobec binarki etapu 02, spójność `q8_0` między trybami i kartami, odrzucane konfiguracje, HTTP z replikami, 44+34 i 900 pytań wobec FP32, wydajność `none` (A/B z potwierdzeniem) i `q8_0`, profil dekwantyzacji, pamięć puli |
 | `tools/decision-sets/run-cloud.sh` | zestaw decyzji wobec upstream FP32 |
 
 ## Pilnowanie maszyny
@@ -250,6 +251,60 @@ nie powiedzie; odpowiedzi wątków klienta, które nie skończą się w ciągu 1
 zatrzymaniu serwera, nie są zapisywane, co oznacza GAP), zapisuje `summary.json` z `complete: false` i nie kończy się
 kodem 0. Wynik nie zakłada skalowania 2× ani
 izolacji awarii sprzętu.
+
+`run-w8a16-cloud.py` korzysta z funkcji trzech powyższych runnerów i z
+`tools/bench/ab.py` (bez ich zmiany). `--plan-only` (bez GPU, chmury i
+binarek) sprawdza w pamięci wejście 900 pytań i wypisuje liczbę kroków, żądań
+i zgrubny czas ze śledzonych manifestów, także najgorszy przypadek warunkowej
+rundy potwierdzenia `perf-none` i sesji rewalidacji; kroków bez śledzonego
+czasu nie szacuje, podaje tylko ich limity. `--prepare-900 KATALOG` zapisuje
+to wejście (odtworzone z `sequential.jsonl` i plików decyzji, round trip
+`public_request` 900/900) poza repozytorium; prawdziwy przebieg buduje je
+ponownie i zapisuje sumy SHA-256 w odcisku. `--base` musi być binarką etapu 02
+o SHA-256 `289a2eac…` (tekst wersji nie jest tożsamością binarki), a
+`--candidate` binarką W8A16; obie sumy `--expect-*-sha256` są wymagane.
+Wymaga dwóch identycznych kart, wag mini i 4.5B w przypiętych rewizjach (ich
+SHA-256 porównuje z manifestami referencji), referencji FP32 i MLX 8-bit,
+plików decyzji, tabel GEMM z `crates/basal-cli/gemm-tables` (podawanych jawnie
+każdemu poleceniu f16 i `q8_0`; log z komunikatem wyszukiwania tabeli kończy
+polecenie jako FAIL) i źródeł Rust do odcisku. Uruchamiaj w `/work`:
+`python3 tools/perf/run-w8a16-cloud.py --base BAZA --expect-base-sha256 SUMA --candidate KANDYDAT --expect-candidate-sha256 SUMA --deadline-minutes MINUTY --out out/w8a16`.
+`--deadline-minutes` jest wymagane (bez wartości domyślnej): dobierz je do
+najmu z zapasem na pobranie wyników i usunięcie maszyny. Po terminie nie
+startuje żaden krok, polecenie ani żądanie HTTP, a trwające są przerywane na
+nim; to, co nie zdążyło, jest GAP, nie FAIL. Termin i limity są bezwzględne:
+żądanie HTTP (nagłówki i treść razem, także `/health`, `/v1/models`,
+`/metrics` i gotowość) jest przerywane, a oczekiwanie na polecenie kończone
+najpóźniej w chwili wcześniejszego z nich (z dokładnością do planowania
+wątków); zatrzymanie procesu polecenia (SIGTERM, po 60 s SIGKILL) trwa już po
+tej chwili. Odpowiedź lub zakończenie zauważone dopiero po niej nie jest
+terminowe, także ze statusem 200 (zostaje zapisane jako dowód). Polecenie GPU
+(eksport, `decide`, każdy `basal bench` z `ab.py` osobno, `benchmark`, `profile`) albo
+żądanie HTTP po własnym limicie czasu to FAIL i koniec przebiegu
+(podejrzenie zawieszonej karty, bez dalszej pracy GPU w żadnej kampanii).
+Odpowiedzi System One serwera `q8_0` (status i treść) runner porównuje z
+natywną referencją `q8_0` tych samych ciał żądań: eksportem wejść pochodnych
+w `--out` (ciała HTTP z `model` mini, `bench.jsonl` jako kopia referencji), a
+przypadek, który ten eksport odrzuca jako Unsupported, z `basal decide` tego
+ciała; referencje i ich eksporty pozostają bez zmian.
+Kampanie i reguły interpretacji (sygnał `perf-none` tylko przy B gorszym w
+każdej parze, jedna runda potwierdzenia z profilem A/B, wniosek tylko przy
+kompletnych parach i wartościach, w `basal bench` dokładnie 39 mierzonych
+pytań o indeksach 5..43, bez progów i wykluczeń) opisuje nagłówek pliku.
+Wynik ma statusy
+PASS, FAIL, GAP oraz SIGNAL (różnica do analizy: utrzymany sygnał `perf-none`,
+różnica decyzji f16 lub `q8_0` wobec f16 na 44+34, nowe zmiany decyzji albo
+niższa trafność `q8_0` na 900 pytaniach, zmienione eksporty `q8_0` w
+rewalidacji; bez znalezionej przyczyny decyzja użytkownika); sygnał samej
+rundy podstawowej `perf-none` nie jest SIGNAL. Kod wyjścia 4 oznacza SIGNAL
+bez FAIL. Rewalidacja po poprawce kodu: `--campaigns 'correctness revalidate
+perf-none perf-q8 profile memory-mini' --steps none --previous-run KATALOG`
+(surowy wynik sesji binarki sprzed poprawki, inny niż `--out`). Runner przed
+startem sprawdza ten katalog (odcisk w `run.json` i `summary.json`, binarka
+etapu 02, znane SHA-256 kandydata inne niż obecnego, te same rewizje modeli,
+tabele GEMM i wejścia, ukończony eksport `q8_0` tree na GPU 0 każdego modelu)
+i zapisuje SHA-256 kandydata, odcisk źródeł oraz eksportów obu sesji. Surowe
+wyniki zawierają ścieżki: pobieraj je do `.cache/cloud`.
 
 Do `reports/` zapisuj krótkie wyniki i zakres weryfikacji. Pełne eksporty, logi
 i profile pobieraj do ignorowanego `.cache/` i archiwizuj poza Gitem.

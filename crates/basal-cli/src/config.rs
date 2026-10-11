@@ -14,6 +14,7 @@
 //!     device: 1                    # CUDA device (default 0); models on one device take turns on it
 //!   - path: .models/basal-1.5-4.5B
 //!     replica_devices: [2, 3]      # CUDA: one replica per device under one model name (GPUs of one type)
+//!     quantization: q8_0           # none (default) | q8_0: 8-bit projection weights (CUDA, dtype f16)
 //! ```
 //!
 //! A model is addressed by the name in its `basal.json` (the `model` field of requests).
@@ -23,6 +24,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
 use basal_core::ModelManifest;
+use basal_gpu::{Kernels, Precision, Quantization};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -81,6 +83,11 @@ pub struct ModelConfig {
     /// f16 (default), bf16 or f32.
     #[serde(default = "default_dtype")]
     pub dtype: String,
+    /// Format of the projection weights: `none` (default, dense weights of `dtype`) or `q8_0` (GGML Q8_0 blocks
+    /// dequantized to f16 per projection: less GPU memory, more work per forward; CUDA with `dtype: f16` only). All
+    /// replicas of the model use it.
+    #[serde(default = "default_quantization")]
+    pub quantization: String,
     /// GPU of the model: the CUDA device ordinal, an index among the GPUs visible to the process (after
     /// `CUDA_VISIBLE_DEVICES`; `basal doctor` lists them). Models on one device take turns on it; models on different
     /// devices run at the same time. Metal and Intel: 0 only. Not together with `replica_devices`.
@@ -132,6 +139,9 @@ pub fn default_gemm_cache() -> PathBuf {
 fn default_dtype() -> String {
     "f16".into()
 }
+fn default_quantization() -> String {
+    Quantization::None.as_str().into()
+}
 fn default_gemm_table() -> String {
     "auto".into()
 }
@@ -171,6 +181,25 @@ impl ModelConfig {
         );
         Ok(devices.clone())
     }
+}
+
+/// The weight format `quantization` of `model`, checked with its `dtype` and the kernel set against the backend
+/// (`cuda_backend`: this build's, or the CUDA build of a Linux package for `basal doctor`) before any download, GEMM
+/// table or load. `dtype` and `kernels` are parsed here only for `q8_0`; otherwise they are checked at load as before.
+pub fn check_quantization(
+    model: &str,
+    quantization: &str,
+    dtype: &str,
+    kernels: &str,
+    cuda_backend: bool,
+) -> Result<Quantization> {
+    let q: Quantization = quantization.parse().with_context(|| format!("model {model}"))?;
+    if q != Quantization::None {
+        let precision = Precision::parse(dtype).with_context(|| format!("model {model}"))?;
+        let kernels = Kernels::parse(kernels).with_context(|| format!("model {model}"))?;
+        q.check(precision, kernels, cuda_backend).with_context(|| format!("model {model}"))?;
+    }
+    Ok(q)
 }
 
 /// The GPUs of a replica group are of one type (name, compute capability, SM count), asked from the driver without

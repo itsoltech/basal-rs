@@ -16,7 +16,7 @@ use candle_core::{Device, Tensor};
 use serde_json::{json, Value};
 use wgpu::Buffer;
 
-use crate::{EvidenceHead, GpuMemory, GpuMemoryProbe, Kernels, Precision, Readout};
+use crate::{EvidenceHead, GpuMemory, GpuMemoryProbe, Kernels, Precision, Quantization, Readout};
 use checkpoint::{Bf16, Checkpoint};
 use runtime::Gpu;
 
@@ -89,10 +89,14 @@ impl IntelBackend {
         precision: Precision,
         readout: Readout,
         kernels: Kernels,
+        quantization: Quantization,
         device: usize,
     ) -> std::result::Result<Self, IntelError> {
         if device != 0 {
             return Err(IntelError::Configuration(SINGLE_DEVICE));
+        }
+        if quantization != Quantization::None {
+            return Err(IntelError::Configuration("use quantization none; q8_0 weights need the CUDA backend"));
         }
         if precision != Precision::F16 {
             return Err(IntelError::Configuration("use --dtype f16; bf16/f32 forwards are not implemented"));
@@ -446,6 +450,10 @@ impl IntelBackend {
     }
     pub fn load_gemm_table(&mut self, _: &Path) -> Result<usize> {
         bail!("CUDA GEMM tables cannot be used by Intel Vulkan")
+    }
+    /// Quantized projection weights are CUDA-only: never any dequantization time or values.
+    pub fn q8_dequant_profile(&self) -> Option<(f64, u64)> {
+        None
     }
     pub fn memory(&self) -> Result<GpuMemory> {
         telemetry::Probe::new(&self.gpu.device, &self.gpu.info).snapshot()

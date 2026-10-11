@@ -516,7 +516,18 @@ fn models(r: &mut Report, c: &ServeConfig, gpus: Option<&[Gpu]>) {
     let mut repos = Vec::new();
     // replica groups (several devices) whose GPUs are compared below
     let mut groups = Vec::new();
+    // the backend of `basal serve`: this build's, or the CUDA build of the Linux package
+    let cuda = cfg!(feature = "cuda") || crate::paths::cuda_binary().is_some();
     for m in &c.models {
+        // the check `basal serve` makes before any download (with its default kernel set, fused)
+        let checked = config::check_quantization(&config::describe(m), &m.quantization, &m.dtype, "fused", cuda);
+        let quantization = match checked {
+            Ok(q) => q,
+            Err(e) => {
+                r.fail("models", format!("{e:#}"), QUANTIZATION_FIX);
+                continue;
+            }
+        };
         let devices = match m.placement() {
             Ok(d) => d,
             Err(e) => {
@@ -533,10 +544,13 @@ fn models(r: &mut Report, c: &ServeConfig, gpus: Option<&[Gpu]>) {
         }
         // the checkpoint is loaded on every device of the model
         let mut bytes = 0u64;
+        // q8_0: the weight estimate needs the model's config.json (local or cached)
+        let mut model_dir = None;
         match (&m.path, &m.repo) {
             (Some(p), _) => match std::fs::metadata(p.join("model.safetensors")) {
                 Ok(md) => {
                     bytes += md.len();
+                    model_dir = Some(p.clone());
                     r.ok("models", format!("{}: local, {:.1} GB", crate::term::P(&p), md.len() as f64 / GB));
                 }
                 Err(_) => r.fail(
@@ -553,6 +567,7 @@ fn models(r: &mut Report, c: &ServeConfig, gpus: Option<&[Gpu]>) {
                         let b = std::fs::metadata(dir.join("model.safetensors")).map(|m| m.len()).unwrap_or(0);
                         bytes += b;
                         r.ok("models", format!("{repo}@{}: cached, {:.1} GB", short(at), b as f64 / GB));
+                        model_dir = Some(dir);
                     }
                     None => {
                         download += size.unwrap_or(0);
@@ -574,12 +589,13 @@ fn models(r: &mut Report, c: &ServeConfig, gpus: Option<&[Gpu]>) {
             }
             _ => {}
         }
+        if quantization != basal_gpu::Quantization::None {
+            bytes = quantized_bytes(r, m, model_dir.as_deref(), bytes, quantization);
+        }
         for d in devices {
             *resident.entry(d).or_default() += bytes;
         }
     }
-    // the backend of `basal serve`: this build's, or the CUDA build of the Linux package
-    let cuda = cfg!(feature = "cuda") || crate::paths::cuda_binary().is_some();
     for (model, devices) in &groups {
         if !cuda {
             r.fail(
@@ -642,7 +658,8 @@ fn models(r: &mut Report, c: &ServeConfig, gpus: Option<&[Gpu]>) {
             r.fail("models", min_cap_message(&format!("device {device} ({})", g.name)), "give the models a newer GPU");
         }
         let Some(b) = g.memory else { continue };
-        // f16 weights take about the checkpoint size (bf16) on the GPU, plus activations and caches
+        // f16 weights take about the checkpoint size (bf16) on the GPU, plus activations and caches (q8_0 models: their
+        // estimated weight bytes)
         let need = resident as f64 * 1.1;
         if need > b as f64 {
             r.warn(
@@ -681,6 +698,41 @@ fn models(r: &mut Report, c: &ServeConfig, gpus: Option<&[Gpu]>) {
         let gpus = crate::config::bundled_gpus();
         let built_in = if gpus.is_empty() { "none".to_string() } else { gpus.join(", ") };
         r.info("models", format!("GEMM tables: {}; built in for: {built_in}", crate::term::P(&gc)));
+    }
+}
+
+const QUANTIZATION_FIX: &str =
+    "`quantization: q8_0` runs on CUDA with `dtype: f16`; otherwise use `quantization: none` (default)";
+
+/// Estimated GPU bytes of a quantized model's weights (format arithmetic over its config.json); the checkpoint size
+/// when the configuration is not on this machine yet.
+fn quantized_bytes(
+    r: &mut Report,
+    m: &config::ModelConfig,
+    dir: Option<&Path>,
+    checkpoint: u64,
+    q: basal_gpu::Quantization,
+) -> u64 {
+    let estimate = dir.context("not downloaded yet").and_then(|d| {
+        let text = std::fs::read_to_string(d.join("config.json")).context("reading config.json")?;
+        let cfg = basal_core::manifest::parse_config(&serde_json::from_str(&text).context("parsing config.json")?)?;
+        basal_gpu::estimated_weight_bytes(&cfg, checkpoint, q)
+    });
+    match estimate {
+        Ok(b) => {
+            r.ok("models", format!("{}: {q} weights ~{:.1} GB (estimate)", config::describe(m), b as f64 / GB));
+            b
+        }
+        Err(e) => {
+            r.info(
+                "models",
+                format!(
+                    "{}: {q} weight estimate unavailable ({e:#}); the checkpoint size is used",
+                    config::describe(m)
+                ),
+            );
+            checkpoint
+        }
     }
 }
 

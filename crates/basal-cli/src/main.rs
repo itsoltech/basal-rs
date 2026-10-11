@@ -44,7 +44,7 @@ use basal_core::{Backend, DecideError, Engine, ModelManifest};
 use basal_gpu::intel::IntelBackend as GpuBackend;
 #[cfg(not(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos"))))]
 use basal_gpu::GpuBackend;
-use basal_gpu::{Kernels, Precision, Readout};
+use basal_gpu::{Kernels, Precision, Quantization, Readout};
 use clap::{Args, Parser, Subcommand};
 use serde_json::{json, Value};
 
@@ -141,6 +141,11 @@ struct GpuArgs {
     /// Decoder kernels: fused (default) or candle (stock candle ops, first port; for comparison)
     #[arg(long, default_value = "fused")]
     kernels: String,
+    /// Projection weights: none (default; dense weights of --dtype) or q8_0 (8-bit GGML Q8_0 blocks dequantized to f16
+    /// per projection: less GPU memory, more work per forward; CUDA with --dtype f16 and --kernels fused). `basal
+    /// serve`: the format of every --model (a configuration file sets `quantization` per model instead)
+    #[arg(long)]
+    quantization: Option<String>,
     /// Do not precompute the K/V of the prompt template prefix
     #[arg(long)]
     no_prefix_cache: bool,
@@ -165,6 +170,17 @@ impl GpuArgs {
     /// The GPU ordinal (`--device`, default 0).
     fn device(&self) -> usize {
         self.device.unwrap_or(0)
+    }
+
+    /// `--quantization` (default none) of `model`, checked with --dtype and --kernels for this build's backend.
+    fn quantization(&self, model: &str) -> Result<Quantization> {
+        config::check_quantization(
+            model,
+            self.quantization.as_deref().unwrap_or(Quantization::None.as_str()),
+            &self.dtype,
+            &self.kernels,
+            cfg!(feature = "cuda"),
+        )
     }
 }
 
@@ -534,6 +550,8 @@ fn read_request(src: &str) -> Result<Value> {
 }
 
 fn gpu_engine(m: &ModelArgs, g: &GpuArgs) -> Result<Engine<GpuBackend>> {
+    // an unsupported weight format fails before the model is downloaded
+    g.quantization(&m.model)?;
     gpu_engine_at(&m.dir()?, g)
 }
 
@@ -541,6 +559,7 @@ fn gpu_engine_at(dir: &Path, g: &GpuArgs) -> Result<Engine<GpuBackend>> {
     #[cfg(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos")))]
     anyhow::ensure!(g.state_cache_mb == 0, "Intel state cache is not implemented; use --state-cache-mb 0");
     let manifest = ModelManifest::load(dir)?;
+    let quantization = g.quantization(&manifest.name)?;
     let readout = match g.readout.as_str() {
         "f32" => Readout::F32,
         "bf16" => Readout::Bf16Rounded,
@@ -552,9 +571,22 @@ fn gpu_engine_at(dir: &Path, g: &GpuArgs) -> Result<Engine<GpuBackend>> {
         Precision::parse(&g.dtype)?,
         readout,
         Kernels::parse(&g.kernels)?,
+        quantization,
         g.device(),
     )?;
     crate::done!("{} loaded on GPU {} in {:.1}s", manifest.name, g.device(), backend.load_s);
+    if quantization != Quantization::None {
+        let q = &backend.describe()["quantization"];
+        crate::note!(
+            "{}: {quantization} projection weights, {} matrices, {:.2} GiB of blocks ({} zero-scale, {} subnormal-scale \
+             blocks)",
+            manifest.name,
+            q["matrices"],
+            q["allocated_bytes_with_padding"].as_f64().unwrap_or(f64::NAN) / 1073741824.0,
+            q["zero_scale_blocks"],
+            q["subnormal_scale_blocks"]
+        );
+    }
     let mut backend = backend;
     if let Some(p) = &g.gemm_table {
         let n = backend.load_gemm_table(p)?;
@@ -672,7 +704,7 @@ fn run() -> Result<()> {
                 &inputs,
                 &out,
                 parse_batching(&batching)?,
-                json!({"dtype": g.dtype, "readout": g.readout, "kernels": g.kernels, "prefix_cache": !g.no_prefix_cache, "load_s": load_s}),
+                json!({"dtype": g.dtype, "quantization": g.quantization(&m.model)?.as_str(), "readout": g.readout, "kernels": g.kernels, "prefix_cache": !g.no_prefix_cache, "load_s": load_s}),
             )?;
         }
         Cmd::BenchRequests { m, g, requests, out, reps, batching } => {
@@ -724,10 +756,14 @@ fn run() -> Result<()> {
                 (0..nl).map(|l| rmax.iter().skip(l).step_by(nl).copied().fold(0.0f32, f32::max)).collect();
             let sum: f64 = prof.values().sum::<f64>() / n as f64;
             let tokens: f64 = prep[1..].iter().map(|p| p.packed.ids.len() as f64).sum::<f64>() / n as f64;
-            println!(
-                "{}",
-                json!({"items": n, "mean_packed_tokens_with_template": tokens, "ms_per_item_profiled": total, "sections_ms_per_item": prof.iter().map(|(k, v)| (k.to_string(), json!(v / n as f64))).collect::<serde_json::Map<_, _>>(), "sections_sum_ms": sum, "residual_abs_max_per_layer": per_layer, "residual_abs_max": per_layer.iter().copied().fold(0.0f32, f32::max)})
-            );
+            let mut out = json!({"items": n, "mean_packed_tokens_with_template": tokens, "ms_per_item_profiled": total, "sections_ms_per_item": prof.iter().map(|(k, v)| (k.to_string(), json!(v / n as f64))).collect::<serde_json::Map<_, _>>(), "sections_sum_ms": sum, "residual_abs_max_per_layer": per_layer, "residual_abs_max": per_layer.iter().copied().fold(0.0f32, f32::max)});
+            // q8_0: the dequantizations are a part of the projection sections, so not added to sections_sum_ms
+            if let Some((ms, values)) = engine.backend.q8_dequant_profile() {
+                out["q8_dequant_ms_per_item"] = json!(ms / n as f64);
+                out["q8_dequant_values_per_item"] = json!(values as f64 / n as f64);
+                out["q8_dequant_scope"] = json!("synchronised time of the q8_0 -> f16 dequantizations; included in the qkv_proj, o_proj, gate_up_proj and down_proj sections, not added to sections_sum_ms");
+            }
+            println!("{out}");
         }
         Cmd::GemmTune { dtype, m, reps } => {
             let shapes = [(2048, 2560), (2048, 2048), (2048, 22016), (11008, 2048)];
@@ -824,10 +860,15 @@ fn run() -> Result<()> {
                     "--replica-devices applies to --model; with a configuration file set `replica_devices` per model \
                      in it"
                 );
+                anyhow::ensure!(
+                    g.quantization.is_none(),
+                    "--quantization applies to --model; with a configuration file set `quantization` per model in it"
+                );
             } else {
                 // models from the command line: the options of the command line
                 for m in &mut c.models {
                     m.dtype = g.dtype.clone();
+                    m.quantization = g.quantization.clone().unwrap_or_else(|| Quantization::None.as_str().into());
                     m.device = g.device;
                     m.replica_devices.clone_from(&replica_devices);
                     m.gemm_table = match &g.gemm_table {
@@ -845,11 +886,16 @@ fn run() -> Result<()> {
                 c.long_slice_ms = long_slice_ms;
                 c.release_date = release_date;
             }
-            // devices of every model's instances; the GPUs of a replica group are compared before any download
+            // devices of every model's instances and its weight format; the GPUs of a replica group are compared
+            // before any download
             let placements: Vec<Vec<usize>> = c
                 .models
                 .iter()
-                .map(|m| m.placement().with_context(|| format!("model {}", config::describe(m))))
+                .map(|m| {
+                    let model = config::describe(m);
+                    config::check_quantization(&model, &m.quantization, &m.dtype, &g.kernels, cfg!(feature = "cuda"))?;
+                    m.placement().with_context(|| format!("model {model}"))
+                })
                 .collect::<Result<_>>()?;
             for (m, devices) in c.models.iter().zip(&placements).filter(|(_, d)| d.len() > 1) {
                 anyhow::ensure!(
@@ -889,6 +935,7 @@ fn run() -> Result<()> {
                         dtype: mc.dtype.clone(),
                         readout: g.readout.clone(),
                         kernels: g.kernels.clone(),
+                        quantization: Some(mc.quantization.clone()),
                         no_prefix_cache: mc.no_prefix_cache,
                         state_cache_mb: mc.state_cache_mb,
                         tree_max_tokens: mc.tree_max_tokens,

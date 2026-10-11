@@ -13,6 +13,7 @@ use std::time::Instant;
 use crate::GpuBackend;
 use anyhow::{ensure, Context, Result};
 use basal_core::{Backend, Engine, ModelManifest};
+use basal_gpu::{PoolProbe, PoolUsage, Quantization};
 use clap::{Args, ValueEnum};
 use serde_json::{json, Value};
 use tokio::sync::oneshot;
@@ -168,8 +169,61 @@ impl Drop for Server {
     }
 }
 
+/// CUDA allocator-pool watermarks of the benchmark process (exact `used` / `reserved` counters of the pool every
+/// tensor is allocated from), or the reason they are missing. Resets happen only outside measured intervals.
+struct PoolTelemetry {
+    probe: Option<PoolProbe>,
+    report: Value,
+}
+
+impl PoolTelemetry {
+    fn new(device: usize) -> Self {
+        let scope = "CUDA stream-ordered allocator pool of the device (cuMemAllocAsync): Candle tensors, resident q8_0 blocks, temporary f16 weights, cuBLASLt workspaces; not the CUDA context, modules, library handles or synchronous allocations. used and reserved are separate counters; *_high are watermarks since the preceding reset";
+        match basal_gpu::pool_probe(device) {
+            Ok(Some(probe)) => Self { probe: Some(probe), report: json!({"available": true, "scope": scope}) },
+            Ok(None) => Self {
+                probe: None,
+                report: json!({"available": false, "gap": "no stream-ordered allocator pool (not CUDA, or the device does not support memory pools)"}),
+            },
+            Err(e) => Self { probe: None, report: json!({"available": false, "gap": format!("pool probe: {e:#}")}) },
+        }
+    }
+
+    /// A failed reset or reading ends the telemetry with a recorded gap; the benchmark itself continues.
+    fn failed(&mut self, stage: &str, e: &anyhow::Error) {
+        self.probe = None;
+        self.report["available"] = json!(false);
+        self.report["gap"] = json!(format!("{stage}: {e:#}"));
+    }
+
+    fn reset(&mut self, stage: &str) {
+        if let Some(Err(e)) = self.probe.as_ref().map(PoolProbe::reset_peaks) {
+            self.failed(stage, &e);
+        }
+    }
+
+    fn read(&mut self, stage: &str, synchronize: bool) -> Option<PoolUsage> {
+        let probe = self.probe.as_ref()?;
+        let usage = (|| {
+            if synchronize {
+                probe.synchronize()?;
+            }
+            probe.usage()
+        })();
+        match usage {
+            Ok(u) => Some(u),
+            Err(e) => {
+                self.failed(stage, &e);
+                None
+            }
+        }
+    }
+}
+
 pub(crate) fn run(model: &ModelArgs, gpu_options: &GpuArgs, options: &Options) -> Result<()> {
     options.validate()?;
+    // an unsupported weight format fails before any GPU check or download
+    let quantization = gpu_options.quantization(&model.model)?;
     let clients = if options.scenario == Scenario::Sequential {
         1
     } else {
@@ -200,7 +254,7 @@ pub(crate) fn run(model: &ModelArgs, gpu_options: &GpuArgs, options: &Options) -
             "Load generator and server share this host and process; CPU/RSS include both.",
             "Memory is sampled, not a true allocation peak; reserve checks cannot prevent an OOM inside a forward.",
             "No sustained thermal/power guarantee. Answer consistency is not upstream FP32 quality validation."]});
-    let result = execute(model, gpu_options, options, raw, &mut report);
+    let result = execute(model, gpu_options, quantization, options, raw, &mut report);
     if let Err(e) = &result {
         report["reason"] = json!(format!("{e:#}"));
     }
@@ -219,6 +273,7 @@ pub(crate) fn run(model: &ModelArgs, gpu_options: &GpuArgs, options: &Options) -
 fn execute(
     model: &ModelArgs,
     g: &GpuArgs,
+    quantization: Quantization,
     options: &Options,
     raw: workload::RawWorkload,
     report: &mut Value,
@@ -233,7 +288,12 @@ fn execute(
     let dir = model.dir()?;
     let checkpoint_bytes = std::fs::metadata(dir.join("model.safetensors")).context("checkpoint size")?.len();
     report["model"]["checkpoint_bytes"] = json!(checkpoint_bytes);
-    let preflight = guard.check(&host_memory()?, &basal_gpu::gpu_memory(g.device())?, checkpoint_bytes);
+    let manifest = ModelManifest::load(&dir)?;
+    // none: the checkpoint size, as before; q8_0: the same with the projections at Q8_0 size
+    let weight_bytes = basal_gpu::estimated_weight_bytes(&manifest.config, checkpoint_bytes, quantization)?;
+    report["model"]["estimated_weight_bytes"] = json!({"bytes": weight_bytes, "quantization": quantization.as_str(),
+        "method": "estimate from format arithmetic (checkpoint size; q8_0: projection matrices at Q8_0 size with padding), not a measurement"});
+    let preflight = guard.check(&host_memory()?, &basal_gpu::gpu_memory(g.device())?, weight_bytes);
     report["resources"] = guard.report();
     preflight?;
     // Same automatic / bundled GEMM selection as serve, without ambient server configuration.
@@ -243,11 +303,22 @@ fn execute(
     if let Some(table) = &g.gemm_table {
         config.gemm_table = table.to_string_lossy().into_owned();
     }
-    let manifest = ModelManifest::load(&dir)?;
     let mut gpu_settings = g.clone();
     gpu_settings.gemm_table =
         crate::config::gemm_table(&config, &manifest, &crate::config::default_gemm_cache(), g.device())?;
+    // pool watermarks of the load alone: reset after the preflight and the GEMM table, outside load_s
+    let mut pool = PoolTelemetry::new(g.device());
+    pool.reset("reset before load");
     let engine = crate::gpu_engine_at(&dir, &gpu_settings)?;
+    // The prefix precomputation queues its temporaries' stream-ordered frees without a final synchronisation:
+    // synchronise the context first (after load_s, before any measured work) so `used` counts only what stays.
+    if let Some(u) = pool.read("reading after load", true) {
+        pool.report["load_peak"] = json!({"used_bytes": u.used_high_bytes, "reserved_bytes": u.reserved_high_bytes,
+            "scope": "load, q8_0 warm-up and template prefix precomputation"});
+        pool.report["resident_after_load"] = json!({"used_bytes": u.used_bytes, "reserved_bytes": u.reserved_bytes,
+            "scope": "the loaded engine (weights, precomputed prefixes, workspaces) before any request, after a context synchronisation"});
+    }
+    report["memory_pool"] = pool.report.clone();
     if let Some(table) = &gpu_settings.gemm_table {
         crate::config::check_gemm_coverage(&engine.manifest.name, &engine.backend.gemm_table_missing(), table)?;
     }
@@ -256,13 +327,15 @@ fn execute(
     report["backend"] = engine.backend.describe();
     // File name only: an automatic table lives in the user's cache directory, whose path identifies the machine.
     let gemm_table = gpu_settings.gemm_table.as_deref().and_then(Path::file_name).map(|n| n.to_string_lossy());
-    report["settings"] = json!({"dtype": g.dtype, "kernels": g.kernels, "readout": g.readout, "prefix_cache": !g.no_prefix_cache,
+    report["settings"] = json!({"dtype": g.dtype, "quantization": quantization.as_str(), "kernels": g.kernels, "readout": g.readout, "prefix_cache": !g.no_prefix_cache,
         "state_cache_mb": g.state_cache_mb, "gemm_table": gemm_table, "tree_max_tokens": g.tree_max_tokens,
         "max_batch_tokens": options.max_batch_tokens, "max_inflight": options.max_inflight, "schedule": format!("{:?}", options.schedule),
         "long_tokens": options.long_tokens, "long_slice_ms": options.long_slice_ms});
     let loaded = guard.check(&host_memory()?, &engine.backend.memory()?, 0);
     report["resources"] = guard.report();
     loaded?;
+    // runtime watermarks: from here through the drained shutdown of every phase
+    pool.reset("reset before the workloads");
     let monitor = Monitor::start(guard, engine.backend.memory_probe())?;
     let mut workloads = Vec::new();
     report["workloads"] = json!({});
@@ -302,6 +375,15 @@ fn execute(
     if let Err(e) = &shutdown {
         report["server_error"] = json!(format!("{e:#}"));
     }
+    // The server threads are joined: the engine and its forks are dropped (the monitor keeps only a device handle),
+    // so after a context synchronisation (pending stream-ordered frees executed) `used` is what outlived them.
+    if let Some(u) = pool.read("reading after shutdown", true) {
+        pool.report["runtime_peak"] = json!({"used_bytes": u.used_high_bytes, "reserved_bytes": u.reserved_high_bytes,
+            "scope": "every phase of this run, warm-up requests and the drained shutdown; not per phase"});
+        pool.report["after_shutdown"] = json!({"used_bytes": u.used_bytes, "reserved_bytes": u.reserved_bytes,
+            "scope": "left after the engine was dropped and the context synchronised (leak diagnostic, not resident memory)"});
+    }
+    report["memory_pool"] = pool.report.clone();
     let resources = monitor.finish()?;
     report["phases"] = json!(phases
         .iter()
@@ -386,6 +468,18 @@ fn print_summary(report: &Value) {
                 }
             }
         }
+    }
+    let pool = &report["memory_pool"];
+    if pool["available"].as_bool() == Some(true) {
+        println!(
+            "GPU allocator pool (used / reserved GiB): load peak {} / {}, after load {} / {}, runtime peak {} / {}",
+            display(&pool["load_peak"]["used_bytes"], 1073741824.0),
+            display(&pool["load_peak"]["reserved_bytes"], 1073741824.0),
+            display(&pool["resident_after_load"]["used_bytes"], 1073741824.0),
+            display(&pool["resident_after_load"]["reserved_bytes"], 1073741824.0),
+            display(&pool["runtime_peak"]["used_bytes"], 1073741824.0),
+            display(&pool["runtime_peak"]["reserved_bytes"], 1073741824.0)
+        );
     }
     if report["resources"].is_object() {
         println!(

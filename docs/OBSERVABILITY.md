@@ -204,6 +204,14 @@ czasu żądania HTTP. Przy `gemm_table: none` (CUDA) pierwsze wywołanie danej
 klasy liczby wierszy mierzy kandydatów cuBLASLt w trakcie partii, więc pierwsze
 partie po starcie mogą być dłuższe.
 
+Przy `quantization: q8_0` ładowanie obejmuje kwantyzację wag projekcji na CPU
+i jednorazowe załadowanie kernela dekwantyzacji (log: liczba macierzy, bajty
+bloków, liczniki skal zerowych i podnormalnych). Dekwantyzacja każdej
+projekcji w forwardzie wchodzi do czasu partii i żądania; osobnej metryki
+Prometheus nie ma. Rozbicie czasu daje `basal profile`
+(`q8_dequant_ms_per_item`), a liczniki puli pamięci CUDA `basal benchmark`
+(`memory_pool`, [Pomiary](BENCHMARKS.md)).
+
 ## Zapytania PromQL do Grafany lub Prometheusa
 
 p50 i p99 poprawnych odpowiedzi na model, w sekundach, w oknie 5 minut:

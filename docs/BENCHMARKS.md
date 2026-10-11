@@ -56,6 +56,29 @@ odpowiedzią `Server.decide`) i `manifest.json` (rewizje, wersje, sumy SHA-256).
 powinno dać różnicę 0,0). Polecenia zapisujące wyniki odmawiają nadpisania
 istniejącej ścieżki.
 
+Kwantyzacja `--quantization q8_0` zmienia numerykę, więc podlega temu samemu
+kryterium FP32 co każda taka zmiana: `basal compare` wobec referencji FP32
+upstream (44 przykłady i 34 żądania System One) z zapisanymi różnicami, bez
+tolerancji liczbowej. Pierwszy, częściowy
+[pomiar](../reports/multigpu-w8-quality-2026-10-11/README.md) wykazał różnice
+(granice evidence, decyzje na 900 pytaniach), dlatego `q8_0` pozostaje
+opcjonalne z jawnie opisanymi różnicami, a domyślne jest `none`
+([podsumowanie](../README.md#serwer)). Koszt czasu, zajętość puli pamięci
+CUDA, profile, zgodność HTTP i replik `q8_0` oraz ich ograniczenia opisuje
+[raport W8A16](../reports/w8a16-2026-10-11/README.md); kryterium FP32 nie
+jest dla `q8_0` spełnione. Domyślne `none` musi dawać eksporty bitowo równe
+wersji bez tej opcji. Manifest eksportu zapisuje `run.quantization`, a opis
+backendu dla `q8_0` obiekt `quantization` (liczba bloków, bajty, liczniki skal
+zerowych i podnormalnych). `basal profile` z `q8_0` podaje
+`q8_dequant_ms_per_item`: zsynchronizowany czas dekwantyzacji, zawarty już w
+sekcjach projekcji i niedodawany do `sections_sum_ms`, oraz
+`q8_dequant_values_per_item` (liczba zdekwantyzowanych wartości wag, podstawa
+efektywnego pasma). Profil `q8_0` jest synchronizowany, więc jego czasy nie są
+latencją żądania ani wynikiem `basal bench`; efektywne pasmo to iloraz bajtów
+i czasu, nie zmierzony transfer pamięci. Ręczny runner kampanii W8A16 na
+wynajętych kartach: `tools/perf/run-w8a16-cloud.py` (`--plan-only` bez GPU i
+bez chmury).
+
 ## Wydajność
 
 | Narzędzie | Co mierzy |
@@ -311,7 +334,10 @@ Benchmark nie czyta ambientowej konfiguracji `basal-serve.yml`.
 
 Domyślne rezerwy to 2 GiB RAM (`--ram-reserve-gib`) i 1 GiB GPU/Metal
 working set (`--gpu-reserve-gib`). Przed ładowaniem dochodzi szacowany
-rozmiar wag; dla GPU zunifikowanego także w RAM. Po załadowaniu monitor
+rozmiar wag; dla GPU zunifikowanego także w RAM. Szacunek
+(`model.estimated_weight_bytes`) to arytmetyka formatu, nie pomiar: rozmiar
+checkpointu, a dla `--quantization q8_0` ten rozmiar z macierzami projekcji w
+rozmiarze bloków Q8_0 (z paddingiem Candle). Po załadowaniu monitor
 sprawdza pamięć mniej więcej co 200 ms, także podczas aktywnych forwardów
 i rozgrzewki. Utrata rezerwy, podwyższona presja pamięci macOS albo co
 najmniej 64 MiB przyrostu zajętego swapu/zapisów do swapu przerywa ruch.
@@ -323,6 +349,25 @@ z uwzględnieniem `CUDA_VISIBLE_DEVICES`; Metal zalecany working set.
 W krótkiej fazie może zabraknąć próbek CPU; wtedy pole ma wartość null.
 Okna pamięci obejmują ostatnie 20000 próbek (około 67 minut przy 5 Hz);
 zbiorcze minima i wzrost swapu dotyczą całego monitorowanego przebiegu.
+
+Na CUDA `memory_pool` podaje dokładne liczniki puli alokatora strumieniowego
+urządzenia (`cuMemAllocAsync`: tensory Candle, bloki `q8_0`, przejściowe
+tensory f16, workspace cuBLASLt), osobno `used` i `reserved`. Znaczniki
+szczytu są zerowane poza mierzonym czasem: tuż przed ładowaniem (po
+preflight i wyborze tabeli GEMM) oraz przed fazami. `load_peak` to szczyt
+ładowania z rozgrzewką, `resident_after_load` stan po załadowaniu i
+synchronizacji kontekstu (zwolnienia buforów przejściowych rozgrzewki
+prefiksów wykonane; po `load_s`, przed mierzonym ruchem),
+`runtime_peak` łączny szczyt wszystkich faz z zamknięciem (bez podziału na
+fazy), a `after_shutdown` pozostałość po zwolnieniu silnika i synchronizacji
+kontekstu (diagnostyka wycieku, nie pamięć rezydentna). Poza pulą pozostają
+kontekst CUDA, moduły, uchwyty bibliotek i alokacje synchroniczne. Bez pul
+(nie-CUDA lub karta bez nich) pole ma `available: false` z opisem luki.
+Uchwyt puli utrzymuje główny kontekst CUDA urządzenia od zerowania przed
+ładowaniem do końca komendy, więc `model.load_s` może nie obejmować tworzenia
+kontekstu, które w wersji bez tej telemetrii mogło przypaść na ładowanie;
+`load_s` obu wersji nie porównujemy bez uwzględnienia tej różnicy. Próbkowany
+całkowity VRAM nadal nie jest szczytem.
 
 Klient i serwer dzielą limit otwartych plików procesu, po dwa gniazda na
 klienta. Gdy limit jest mniejszy niż `2 × max(--concurrency) + 64`,

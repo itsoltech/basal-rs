@@ -110,6 +110,32 @@ rozszerza je przed użyciem (dokładny forward FP32, punkt odniesienia).
   redukcją f32, swizzle; bez tabeli najszybszy z 16 algorytmów heurystyki
   mierzony przy pierwszym użyciu.
 
+### Kwantyzacja W8A16 (`q8_0`)
+
+Opcjonalna, domyślnie wyłączona (`quantization: none`), tylko CUDA z
+`dtype: f16` i kernelami `fused` (walidacja przed pobraniem modelu). Cztery
+macierze projekcji każdej warstwy (`wqkv`, `wo`, `wgu`, `wdown`) mają w
+`Layer` typ `ProjWeight`: `Dense(Tensor)` albo `Q8(Arc<QTensor>)`. Loader
+czyta części bf16 tak jak dla gęstych wag (sklejone wzdłuż N), sprawdza
+kształt `[N, K]`, `K % 32 == 0`, przepełnienia i dokładną liczbę bloków,
+konwertuje wiersze do f32 na wszystkich rdzeniach (bez kopii f32 całej
+macierzy), odrzuca wartości nieskończone i skale poza zakresem f16, liczy
+bloki ze skalą zerową (`amax/127 ≤ 2⁻²⁵`) i podnormalną, kwantyzuje
+`BlockQ8_0::from_float` i wysyła bloki raz przez `load_quantized` Candle.
+Bloki muszą leżeć na tym samym urządzeniu Candle (`DeviceId`) co backend;
+dekwantyzacja idzie wyłącznie na `q.device()`, więc nie ma transferów.
+Wysłania i jednorazowa dekwantyzacja najmniejszej macierzy (ładuje moduł
+`QUANTIZED` i kernel przy starcie) są kolejkowane przed synchronizacją
+kończącą ładowanie. W forwardzie `matmul_t` dla `Q8` tworzy przejściowy
+tensor f16 macierzy (`dequantize_block_q8_0_f16`), podaje go temu samemu GEMM
+cuBLASLt f16 i zwalnia go po wywołaniu, na strumieniu wątku silnika. Tor
+`Dense` jest kodem sprzed zmiany; jedyną różnicą jest dopasowanie wariantu.
+Forki silnika (tor długich żądań) współdzielą bloki przez `Arc`, a repliki
+ładują własne. `basal profile` raportuje czas dekwantyzacji osobno
+(`q8_dequant_ms_per_item`, część sekcji projekcji, nie dodawana do
+`sections_sum_ms`). `QMatMul` Candle nie jest używany (kwantyzuje aktywacje
+do Q8_1). Własny kernel W8A16 i formaty 4-bitowe są poza tym etapem.
+
 ### Niezależność od partii
 
 Z tabelą `--invariant` (dla każdego kształtu wag algorytmy bez split-K z
@@ -307,6 +333,11 @@ scrape nie przechodzi przez kolejkę inferencji. Szczegółowa semantyka i PromQ
 - Tabela GEMM jest specyficzna dla karty i wersji cuBLASLt. Plik w
   `gemm_cache` jest nazwany modelem i precyzją, bez karty: przeniesienie
   modelu na GPU innego typu generuje tabelę od nowa i zastępuje poprzednią.
+- `quantization: q8_0` działa tylko na CUDA z f16 i dodaje dekwantyzację
+  wag na każdy forward. Na RTX 6000 Ada zmniejsza zajętość puli pamięci CUDA
+  (basal-1.5-mini i 4.5B), wydłuża czas (4.5B) i zmienia część decyzji oraz
+  granic evidence wobec FP32 ([raport](../reports/w8a16-2026-10-11/README.md));
+  model max, inne karty i obciążenia nie zostały zmierzone.
 - Repliki wymagają kart jednego typu i wspólnej tabeli GEMM niezależnej od
   partii; mieszane grupy wymagają osobnej decyzji numerycznej. Zgodność
   konfiguracji nie zastępuje pomiaru równości wyników na obu kartach.
