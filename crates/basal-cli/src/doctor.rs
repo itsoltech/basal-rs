@@ -192,6 +192,48 @@ fn memory_bytes() -> Option<u64> {
 
 /// GPU checks; returns the memory available to the models (bytes) when known.
 fn gpu(r: &mut Report) -> Option<u64> {
+    #[cfg(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos")))]
+    return intel_gpu(r);
+    #[cfg(not(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos"))))]
+    candle_gpu(r)
+}
+
+/// The Intel Vulkan device the backend selects and its heap budget, queried through one device.
+#[cfg(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos")))]
+fn intel_gpu(r: &mut Report) -> Option<u64> {
+    let info = match basal_gpu::intel::info() {
+        Ok(info) => info,
+        Err(e) => {
+            r.fail("gpu", format!("{e:#}"), "install Vulkan loader and Intel Mesa driver (Arch: vulkan-intel)");
+            return None;
+        }
+    };
+    r.ok("gpu", format!("{}; Intel Vulkan, {}", info.name, info.driver));
+    match info.memory {
+        Ok(memory) => {
+            if memory.unified {
+                r.info("gpu", "GPU shares host RAM; weights and activations compete with the desktop");
+            }
+            r.info("gpu", format!("Vulkan heap budget: {:.1} GiB available", memory.available_bytes as f64 / GIB));
+            Some(memory.available_bytes)
+        }
+        Err(e) => {
+            r.warn(
+                "gpu",
+                format!("Vulkan memory telemetry unavailable: {e:#}"),
+                "update the Intel Vulkan driver to support VK_EXT_memory_budget",
+            );
+            None
+        }
+    }
+}
+
+/// Metal or NVIDIA CUDA checks.
+#[cfg_attr(
+    all(feature = "intel", not(feature = "cuda"), not(target_os = "macos")),
+    expect(dead_code, reason = "the Intel build checks its Vulkan device instead")
+)]
+fn candle_gpu(r: &mut Report) -> Option<u64> {
     if cfg!(target_os = "macos") {
         if std::env::consts::ARCH != "aarch64" {
             r.fail("gpu", "Intel Mac: the Metal backend needs Apple Silicon (M1 or newer)", "use an Apple Silicon Mac");

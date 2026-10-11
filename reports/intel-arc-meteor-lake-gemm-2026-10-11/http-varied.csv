@@ -1,0 +1,7 @@
+version,class,requests,median_latency_ms,mean_latency_ms,errors,answer_changes
+baseline,document,2,8550.271938,8550.271938,0,0
+baseline,shared,2,4279.957627,4279.957627,0,0
+baseline,short,2,870.82475,870.82475,0,0
+candidate,document,2,7490.779647,7490.779647,0,0
+candidate,shared,2,3613.417152,3613.417152,0,0
+candidate,short,2,746.786312,746.786312,0,0

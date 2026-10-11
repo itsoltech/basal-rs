@@ -10,9 +10,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::GpuBackend;
 use anyhow::{ensure, Context, Result};
 use basal_core::{Backend, Engine, ModelManifest};
-use basal_gpu::GpuBackend;
 use clap::{Args, ValueEnum};
 use serde_json::{json, Value};
 use tokio::sync::oneshot;
@@ -48,7 +48,7 @@ pub(crate) struct Options {
     /// Minimum available RAM to retain (GiB)
     #[arg(long, default_value_t = 2.0)]
     ram_reserve_gib: f64,
-    /// Minimum free VRAM / Metal working-set headroom (GiB)
+    /// Minimum free VRAM / Metal working-set / Vulkan heap headroom (GiB)
     #[arg(long, default_value_t = 1.0)]
     gpu_reserve_gib: f64,
     /// Packed tokens admitted per server batch; same setting as serve
@@ -233,7 +233,13 @@ fn execute(
     let dir = model.dir()?;
     let checkpoint_bytes = std::fs::metadata(dir.join("model.safetensors")).context("checkpoint size")?.len();
     report["model"]["checkpoint_bytes"] = json!(checkpoint_bytes);
-    let preflight = guard.check(&host_memory()?, &basal_gpu::gpu_memory()?, checkpoint_bytes);
+    let manifest = ModelManifest::load(&dir)?;
+    #[cfg(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos")))]
+    let weight_bytes = GpuBackend::estimated_weight_bytes(&dir, &manifest.config)?;
+    #[cfg(not(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos"))))]
+    let weight_bytes = checkpoint_bytes;
+    report["model"]["estimated_resident_weight_bytes"] = json!(weight_bytes);
+    let preflight = guard.check(&host_memory()?, &basal_gpu::gpu_memory()?, weight_bytes);
     report["resources"] = guard.report();
     preflight?;
     // Same automatic / bundled GEMM selection as serve, without ambient server configuration.
@@ -243,7 +249,6 @@ fn execute(
     if let Some(table) = &g.gemm_table {
         config.gemm_table = table.to_string_lossy().into_owned();
     }
-    let manifest = ModelManifest::load(&dir)?;
     let mut gpu_settings = g.clone();
     gpu_settings.gemm_table = crate::config::gemm_table(&config, &manifest, &crate::config::default_gemm_cache())?;
     let engine = crate::gpu_engine_at(&dir, &gpu_settings)?;
@@ -259,7 +264,10 @@ fn execute(
         "state_cache_mb": g.state_cache_mb, "gemm_table": gemm_table, "tree_max_tokens": g.tree_max_tokens,
         "max_batch_tokens": options.max_batch_tokens, "max_inflight": options.max_inflight, "schedule": format!("{:?}", options.schedule),
         "long_tokens": options.long_tokens, "long_slice_ms": options.long_slice_ms});
-    let loaded = guard.check(&host_memory()?, &engine.backend.memory()?, 0);
+    let host = host_memory()?;
+    let gpu = engine.backend.memory()?;
+    report["memory_after_load"] = json!({"host": host, "gpu": gpu});
+    let loaded = guard.check(&host, &gpu, 0);
     report["resources"] = guard.report();
     loaded?;
     let monitor = Monitor::start(guard, engine.backend.memory_probe())?;

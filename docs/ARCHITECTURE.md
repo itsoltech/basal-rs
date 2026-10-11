@@ -64,11 +64,12 @@ osobno). Pytania o ten sam stan trafiają obok siebie.
 Stały prefiks promptu (szablon do stanu, 53 tokeny PL i 66 EN) jest liczony
 raz przy starcie. Opcjonalny cache stanu (`--state-cache-mb`) przechowuje K/V
 szablonu ze stanem dla kolejnych żądań o ten sam stan (LRU z budżetem
-pamięci). Oba działają tylko przy dokładnej zgodności token IDs.
+pamięci; CUDA/Metal). Oba działają tylko przy dokładnej zgodności token IDs.
+Intel obsługuje cache stałego prefiksu, bez cache stanu między requestami.
 
 ## Forward
 
-Model Llama z biasami lub bez (basal-1.0 ma biasy, basal-1.5 nie). Domyślna
+Model Llama z biasami lub bez (basal-1.5 mini i 4.5B mają biasy, max nie). Domyślna
 precyzja to f16: wagi bf16 konwertowane przy ładowaniu, strumień residualny,
 normy i MLP w f16, akumulacja GEMM w f32. Precyzja `f32` trzyma wagi bf16 i
 rozszerza je przed użyciem (dokładny forward FP32, punkt odniesienia).
@@ -120,6 +121,25 @@ liczby wierszy, attention po jednostkach drzewa) wynik jest bitowo ten sam
 pojedynczo, w partii i w drzewie
 ([pomiar](../reports/metal-m2-max-tree/README.md)); z cache stanu tego nie
 mierzono.
+
+### Intel Vulkan
+
+Opcjonalny `basal-gpu::intel::IntelBackend` implementuje ten sam trait `Backend`.
+Kernele WGSL wykonują forward FP16 przez wgpu/Vulkan, z sumami GEMM, RMSNorm,
+RoPE, attention i logitami liter w FP32. Attention czyta ciągłe zakresy przodków
+drzewa i aktualizuje online softmax; nie alokuje kwadratowej maski. Granica `Packed`
+waliduje tokeny, pozycje, rodziców, ciągłość bloków oraz długość prefiksu przed użyciem cache.
+
+Wiersze partii liczą się kolejno; projekcje wewnątrz wiersza mają zwarte kafelki GEMM.
+K/V stałych prefiksów współdzielą forki. Wagi i pipeline'y są niemutowalne i współdzielone
+przez `Arc`, a scratch jest lokalny dla forwardu. Wagi embeddingu i głowicy pozostają
+w pliku checkpointu (odczyt `pread`, bez mapowania): przesyłane są tylko potrzebne wiersze. Ostatnia warstwa
+ogranicza o_proj i MLP do pozycji odczytu, także przy powtórzonych pozycjach evidence.
+
+Wątek długich żądań synchronizuje GPU przed checkpointem bramki między warstwami.
+Błędy walidacji i alokacji wgpu są przechwytywane; odczyt GPU ma timeout.
+Telemetria używa `VK_EXT_memory_budget` rzeczywistego urządzenia, zachowując jego lifetime.
+Szczegóły opcji i ograniczeń: [INTEL.md](INTEL.md).
 
 ## Rozszerzenia basal-1.5
 

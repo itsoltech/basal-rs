@@ -6,6 +6,11 @@
 //! same file with the Hopper (wgmma) attention, used on compute capability 9.0 only.
 
 fn main() {
+    #[cfg(feature = "intel")]
+    if let Err(error) = validate_intel_shaders() {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=src/kernels.cu");
     println!("cargo:rerun-if-env-changed=CUDA_COMPUTE_CAP");
@@ -53,4 +58,20 @@ fn main() {
         table += "pub const PTX_90A: Option<&str> = None;\n";
     }
     std::fs::write(out_dir.join("kernels_ptx.rs"), table).unwrap();
+}
+
+/// Compile-time WGSL syntax/type validation. This requires no Vulkan driver or GPU and does not run inference.
+#[cfg(feature = "intel")]
+fn validate_intel_shaders() -> Result<(), String> {
+    for name in ["gemm", "norm", "rope", "attention", "elementwise", "gather", "readout"] {
+        let path = format!("src/intel/{name}.wgsl");
+        println!("cargo:rerun-if-changed={path}");
+        let source = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
+        let module = naga::front::wgsl::parse_str(&source).map_err(|e| e.emit_to_string_with_path(&source, &path))?;
+        let capabilities = naga::valid::Capabilities::SHADER_FLOAT16 | naga::valid::Capabilities::SUBGROUP;
+        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), capabilities)
+            .validate(&module)
+            .map_err(|e| e.emit_to_string_with_path(&source, &path))?;
+    }
+    Ok(())
 }
