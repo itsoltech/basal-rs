@@ -309,17 +309,45 @@ Opcje `--max-batch-tokens`, `--max-inflight`, `--schedule`, `--long-tokens`
 i `--long-slice-ms` mają takie same domyślne wartości jak `serve`.
 Benchmark nie czyta ambientowej konfiguracji `basal-serve.yml`.
 
-Domyślne rezerwy to 2 GiB RAM (`--ram-reserve-gib`) i 1 GiB GPU/Metal
-working set (`--gpu-reserve-gib`). Przed ładowaniem dochodzi szacowany
-rozmiar wag; dla GPU zunifikowanego także w RAM. Po załadowaniu monitor
+Domyślne rezerwy to 2 GiB RAM (`--ram-reserve-gib`) i 1 GiB VRAM / Metal
+working set / budżetu Vulkan (`--gpu-reserve-gib`). Przed ładowaniem dochodzi
+szacowany rozmiar wag; dla GPU zunifikowanego także w RAM. Rezerwy RAM i GPU
+są osobnymi ograniczeniami tej samej pamięci na iGPU, nie sumujemy ich.
+Dla zintegrowanego Intela kontrola wstępna wymaga miejsca w RAM na wagi
+i większą z obu rezerw. Bieżący budżet Vulkan musi mieścić same wagi
+oraz, osobno, rezerwę GPU: jest dynamiczną wskazówką sterownika, a nie
+pojemnością osobnej VRAM. Po załadowaniu modelu i podczas inferencji pełna
+rezerwa GPU jest sprawdzana względem rzeczywistego użycia. `memory_after_load`
+zapisuje oba odczyty, także gdy kontrola przerwie pomiar. Pozostałe backendy
+i osobne karty Intel nadal wymagają przed ładowaniem sumy wag i rezerwy GPU.
+`model.estimated_resident_weight_bytes` dla Intela obejmuje tensory BF16
+konwertowane do FP16 i współdzielony bufor zerowych biasów, bez pełnych
+embeddingów i `lm_head`: backend czyta tylko potrzebne wiersze tych macierzy.
+Szacunek korzysta ze zwalidowanego nagłówka safetensors, bez odczytywania wag.
+Dla Metal/CUDA nadal jest to rozmiar pliku checkpointu.
+Cache prefiksów, bufory forwardu, wybrane wiersze i narzut sterownika nie są
+wagami: potrzebują dodatkowej pamięci. Rezerwa przed ładowaniem pozostawia
+na nie zapas, ale nie jest szacunkiem szczytu dla konkretnego obciążenia.
+Po załadowaniu monitor
 sprawdza pamięć mniej więcej co 200 ms, także podczas aktywnych forwardów
 i rozgrzewki. Utrata rezerwy, podwyższona presja pamięci macOS albo co
 najmniej 64 MiB przyrostu zajętego swapu/zapisów do swapu przerywa ruch.
 Swap jest globalny; wpływ innych aplikacji może zatrzymać benchmark.
 RAM macOS to szacunek wolnych, nieaktywnych i spekulacyjnych stron.
-Linux uwzględnia limity cgroup v1/v2 procesu i rodziców przy standardowym
-mount `/sys/fs/cgroup`. CUDA mierzy faktycznie wybrane urządzenie,
-z uwzględnieniem `CUDA_VISIBLE_DEVICES`; Metal zalecany working set.
+Linux bierze minimum systemowego `MemAvailable` i zapasu pod każdym limitem
+cgroup v1/v2 procesu i rodziców przy standardowym mount `/sys/fs/cgroup`.
+Zajętość cgroup pomniejszamy o nieaktywny cache plików, po odjęciu stron
+brudnych i w trakcie zapisu. Nie doliczamy aktywnego cache, pamięci wymagającej
+zapisu do swapu, shmem ani slab. Dla v1 używamy liczników `total_*`, obejmujących potomków;
+brak wymaganych liczników oznacza brak ulgi za cache. To szacunek możliwego
+odzysku, nie gwarancja natychmiastowej alokacji. `resources.before_load`
+zawiera `system_available_bytes` i `cgroups` z limitem, użyciem, szacowanym
+odzyskiwalnym cache i dostępnymi bajtami, bez ścieżek identyfikujących sesję.
+CUDA mierzy faktycznie wybrane urządzenie, z uwzględnieniem
+`CUDA_VISIBLE_DEVICES`; Metal zalecany working set, a Vulkan budżet sterownika.
+Odmowa podaje dostępne i wymagane GiB oraz składniki wymagania. Jawne
+zmniejszenie rezerwy nie wyłącza kontroli pamięci ani swapu; nie zmienia też
+limitu cgroup lub budżetu sterownika.
 W krótkiej fazie może zabraknąć próbek CPU; wtedy pole ma wartość null.
 Okna pamięci obejmują ostatnie 20000 próbek (około 67 minut przy 5 Hz);
 zbiorcze minima i wzrost swapu dotyczą całego monitorowanego przebiegu.

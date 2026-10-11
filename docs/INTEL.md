@@ -88,9 +88,14 @@ Nie odejmuj ponownie tych samych wag od obu pomiarów. Max wymaga szczególnej
 uwagi przy długich promptach i kilku modelach w jednym procesie.
 Repozytoryjny `serve.yml` ładuje wszystkie trzy modele naraz; ich wagi
 nie mieszczą się razem w 32 GB RAM. Na takiej maszynie uruchamiaj je osobno.
-W opisanej sesji benchmark max zatrzymał się na kontroli rezerwy RAM przed
-ładowaniem. Udana inferencja max nie oznacza, że zostaje zapas na dowolny
-prompt lub współbieżność; zakres sprawdzonych przebiegów podaje raport.
+Kontrola przed ładowaniem uwzględnia odzyskiwalny nieaktywny cache plików
+w cgroup oraz wagi rzeczywiście przechowywane na GPU. Na iGPU zapas przed
+ładowaniem pochodzi ze wspólnego RAM, a pełna rezerwa GPU jest sprawdzana
+ponownie po ładowaniu i podczas inferencji. Budżet Vulkan może się zmieniać;
+nie traktujemy odczytu sprzed ładowania jako stałej pojemności VRAM.
+[Pomiary pamięci](../reports/intel-arc-meteor-lake-memory-2026-10-11/README.md)
+obejmują również odmowy z powodu faktycznego przyrostu swapu podczas ładowania
+max. Udana inferencja nie oznacza zapasu na dowolny prompt lub współbieżność.
 
 ## Weryfikacja i profilowanie
 
