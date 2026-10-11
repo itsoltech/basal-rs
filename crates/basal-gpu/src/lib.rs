@@ -264,6 +264,57 @@ pub fn gpu_name(device: usize) -> Result<String> {
     bail!("gpu_name: CUDA only (device {device})")
 }
 
+/// Type of a CUDA device as the driver reports it: the name GEMM tables record, compute capability and SM count.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GpuIdentity {
+    pub name: String,
+    /// Compute capability (major, minor).
+    pub compute_capability: (u32, u32),
+    pub multiprocessors: u32,
+}
+
+impl std::fmt::Display for GpuIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (major, minor) = self.compute_capability;
+        write!(f, "{}, compute capability {major}.{minor}, {} SMs", self.name, self.multiprocessors)
+    }
+}
+
+/// Type of CUDA device `device` (an ordinal visible to this process) from the driver API, without creating a context
+/// or applying `BASAL_CUDA_SYNC`: `serve` compares the GPUs of a replica group before downloading or loading anything.
+pub fn gpu_identity(device: usize) -> Result<GpuIdentity> {
+    #[cfg(feature = "cuda")]
+    {
+        use candle_core::cuda_backend::cudarc::driver::{result, sys::CUdevice_attribute as A};
+        result::init().context("initialising the CUDA driver")?;
+        let count = result::device::get_count().context("counting CUDA devices")?;
+        ensure!(
+            device < usize::try_from(count).unwrap_or(0),
+            "CUDA device {device} does not exist: this process sees {count} CUDA device(s), numbered from 0 \
+             (CUDA_VISIBLE_DEVICES selects and renumbers them)"
+        );
+        let dev = result::device::get(i32::try_from(device)?).with_context(|| format!("CUDA device {device}"))?;
+        let name = result::device::get_name(dev).with_context(|| format!("name of CUDA device {device}"))?;
+        let attribute = |a: A| -> Result<u32> {
+            // SAFETY: `dev` was returned by cuDeviceGet for an ordinal below the device count (checked above), as
+            // get_attribute requires; the call only reads a device property and needs no context.
+            let v = unsafe { result::device::get_attribute(dev, a) }
+                .with_context(|| format!("{a:?} of CUDA device {device}"))?;
+            u32::try_from(v).with_context(|| format!("{a:?} of CUDA device {device}: {v}"))
+        };
+        Ok(GpuIdentity {
+            name,
+            compute_capability: (
+                attribute(A::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)?,
+                attribute(A::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)?,
+            ),
+            multiprocessors: attribute(A::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)?,
+        })
+    }
+    #[cfg(not(feature = "cuda"))]
+    bail!("GPU identity needs the CUDA backend (device {device})")
+}
+
 /// Version of the batch-invariant GEMM search of this build (CUDA; 0 without cuBLASLt), as recorded in GEMM tables.
 pub fn gemm_search_version() -> u64 {
     #[cfg(feature = "cuda")]

@@ -338,7 +338,24 @@ COMMANDS = {"types": cmd_types, "template": cmd_template, "up": cmd_up, "bootstr
             "build": cmd_build, "push": cmd_push,
             "sync": cmd_sync, "run": cmd_run, "pull": cmd_pull, "ssh": cmd_ssh, "ls": cmd_ls, "down": cmd_down}
 
+HELP = ("-h", "--help")
+
+
+def wants_help(argv):
+    """-h/--help anywhere after a command, checked before it runs: an unknown --help once reached `up` and created a
+    machine. The options of `run` belong to the remote command (`run basal-dev --help`): there only a leading flag,
+    with no remote command, is help."""
+    if argv and argv[0] in HELP:
+        return True
+    if argv and argv[0] == "run":
+        return len(argv) > 1 and argv[1] in HELP
+    return any(a in HELP for a in argv[1:])
+
+
 if __name__ == "__main__":
+    if wants_help(sys.argv[1:]):
+        print(__doc__)
+        sys.exit(0)
     if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:
         sys.exit(__doc__)
     COMMANDS[sys.argv[1]](sys.argv[2:])

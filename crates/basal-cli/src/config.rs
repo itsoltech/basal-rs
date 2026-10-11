@@ -12,6 +12,8 @@
 //!   - path: .models/basal-1.5-mini # or a local model directory
 //!     long_tokens: 0
 //!     device: 1                    # CUDA device (default 0); models on one device take turns on it
+//!   - path: .models/basal-1.5-4.5B
+//!     replica_devices: [2, 3]      # CUDA: one replica per device under one model name (GPUs of one type)
 //! ```
 //!
 //! A model is addressed by the name in its `basal.json` (the `model` field of requests).
@@ -81,9 +83,16 @@ pub struct ModelConfig {
     pub dtype: String,
     /// GPU of the model: the CUDA device ordinal, an index among the GPUs visible to the process (after
     /// `CUDA_VISIBLE_DEVICES`; `basal doctor` lists them). Models on one device take turns on it; models on different
-    /// devices run at the same time. Metal and Intel: 0 only.
+    /// devices run at the same time. Metal and Intel: 0 only. Not together with `replica_devices`.
     #[serde(default)]
-    pub device: usize,
+    pub device: Option<usize>,
+    /// CUDA: independent replicas of this model under its one name, one per listed device (distinct ordinals of GPUs
+    /// of one type: name, compute capability and SM count). Each replica loads the weights and has its own queue,
+    /// scheduler, caches and long lane; requests go to the replica with the fewest waiting and running ones. Several
+    /// replicas need one batch-invariant GEMM table (`gemm_table: auto` or a path, not `none`). One device is the
+    /// same as `device`.
+    #[serde(default)]
+    pub replica_devices: Option<Vec<usize>>,
     /// `auto`: the table of this model and GPU from `gemm_cache`, generated when missing or not valid here; `none`:
     /// algorithms timed at first use (results may depend on the batch); otherwise the path of a table.
     #[serde(default = "default_gemm_table")]
@@ -137,6 +146,64 @@ fn default_long_tokens() -> usize {
 }
 fn default_tree_max_tokens() -> usize {
     basal_core::engine::TREE_MAX_TOKENS
+}
+
+impl ModelConfig {
+    /// GPU ordinal of a model without replicas (`device`, default 0).
+    pub fn device(&self) -> usize {
+        self.device.unwrap_or(0)
+    }
+
+    /// Devices of the model's instances: `[device]`, or the validated `replica_devices` (non-empty, distinct, not
+    /// together with `device`; several need a GEMM table). Whether the ordinals exist and the GPUs match is checked
+    /// against the driver ([`check_replica_gpus`]).
+    pub fn placement(&self) -> Result<Vec<usize>> {
+        let Some(devices) = &self.replica_devices else { return Ok(vec![self.device()]) };
+        ensure!(self.device.is_none(), "give either `device` or `replica_devices`, not both");
+        ensure!(!devices.is_empty(), "`replica_devices` is empty (give at least one CUDA device)");
+        for (i, d) in devices.iter().enumerate() {
+            ensure!(!devices[..i].contains(d), "`replica_devices` lists device {d} twice (one replica per GPU)");
+        }
+        ensure!(
+            devices.len() == 1 || self.gemm_table != "none",
+            "several `replica_devices` need one batch-invariant GEMM table shared by the replicas: use `gemm_table: \
+             auto` or the path of a `basal gemm-search --invariant` table, not `none`"
+        );
+        Ok(devices.clone())
+    }
+}
+
+/// The GPUs of a replica group are of one type (name, compute capability, SM count), asked from the driver without
+/// creating a context, so a mixed group is refused before any download, GEMM table or load.
+pub fn check_replica_gpus(model: &str, devices: &[usize]) -> Result<()> {
+    let ids = devices
+        .iter()
+        .map(|&d| basal_gpu::gpu_identity(d).with_context(|| format!("{model}: replica device {d}")))
+        .collect::<Result<Vec<_>>>()?;
+    if ids.iter().any(|id| *id != ids[0]) {
+        let gpus: Vec<String> = devices.iter().zip(&ids).map(|(d, id)| format!("device {d}: {id}")).collect();
+        bail!(
+            "{model}: replicas need GPUs of one type (name, compute capability, SM count), `replica_devices` mixes \
+             them ({})",
+            gpus.join("; ")
+        );
+    }
+    Ok(())
+}
+
+/// The one GEMM table of a replica group is batch-invariant and valid on the GPU of every replica (cuBLASLt version,
+/// GPU name and every algorithm at its M class), checked before any replica loads.
+pub fn check_replica_table(name: &str, table: Option<&Path>, devices: &[usize]) -> Result<()> {
+    let Some(path) = table else {
+        bail!("{name}: several `replica_devices` need a batch-invariant GEMM table (CUDA build, gemm_table not none)")
+    };
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", crate::term::P(&path)))?;
+    let v: Value = serde_json::from_str(&text).with_context(|| format!("parsing {}", crate::term::P(&path)))?;
+    for &d in devices {
+        basal_gpu::check_gemm_table(&v, d)
+            .with_context(|| format!("{name}: GEMM table {} on replica device {d}", crate::term::P(&path)))?;
+    }
+    Ok(())
 }
 
 impl ServeConfig {
@@ -456,9 +523,10 @@ impl hf_hub::progress::ProgressHandler for DownloadLog {
 }
 
 /// GEMM table of a model: `None` for `gemm_table: none` and on builds without CUDA; for `auto` the cached table of
-/// this model, dtype, GPU (the model's `device`) and cuBLASLt version, generated (one-time, minutes to an hour) on
-/// that GPU when it is missing, was made on another GPU or cuBLASLt, or does not cover the model's weight shapes.
-pub fn gemm_table(m: &ModelConfig, manifest: &ModelManifest, cache: &Path) -> Result<Option<PathBuf>> {
+/// this model, dtype, GPU `device` and cuBLASLt version, generated (one-time, minutes to an hour) on that GPU when it
+/// is missing, was made on another GPU or cuBLASLt, or does not cover the model's weight shapes. A replica group
+/// resolves its one table on its first device ([`check_replica_table`] then checks it on every device).
+pub fn gemm_table(m: &ModelConfig, manifest: &ModelManifest, cache: &Path, device: usize) -> Result<Option<PathBuf>> {
     match m.gemm_table.as_str() {
         "none" => return Ok(None),
         "auto" => {}
@@ -467,7 +535,7 @@ pub fn gemm_table(m: &ModelConfig, manifest: &ModelManifest, cache: &Path) -> Re
     let Some(version) = basal_gpu::cublaslt_version() else {
         return Ok(None); // Metal: no cuBLASLt tables
     };
-    let gpu = basal_gpu::gpu_name(m.device)?;
+    let gpu = basal_gpu::gpu_name(device)?;
     let shapes = basal_gpu::projection_shapes(&manifest.config);
     let path = cache.join(format!("{}-{}.json", manifest.name, m.dtype));
     let problem = match std::fs::read_to_string(&path) {
@@ -484,7 +552,7 @@ pub fn gemm_table(m: &ModelConfig, manifest: &ModelManifest, cache: &Path) -> Re
             if table_problem(&v, version, &gpu, &m.dtype, &shapes).is_some() {
                 continue;
             }
-            match basal_gpu::check_gemm_table(&v, m.device) {
+            match basal_gpu::check_gemm_table(&v, device) {
                 Ok(()) => {
                     std::fs::create_dir_all(cache).with_context(|| format!("creating {}", crate::term::P(&cache)))?;
                     let tmp = path.with_extension("json.tmp");
@@ -502,13 +570,13 @@ pub fn gemm_table(m: &ModelConfig, manifest: &ModelManifest, cache: &Path) -> Re
             "{}: generating the batch-invariant GEMM table for {gpu} (device {}; {why}; {} classes x {} shapes, \
              one-time) -> {}",
             manifest.name,
-            m.device,
+            device,
             INVARIANT_CLASSES.len(),
             shapes.len(),
             crate::term::P(&path)
         );
         let t = std::time::Instant::now();
-        let mut table = search(&shapes, &m.dtype, m.device)?;
+        let mut table = search(&shapes, &m.dtype, device)?;
         // for `basal gemm-share`: which build and model made the table
         table["model"] = Value::from(manifest.name.clone());
         table["basal"] = Value::from(format!("{} ({})", env!("CARGO_PKG_VERSION"), env!("BASAL_GIT_SHA")));

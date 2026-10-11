@@ -15,6 +15,8 @@ Metodyka: [docs/BENCHMARKS.md](../docs/BENCHMARKS.md).
 | [inference-profile-h100-2026-10-09](inference-profile-h100-2026-10-09/README.md) | H100: Nsight Systems/Compute, SW128 w WGMMA, bitowa zgodność, latency/throughput oraz HTTP A/B/B/A |
 | [multigpu-placement-2026-10-11](multigpu-placement-2026-10-11/README.md) | 4.5B i mini na dwóch RTX 6000 Ada: bitowa zgodność, przypisanie modeli do GPU, ruch równoległy i widoczność CUDA |
 | [multigpu-isolation-2026-10-11](multigpu-isolation-2026-10-11/README.md) | RTX 6000 Ada: mini bez/z obciążonym 4.5B, stare/nowe single-GPU, identyczny ruch A/B/B/A i pełne odpowiedzi |
+| [multigpu-replicas-2026-10-11](multigpu-replicas-2026-10-11/README.md) | RTX 6000 Ada: jedna i dwie repliki mini, zgodność i routing, single-GPU A/B z obserwowanym spadkiem mediany przepustowości |
+| [multigpu-replicas-control-2026-10-11](multigpu-replicas-control-2026-10-11/README.md) | RTX 6000 Ada: dodatkowa kontrola single-GPU A/B, żądany zegar 1200 MHz, wspólna maska CPU i wszystkie 16 przebiegów |
 
 ## basal-1.5-max
 

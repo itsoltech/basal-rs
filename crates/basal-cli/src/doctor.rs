@@ -197,6 +197,8 @@ struct Gpu {
     memory: Option<u64>,
     /// CUDA compute capability
     cap: Option<(u32, u32)>,
+    /// CUDA streaming multiprocessors
+    sms: Option<u32>,
 }
 
 /// GPU checks; returns the GPUs by `device` number, None when the numbers are unknown. CUDA: the devices the driver
@@ -236,7 +238,7 @@ fn intel_gpu(r: &mut Report) -> Option<Gpu> {
             None
         }
     };
-    Some(Gpu { name: info.name, memory, cap: None })
+    Some(Gpu { name: info.name, memory, cap: None, sms: None })
 }
 
 /// Metal or NVIDIA CUDA checks.
@@ -366,6 +368,7 @@ fn query_cuda_devices() -> Result<Vec<Gpu>> {
     const ERROR_NO_DEVICE: CuResult = 100;
     const CAP_MAJOR: c_uint = 75;
     const CAP_MINOR: c_uint = 76;
+    const MULTIPROCESSORS: c_uint = 16;
     // SAFETY: loads the NVIDIA driver library by its fixed name. The handle is leaked: cuInit may start driver threads
     // running the library's code, so it must stay mapped for the rest of the process.
     let lib: &'static libloading::Library =
@@ -417,7 +420,7 @@ fn query_cuda_devices() -> Result<Vec<Gpu>> {
                 (unsafe { attribute(&mut v, a, dev) } == SUCCESS).then(|| u32::try_from(v).ok()).flatten()
             };
             let cap = attr(CAP_MAJOR).zip(attr(CAP_MINOR));
-            Ok(Gpu { name, memory, cap })
+            Ok(Gpu { name, memory, cap, sms: attr(MULTIPROCESSORS) })
         })
         .collect()
 }
@@ -511,12 +514,29 @@ fn models(r: &mut Report, c: &ServeConfig, gpus: Option<&[Gpu]>) {
     // checkpoint bytes of the models of each device
     let mut resident = std::collections::BTreeMap::<usize, u64>::new();
     let mut repos = Vec::new();
+    // replica groups (several devices) whose GPUs are compared below
+    let mut groups = Vec::new();
     for m in &c.models {
-        let resident = resident.entry(m.device).or_default();
+        let devices = match m.placement() {
+            Ok(d) => d,
+            Err(e) => {
+                r.fail(
+                    "models",
+                    format!("{}: {e:#}", config::describe(m)),
+                    "`device: N` for one GPU, or `replica_devices: [N, M]` (distinct CUDA devices) for replicas",
+                );
+                continue;
+            }
+        };
+        if devices.len() > 1 {
+            groups.push((config::describe(m), devices.clone()));
+        }
+        // the checkpoint is loaded on every device of the model
+        let mut bytes = 0u64;
         match (&m.path, &m.repo) {
             (Some(p), _) => match std::fs::metadata(p.join("model.safetensors")) {
                 Ok(md) => {
-                    *resident += md.len();
+                    bytes += md.len();
                     r.ok("models", format!("{}: local, {:.1} GB", crate::term::P(&p), md.len() as f64 / GB));
                 }
                 Err(_) => r.fail(
@@ -531,12 +551,12 @@ fn models(r: &mut Report, c: &ServeConfig, gpus: Option<&[Gpu]>) {
                 match config::cached_model_dir(repo, m.revision.as_deref()) {
                     Some(dir) => {
                         let b = std::fs::metadata(dir.join("model.safetensors")).map(|m| m.len()).unwrap_or(0);
-                        *resident += b;
+                        bytes += b;
                         r.ok("models", format!("{repo}@{}: cached, {:.1} GB", short(at), b as f64 / GB));
                     }
                     None => {
                         download += size.unwrap_or(0);
-                        *resident += size.unwrap_or(0);
+                        bytes += size.unwrap_or(0);
                         repos.push((repo.clone(), at.to_string()));
                         r.info(
                             "models",
@@ -554,9 +574,44 @@ fn models(r: &mut Report, c: &ServeConfig, gpus: Option<&[Gpu]>) {
             }
             _ => {}
         }
+        for d in devices {
+            *resident.entry(d).or_default() += bytes;
+        }
     }
     // the backend of `basal serve`: this build's, or the CUDA build of the Linux package
     let cuda = cfg!(feature = "cuda") || crate::paths::cuda_binary().is_some();
+    for (model, devices) in &groups {
+        if !cuda {
+            r.fail(
+                "models",
+                format!("{model}: replicas on devices {devices:?} need the CUDA build"),
+                "remove `replica_devices` from the configuration",
+            );
+            continue;
+        }
+        // missing devices are reported per device below; GPUs of unknown type are not compared
+        let Some(gpus) = gpus else { continue };
+        let Some(kinds) = devices.iter().map(|&d| gpus.get(d)).collect::<Option<Vec<_>>>() else { continue };
+        let kind = |g: &Gpu| (g.name.clone(), g.cap, g.sms);
+        if kinds.iter().any(|g| kind(g) != kind(kinds[0])) {
+            let listed: Vec<String> = devices
+                .iter()
+                .zip(&kinds)
+                .map(|(d, g)| {
+                    let cap = g.cap.map_or_else(|| "unknown".to_string(), |(a, b)| format!("{a}.{b}"));
+                    let sms = g.sms.map_or_else(|| "unknown".to_string(), |n| n.to_string());
+                    format!("device {d}: {}, compute capability {cap}, {sms} SMs", g.name)
+                })
+                .collect();
+            r.fail(
+                "models",
+                format!("{model}: replicas need GPUs of one type ({})", listed.join("; ")),
+                "list devices of one GPU type in `replica_devices`; models of their own may use other GPUs",
+            );
+        } else {
+            r.ok("models", format!("{model}: {} replicas on devices {devices:?} ({})", devices.len(), kinds[0].name));
+        }
+    }
     let several = resident.keys().any(|&d| d > 0);
     for (&device, &resident) in &resident {
         if device > 0 && !cuda {

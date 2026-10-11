@@ -24,7 +24,8 @@ models:
     # default fastest first, which may differ from nvidia-smi; CUDA_DEVICE_ORDER=PCI_BUS_ID: PCI order, as
     # nvidia-smi), then CUDA_VISIBLE_DEVICES selects, reorders and renumbers them from 0. `basal doctor`, run with
     # the same environment, lists the ordinals. Models on one device take turns on it, models on different
-    # devices run at the same time. One model is loaded once, on one GPU. Metal and Intel: 0 only.
+    # devices run at the same time. Without replica_devices a model is loaded once, on one GPU. Metal and Intel: 0
+    # only. Not together with replica_devices (not even device: 0).
     device: 0
     max_batch_tokens: 8192         # packed tokens of one batch
     schedule: hrrn                 # hrrn (default) or fifo
@@ -36,3 +37,9 @@ models:
 
   - path: .models/basal-1.5-mini
     # device: 1
+    # CUDA replicas instead of device: an independent copy of the model on each listed GPU under its one name, each
+    # with its own queue, scheduler, caches and long lane; a request goes to the replica with the fewest waiting and
+    # running requests. Distinct ordinals of GPUs of one type (name, compute capability, SM count); several replicas
+    # share one batch-invariant GEMM table checked on every GPU, so gemm_table must not be none. One element is the
+    # same as device. Also `basal serve --model mini --replica-devices 0,1`.
+    # replica_devices: [0, 1]

@@ -46,7 +46,7 @@ scrape_configs:
 ```
 
 W osobnych kontenerach zamiast `localhost` użyj nazwy usługi serwera dostępnej
-z kontenera Prometheusa, np. `basal:8000`. Dla wielu replik dodaj osobne targets
+z kontenera Prometheusa, np. `basal:8000`. Dla wielu procesów serwera dodaj osobne targets
 lub service discovery. Endpoint podlega tym samym regułom dostępu sieciowego co
 API; serwer nie dodaje osobnego uwierzytelniania do metryk. Przy publicznym API
 ogranicz dostęp do `/metrics` na reverse proxy do sieci monitoringu.
@@ -138,6 +138,51 @@ Histogramy czasu mają granice od 1 ms do 600 s oraz `+Inf`:
 Histogram wielkości partii: `1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, +Inf`.
 Każdy histogram eksportuje `_bucket`, `_sum` i `_count`.
 
+## Repliki i instancje modeli
+
+Każdy model ma co najmniej jedną instancję; `replica_devices` daje kilka
+replik jednego modelu na osobnych GPU CUDA. Metryki z poprzednich sekcji
+zachowują znaczenie zagregowane: wszystkie repliki modelu zapisują do tych
+samych serii `model` i `lane`. Osobne serie instancji (także jedynej instancji
+modelu bez replik, `replica="0"`) mają etykiety tylko z konfiguracji: nazwę
+modelu, indeks repliki w `replica_devices` i ordinal CUDA.
+
+| Metryka | Typ | Etykiety | Znaczenie |
+|---|---|---|---|
+| `basal_replica_info` | gauge | `model`, `replica`, `device` | 1 dla każdej skonfigurowanej instancji; wiąże indeks repliki z ordinalem CUDA |
+| `basal_replica_routed_requests_total` | counter | `model`, `replica` | żądania przekazane do kolejki instancji |
+| `basal_replica_inflight_requests` | gauge | `model`, `replica` | żądania zarezerwowane na instancji: w kolejce, planowane, oczekujące i wykonywane |
+| `basal_replica_waiting_requests` | gauge | `model`, `replica`, `lane` | zaplanowane żądania pozostałe w torze po ostatnim przyjęciu partii |
+| `basal_replica_queue_duration_seconds` | histogram | `model`, `replica`, `lane` | jak `basal_queue_duration_seconds`, dla toru instancji |
+| `basal_replica_batch_duration_seconds` | histogram | `model`, `replica`, `lane`, `outcome` | jak `basal_batch_duration_seconds`, dla toru instancji |
+| `basal_replica_batch_requests` | histogram | `model`, `replica`, `lane` | jak `basal_batch_requests`, dla toru instancji |
+| `basal_replica_available` | gauge | `model`, `replica` | 1, gdy główny worker instancji działa i backend nie zgłosił utraty urządzenia; liczone przy scrape |
+| `basal_model_replicas` | gauge | `model` | liczba skonfigurowanych instancji modelu |
+| `basal_model_replicas_available` | gauge | `model` | liczba dostępnych instancji modelu; liczone przy scrape |
+
+Rezerwacja należy do zadania od wysłania do kolejki instancji do odpowiedzi
+albo usunięcia zadania. Zwalnia się po błędzie planowania, po pominięciu
+żądania porzuconego w kolejce, po partii także wtedy, gdy klient rozłączył się
+podczas obliczeń, oraz przy zamknięciu albo panice workera. Różni się tym od
+`basal_model_inflight_requests`, który liczy handlery HTTP i zwalnia miejsce
+od razu po porzuceniu handlera. Router grupy replik wybiera dostępną replikę
+z najmniejszą liczbą rezerwacji, a remisy rozstrzyga rotacja; wybór i
+rezerwacja nie są jedną operacją atomową, więc równoległe żądania mogą trafić
+do tej samej repliki. Liczniki rezerwacji pozostają dokładne. Limit
+`max_inflight` nadal liczy handlery wszystkich modeli.
+
+Dostępność to obserwowany stan workera i sygnał backendu, a nie test sprzętu.
+CUDA nie zgłasza utraty urządzenia, więc na CUDA niedostępność oznacza
+zatrzymany główny worker repliki. Błąd walidacji, alokacji albo timeout
+żądania nie wyłącza repliki. Zatrzymanie samego toru `long` nie zmienia
+dostępności: jego żądania liczy tor główny.
+
+```promql
+sum by (model, replica) (rate(basal_replica_routed_requests_total[5m]))
+
+basal_model_replicas_available < basal_model_replicas
+```
+
 ## Start serwera
 
 Metryki nie obejmują startu. `basal serve` przed otwarciem portu wybiera
@@ -176,8 +221,9 @@ histogram_quantile(0.99,
 To estymaty z histogramów, interpolowane w granicach bucketów. Brak ruchu daje
 `NaN`; przy niewielu żądaniach p99 jest mało stabilne. Kwantyl w `+Inf` jest
 ograniczony do najwyższej skończonej granicy (600 s). Nie uśredniaj percentyli
-replik: sumuj ich buckety, jak powyżej. Możesz dodać `endpoint` do `sum by`,
-żeby rozdzielić API, albo `instance`, żeby rozdzielić repliki.
+procesów ani replik: sumuj ich buckety, jak powyżej. Możesz dodać `endpoint` do
+`sum by`, żeby rozdzielić API, `instance`, żeby rozdzielić procesy serwera, albo
+użyć serii `basal_replica_*` z etykietą `replica` dla replik w jednym procesie.
 Zobacz [dokumentację histogramów Prometheusa](https://prometheus.io/docs/practices/histograms/).
 
 Żądania/s, liczba żądań z ostatniej godziny i błędy/s, na model i status:

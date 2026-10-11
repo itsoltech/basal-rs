@@ -456,13 +456,12 @@ fn run_local(
 fn load_local(args: &ClientArgs, name: &str) -> Result<basal_core::Engine<crate::GpuBackend>> {
     let mut model = crate::config::model_ref(name)?;
     model.dtype = args.dtype.clone();
-    model.device = args.device;
     if let Some(table) = &args.gemm_table {
         model.gemm_table = table.display().to_string();
     }
     let dir = crate::config::model_dir(&model)?;
     let manifest = ModelManifest::load(&dir)?;
-    let table = crate::config::gemm_table(&model, &manifest, &crate::config::default_gemm_cache())?;
+    let table = crate::config::gemm_table(&model, &manifest, &crate::config::default_gemm_cache(), args.device)?;
     let gpu = crate::GpuArgs {
         dtype: args.dtype.clone(),
         readout: "f32".into(),

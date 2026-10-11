@@ -398,7 +398,7 @@ enum Cmd {
     Serve {
         /// YAML file with the served models and their options (serve.example.yml); replaces the model, GPU and
         /// admission options below. Default: BASAL_CONFIG, else basal-serve.yml in the working directory
-        #[arg(long, conflicts_with_all = ["models", "gemm_table", "device"])]
+        #[arg(long, conflicts_with_all = ["models", "gemm_table", "device", "replica_devices"])]
         config: Option<PathBuf>,
         /// Model to serve: name (owner Remek; mini, 4.5B, max), owner/name, @revision, or a local directory; repeat
         /// for several (the options below apply to each). Without --model and a configuration file: basal-1.5-4.5B
@@ -406,6 +406,10 @@ enum Cmd {
         models: Vec<String>,
         #[command(flatten)]
         g: GpuArgs,
+        /// CUDA: independent replicas of every --model under its one name, one per listed device (e.g. 0,1; distinct
+        /// GPUs of one type, instead of --device). A configuration file sets `replica_devices` per model instead
+        #[arg(long, value_delimiter = ',', conflicts_with = "device")]
+        replica_devices: Option<Vec<usize>>,
         /// Listen address (default: the configuration's, BASAL_ADDR, 127.0.0.1:8000)
         #[arg(long)]
         addr: Option<std::net::SocketAddr>,
@@ -777,6 +781,7 @@ fn run() -> Result<()> {
             config,
             models,
             g,
+            replica_devices,
             addr,
             max_batch_tokens,
             max_inflight,
@@ -814,11 +819,17 @@ fn run() -> Result<()> {
                     g.device.is_none(),
                     "--device applies to --model; with a configuration file set `device` per model in it"
                 );
+                anyhow::ensure!(
+                    replica_devices.is_none(),
+                    "--replica-devices applies to --model; with a configuration file set `replica_devices` per model \
+                     in it"
+                );
             } else {
                 // models from the command line: the options of the command line
                 for m in &mut c.models {
                     m.dtype = g.dtype.clone();
-                    m.device = g.device();
+                    m.device = g.device;
+                    m.replica_devices.clone_from(&replica_devices);
                     m.gemm_table = match &g.gemm_table {
                         Some(t) => t.display().to_string(),
                         None => "auto".into(),
@@ -834,6 +845,20 @@ fn run() -> Result<()> {
                 c.long_slice_ms = long_slice_ms;
                 c.release_date = release_date;
             }
+            // devices of every model's instances; the GPUs of a replica group are compared before any download
+            let placements: Vec<Vec<usize>> = c
+                .models
+                .iter()
+                .map(|m| m.placement().with_context(|| format!("model {}", config::describe(m))))
+                .collect::<Result<_>>()?;
+            for (m, devices) in c.models.iter().zip(&placements).filter(|(_, d)| d.len() > 1) {
+                anyhow::ensure!(
+                    cfg!(feature = "cuda"),
+                    "model {}: several `replica_devices` need the CUDA build",
+                    config::describe(m)
+                );
+                config::check_replica_gpus(&format!("model {}", config::describe(m)), devices)?;
+            }
             // model files (local or downloaded), then GEMM tables (a search needs no model weights in GPU memory),
             // then the models
             let dirs: Vec<PathBuf> = c.models.iter().map(config::model_dir).collect::<Result<_>>()?;
@@ -842,33 +867,42 @@ fn run() -> Result<()> {
             for (i, m) in manifests.iter().enumerate() {
                 anyhow::ensure!(
                     manifests[..i].iter().all(|o| o.name != m.name),
-                    "model {} configured twice (one model is served on one device)",
+                    "model {} configured twice (one entry per model; `replica_devices` serves it on several GPUs)",
                     m.name
                 );
             }
+            // one table per model, resolved on its first device; a replica group's table is checked on every device
+            // before any replica loads (no per-device cache writes)
             let mut tables = Vec::new();
-            for (mc, manifest) in c.models.iter().zip(&manifests) {
-                tables.push(config::gemm_table(mc, manifest, &c.gemm_cache)?);
+            for ((mc, manifest), devices) in c.models.iter().zip(&manifests).zip(&placements) {
+                let table = config::gemm_table(mc, manifest, &c.gemm_cache, devices[0])?;
+                if devices.len() > 1 {
+                    config::check_replica_table(&manifest.name, table.as_deref(), devices)?;
+                }
+                tables.push(table);
             }
             let mut served = Vec::new();
-            for ((mc, table), dir) in c.models.iter().zip(tables).zip(dirs) {
-                let mg = GpuArgs {
-                    dtype: mc.dtype.clone(),
-                    readout: g.readout.clone(),
-                    kernels: g.kernels.clone(),
-                    no_prefix_cache: mc.no_prefix_cache,
-                    state_cache_mb: mc.state_cache_mb,
-                    tree_max_tokens: mc.tree_max_tokens,
-                    gemm_table: table.clone(),
-                    device: Some(mc.device),
-                };
-                let engine = gpu_engine_at(&dir, &mg)?;
-                if let Some(t) = &table {
-                    config::check_gemm_coverage(&engine.manifest.name, &engine.backend.gemm_table_missing(), t)?;
+            for (((mc, table), dir), devices) in c.models.iter().zip(tables).zip(dirs).zip(placements) {
+                let mut replicas = Vec::with_capacity(devices.len());
+                for device in devices {
+                    let mg = GpuArgs {
+                        dtype: mc.dtype.clone(),
+                        readout: g.readout.clone(),
+                        kernels: g.kernels.clone(),
+                        no_prefix_cache: mc.no_prefix_cache,
+                        state_cache_mb: mc.state_cache_mb,
+                        tree_max_tokens: mc.tree_max_tokens,
+                        gemm_table: table.clone(),
+                        device: Some(device),
+                    };
+                    let engine = gpu_engine_at(&dir, &mg)?;
+                    if let Some(t) = &table {
+                        config::check_gemm_coverage(&engine.manifest.name, &engine.backend.gemm_table_missing(), t)?;
+                    }
+                    replicas.push(serve::Replica { engine, device });
                 }
                 served.push(serve::ServedModel {
-                    engine,
-                    device: mc.device,
+                    replicas,
                     max_batch_tokens: mc.max_batch_tokens,
                     schedule: mc.schedule,
                     long_tokens: mc.long_tokens,

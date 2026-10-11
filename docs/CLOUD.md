@@ -72,6 +72,7 @@ Każdy skrypt opisuje w nagłówku, co mierzy, jakie ścieżki trzeba wcześniej
 | `tools/perf/run-http-variants-cloud.sh` | HTTP A/B/B/A jednego buildu: pełne odpowiedzi, latency, throughput, energia i VRAM |
 | `tools/perf/run-multigpu-cloud.py` | modele na osobnych GPU (dwie identyczne karty): `doctor` i odrzucane konfiguracje, eksporty baseline i kandydata na GPU 0 i 1 (bajtowo i `basal compare`), jedno API z dwoma modelami na dwóch GPU i na jednym, odwrócone `CUDA_VISIBLE_DEVICES`, zamknięcie serwera |
 | `tools/perf/run-isolation-cloud.py` | wpływ obciążonego 4.5B na GPU 0 na mini na GPU 1 w jednym API (identyczny ruch mini: zamknięta pętla i otwarty napływ według stałego harmonogramu, A/B/B/A) oraz mini na jednej karcie w binarce sprzed i po przypisaniu urządzeń |
+| `tools/perf/run-replicas-cloud.py` | repliki jednego modelu (`replica_devices`) na dwóch identycznych kartach: eksporty binarki rozmieszczenia i kandydata na GPU 0 i 1, odrzucane konfiguracje, zgodność odpowiedzi HTTP, routing i metryki replik, admission 529, rozłączeni klienci, `CUDA_VISIBLE_DEVICES`, zamknięcie; wydajność jednej i dwóch replik A/B/B/A |
 | `tools/decision-sets/run-cloud.sh` | zestaw decyzji wobec upstream FP32 |
 
 ## Pilnowanie maszyny
@@ -207,6 +208,48 @@ samym hoście; różnica A/B obejmuje też obsługę HTTP i pamięć drugiego mo
 procesie oraz obciążenie CPU przez klienta tła. `utilization.gpu` jest zgrubnym
 udziałem czasu pracy, a nagłówki opisują partie serwera, nie czas kerneli.
 Wynik nie dowodzi pełnej izolacji ani przyspieszenia.
+
+`run-replicas-cloud.py` korzysta z funkcji obu powyższych runnerów (bez ich
+zmiany) i ma te same wymagania co do tabel GEMM, `config.rs` i wag (mini i
+4.5B), wymaga dokładnie dwóch identycznych kart, a dodatkowo potrzebuje źródeł
+Rust (tylko odczyt i SHA-256 do odcisku).
+`--base` to zarchiwizowana binarka rozmieszczenia, `--candidate` binarka replik;
+obie sumy `--expect-*-sha256` są wymagane. `--plan-only` wypisuje plan bez GPU.
+Kampania `correctness` sprawdza `doctor`, odrzucane konfiguracje (przed
+ładowaniem wag), eksporty mini i 4.5B na obu kartach względem binarki
+rozmieszczenia tej samej karty, odpowiedzi HTTP (także multi, evidence, błędy
+400/422 i niepoprawny JSON) jednej instancji na każdej karcie i grupy replik
+względem odpowiedzi bazy na GPU 0, liczniki routingu i aktywność obu kart,
+presję admission z 529, rozłączenia klientów w kolejce i w trakcie obliczeń
+z powrotem rezerwacji do 0, `CUDA_VISIBLE_DEVICES` oraz SIGTERM z żądaniami
+w toku. Długie żądania presji, rozłączeń i zamknięcia to `--long-ids`
+(domyślnie `long-4000-q1` i `long-4000-q5`). Każde musi dostać 200 w
+referencji HTTP obsługiwanego modelu (decyduje jego limit kontekstu), inaczej
+kontrola referencji kończy się FAIL; runner niczego nie dobiera sam. Liczba w
+identyfikatorze to nominalny rozmiar z `make_long_states.py`, nie liczba
+tokenów widziana przez model: mini odpowiada na `long-8000` i `long-16000`
+kodem 422 i zostają one w referencji HTTP jako oczekiwane 422. Przy innych
+`--models` lub `--long-ids` wskaż żądania, na które pierwszy model odpowiada
+200. SIGTERM pada po `--inflight-delay` (domyślnie 0,05 s); gdy wtedy któraś
+replika nie ma rezerwacji, ta kontrola to GAP. Mieszanej grupy, niedostępnej
+repliki ani nieudanego startu po załadowaniu repliki nie wywołuje: to GAP z
+przeglądu statycznego. Kampania
+`performance` porównuje mini z jedną (A) i dwiema (B) replikami w porządku
+A B B A przy tych samych żądaniach i harmonogramach: zamknięte pętle
+`--closed` (domyślnie 1, 16 i 32 klientów) i otwarty napływ `--rates`
+(domyślnie 50, 100 i 150 żądań/s). Poza danymi jak w `run-isolation-cloud.py`
+zapisuje liczniki każdej repliki, średnią wielkość partii, czas CPU serwera i
+klienta na sekundę oraz obciążenie CPU hosta; faza bez kompletnego pomiaru CPU
+to GAP i nie wchodzi do median. `--deadline-minutes` (domyślnie 100) zatrzymuje
+uruchamianie kolejnych kroków, eksportów i przypadków oraz ogranicza czekanie na
+eksport; reszta to GAP. Eksport dłuższy niż `--export-timeout` (podejrzenie
+zawieszonego GPU) to FAIL kończący cały przebieg. Przerwany przebieg (sygnał,
+także Ctrl-C, nieoczekiwany błąd) ignoruje kolejne sygnały, zapisuje raz do
+`requests.jsonl` każdą otrzymaną odpowiedź (także gdy zatrzymanie serwera się
+nie powiedzie; odpowiedzi wątków klienta, które nie skończą się w ciągu 10 s po
+zatrzymaniu serwera, nie są zapisywane, co oznacza GAP), zapisuje `summary.json` z `complete: false` i nie kończy się
+kodem 0. Wynik nie zakłada skalowania 2× ani
+izolacji awarii sprzętu.
 
 Do `reports/` zapisuj krótkie wyniki i zakres weryfikacji. Pełne eksporty, logi
 i profile pobieraj do ignorowanego `.cache/` i archiwizuj poza Gitem.

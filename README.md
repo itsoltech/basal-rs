@@ -321,9 +321,9 @@ aktywacje.
 
 Na CUDA klucz `device` przypisuje model do GPU (domyślnie 0), np. max na
 jednej karcie, a 4.5B i mini na drugiej. Modele na różnych GPU liczą
-jednocześnie, za tym samym API i z tymi samymi nazwami modeli. Każdy model
-jest ładowany raz, na jednym GPU: nie ma replik tego samego modelu ani
-podziału modelu między karty. Numer to indeks CUDA widoczny dla procesu.
+jednocześnie, za tym samym API i z tymi samymi nazwami modeli. Bez
+`replica_devices` model jest ładowany raz, na jednym GPU; podziału jednego
+modelu między karty nie ma. Numer to indeks CUDA widoczny dla procesu.
 Kolejność wszystkich kart ustala `CUDA_DEVICE_ORDER` (domyślna może różnić się
 od `nvidia-smi`, `PCI_BUS_ID` daje kolejność PCI jak `nvidia-smi`), a
 `CUDA_VISIBLE_DEVICES` wybiera z niej karty, zmienia ich kolejność i numeruje
@@ -334,6 +334,25 @@ Działanie 4.5B i mini na dwóch RTX 6000 Ada, bitową zgodność z wersją
 sprzed zmiany oraz ruch równoległy sprawdzono na sprzęcie
 ([raport](reports/multigpu-placement-2026-10-11/README.md)); pomiar nie
 wyznacza skalowania przepustowości ani zachowania kart różnych architektur.
+
+Repliki (CUDA): `replica_devices: [0, 1]` przy modelu albo
+`basal serve --model mini --replica-devices 0,1` ładuje niezależną kopię modelu
+na każdą wymienioną kartę pod jedną nazwą w API (`/v1/models` wymienia model
+raz). Każda replika ma własną kolejkę, harmonogram, cache i tor długich żądań;
+żądanie trafia do dostępnej repliki z najmniejszą liczbą żądań w kolejce i w
+trakcie, a remisy rozstrzyga rotacja. Żądanie nie jest ponawiane po
+rozpoczęciu obliczeń. Lista musi być niepusta, bez powtórzeń, a karty jednego
+typu (nazwa, compute capability, liczba SM); mieszaną grupę serwer odrzuca
+przed pobraniem modelu. Repliki używają jednej tabeli GEMM niezależnej od
+partii, sprawdzonej na każdej karcie, więc `gemm_table: none` jest wtedy
+błędem. `device` i `replica_devices` razem są błędem, także przy `device: 0`;
+jeden element listy działa jak `device`. Modele bez replik mogą nadal używać
+innych typów kart. Limit `max_inflight` i model domyślny są wspólne. Grupa
+jest gotowa, dopóki ma dostępną replikę; zatrzymany worker repliki widać w
+`/health` i metrykach. To nie jest wykrywanie awarii sprzętu: CUDA nie zgłasza
+utraty urządzenia, a po niektórych błędach CUDA proces wymaga restartu, także
+dla pozostałych kart. Bitowej zgodności i skalowania replik nie deklarujemy bez
+pomiaru na sprzęcie.
 
 Jeden model bez pliku konfiguracji:
 
@@ -348,8 +367,8 @@ Jeden model bez pliku konfiguracji:
 | `POST /v1/systemone` | TypeSafe System One: ścisła walidacja, odpowiedzi i confidence TypeSafe, rozszerzenia basal-1.5 |
 | `POST /v1/basal` | konwencje `Server.decide` upstream v1.5.0: walidacja `to_items`, `confidence = max(p)`, błędy jako 422 `{"error"}` |
 | `GET /v1/models` | lista modeli TypeSafe z polami upstream `mode` i `early_exit` |
-| `GET /health` | gotowość: 200 `{"status":"ok"}`; 503 `{"status":"device_lost"}` z `lost_models`, gdy backend zgłosił trwałą utratę GPU (obecnie Intel Vulkan) |
-| `GET /metrics` | opcjonalne metryki Prometheus: żądania, opóźnienia, tokeny, kolejka i partie, z podziałem na modele |
+| `GET /health` | gotowość: 200 `{"status":"ok"}`; 503 `{"status":"device_lost"}` z `lost_models`, gdy backend zgłosił trwałą utratę GPU (obecnie Intel Vulkan). Grupy replik: 200 z `degraded_models`, gdy część replik jest niedostępna; 503 `{"status":"engine_stopped"}` z `unavailable_models`, gdy żadna. Wpis: `{"model", "replicas", "available", "unavailable": [{"replica", "device", "reason": "worker_closed" \| "device_lost"}]}` |
+| `GET /metrics` | opcjonalne metryki Prometheus: żądania, opóźnienia, tokeny, kolejka i partie, z podziałem na modele i ich repliki |
 
 Odpowiedzi mają nagłówki `x-basal-queue-ms`, `x-basal-compute-ms` i
 `x-basal-batch-requests`.
@@ -381,6 +400,7 @@ wiersza poleceń, np. `--max-batch-tokens`):
 | `gemm_table` | `auto` | tabela algorytmów cuBLASLt (opis niżej); `none`: algorytmy dobierane przy pierwszym użyciu, wynik może zależeć od partii; albo ścieżka tabeli |
 | `dtype` | `f16` | `f16`, `bf16` albo `f32` (referencja numeryczna, wolna) |
 | `device` | 0 | GPU modelu: indeks urządzenia CUDA widoczny dla procesu; modele z tym samym `device` dzielą GPU, z różnymi liczą jednocześnie; Metal i Intel: tylko 0 |
+| `replica_devices` | | CUDA: repliki modelu pod jedną nazwą, po jednej na każdy podany indeks (różne karty jednego typu); zamiast `device`; kilka wymaga tabeli GEMM (`auto` albo ścieżka) |
 | `max_batch_tokens` | 8192 | tokeny jednej partii, liczone po współdzieleniu prefiksów |
 | `schedule` | `hrrn` | kolejność przyjmowania żądań: `hrrn` (krótkie przed długimi, bez zagłodzenia) albo `fifo` |
 | `long_tokens` | 4096 | żądania powyżej tej liczby tokenów idą do toru długich żądań, który oddaje GPU krótkim partiom między warstwami; `0` wyłącza |

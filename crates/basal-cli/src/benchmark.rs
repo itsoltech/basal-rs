@@ -17,7 +17,7 @@ use clap::{Args, ValueEnum};
 use serde_json::{json, Value};
 use tokio::sync::oneshot;
 
-use crate::serve::{Schedule, ServeOptions, ServedModel};
+use crate::serve::{Replica, Schedule, ServeOptions, ServedModel};
 use crate::{GpuArgs, ModelArgs};
 use resources::{host_memory, Guard, Monitor};
 
@@ -131,8 +131,7 @@ impl Server {
             metrics: false,
         };
         let model = ServedModel {
-            engine,
-            device,
+            replicas: vec![Replica { engine, device }],
             max_batch_tokens: options.max_batch_tokens,
             schedule: options.schedule,
             long_tokens: options.long_tokens,
@@ -241,13 +240,13 @@ fn execute(
     let mut config = crate::config::model_ref(&model.model)?;
     report["model"]["resolved_revision"] = json!(config.revision);
     config.dtype = g.dtype.clone();
-    config.device = g.device();
     if let Some(table) = &g.gemm_table {
         config.gemm_table = table.to_string_lossy().into_owned();
     }
     let manifest = ModelManifest::load(&dir)?;
     let mut gpu_settings = g.clone();
-    gpu_settings.gemm_table = crate::config::gemm_table(&config, &manifest, &crate::config::default_gemm_cache())?;
+    gpu_settings.gemm_table =
+        crate::config::gemm_table(&config, &manifest, &crate::config::default_gemm_cache(), g.device())?;
     let engine = crate::gpu_engine_at(&dir, &gpu_settings)?;
     if let Some(table) = &gpu_settings.gemm_table {
         crate::config::check_gemm_coverage(&engine.manifest.name, &engine.backend.gemm_table_missing(), table)?;

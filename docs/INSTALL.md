@@ -72,7 +72,11 @@ Kilka `--model` serwuje kilka modeli w jednym procesie. Opcje GPU i kolejki
 z linii poleceń (`--dtype`, `--device`, `--max-batch-tokens` itd.) dotyczą wtedy
 każdego z nich. Różne GPU dla różnych modeli ustawia plik konfiguracji
 (`device` przy modelu); `--device` razem z plikiem konfiguracji kończy się
-błędem. `--device N` (domyślnie 0) wybiera GPU także w pozostałych
+błędem. `basal serve --replica-devices 0,1` (CUDA, zamiast `--device`) serwuje
+każdy `--model` jako repliki pod jedną nazwą, po jednej na każdą z kart
+jednego typu; w pliku konfiguracji odpowiada mu `replica_devices` przy
+modelu, a flaga razem z plikiem kończy się błędem. `--device N` (domyślnie 0)
+wybiera GPU także w pozostałych
 poleceniach GPU (m.in. `decide`, `export`, `bench`, `benchmark`, `profile`,
 `gemm-search`, `client --local`). To indeks
 urządzenia CUDA widoczny dla procesu. CUDA najpierw ustawia wszystkie karty w
@@ -97,7 +101,7 @@ zastępują plik.
 
 | Polecenie | Działanie |
 |---|---|
-| `basal doctor [--model REF \| --config PLIK] [--json]` | system, GPU (inwentarz `nvidia-smi` i urządzenia CUDA widoczne dla procesu), sterownik i biblioteki CUDA, konfiguracja, modele w cache lub do pobrania, pamięć i compute capability GPU każdego `device`, dysk, dostęp do Hugging Face, port; przy każdym problemie sposób naprawy |
+| `basal doctor [--model REF \| --config PLIK] [--json]` | system, GPU (inwentarz `nvidia-smi` i urządzenia CUDA widoczne dla procesu), sterownik i biblioteki CUDA, konfiguracja, modele w cache lub do pobrania, pamięć i compute capability GPU każdego `device` i `replica_devices`, zgodność typu kart replik, dysk, dostęp do Hugging Face, port; przy każdym problemie sposób naprawy |
 | `basal setup [--model REF \| --config PLIK] [--prefetch] [--service] [--force]` | biblioteki CUDA (Linux), opcjonalnie pobranie modeli i usługa użytkownika (systemd, launchd) z tymi modelami lub plikiem; plików konfiguracji nie zapisuje |
 | `basal init [--model REF]... [--out PLIK] [--force]` | `basal-serve.yml` z wybranymi modelami |
 | `basal serve [--model REF]... [--config PLIK] [--addr ADRES] [--access-log] [--metrics]` | serwer; modele jak w [Modele](#modele); log podaje czas pobrania lub odczytu modelu z cache, ładowania na GPU i gotowości; `--access-log` (albo `access_log: true`, `BASAL_ACCESS_LOG=1`) dopisuje linię na żądanie: `[POST] 200 /v1/systemone 31 ms (queue 0.5 ms, compute 30 ms, batch 1)`; `--metrics` (albo `metrics: true`) włącza domyślnie wyłączone [metryki Prometheus](OBSERVABILITY.md) |

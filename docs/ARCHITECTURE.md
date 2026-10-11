@@ -218,8 +218,53 @@ inwentarzem maszyny, bo jej numeracja może różnić się od CUDA. Gdy sterowni
 nie da się zapytać, doctor nie ocenia urządzeń modeli. Wybór PTX, kernela attention
 (Hopper albo nie) i liczba SM są zapamiętywane osobno dla każdego GPU, więc
 karty różnych architektur w jednym procesie nie dziedziczą wyboru pierwszej.
-Model nie ma replik ani podziału między GPU; ta sama nazwa modelu dwa razy
-kończy się błędem przed ładowaniem. Metal i Intel obsługują tylko GPU 0.
+Ta sama nazwa modelu w dwóch wpisach kończy się błędem przed ładowaniem.
+Metal i Intel obsługują tylko GPU 0. Podziału jednego modelu między GPU nie ma.
+
+Repliki (`replica_devices`, CUDA) to niezależne instancje jednego modelu pod
+jedną nazwą, po jednej na każdy ordinal z listy. Walidacja konfiguracji
+odrzuca pustą listę, powtórzenia, `device` razem z listą (także `device: 0`) i
+`gemm_table: none` przy kilku replikach; jeden element listy to zwykła
+instancja. Przed pobraniem modelu `basal_gpu::gpu_identity` pyta sterownik,
+bez tworzenia kontekstu, o nazwę, compute capability i liczbę SM każdej karty
+grupy; różne typy kończą się błędem. Tabela GEMM jest rozwiązywana raz, na
+pierwszej karcie grupy (jeden plik w `gemm_cache`), a potem
+`check_gemm_table` sprawdza ją na każdej karcie przed załadowaniem
+którejkolwiek repliki. Każda replika ładuje wagi na swoją kartę; fork toru
+długich żądań współdzieli wagi tylko w obrębie repliki, a scratch i cache ma
+własne. Gate'y powstają z płaskiej listy wszystkich instancji (modeli i
+replik) według ordinalu, z tą samą regułą co dla modeli, więc niezależne karty
+nie czekają na siebie.
+
+`App::routes` trzyma dla modelu jedną instancję (`Route::One`, dotychczasowa
+ścieżka: bez kontroli dostępności, bez rezerwacji przy wyłączonych metrykach)
+albo grupę (`Route::Group`). Grupa wybiera dostępną replikę z najmniejszą
+liczbą rezerwacji (`ReplicaLoad`), skanując od indeksu przesuwanego o jeden
+na żądanie, więc remisy rotują. Wybór i zwiększenie licznika to osobne kroki:
+równoległe żądania mogą wybrać tę samą replikę, ale liczniki się nie gubią.
+Rezerwacja (`Reservation`, RAII) należy do zadania: powstaje przed wysłaniem
+do kolejki repliki i znika przy odpowiedzi (przed wysłaniem odpowiedzi
+klientowi), błędzie planowania, pominięciu porzuconego żądania, po partii
+także dla rozłączonego klienta oraz przy opróżnieniu kolejki zamkniętego
+albo spanikowanego workera. `SendError` zwraca całe nieprzyjęte zadanie;
+wtedy router zwalnia rezerwację i próbuje innej dostępnej repliki, co
+najwyżej raz na replikę. Po przyjęciu zadania przez worker nie ma ponowień.
+Bez dostępnej repliki odpowiedź to dotychczasowe „engine stopped”. Globalny
+licznik admission handlerów (`max_inflight`) i gauge
+`basal_model_inflight_requests` nie zmieniają semantyki.
+
+Replika jest niedostępna, gdy backend zgłosił utratę urządzenia
+(`DeviceHealth`) albo jej główny worker zamknął kolejkę; zamknięcie toru
+`long` tego nie zmienia, bo tor główny przejmuje jego żądania. CUDA nie
+raportuje `DeviceHealth`, więc na CUDA widoczne jest tylko zatrzymanie
+workera. Fatalny błąd CUDA może wymagać restartu całego procesu, więc
+repliki nie są izolacją awarii sprzętu. `/health` dla modeli z jedną
+instancją zachowuje dotychczasową treść i reguły (`device_lost`,
+`lost_models`). Grupa z częścią niedostępnych replik daje 200 ze
+`status: ok` i `degraded_models`, grupa bez dostępnych replik 503 ze
+`status: engine_stopped` i `unavailable_models`; wpis zawiera `model`,
+`replicas`, `available` i `unavailable` (`replica`, `device`, `reason`:
+`worker_closed` albo `device_lost`).
 
 ### Pomiar scenariuszy HTTP
 
@@ -262,6 +307,9 @@ scrape nie przechodzi przez kolejkę inferencji. Szczegółowa semantyka i PromQ
 - Tabela GEMM jest specyficzna dla karty i wersji cuBLASLt. Plik w
   `gemm_cache` jest nazwany modelem i precyzją, bez karty: przeniesienie
   modelu na GPU innego typu generuje tabelę od nowa i zastępuje poprzednią.
+- Repliki wymagają kart jednego typu i wspólnej tabeli GEMM niezależnej od
+  partii; mieszane grupy wymagają osobnej decyzji numerycznej. Zgodność
+  konfiguracji nie zastępuje pomiaru równości wyników na obu kartach.
 - 4.5B i mini na dwóch RTX 6000 Ada: bitowa zgodność z wersją sprzed zmiany,
   przypisanie urządzeń i ruch równoległy sprawdzone
   ([raport](../reports/multigpu-placement-2026-10-11/README.md)). Nie zmierzono
