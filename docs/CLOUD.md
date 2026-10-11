@@ -71,6 +71,7 @@ Każdy skrypt opisuje w nagłówku, co mierzy, jakie ścieżki trzeba wcześniej
 | `tools/perf/run-parity-cloud.sh` | identyczność bajtowa eksportów dwóch buildów: single/tree/budget, cache prefiksu i cache stanu |
 | `tools/perf/run-http-variants-cloud.sh` | HTTP A/B/B/A jednego buildu: pełne odpowiedzi, latency, throughput, energia i VRAM |
 | `tools/perf/run-multigpu-cloud.py` | modele na osobnych GPU (dwie identyczne karty): `doctor` i odrzucane konfiguracje, eksporty baseline i kandydata na GPU 0 i 1 (bajtowo i `basal compare`), jedno API z dwoma modelami na dwóch GPU i na jednym, odwrócone `CUDA_VISIBLE_DEVICES`, zamknięcie serwera |
+| `tools/perf/run-isolation-cloud.py` | wpływ obciążonego 4.5B na GPU 0 na mini na GPU 1 w jednym API (identyczny ruch mini: zamknięta pętla i otwarty napływ według stałego harmonogramu, A/B/B/A) oraz mini na jednej karcie w binarce sprzed i po przypisaniu urządzeń |
 | `tools/decision-sets/run-cloud.sh` | zestaw decyzji wobec upstream FP32 |
 
 ## Pilnowanie maszyny
@@ -141,6 +142,71 @@ Wszystkim procesom ustawia `CUDA_DEVICE_ORDER=PCI_BUS_ID`. Każde sprawdzenie
 zapisuje jako PASS, FAIL lub GAP w `checks.txt`; kod wyjścia 1 oznacza co najmniej
 jedno FAIL. Czasy, telemetria `nvidia-smi` osobno dla każdej karty i przedziały
 obliczeń z nagłówków odpowiedzi są tylko obserwacją, nie dowodem przyspieszenia.
+
+`run-isolation-cloud.py` korzysta z funkcji `run-multigpu-cloud.py` (oba pliki
+z `tools/perf`) i ma te same wymagania co do kart, tabel GEMM, `config.rs` i wag
+(mini i 4.5B), a dodatkowo `reports/reference-basal-1.5-mini-fp32` i
+`tools/bench/long_states.jsonl`. Uruchamiaj go w `/work`, sumy SHA-256 binarek
+bierz z raportu rozmieszczenia:
+`python3 tools/perf/run-isolation-cloud.py --base /opt/basal-dev/basal-cuda-base --candidate /opt/basal-dev/basal-cuda --expect-base-sha256 SUMA --expect-candidate-sha256 SUMA --out out/isolation`.
+`--plan-only` wypisuje fazy i rozmiary harmonogramów bez GPU. Kampania
+`isolation` porównuje mini na GPU 1 bez drugiego modelu (A) z mini na GPU 1 i 4.5B
+na GPU 0 w tym samym serwerze (B). 4.5B obciąża osobny proces klienta: 16
+zamkniętych pętli długich dokumentów nominalnie 4k i 8k według generatora;
+faktyczne tokeny wejścia zależą od modelu. Startuje po rozgrzewce i przed
+pierwszym mierzonym żądaniem mini, a kończy się po opróżnieniu ostatniej fazy
+mini. Przypadek A czeka przed pierwszą fazą tyle samo (`--bg-lead`).
+Kampania `overhead` uruchamia mini pod `CUDA_VISIBLE_DEVICES=1` z tym samym
+YAML bez `device` w binarce bazowej (A) i kandydacie (B). Każdy przypadek to
+osobny serwer, przypadki idą kolejno w porządku A B B A (`--repeats`).
+
+Ruch mini jest identyczny we wszystkich przypadkach. Zestaw to żądania System
+One z odpowiedzią 200 w pierwszej rozgrzewce; pozostałe są wykluczone i wypisane
+z kodem. Fazy to zamknięta pętla 16 klientów (`--closed-requests`) oraz otwarty
+napływ `--rates` (domyślnie 50 i 100 żądań/s przez `--open-seconds`). Napływ
+korzysta ze stałych czasów Poissona; ich SHA-256 jest w `summary.json`.
+Przepustowość zamkniętej pętli jest skutkiem szybkości serwera, a nie
+kontrolowanym napływem. W otwartym napływie opóźnienie liczy się od planowanego
+czasu wysłania, więc obejmuje spóźnienie generatora i kolejkę klienta
+(`--max-outstanding`). Zapisywane są też zaległe i trwające żądania. Żadne
+zaplanowane żądanie nie jest pomijane; niewysłane, anulowane albo odebrane
+dopiero po `--drain-timeout` oznacza FAIL. Spóźnione odpowiedzi zostają w
+zapisie, ale faza nie wchodzi do median. Pusty harmonogram (za mała częstość
+albo `--open-seconds`) jest odrzucany przed startem. `max_inflight` serwera
+(domyślnie 4096) jest wyższy od sumy limitów klientów, a każde 529 oznacza FAIL.
+Pierwszy błąd transportu kończy fazę i przypadek: klienci kończą tylko żądania w
+toku (najwyżej `--http-timeout`), więc zawieszony serwer kosztuje minuty, a nie
+godziny. Klient tła po błędzie transportu przestaje wysyłać.
+Każda odpowiedź mini i 4.5B, łącznie z rozgrzewkami, musi mieć status i treść
+pierwszej rozgrzewki swojego modelu. Porównanie pomija tylko `usage.latency_ms`.
+Faza jest ważną obserwacją tylko wtedy, gdy `/metrics` przed nią i po niej
+zwraca 200 z licznikiem żądań, każda odpowiedź 200 ma nagłówki czasu, a każda
+oczekiwana karta ma dość pełnych próbek telemetrii (wykorzystanie, pamięć, moc,
+zegar SM i temperatura; co najmniej `--telemetry-min-share` interwałów 200 ms,
+minimum pięć, bez przerwy dłuższej niż 2 s). Brak tych danych to GAP, osobny od
+błędów inferencji. Faza B świadczy o zajętym sąsiedzie tylko przy średnio co
+najmniej 90% klientów tła w toku, przerwach najwyżej 1% okna fazy i średnim
+`utilization.gpu` GPU 0 nie niższym niż `--busy-util`. Do median A/B wchodzą
+tylko ważne fazy. Pokrycie wymaga ważnej fazy we wszystkich 2 × `--repeats`
+przypadkach każdego wariantu; mniej to GAP. Kod wyjścia: 0 wszystko PASS,
+1 co najmniej jedno FAIL, 3 tylko brakujące dowody (GAP), 2 błąd przygotowania.
+Domyślny przebieg obu kampanii (8 przypadków) powinien trwać około 15 minut z
+ładowaniem modeli; czas zależy od
+przepustowości mini i zaległości przy 100 żądaniach/s.
+
+`summary.json` zawiera odcisk (SHA-256 binarek, runnera, wejść i tabel, rewizje
+modeli, sterownik, karty, biblioteki CUDA), parametry, p50/p95/p99 opóźnienia,
+nagłówków kolejki i obliczeń, opóźnienia generatora, przepustowość, wyniki
+wszystkich żądań, pokrycie metryk i telemetrii, telemetrię każdej karty oraz
+mediany A i B. Ścieżki i adresy PCI w opisach kontroli i błędów są zastąpione
+przez `<local>` z odsyłaczem do surowego wpisu w `checks.txt`. Zastępowanie
+działa według wzorca, więc przed skopiowaniem wyników do `reports/` przejrzyj
+plik. Pozostałe pliki są surowe (ścieżki, topologia PCI), więc pobieraj je do
+ignorowanego `.cache/` i nie dodawaj do Git. Ograniczenia: klient działa na tym
+samym hoście; różnica A/B obejmuje też obsługę HTTP i pamięć drugiego modelu w
+procesie oraz obciążenie CPU przez klienta tła. `utilization.gpu` jest zgrubnym
+udziałem czasu pracy, a nagłówki opisują partie serwera, nie czas kerneli.
+Wynik nie dowodzi pełnej izolacji ani przyspieszenia.
 
 Do `reports/` zapisuj krótkie wyniki i zakres weryfikacji. Pełne eksporty, logi
 i profile pobieraj do ignorowanego `.cache/` i archiwizuj poza Gitem.
