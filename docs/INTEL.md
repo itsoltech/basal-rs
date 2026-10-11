@@ -7,6 +7,8 @@ Nie wymaga Pythona, CUDA, OpenCL ani oneAPI.
 
 Pomiary na zintegrowanym Arc Meteor Lake i ograniczenia ich zakresu opisuje
 [raport](../reports/intel-arc-meteor-lake-2026-10-10/README.md).
+Nowsze [porównanie GEMM i HTTP przed/po](../reports/intel-arc-meteor-lake-gemm-2026-10-11/README.md)
+obejmuje optymalizację kernela z zachowaniem kolejności akumulacji FP32.
 Inne generacje i osobne karty Arc wymagają własnej weryfikacji. Ten backend
 nie korzysta z XMX; nie jest dowodem maksymalnej wydajności wszystkich kart Intel.
 
