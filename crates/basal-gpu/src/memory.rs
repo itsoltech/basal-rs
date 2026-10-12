@@ -86,8 +86,8 @@ pub fn gpu_memory(device: usize) -> Result<GpuMemory> {
 }
 
 /// Counters of a CUDA device's stream-ordered allocator pool (bytes): the pool `cuMemAllocAsync` allocates from, so
-/// every Candle tensor, resident q8_0 block, temporary f16 tensor and cuBLASLt workspace of this process on the
-/// device. Not in it: the CUDA context, loaded modules, library handles and their internal workspaces, synchronous
+/// every Candle tensor, resident q8_0 or q4_k block, temporary f16 tensor and cuBLASLt workspace of this process on
+/// the device. Not in it: the CUDA context, loaded modules, library handles and their internal workspaces, synchronous
 /// allocations. `*_high` are watermarks since the last [`PoolProbe::reset_peaks`] (or since the pool was created).
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct PoolUsage {

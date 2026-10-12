@@ -524,7 +524,7 @@ fn models(r: &mut Report, c: &ServeConfig, gpus: Option<&[Gpu]>) {
         let quantization = match checked {
             Ok(q) => q,
             Err(e) => {
-                r.fail("models", format!("{e:#}"), QUANTIZATION_FIX);
+                r.fail("models", format!("{e:#}"), quantization_fix(&m.quantization));
                 continue;
             }
         };
@@ -544,7 +544,7 @@ fn models(r: &mut Report, c: &ServeConfig, gpus: Option<&[Gpu]>) {
         }
         // the checkpoint is loaded on every device of the model
         let mut bytes = 0u64;
-        // q8_0: the weight estimate needs the model's config.json (local or cached)
+        // q8_0 / q4_k: the weight estimate needs the model's config.json (local or cached)
         let mut model_dir = None;
         match (&m.path, &m.repo) {
             (Some(p), _) => match std::fs::metadata(p.join("model.safetensors")) {
@@ -658,8 +658,8 @@ fn models(r: &mut Report, c: &ServeConfig, gpus: Option<&[Gpu]>) {
             r.fail("models", min_cap_message(&format!("device {device} ({})", g.name)), "give the models a newer GPU");
         }
         let Some(b) = g.memory else { continue };
-        // f16 weights take about the checkpoint size (bf16) on the GPU, plus activations and caches (q8_0 models: their
-        // estimated weight bytes)
+        // f16 weights take about the checkpoint size (bf16) on the GPU, plus activations and caches (q8_0 / q4_k
+        // models: their estimated weight bytes)
         let need = resident as f64 * 1.1;
         if need > b as f64 {
             r.warn(
@@ -703,9 +703,20 @@ fn models(r: &mut Report, c: &ServeConfig, gpus: Option<&[Gpu]>) {
 
 const QUANTIZATION_FIX: &str =
     "`quantization: q8_0` runs on CUDA with `dtype: f16`; otherwise use `quantization: none` (default)";
+const QUANTIZATION_FIX_Q4K: &str =
+    "`quantization: q4_k` runs on CUDA with `dtype: f16`; otherwise use `quantization: none` (default)";
+
+/// The fix of a rejected `quantization`: the q4_k text for `q4_k`, otherwise the q8_0 one (also for unknown values).
+fn quantization_fix(quantization: &str) -> &'static str {
+    match quantization.parse() {
+        Ok(basal_gpu::Quantization::Q4K) => QUANTIZATION_FIX_Q4K,
+        _ => QUANTIZATION_FIX,
+    }
+}
 
 /// Estimated GPU bytes of a quantized model's weights (format arithmetic over its config.json); the checkpoint size
-/// when the configuration is not on this machine yet.
+/// when the configuration is not on this machine yet. `q4_k` with a known configuration whose projection K is not a
+/// multiple of 256 fails (the load would); every other estimate error is information, as for `q8_0`.
 fn quantized_bytes(
     r: &mut Report,
     m: &config::ModelConfig,
@@ -713,11 +724,26 @@ fn quantized_bytes(
     checkpoint: u64,
     q: basal_gpu::Quantization,
 ) -> u64 {
-    let estimate = dir.context("not downloaded yet").and_then(|d| {
+    let cfg = dir.context("not downloaded yet").and_then(|d| {
         let text = std::fs::read_to_string(d.join("config.json")).context("reading config.json")?;
-        let cfg = basal_core::manifest::parse_config(&serde_json::from_str(&text).context("parsing config.json")?)?;
-        basal_gpu::estimated_weight_bytes(&cfg, checkpoint, q)
+        basal_core::manifest::parse_config(&serde_json::from_str(&text).context("parsing config.json")?)
     });
+    if let (Ok(cfg), basal_gpu::Quantization::Q4K, Some(block)) = (&cfg, q, q.block_values()) {
+        if let Some((n, k)) = basal_gpu::projection_shapes(cfg).into_iter().find(|&(_, k)| !k.is_multiple_of(block)) {
+            r.fail(
+                "models",
+                format!(
+                    "{}: quantization q4_k needs every projection K to be a multiple of {block}; projection {n}x{k} \
+                     is not",
+                    config::describe(m)
+                ),
+                "use `quantization: none` (default) for this model, or `q8_0` when every projection K is a multiple \
+                 of 32",
+            );
+            return checkpoint;
+        }
+    }
+    let estimate = cfg.and_then(|cfg| basal_gpu::estimated_weight_bytes(&cfg, checkpoint, q));
     match estimate {
         Ok(b) => {
             r.ok("models", format!("{}: {q} weights ~{:.1} GB (estimate)", config::describe(m), b as f64 / GB));

@@ -178,7 +178,7 @@ struct PoolTelemetry {
 
 impl PoolTelemetry {
     fn new(device: usize) -> Self {
-        let scope = "CUDA stream-ordered allocator pool of the device (cuMemAllocAsync): Candle tensors, resident q8_0 blocks, temporary f16 weights, cuBLASLt workspaces; not the CUDA context, modules, library handles or synchronous allocations. used and reserved are separate counters; *_high are watermarks since the preceding reset";
+        let scope = "CUDA stream-ordered allocator pool of the device (cuMemAllocAsync): Candle tensors, resident q8_0 or q4_k blocks, temporary f16 weights, cuBLASLt workspaces; not the CUDA context, modules, library handles or synchronous allocations. used and reserved are separate counters; *_high are watermarks since the preceding reset";
         match basal_gpu::pool_probe(device) {
             Ok(Some(probe)) => Self { probe: Some(probe), report: json!({"available": true, "scope": scope}) },
             Ok(None) => Self {
@@ -289,10 +289,10 @@ fn execute(
     let checkpoint_bytes = std::fs::metadata(dir.join("model.safetensors")).context("checkpoint size")?.len();
     report["model"]["checkpoint_bytes"] = json!(checkpoint_bytes);
     let manifest = ModelManifest::load(&dir)?;
-    // none: the checkpoint size, as before; q8_0: the same with the projections at Q8_0 size
+    // none: the checkpoint size, as before; q8_0 / q4_k: the same with the projections at the format's block size
     let weight_bytes = basal_gpu::estimated_weight_bytes(&manifest.config, checkpoint_bytes, quantization)?;
     report["model"]["estimated_weight_bytes"] = json!({"bytes": weight_bytes, "quantization": quantization.as_str(),
-        "method": "estimate from format arithmetic (checkpoint size; q8_0: projection matrices at Q8_0 size with padding), not a measurement"});
+        "method": "estimate from format arithmetic (checkpoint size; q8_0 / q4_k: projection matrices at Q8_0 / Q4_K block size with padding), not a measurement"});
     let preflight = guard.check(&host_memory()?, &basal_gpu::gpu_memory(g.device())?, weight_bytes);
     report["resources"] = guard.report();
     preflight?;
@@ -314,7 +314,7 @@ fn execute(
     // synchronise the context first (after load_s, before any measured work) so `used` counts only what stays.
     if let Some(u) = pool.read("reading after load", true) {
         pool.report["load_peak"] = json!({"used_bytes": u.used_high_bytes, "reserved_bytes": u.reserved_high_bytes,
-            "scope": "load, q8_0 warm-up and template prefix precomputation"});
+            "scope": "load, q8_0 / q4_k warm-up (q4_k: with its host/GPU check of one matrix) and template prefix precomputation"});
         pool.report["resident_after_load"] = json!({"used_bytes": u.used_bytes, "reserved_bytes": u.reserved_bytes,
             "scope": "the loaded engine (weights, precomputed prefixes, workspaces) before any request, after a context synchronisation"});
     }

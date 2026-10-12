@@ -141,9 +141,10 @@ struct GpuArgs {
     /// Decoder kernels: fused (default) or candle (stock candle ops, first port; for comparison)
     #[arg(long, default_value = "fused")]
     kernels: String,
-    /// Projection weights: none (default; dense weights of --dtype) or q8_0 (8-bit GGML Q8_0 blocks dequantized to f16
-    /// per projection: less GPU memory, more work per forward; CUDA with --dtype f16 and --kernels fused). `basal
-    /// serve`: the format of every --model (a configuration file sets `quantization` per model instead)
+    /// Projection weights: none (default; dense weights of --dtype), q8_0 (8-bit GGML Q8_0 blocks) or q4_k (4-bit GGML
+    /// Q4_K blocks), dequantized to f16 per projection: less GPU memory, more work per forward, different numerics;
+    /// CUDA with --dtype f16 and --kernels fused. `basal serve`: the format of every --model (a configuration file sets
+    /// `quantization` per model instead)
     #[arg(long)]
     quantization: Option<String>,
     /// Do not precompute the K/V of the prompt template prefix
@@ -575,17 +576,39 @@ fn gpu_engine_at(dir: &Path, g: &GpuArgs) -> Result<Engine<GpuBackend>> {
         g.device(),
     )?;
     crate::done!("{} loaded on GPU {} in {:.1}s", manifest.name, g.device(), backend.load_s);
-    if quantization != Quantization::None {
-        let q = &backend.describe()["quantization"];
-        crate::note!(
-            "{}: {quantization} projection weights, {} matrices, {:.2} GiB of blocks ({} zero-scale, {} subnormal-scale \
-             blocks)",
-            manifest.name,
-            q["matrices"],
-            q["allocated_bytes_with_padding"].as_f64().unwrap_or(f64::NAN) / 1073741824.0,
-            q["zero_scale_blocks"],
-            q["subnormal_scale_blocks"]
-        );
+    match quantization {
+        Quantization::None => {}
+        Quantization::Q8_0 => {
+            let q = &backend.describe()["quantization"];
+            crate::note!(
+                "{}: {quantization} projection weights, {} matrices, {:.2} GiB of blocks ({} zero-scale, {} \
+                 subnormal-scale blocks)",
+                manifest.name,
+                q["matrices"],
+                q["allocated_bytes_with_padding"].as_f64().unwrap_or(f64::NAN) / 1073741824.0,
+                q["zero_scale_blocks"],
+                q["subnormal_scale_blocks"]
+            );
+        }
+        Quantization::Q4K => {
+            let q = &backend.describe()["quantization"];
+            let model = &q["reconstruction_error"]["model"];
+            let groups = &model["groups"];
+            crate::note!(
+                "{}: {quantization} projection weights, {} matrices, {:.2} GiB of blocks; reconstruction relative RMS \
+                 error {} over all projections, {} flattened and {} zero groups of 32 of {}; warm-up check: layer {} \
+                 {} dequantized on the GPU bitwise equal to the host",
+                manifest.name,
+                q["matrices"],
+                q["allocated_bytes_with_padding"].as_f64().unwrap_or(f64::NAN) / 1073741824.0,
+                model["relative_error_ratio"]["sqrt"],
+                groups["flattened"]["count"],
+                groups["zero"],
+                groups["total"],
+                q["warmup_check"]["layer"],
+                q["warmup_check"]["projection"]
+            );
+        }
     }
     let mut backend = backend;
     if let Some(p) = &g.gemm_table {
@@ -757,11 +780,21 @@ fn run() -> Result<()> {
             let sum: f64 = prof.values().sum::<f64>() / n as f64;
             let tokens: f64 = prep[1..].iter().map(|p| p.packed.ids.len() as f64).sum::<f64>() / n as f64;
             let mut out = json!({"items": n, "mean_packed_tokens_with_template": tokens, "ms_per_item_profiled": total, "sections_ms_per_item": prof.iter().map(|(k, v)| (k.to_string(), json!(v / n as f64))).collect::<serde_json::Map<_, _>>(), "sections_sum_ms": sum, "residual_abs_max_per_layer": per_layer, "residual_abs_max": per_layer.iter().copied().fold(0.0f32, f32::max)});
-            // q8_0: the dequantizations are a part of the projection sections, so not added to sections_sum_ms
-            if let Some((ms, values)) = engine.backend.q8_dequant_profile() {
-                out["q8_dequant_ms_per_item"] = json!(ms / n as f64);
-                out["q8_dequant_values_per_item"] = json!(values as f64 / n as f64);
-                out["q8_dequant_scope"] = json!("synchronised time of the q8_0 -> f16 dequantizations; included in the qkv_proj, o_proj, gate_up_proj and down_proj sections, not added to sections_sum_ms");
+            // quantized weights: the dequantizations are a part of the projection sections, so not added to
+            // sections_sum_ms (q8_0 keeps its keys)
+            match engine.backend.dequant_profile() {
+                Some((Quantization::Q8_0, ms, values)) => {
+                    out["q8_dequant_ms_per_item"] = json!(ms / n as f64);
+                    out["q8_dequant_values_per_item"] = json!(values as f64 / n as f64);
+                    out["q8_dequant_scope"] = json!("synchronised time of the q8_0 -> f16 dequantizations; included in the qkv_proj, o_proj, gate_up_proj and down_proj sections, not added to sections_sum_ms");
+                }
+                Some((format, ms, values)) => {
+                    out["dequant_ms_per_item"] = json!(ms / n as f64);
+                    out["dequant_values_per_item"] = json!(values as f64 / n as f64);
+                    out["dequant_format"] = json!(format.as_str());
+                    out["dequant_scope"] = json!(format!("synchronised time of the {format} -> f16 dequantizations; included in the qkv_proj, o_proj, gate_up_proj and down_proj sections, not added to sections_sum_ms"));
+                }
+                None => {}
             }
             println!("{out}");
         }

@@ -74,6 +74,7 @@ Każdy skrypt opisuje w nagłówku, co mierzy, jakie ścieżki trzeba wcześniej
 | `tools/perf/run-isolation-cloud.py` | wpływ obciążonego 4.5B na GPU 0 na mini na GPU 1 w jednym API (identyczny ruch mini: zamknięta pętla i otwarty napływ według stałego harmonogramu, A/B/B/A) oraz mini na jednej karcie w binarce sprzed i po przypisaniu urządzeń |
 | `tools/perf/run-replicas-cloud.py` | repliki jednego modelu (`replica_devices`) na dwóch identycznych kartach: eksporty binarki rozmieszczenia i kandydata na GPU 0 i 1, odrzucane konfiguracje, zgodność odpowiedzi HTTP, routing i metryki replik, admission 529, rozłączeni klienci, `CUDA_VISIBLE_DEVICES`, zamknięcie; wydajność jednej i dwóch replik A/B/B/A |
 | `tools/perf/run-w8a16-cloud.py` | opcjonalne wagi `q8_0` (W8A16) na dwóch identycznych kartach: tor `none` bajtowo wobec binarki etapu 02, spójność `q8_0` między trybami i kartami, odrzucane konfiguracje, HTTP z replikami, 44+34 i 900 pytań wobec FP32, wydajność `none` (A/B z potwierdzeniem) i `q8_0`, profil dekwantyzacji, pamięć puli |
+| `tools/perf/run-w4a16-cloud.py` | opcjonalne wagi `q4_k` (W4A16) na dwóch identycznych kartach: tory `none` i `q8_0` bajtowo wobec stabilnej binarki W8, spójność `q4_k` między trybami i kartami, diagnostyka ładowania wobec P0, odrzucane konfiguracje, HTTP z replikami, 44+34 i 900 pytań wobec FP32, profil, pamięć puli, rodziny wydajności `none` i `q8_0` (A B C C B A) |
 | `tools/decision-sets/run-cloud.sh` | zestaw decyzji wobec upstream FP32 |
 
 ## Pilnowanie maszyny
@@ -305,6 +306,67 @@ etapu 02, znane SHA-256 kandydata inne niż obecnego, te same rewizje modeli,
 tabele GEMM i wejścia, ukończony eksport `q8_0` tree na GPU 0 każdego modelu)
 i zapisuje SHA-256 kandydata, odcisk źródeł oraz eksportów obu sesji. Surowe
 wyniki zawierają ścieżki: pobieraj je do `.cache/cloud`.
+
+`run-w4a16-cloud.py` (W4A16, `quantization: q4_k`) korzysta bez zmian z
+`run-w8a16-cloud.py` (a przez niego z trzech powyższych runnerów) i z
+`tools/bench/ab.py`; przed startem sprawdza ich SHA-256. Sesje to osobne
+wywołania: S1 `--campaigns 'correctness quality profile memory-mini'`
+(domyślne), po audycie surowych danych S2 `--campaigns perf-none-family
+--s1-run KATALOG_S1` i S3 `--campaigns perf-q8-family --s1-run KATALOG_S1`.
+Rodzina nie startuje, gdy przebieg S1 ma FAIL klasy innej niż
+`quality-criterion` albo inne binarki lub źródła. Przed pracą GPU porównuje
+też zapisane w S1 SHA-256 runnera i helperów, zasoby wbudowane, model rodziny
+(nazwa, rewizja, `config.json`, wagi), jego tabelę GEMM, referencję FP32,
+decyzje i wejście 900 oraz pliki sequential, lock, long, `config.rs` i fakty
+P0: różnica to FAIL i zatrzymanie, brak dowodu w którymkolwiek przebiegu (np.
+`--no-weight-hash`) to GAP tego powiązania. Rewalidacja tylko po rzeczywistej
+poprawce kodu: `--campaigns revalidate --previous-run KATALOG
+--expect-previous-candidate-sha256 SUMA`, potem dotknięte rodziny z `--s1-run`
+tego przebiegu. Rewalidacja raz mierzy natywne HTTP i repliki `q4_k` końcowego
+kandydata, niezależnie od równości eksportów. `--base` to stabilna binarka W8
+ze źródła `750c146`, `--candidate` binarka W4A16. Wymagane są obie sumy
+`--expect-*-sha256`, `--base-label` i `--candidate-label` (role i źródła
+zapisane jako deklaracja, nie dowód) oraz `--deadline-minutes`; opcjonalne są
+rekordy budowy `--base-provenance` i `--candidate-provenance` (JSON z
+`binary_sha256` tej binarki; rekord bez niej albo z inną sumą jest odrzucany)
+oraz `--lease-end-unix`. Obowiązuje wcześniejszy z tych terminów: koordynator
+liczy go z czasu utworzenia maszyny, limitu jej życia (≤ 2 h) i rezerwy na
+pobranie wyników i usunięcie. Runner nie przedłuża sesji, nie wynajmuje i nie
+usuwa maszyn. Kampanie, statusy, klasy FAIL (`correctness`,
+`quality-criterion`, `timeout`), kody wyjścia i limity opisuje nagłówek pliku
+(`--help`).
+
+`--plan-only` (bez GPU, chmury, sieci i binarek) buduje w pamięci wejście 900
+pytań i dla S1, S2, S3 oraz jednej warunkowej sesji rewalidacji wypisuje
+liczby poleceń, serwerów, ładowań modelu i żądań HTTP. Sesję rewalidacji
+podaje tak, jak definiuje ją plan: jedna maszyna z wywołaniem `revalidate`
+(R1) i dotkniętymi rodzinami (R2 `none`, R3 `q8_0`), w wariantach R1+R2, R1+R3
+i R1+R2+R3. Osobne maszyny R1, R2 i R3 są tylko proponowanym podziałem: przed
+zakupem wymaga on rewizji planu i prognozy przez koordynatora. Szacunek czasu
+każdego kroku ma źródło: (a) śledzony raport W8 z SHA-256 i polem, (b)
+prywatny surowy rekord W8 (`--w8-raw KATALOG`, ścieżka względna i SHA-256)
+albo (c) jawne założenie. Czas procesu `q4_k` to czas tego samego procesu
+`q8_0` z W8 plus bezwzględny czas toru hosta Q4_K z P0 na każde ładowanie:
+nieskalibrowany zapas, nie zmierzony narzut ani granica. Runner podaje też,
+czy sesja z założonym przygotowaniem maszyny i rezerwą (`--bootstrap-minutes`,
+`--collect-delete-minutes`) mieści się w 120 min; jeśli nie, przed zakupem
+potrzebny jest zaplanowany podział, bez obcinania kroków, par i metryk.
+Szacunek nie jest pomiarem ani decyzją o budżecie. `--prepare-900 KATALOG`
+zapisuje wejście 900 pytań poza repozytorium. Sesję S1 wykonano
+([raport](../reports/w4a16-s1-2026-10-12/README.md)): kryterium FP32 ma FAIL,
+a użytkownik dopuścił `q4_k` tylko jako opcjonalny tryb eksperymentalny
+(domyślne i zalecane `none`). Ta decyzja jakościowa nie zamykała rodzin
+wydajności; wykonano je osobno. S2
+([raport](../reports/w4a16-s2-2026-10-12/README.md)) ma wniosek (a) dla
+`none` i opisowy kompromis `q4_k` wobec f16. S3
+([raport](../reports/w4a16-s3-2026-10-12/README.md)) ma utrzymany sygnał
+mixed c16 `q8_0` (−0,1076% do −0,3732%) z nieustaloną przyczyną (wniosek
+(c)) i opisowy kompromis `q4_k` wobec `q8_0`. Ten zaobserwowany spadek
+zaakceptował użytkownik w osobnej decyzji wydajnościowej, opisanej w
+raporcie S3; sygnał i statusy runnera pozostają, a decyzja nie tworzy progu.
+Poprawki kodu nie było, więc nie wykonano rewalidacji. Kolejne sesje GPU
+wymagają zgody użytkownika na kartę i budżet według
+[Zgoda i budżet](#zgoda-i-budżet).
 
 Do `reports/` zapisuj krótkie wyniki i zakres weryfikacji. Pełne eksporty, logi
 i profile pobieraj do ignorowanego `.cache/` i archiwizuj poza Gitem.

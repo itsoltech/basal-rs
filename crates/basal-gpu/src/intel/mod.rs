@@ -95,8 +95,14 @@ impl IntelBackend {
         if device != 0 {
             return Err(IntelError::Configuration(SINGLE_DEVICE));
         }
-        if quantization != Quantization::None {
-            return Err(IntelError::Configuration("use quantization none; q8_0 weights need the CUDA backend"));
+        match quantization {
+            Quantization::None => {}
+            Quantization::Q8_0 => {
+                return Err(IntelError::Configuration("use quantization none; q8_0 weights need the CUDA backend"))
+            }
+            Quantization::Q4K => {
+                return Err(IntelError::Configuration("use quantization none; q4_k weights need the CUDA backend"))
+            }
         }
         if precision != Precision::F16 {
             return Err(IntelError::Configuration("use --dtype f16; bf16/f32 forwards are not implemented"));
@@ -451,8 +457,8 @@ impl IntelBackend {
     pub fn load_gemm_table(&mut self, _: &Path) -> Result<usize> {
         bail!("CUDA GEMM tables cannot be used by Intel Vulkan")
     }
-    /// Quantized projection weights are CUDA-only: never any dequantization time or values.
-    pub fn q8_dequant_profile(&self) -> Option<(f64, u64)> {
+    /// Quantized projection weights are CUDA-only: never any dequantization format, time or values.
+    pub fn dequant_profile(&self) -> Option<(Quantization, f64, u64)> {
         None
     }
     pub fn memory(&self) -> Result<GpuMemory> {

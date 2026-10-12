@@ -39,8 +39,8 @@ pub mod intel;
 mod memory;
 mod quant;
 pub use memory::{gpu_memory, pool_probe, GpuMemory, GpuMemoryProbe, PoolProbe, PoolUsage};
-use quant::ProjWeight;
 pub use quant::{estimated_weight_bytes, ParseQuantizationError, Quantization};
+use quant::{ProjWeight, Projection};
 #[cfg(target_os = "macos")]
 pub mod gemm;
 use fused::HeadDims;
@@ -436,12 +436,13 @@ pub struct GpuBackend {
     pub profile: Option<std::cell::RefCell<BTreeMap<&'static str, f64>>>,
     /// Format of the projection weights.
     quantization: Quantization,
-    /// `q8_0`: load diagnostics of the projection matrices (the `quantization` object of [`Backend::describe`]).
+    /// `q8_0` / `q4_k`: load diagnostics of the projection matrices (the `quantization` object of
+    /// [`Backend::describe`]).
     #[cfg(feature = "cuda")]
-    q8_stats: Option<quant::Q8Stats>,
-    /// `q8_0` while profiling: synchronised time of the dequantizations (ms, a part of the projection sections) and
-    /// the weight values they produced.
-    q8_dequant: std::cell::Cell<(f64, u64)>,
+    quant_stats: Option<quant::QuantStats>,
+    /// `q8_0` / `q4_k` while profiling: synchronised time of the dequantizations (ms, a part of the projection
+    /// sections) and the weight values they produced.
+    dequant: std::cell::Cell<(f64, u64)>,
     /// When set, the largest |value| of the residual stream after every layer is recorded (diagnostic: f16 range).
     pub residual_max: Option<std::cell::RefCell<Vec<f32>>>,
     /// Timing of the last call in milliseconds: host preparation, GPU forward + readout (synchronised).
@@ -574,20 +575,24 @@ fn bf16_to_f16(src: &[u8], dst: &mut [half::f16]) {
     });
 }
 
-/// Read the bf16 parts of a projection weight (concatenated along N, as the dense loader does), quantize them to Q8_0
-/// on the host and upload the blocks once onto `dev` (Candle's `load_quantized`: one zeroed allocation with padding,
-/// then a copy on the loading thread's stream). Checks the invariants Candle leaves to the caller: the block count
-/// and bytes of the shape, and that the blocks live on `dev` itself (its `DeviceId`), so dequantizing them onto
-/// `q.device()` never transfers.
+/// Read the bf16 parts of a projection weight (concatenated along N, as the dense loader does), quantize them on the
+/// host with `quantize` (`q8_0`: [`quant::quantize_q8_0`]; `q4_k`: [`quant::quantize_q4_k`]) and upload the blocks
+/// once onto `dev` (Candle's `load_quantized`: one zeroed allocation with padding, then a copy on the loading thread's
+/// stream). Checks the invariants Candle leaves to the caller: the block type and bytes of the shape, and that the
+/// blocks live on `dev` itself (its `DeviceId`), so dequantizing them onto `q.device()` never transfers. The host
+/// blocks are dropped here unless `keep_blocks` (the q4_k warm-up check).
 #[cfg(feature = "cuda")]
-fn load_q8(
+fn load_blocks<B: candle_core::quantized::GgmlType + Send + Sync + 'static, S>(
     st: &MmapedSafetensors,
     reader: &TensorReader,
     names: &[String],
     dev: &Device,
-) -> Result<(candle_core::quantized::QTensor, quant::Q8Stats)> {
-    use candle_core::quantized::{GgmlDType, QTensor};
-    let Device::Cuda(cuda) = dev else { bail!("q8_0 weights need a CUDA device") };
+    quantization: Quantization,
+    keep_blocks: bool,
+    quantize: impl FnOnce(&[u8], usize, usize) -> Result<(Vec<B>, S)>,
+) -> Result<(candle_core::quantized::QTensor, Option<Vec<B>>, S)> {
+    use candle_core::quantized::QTensor;
+    let Device::Cuda(cuda) = dev else { bail!("{quantization} weights need a CUDA device") };
     let (mut rows, mut cols) = (0usize, None);
     for n in names {
         let v = st.get(n)?;
@@ -601,19 +606,32 @@ fn load_q8(
     for n in names {
         reader.read(n, &mut bytes)?;
     }
-    let (blocks, stats) = quant::quantize_q8_0(&bytes, rows, cols)?;
+    let (blocks, stats) = quantize(&bytes, rows, cols)?;
     drop(bytes);
     let storage = candle_core::quantized::cuda::load_quantized(cuda, &blocks)?;
     let q = QTensor::new(storage, (rows, cols))?;
-    ensure!(q.dtype() == GgmlDType::Q8_0, "uploaded blocks of type {:?}", q.dtype());
-    let expected = blocks.len().checked_mul(quant::Q8_BLOCK_BYTES).context("block bytes overflow")?;
+    ensure!(q.dtype() == B::DTYPE, "uploaded blocks of type {:?}", q.dtype());
+    let expected = blocks.len().checked_mul(std::mem::size_of::<B>()).context("block bytes overflow")?;
     ensure!(
         q.storage_size_in_bytes() == expected,
         "{} bytes of blocks on the device, expected {expected}",
         q.storage_size_in_bytes()
     );
-    ensure!(q.device().same_device(dev), "the q8_0 blocks are not on the backend's candle device");
-    Ok((q, stats))
+    ensure!(q.device().same_device(dev), "the {quantization} blocks are not on the backend's candle device");
+    Ok((q, keep_blocks.then_some(blocks), stats))
+}
+
+/// The bf16 tensors of a projection, concatenated along N in this order: name and rows (q4_k positions).
+#[cfg(feature = "cuda")]
+fn source_parts(st: &MmapedSafetensors, names: &[String]) -> Result<Vec<(String, usize)>> {
+    names
+        .iter()
+        .map(|n| {
+            let v = st.get(n)?;
+            let &[r, _] = v.shape() else { bail!("{n}: shape {:?}, expected a matrix", v.shape()) };
+            Ok((n.clone(), r))
+        })
+        .collect()
 }
 
 fn check(st: &MmapedSafetensors, name: &str, shape: &[usize]) -> Result<()> {
@@ -624,8 +642,8 @@ fn check(st: &MmapedSafetensors, name: &str, shape: &[usize]) -> Result<()> {
 }
 
 impl GpuBackend {
-    /// Load a model onto GPU `device`. `quantization` sets the format of the projection weights; `q8_0` is checked
-    /// against `precision`, `kernels` and this build's backend before anything is opened.
+    /// Load a model onto GPU `device`. `quantization` sets the format of the projection weights; a quantized format is
+    /// checked against `precision`, `kernels` and this build's backend before anything is opened.
     pub fn load(
         model_dir: &Path,
         cfg: &LlamaConfig,
@@ -709,23 +727,63 @@ impl GpuBackend {
             })
         };
         let load = |name: &str| load_cat(&[name.to_string()]);
-        // Projection weights: dense as above, or q8_0 blocks quantized on the host from the bf16 values and uploaded
-        // once (one allocation per matrix; no dense copy on the GPU).
+        // Projection weights: dense as above, or q8_0 / q4_k blocks quantized on the host from the bf16 values and
+        // uploaded once (one allocation per matrix; no dense copy on the GPU).
         #[cfg(feature = "cuda")]
         let mut q8_stats = quant::Q8Stats::default();
-        #[cfg_attr(not(feature = "cuda"), allow(unused_mut, reason = "only CUDA accumulates q8_0 diagnostics"))]
-        let mut load_proj = |names: &[String]| -> Result<ProjWeight> {
+        #[cfg(feature = "cuda")]
+        let mut q4k_stats = quant::Q4KStats::default();
+        // q4_k: the host blocks of one matrix are kept for the warm-up check: the projection of layer 0 with the
+        // fewest values in this architecture's shapes (the first of equals, as the q8_0 warm-up picks)
+        #[cfg(feature = "cuda")]
+        let q4k_warm_projection = Projection::ALL
+            .into_iter()
+            .zip(projection_shapes(cfg))
+            .min_by_key(|&(_, (n, k))| n.saturating_mul(k))
+            .map(|(p, _)| p);
+        // the kept matrix: its tensor, host blocks, source tensors and projection
+        #[cfg(feature = "cuda")]
+        let mut q4k_warm = None;
+        #[cfg_attr(
+            not(feature = "cuda"),
+            allow(
+                unused_mut,
+                unused_variables,
+                reason = "only CUDA loads quantized weights and accumulates their diagnostics"
+            )
+        )]
+        let mut load_proj = |layer: usize, projection: Projection, names: &[String]| -> Result<ProjWeight> {
             match quantization {
                 Quantization::None => Ok(ProjWeight::Dense(load_cat(names)?)),
                 #[cfg(feature = "cuda")]
                 Quantization::Q8_0 => {
                     let what = || format!("{} as q8_0 on CUDA device {device}", names.join(" + "));
-                    let (q, stats) = load_q8(&st, &reader, names, &dev).with_context(what)?;
+                    let (q, _, stats) =
+                        load_blocks(&st, &reader, names, &dev, quantization, false, quant::quantize_q8_0)
+                            .with_context(what)?;
                     q8_stats.add(&stats);
-                    Ok(ProjWeight::Q8(Arc::new(q)))
+                    Ok(ProjWeight::Quantized(Arc::new(q)))
+                }
+                #[cfg(feature = "cuda")]
+                Quantization::Q4K => {
+                    let what = || format!("{} as q4_k on CUDA device {device}", names.join(" + "));
+                    let parts = source_parts(&st, names).with_context(what)?;
+                    let source = quant::Source { layer, projection, parts: &parts };
+                    let keep = layer == 0 && q4k_warm_projection == Some(projection);
+                    let (q, kept, matrix) = load_blocks(&st, &reader, names, &dev, quantization, keep, |b, r, c| {
+                        quant::quantize_q4_k(b, r, c, &source)
+                    })
+                    .with_context(what)?;
+                    quant::check_q4k_resident(&q, matrix.blocks()).with_context(what)?;
+                    q4k_stats.add(&matrix).with_context(what)?;
+                    let q = Arc::new(q);
+                    if let Some(blocks) = kept {
+                        q4k_warm = Some((Arc::clone(&q), blocks, parts, projection));
+                    }
+                    Ok(ProjWeight::Quantized(q))
                 }
                 #[cfg(not(feature = "cuda"))]
-                Quantization::Q8_0 => bail!("quantization q8_0 needs the CUDA backend"),
+                Quantization::Q8_0 | Quantization::Q4K => bail!("quantization {quantization} needs the CUDA backend"),
             }
         };
         // Models without biases (basal-1.5) get zero biases: the fused kernels then add exactly 0, which leaves every
@@ -744,21 +802,21 @@ impl GpuBackend {
             let ps = |ns: &[&str]| ns.iter().map(|n| p(n)).collect::<Vec<_>>();
             layers.push(Layer {
                 ln1: load(&p("input_layernorm.weight"))?,
-                wqkv: load_proj(&ps(&[
-                    "self_attn.q_proj.weight",
-                    "self_attn.k_proj.weight",
-                    "self_attn.v_proj.weight",
-                ]))?,
+                wqkv: load_proj(
+                    l,
+                    Projection::Qkv,
+                    &ps(&["self_attn.q_proj.weight", "self_attn.k_proj.weight", "self_attn.v_proj.weight"]),
+                )?,
                 bqkv: biases(
                     &ps(&["self_attn.q_proj.bias", "self_attn.k_proj.bias", "self_attn.v_proj.bias"]),
                     qd + 2 * kvd,
                 )?,
-                wo: load_proj(&ps(&["self_attn.o_proj.weight"]))?,
+                wo: load_proj(l, Projection::O, &ps(&["self_attn.o_proj.weight"]))?,
                 bo: biases(&ps(&["self_attn.o_proj.bias"]), h)?,
                 ln2: load(&p("post_attention_layernorm.weight"))?,
-                wgu: load_proj(&ps(&["mlp.gate_proj.weight", "mlp.up_proj.weight"]))?,
+                wgu: load_proj(l, Projection::GateUp, &ps(&["mlp.gate_proj.weight", "mlp.up_proj.weight"]))?,
                 bgu: biases(&ps(&["mlp.gate_proj.bias", "mlp.up_proj.bias"]), 2 * i)?,
-                wdown: load_proj(&ps(&["mlp.down_proj.weight"]))?,
+                wdown: load_proj(l, Projection::Down, &ps(&["mlp.down_proj.weight"]))?,
                 bdown: biases(&ps(&["mlp.down_proj.bias"]), h)?,
             });
         }
@@ -776,10 +834,25 @@ impl GpuBackend {
         // synchronisation below, like every upload: the engines run on the per-thread streams of other threads and
         // event tracking is off (gpu_device), so this synchronisation is what makes the blocks visible to them.
         #[cfg(feature = "cuda")]
-        if let Some(ProjWeight::Q8(q)) =
-            layers.first().and_then(|l| [&l.wqkv, &l.wo, &l.wgu, &l.wdown].into_iter().min_by_key(|w| w.elem_count()))
-        {
-            drop(q.dequantize_f16(&q.device()).context("q8_0: warming up the dequantization kernel")?);
+        if quantization == Quantization::Q8_0 {
+            if let Some(ProjWeight::Quantized(q)) = layers
+                .first()
+                .and_then(|l| [&l.wqkv, &l.wo, &l.wgu, &l.wdown].into_iter().min_by_key(|w| w.elem_count()))
+            {
+                drop(q.dequantize_f16(&q.device()).context("q8_0: warming up the dequantization kernel")?);
+            }
+        }
+        // q4_k: the same warm-up on the kept matrix, plus a control: its f16 result copied back to the host and
+        // compared bitwise (signed zeros included) with the host reconstruction of the uploaded blocks. A difference
+        // is a load error. The kept host blocks are released afterwards; the other matrices kept none.
+        #[cfg(feature = "cuda")]
+        if quantization == Quantization::Q4K {
+            let (q, blocks, parts, projection) =
+                q4k_warm.take().context("q4_k: no matrix was kept for the warm-up check")?;
+            let source = quant::Source { layer: 0, projection, parts: &parts };
+            let values = quant::check_q4k_warmup(&q, &blocks, &source)
+                .with_context(|| format!("q4_k warm-up check on CUDA device {device}"))?;
+            q4k_stats.set_warmup(0, projection, values);
         }
         dev.synchronize()?;
         let d = cfg.head_dim;
@@ -809,8 +882,12 @@ impl GpuBackend {
             profile: None,
             quantization,
             #[cfg(feature = "cuda")]
-            q8_stats: (quantization == Quantization::Q8_0).then_some(q8_stats),
-            q8_dequant: std::cell::Cell::new((0.0, 0)),
+            quant_stats: match quantization {
+                Quantization::None => None,
+                Quantization::Q8_0 => Some(quant::QuantStats::Q8(q8_stats)),
+                Quantization::Q4K => Some(quant::QuantStats::Q4K(Box::new(q4k_stats))),
+            },
+            dequant: std::cell::Cell::new((0.0, 0)),
             residual_max: None,
             last_timing: (0.0, 0.0),
             evidence: {
@@ -887,13 +964,13 @@ impl GpuBackend {
     /// small M) 32-row tiles of the same MLX kernel family skip that padding (measured with `basal gemm-tune`;
     /// results are bitwise identical, the K reduction order does not change).
     /// On CUDA: cuBLASLt with measured algorithms (f16/bf16), otherwise cuBLAS through candle.
-    /// `q8_0`: the weight is dequantized into a temporary f16 tensor of this call (freed on this thread's stream)
-    /// and multiplied like a dense f16 weight.
+    /// `q8_0` / `q4_k`: the weight is dequantized into a temporary f16 tensor of this call (freed on this thread's
+    /// stream) and multiplied like a dense f16 weight.
     fn matmul_t(&self, x: &Tensor, w: &ProjWeight) -> Result<Tensor> {
         let w = match w {
             ProjWeight::Dense(w) => self.w(w)?,
             #[cfg(feature = "cuda")]
-            ProjWeight::Q8(q) => self.dequantize_q8(q)?,
+            ProjWeight::Quantized(q) => self.dequantize_blocks(q)?,
         };
         #[cfg(feature = "cuda")]
         if let (Some(lt), DType::F16 | DType::BF16) = (&self.lt, w.dtype()) {
@@ -911,10 +988,10 @@ impl GpuBackend {
         Ok(x.matmul(&w.t()?)?)
     }
 
-    /// f16 values of resident Q8_0 blocks, on the blocks' own candle device (the backend's, checked at load). While
-    /// profiling, synchronised before and after and timed into `q8_dequant` (a part of the projection sections).
+    /// f16 values of resident Q8_0 or Q4_K blocks, on the blocks' own candle device (the backend's, checked at load).
+    /// While profiling, synchronised before and after and timed into `dequant` (a part of the projection sections).
     #[cfg(feature = "cuda")]
-    fn dequantize_q8(&self, q: &candle_core::quantized::QTensor) -> Result<Tensor> {
+    fn dequantize_blocks(&self, q: &candle_core::quantized::QTensor) -> Result<Tensor> {
         if self.profile.is_none() {
             return Ok(q.dequantize_f16(&q.device())?);
         }
@@ -922,16 +999,19 @@ impl GpuBackend {
         let t = Instant::now();
         let w = q.dequantize_f16(&q.device())?;
         self.dev.synchronize()?;
-        let (ms, values) = self.q8_dequant.get();
-        self.q8_dequant.set((ms + t.elapsed().as_secs_f64() * 1e3, values + q.shape().elem_count() as u64));
+        let (ms, values) = self.dequant.get();
+        self.dequant.set((ms + t.elapsed().as_secs_f64() * 1e3, values + q.shape().elem_count() as u64));
         Ok(w)
     }
 
-    /// `q8_0`: synchronised time (ms) of the projection dequantizations since profiling started (already included in
-    /// the projection sections of `profile`) and the number of weight values dequantized; `None` without quantized
-    /// weights.
-    pub fn q8_dequant_profile(&self) -> Option<(f64, u64)> {
-        (self.quantization == Quantization::Q8_0).then(|| self.q8_dequant.get())
+    /// Quantized projection weights: their format, the synchronised time (ms) of the projection dequantizations since
+    /// profiling started (already included in the projection sections of `profile`) and the number of weight values
+    /// dequantized; `None` without quantized weights.
+    pub fn dequant_profile(&self) -> Option<(Quantization, f64, u64)> {
+        (self.quantization != Quantization::None).then(|| {
+            let (ms, values) = self.dequant.get();
+            (self.quantization, ms, values)
+        })
     }
 
     /// f32 attention of one segment: `q [1, NH, L, HD]`, `k, v [1, NKV, LK, HD]`, additive mask `[1, 1, L, LK]`
@@ -1605,8 +1685,8 @@ impl Backend for GpuBackend {
             profile: None,
             quantization: self.quantization,
             #[cfg(feature = "cuda")]
-            q8_stats: self.q8_stats,
-            q8_dequant: std::cell::Cell::new((0.0, 0)),
+            quant_stats: self.quant_stats.clone(),
+            dequant: std::cell::Cell::new((0.0, 0)),
             residual_max: None,
             last_timing: (0.0, 0.0),
             #[cfg(feature = "cuda")]
@@ -1632,7 +1712,7 @@ impl Backend for GpuBackend {
 
     fn describe(&self) -> Value {
         let cuda = self.dev.is_cuda();
-        #[cfg_attr(not(feature = "cuda"), allow(unused_mut, reason = "only CUDA describes q8_0 weights"))]
+        #[cfg_attr(not(feature = "cuda"), allow(unused_mut, reason = "only CUDA describes quantized weights"))]
         let mut d = json!({
             "backend": if cuda { "cuda" } else { "metal" },
             "device": if cuda { format!("NVIDIA GPU through candle Device::new_cuda({})", self.device) } else { format!("Apple GPU through candle Device::new_metal({})", self.device) },
@@ -1672,9 +1752,12 @@ impl Backend for GpuBackend {
         });
         // `none` keeps the description above unchanged
         #[cfg(feature = "cuda")]
-        if let Some(q8) = &self.q8_stats {
-            d["weights"] = json!("projections q8_0 (GGML blocks, dequantized to f16 per projection); embedding, norms, biases f16 (converted from bf16); lm_head bf16");
-            d["quantization"] = q8.describe();
+        if let Some(stats) = &self.quant_stats {
+            d["weights"] = match stats {
+                quant::QuantStats::Q8(_) => json!("projections q8_0 (GGML blocks, dequantized to f16 per projection); embedding, norms, biases f16 (converted from bf16); lm_head bf16"),
+                quant::QuantStats::Q4K(_) => json!("projections q4_k (GGML blocks, dequantized to f16 per projection); embedding, norms, biases f16 (converted from bf16); lm_head bf16"),
+            };
+            d["quantization"] = stats.describe();
         }
         d
     }

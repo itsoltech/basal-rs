@@ -79,6 +79,75 @@ i czasu, nie zmierzony transfer pamięci. Ręczny runner kampanii W8A16 na
 wynajętych kartach: `tools/perf/run-w8a16-cloud.py` (`--plan-only` bez GPU i
 bez chmury).
 
+`--quantization q4_k` (W4A16) podlega temu samemu kryterium FP32; ocena `q8_0`
+go nie obejmuje. Pierwszy pomiar GPU (sesja S1:
+[raport](../reports/w4a16-s1-2026-10-12/README.md), mini i 4.5B,
+jeden typ GPU: RTX 6000 Ada)
+daje dla tego kryterium FAIL na obu modelach (klasa `quality-criterion`):
+26 naruszeń predykatu w 15 unikalnych pozycjach (mini) i 20 w 12 (4.5B), przy
+0 dla f16 tej sesji. Liczba naruszeń nie jest liczbą pytań. Na 900 pytaniach
+`q4_k` daje 76 i 81 nowych zmian decyzji wobec FP32 poza zmianami f16,
+a trafność FP32 / f16 / `q4_k` wynosi 664 / 663 / 668 i 703 / 702 / 685;
++5 wobec f16 w mini to wynik próbki, nie poprawa ani równoważność. Kryterium,
+brak tolerancji i statusy FAIL pozostają bez zmian. Decyzja użytkownika (M2)
+dopuszcza `q4_k` wyłącznie jako opcjonalny tryb eksperymentalny z opisanymi
+różnicami; domyślne i zalecane jest `none`
+([podsumowanie](../README.md#serwer)). Decyzja nie dowodzi zachowania jakości,
+zgodności z FP32 ani braku defektu i jest niezależna od decyzji dla `q8_0`.
+Zakres dowodów S1: równość statystyk rekonstrukcji z P0 wykazano dla 14
+z 21 ładowań `q4_k` (pozostałe 7 zapisało tylko linię logu); kontrola
+warm-upu porównuje bitowo jedną macierz (warstwa 0, `o`) w każdym ładowaniu;
+RSS hosta to `ru_maxrss` jednego procesu (serwer HTTP i generator obciążenia)
+od jego startu, a izolowanego szczytu ładowania nie zmierzono.
+
+Wydajność 4.5B zmierzono w dwóch osobnych sesjach (RTX 6000 Ada, GPU 0,
+żądany zegar SM 1200 MHz, limit 300 W), każda z rolami A (baza, przebudowa `750c146`),
+B (kandydat W4A16) i C (kandydat z `q4_k`) w kolejności A B C C B A, z
+parami ustalonymi przed pomiarem. Kompromis C wobec B jest opisowy, bez
+reguły sygnału i bez przypisania przyczyny:
+
+- [S2](../reports/w4a16-s2-2026-10-12/README.md), rodzina `none`: C wobec
+  f16 B ma p50 sekwencyjnych żądań wyższe o 56,52% i 56,85%, żądania/s
+  sequential c1 niższe o 33,17% i 33,23%, a mixed c16 o 7,37% i 7,18%.
+  Regresja `none` (A/B) ma wniosek (a): przy zmierzonej rozdzielczości żaden
+  sygnał nie utrzymał się w rundzie potwierdzenia; nie jest to dowód braku
+  regresji ani zerowego narzutu;
+- [S3](../reports/w4a16-s3-2026-10-12/README.md), rodzina `q8_0`: C wobec
+  `q8_0` B ma żądania/s wyższe o 1,37% i 1,70% (sequential c1) oraz 0,43% i
+  0,66% (mixed c16), a agregat `ab.py` daje medianę C/B per pytanie
+  0,9766. Regresja `q8_0` (A/B) ma utrzymany sygnał: żądania/s i pytania/s
+  mixed c16 (jedna para metryk z tego samego `wall_s`) były gorsze dla B we
+  wszystkich czterech parach obu rund, o 0,1076–0,3732% (status SIGNAL, kod
+  wyjścia 4, bez FAIL). Ograniczona analiza warunków, profili i zmienionego
+  kodu nie wskazała przyczyny (wniosek (c)); nie twierdzimy, że to szum ani
+  że regresji nie ma. Użytkownik zaakceptował ten zaobserwowany spadek jako
+  kompromis; nie tworzy to progu, a surowy sygnał i statusy pozostają.
+  Profil A/B (`--batch 1`, jeden proces na rolę) jest w B wolniejszy o
+  17,59%, w tym dekwantyzacja o 40,25%; to synchronizowany profil sekcji, nie
+  latencja żądań mixed c16 ani wykazana przyczyna.
+
+Zajętość puli alokatora po załadowaniu (`resident_after_load.used_bytes`, bez
+kontekstu CUDA, modułów i alokacji synchronicznych, nie cały VRAM, RSS ani
+szczyt ładowania) wynosi dla 4.5B 2 996 968 960 B z `q4_k` w obu sesjach,
+9 644 216 320 B dla f16 (S2) i 5 309 140 480 B dla `q8_0` (S3). Wartości obu
+sesji nie tworzą par między sobą. Czas kwantyzacji na hoście w `load_s` nie
+jest rozłożony, a dekwantyzację GPU porównano bitowo dla jednej macierzy na
+ładowanie. Jakości nie mierzono ponownie; decyzja M2 pozostaje bez zmian.
+Wybór formatu Q4_K wynika
+z reguły ustalonej przed pomiarem na błędzie wag
+([raport P0](../reports/w4a16-p0-2026-10-12/README.md)), nie z
+jakości modelu. Opis backendu `q4_k` (obiekt `quantization`) podaje liczbę
+macierzy, bloków i bajtów, błąd rekonstrukcji wag (`reconstruction_error`:
+`sum_e2`, `sum_w2`, `max_abs_error`, `rms_error`, `relative_error_ratio`,
+liczniki grup zerowych i spłaszczonych z pierwszą pozycją) dla całego modelu i
+każdego typu projekcji oraz macierz kontroli warm-upu; obiekt jest
+deterministyczny, więc powinien być równy między trybami, kartami i
+`CUDA_VISIBLE_DEVICES`. `basal profile` z `q4_k` podaje
+`dequant_ms_per_item`, `dequant_values_per_item`, `dequant_format` i
+`dequant_scope` w tym samym zakresie co `q8_dequant_*` dla `q8_0`. Ręczny
+runner kampanii W4A16: `tools/perf/run-w4a16-cloud.py` (`--plan-only` bez GPU
+i bez chmury; sesje i reguły w [CLOUD.md](CLOUD.md)).
+
 ## Wydajność
 
 | Narzędzie | Co mierzy |
@@ -336,8 +405,9 @@ Domyślne rezerwy to 2 GiB RAM (`--ram-reserve-gib`) i 1 GiB GPU/Metal
 working set (`--gpu-reserve-gib`). Przed ładowaniem dochodzi szacowany
 rozmiar wag; dla GPU zunifikowanego także w RAM. Szacunek
 (`model.estimated_weight_bytes`) to arytmetyka formatu, nie pomiar: rozmiar
-checkpointu, a dla `--quantization q8_0` ten rozmiar z macierzami projekcji w
-rozmiarze bloków Q8_0 (z paddingiem Candle). Po załadowaniu monitor
+checkpointu, a dla `--quantization q8_0` albo `q4_k` ten rozmiar z macierzami
+projekcji w rozmiarze bloków Q8_0 albo Q4_K (z paddingiem Candle). Po
+załadowaniu monitor
 sprawdza pamięć mniej więcej co 200 ms, także podczas aktywnych forwardów
 i rozgrzewki. Utrata rezerwy, podwyższona presja pamięci macOS albo co
 najmniej 64 MiB przyrostu zajętego swapu/zapisów do swapu przerywa ruch.
@@ -351,11 +421,12 @@ Okna pamięci obejmują ostatnie 20000 próbek (około 67 minut przy 5 Hz);
 zbiorcze minima i wzrost swapu dotyczą całego monitorowanego przebiegu.
 
 Na CUDA `memory_pool` podaje dokładne liczniki puli alokatora strumieniowego
-urządzenia (`cuMemAllocAsync`: tensory Candle, bloki `q8_0`, przejściowe
+urządzenia (`cuMemAllocAsync`: tensory Candle, bloki `q8_0` i `q4_k`, przejściowe
 tensory f16, workspace cuBLASLt), osobno `used` i `reserved`. Znaczniki
 szczytu są zerowane poza mierzonym czasem: tuż przed ładowaniem (po
 preflight i wyborze tabeli GEMM) oraz przed fazami. `load_peak` to szczyt
-ładowania z rozgrzewką, `resident_after_load` stan po załadowaniu i
+ładowania z rozgrzewką (dla `q4_k` także kontrolą jednej macierzy z kopią do
+hosta), `resident_after_load` stan po załadowaniu i
 synchronizacji kontekstu (zwolnienia buforów przejściowych rozgrzewki
 prefiksów wykonane; po `load_s`, przed mierzonym ruchem),
 `runtime_peak` łączny szczyt wszystkich faz z zamknięciem (bez podziału na

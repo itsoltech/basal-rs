@@ -415,6 +415,90 @@ a pomiar czasu 4.5B nie wykazał powtarzalnego spadku przy swojej rozdzielczośc
 ([pomiar](reports/multigpu-w8-none-2026-10-11/README.md)); nie jest to dowód
 zerowego narzutu.
 
+Kwantyzacja W4A16 (opcjonalna, eksperymentalna, CUDA):
+`quantization: q4_k` albo `--quantization q4_k` działa jak `q8_0` (te same
+cztery projekcje, polecenia, wymagania `dtype: f16` i kerneli `fused`, ta sama
+walidacja przed pobraniem modelu i odmowa dla Metal i Intel), ale z blokami
+GGML Q4_K: 256 wartości wzdłuż K w 8 grupach po 32, 6-bitowe skale i minima
+grup względem skal f16 bloku, kody 4-bitowe (144 B na 256 wartości). Każde K
+projekcji musi być wielokrotnością 256 (spełniają to kształty mini, 4.5B i
+max); przy znanym `config.json` `basal doctor` zgłasza inny przypadek jako
+błąd. Ładowanie dodatkowo rekonstruuje każdą macierz na CPU, odrzuca wartości
+nieskończone wag i rekonstrukcji oraz stałe niezerowe grupy 32 wartości
+(przypięty kwantyzator Candle zamienia je na zera) i porównuje bitowo
+dekwantyzację jednej macierzy na GPU z rekonstrukcją na CPU; to kontrola
+jednej macierzy, nie dowód dla pozostałych. Opis backendu (obiekt
+`quantization`) podaje błąd rekonstrukcji wag i liczniki grup. Format wybrano
+regułą ustaloną przed pomiarem, na podstawie błędu w przestrzeni wag
+([raport P0](reports/w4a16-p0-2026-10-12/README.md)); to nie jest ocena
+jakości odpowiedzi. Arytmetyka formatu daje dla bloków projekcji 4.5B
+2 601 192 960 B wobec 4 913 364 480 B przy `q8_0` (z paddingiem Candle); to
+nie jest pomiar puli pamięci ani VRAM.
+
+Domyślne i zalecane jest `none`; `q4_k` to tryb eksperymentalny, włączany
+tylko jawnie. Zmienia numerykę i wyniki modelu; w tym pomiarze różnice wobec
+FP32 były wyraźnie większe niż dla `q8_0`, a kryterium zgodności z FP32
+upstream nie jest spełnione na żadnym z dwóch zmierzonych modeli. Ocena
+i wybór `q8_0` opisane wyżej nie obejmują `q4_k`.
+[Pomiar](reports/w4a16-s1-2026-10-12/README.md) (basal-1.5-mini
+i basal-1.5-4.5B, CUDA f16, RTX 6000 Ada, jedna sesja) wykazał:
+
+- na 44 przykładach bench, 34 żądaniach System One i 55 pytaniach endpointu
+  26 naruszeń kryterium FP32 w 15 pozycjach (mini) i 20 w 12 (4.5B): zmienione
+  decyzje bench i endpointu oraz granice fragmentów evidence; f16 bez
+  kwantyzacji ma w tej samej sesji 0 naruszeń, a jedna pozycja może dać kilka;
+- na 900 pytaniach diagnostycznych nowe decyzje różne od FP32 (bez pytań,
+  które zmienia już f16): 76 w mini i 81 w 4.5B (`q8_0`: 3 i 5);
+- poprawne odpowiedzi FP32 / f16 / `q4_k`: mini 664 / 663 / 668, 4.5B
+  703 / 702 / 685. Nowe zmiany poprawiają i pogarszają odpowiedzi (mini: 38
+  popraw i 33 pogorszenia, 4.5B: 25 i 43). Wynik +5 wobec f16 w mini dotyczy
+  tej próbki i nie oznacza poprawy ani równoważności jakości; w 4.5B `q4_k` ma
+  o 17 poprawnych odpowiedzi mniej niż f16.
+
+Eksporty `q4_k` są bitowo równe między kartami, trybami pakowania,
+`--no-prefix-cache` i `CUDA_VISIBLE_DEVICES`. Odpowiedzi HTTP serwera mini
+`q4_k` są równe natywnej referencji `q4_k` tych samych wejść, a dwie repliki na
+dwóch kartach dają odpowiedzi równe pojedynczemu serwerowi; to zgodność
+wewnętrzna `q4_k`, nie z FP32. Zajętość puli alokatora CUDA po załadowaniu mini
+(jeden przebieg; bez kontekstu CUDA, modułów i alokacji synchronicznych, nie
+cały VRAM) wyniosła 1 119 439 872 B wobec 1 868 155 904 B przy `q8_0`
+i 3 271 867 392 B bez kwantyzacji.
+
+Kompromis pamięci i czasu 4.5B `q4_k` zmierzono na GPU 0 karty RTX 6000 Ada
+48 GB, CUDA f16, z żądanym zegarem SM 1200 MHz i limitem mocy 300 W, w dwóch
+osobnych sesjach, w parach ustalonych przed pomiarem. Wyniki są opisowe: bez
+kryterium szybkości i bez ustalonej przyczyny różnic.
+
+- Wobec f16 bez kwantyzacji ([S2](reports/w4a16-s2-2026-10-12/README.md)):
+  p50 sekwencyjnych żądań `basal benchmark` wzrosło o 56,5% i 56,8% (z około
+  27 do około 42 ms), żądania/s spadły o 33,2% sekwencyjnie oraz o 7,4% i 7,2%
+  w ruchu mieszanym przy 16 klientach, a mediana ilorazu `latency2` per
+  pytanie w `basal bench` wynosi 1,60. Zajętość puli alokatora po załadowaniu
+  spadła z 9 644 216 320 do 2 996 968 960 B. `load_s` benchmarku wzrósł
+  z 11,5–12,8 do 25,4–25,5 s; obejmuje kwantyzację na hoście, której czasu
+  nie mierzymy osobno.
+- Wobec `q8_0` ([S3](reports/w4a16-s3-2026-10-12/README.md)): żądania/s
+  wzrosły o 1,37% i 1,70% sekwencyjnie oraz o 0,43% i 0,66% przy 16 klientach,
+  mediana ilorazu `latency2` per pytanie (`q4_k` / `q8_0`) wynosi 0,977, a pula
+  po załadowaniu to 2 996 968 960 wobec 5 309 140 480 B.
+
+Mniejsza pamięć wag `q4_k` kosztuje więc wobec f16 wyraźnie więcej czasu;
+`q4_k` nie jest ogólnie szybsze ani lepsze jakościowo. S2 i S3 to osobne
+sesje, więc ich wyników nie łączymy w porównanie f16 z `q8_0`. Pula (jak
+wyżej) nie jest całym VRAM ani jego szczytem. Szybkość żądań mini, model max,
+inne karty, zegary i obciążenia nie zostały zmierzone.
+
+Z `none` i `q8_0` zmierzone w S1 eksporty mini i 4.5B są bitowo równe wersji
+sprzed dodania `q4_k`. Pomiar czasu 4.5B z `none` nie wykazał powtarzalnego
+spadku przy swojej rozdzielczości (S2); nie jest to dowód zerowego narzutu.
+Z `q8_0` przepustowość ruchu mieszanego przy 16 klientach była niższa niż
+w wersji sprzed zmiany we wszystkich czterech parach, o 0,11–0,37% (S3).
+Przyczyny nie ustalono i nie twierdzimy, że to szum ani że regresji nie ma;
+użytkownik zaakceptował ten zaobserwowany spadek jako kompromis, bez nowego
+progu. Synchronizowany profil sekcji `q8_0` (batch 1, jeden proces na wersję)
+był w nowej wersji wolniejszy o 17,6%, w tym dekwantyzacja o 40,3%; nie jest
+to latencja żądań ani wykazana przyczyna tej różnicy.
+
 Jeden model bez pliku konfiguracji:
 
 ```sh
@@ -460,7 +544,7 @@ wiersza poleceń, np. `--max-batch-tokens`):
 | `path` | | lokalny katalog modelu (zamiast `repo`) |
 | `gemm_table` | `auto` | tabela algorytmów cuBLASLt (opis niżej); `none`: algorytmy dobierane przy pierwszym użyciu, wynik może zależeć od partii; albo ścieżka tabeli |
 | `dtype` | `f16` | `f16`, `bf16` albo `f32` (referencja numeryczna, wolna) |
-| `quantization` | `none` | format wag projekcji: `none` (gęste wagi `dtype`) albo `q8_0` (8-bitowe wagi z aktywacjami f16; tylko CUDA z `dtype: f16`; opis niżej) |
+| `quantization` | `none` | format wag projekcji: `none` (gęste wagi `dtype`), `q8_0` (8-bitowe wagi z aktywacjami f16) albo `q4_k` (4-bitowe wagi z aktywacjami f16, eksperymentalne; K projekcji wielokrotnością 256); tylko CUDA z `dtype: f16`; opis niżej |
 | `device` | 0 | GPU modelu: indeks urządzenia CUDA widoczny dla procesu; modele z tym samym `device` dzielą GPU, z różnymi liczą jednocześnie; Metal i Intel: tylko 0 |
 | `replica_devices` | | CUDA: repliki modelu pod jedną nazwą, po jednej na każdy podany indeks (różne karty jednego typu); zamiast `device`; kilka wymaga tabeli GEMM (`auto` albo ścieżka) |
 | `max_batch_tokens` | 8192 | tokeny jednej partii, liczone po współdzieleniu prefiksów |

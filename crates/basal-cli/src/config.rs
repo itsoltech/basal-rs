@@ -14,7 +14,7 @@
 //!     device: 1                    # CUDA device (default 0); models on one device take turns on it
 //!   - path: .models/basal-1.5-4.5B
 //!     replica_devices: [2, 3]      # CUDA: one replica per device under one model name (GPUs of one type)
-//!     quantization: q8_0           # none (default) | q8_0: 8-bit projection weights (CUDA, dtype f16)
+//!     quantization: q8_0           # none (default) | q8_0 | q4_k: 8- or 4-bit projection weights (CUDA, dtype f16)
 //! ```
 //!
 //! A model is addressed by the name in its `basal.json` (the `model` field of requests).
@@ -83,9 +83,10 @@ pub struct ModelConfig {
     /// f16 (default), bf16 or f32.
     #[serde(default = "default_dtype")]
     pub dtype: String,
-    /// Format of the projection weights: `none` (default, dense weights of `dtype`) or `q8_0` (GGML Q8_0 blocks
-    /// dequantized to f16 per projection: less GPU memory, more work per forward; CUDA with `dtype: f16` only). All
-    /// replicas of the model use it.
+    /// Format of the projection weights: `none` (default, dense weights of `dtype`), `q8_0` (GGML Q8_0 blocks) or
+    /// `q4_k` (GGML Q4_K blocks; every projection's K a multiple of 256), dequantized to f16 per projection: less GPU
+    /// memory, more work per forward, different numerics; CUDA with `dtype: f16` only. All replicas of the model use
+    /// it.
     #[serde(default = "default_quantization")]
     pub quantization: String,
     /// GPU of the model: the CUDA device ordinal, an index among the GPUs visible to the process (after
@@ -185,7 +186,8 @@ impl ModelConfig {
 
 /// The weight format `quantization` of `model`, checked with its `dtype` and the kernel set against the backend
 /// (`cuda_backend`: this build's, or the CUDA build of a Linux package for `basal doctor`) before any download, GEMM
-/// table or load. `dtype` and `kernels` are parsed here only for `q8_0`; otherwise they are checked at load as before.
+/// table or load. `dtype` and `kernels` are parsed here only for a quantized format (`q8_0`, `q4_k`); otherwise they
+/// are checked at load as before.
 pub fn check_quantization(
     model: &str,
     quantization: &str,

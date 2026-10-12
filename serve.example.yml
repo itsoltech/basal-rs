@@ -24,6 +24,13 @@ models:
     # on the GPU as 8-bit GGML Q8_0 blocks and are dequantized to f16 before each projection GEMM (f16 activations):
     # less GPU memory for those weights, more work on every forward. CUDA with dtype f16 only; checked before the
     # download. Every replica of the model uses it. Also `basal serve --model mini --quantization q8_0`.
+    # q4_k: the same with 4-bit GGML Q4_K blocks (every projection K a multiple of 256). Experimental, explicit opt-in
+    # only; none is recommended. Its measured answers differ from FP32 more than with q8_0 (mini and 4.5B,
+    # reports/w4a16-s1-2026-10-12). On one RTX 6000 Ada, 4.5B q4_k had a smaller GPU allocator pool after load
+    # than f16 but served about 33% fewer sequential and 7% fewer mixed 16-client requests/s
+    # (reports/w4a16-s2-2026-10-12); vs q8_0, a smaller pool and 0.4-1.7% more requests/s
+    # (reports/w4a16-s3-2026-10-12). Request speed of mini, max and other GPUs was not measured.
+    # Both change the numerics of the model.
     quantization: none
     # GPU of the model (default 0): CUDA device ordinal visible to the process. CUDA first orders all GPUs (by
     # default fastest first, which may differ from nvidia-smi; CUDA_DEVICE_ORDER=PCI_BUS_ID: PCI order, as

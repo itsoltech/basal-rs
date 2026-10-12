@@ -115,7 +115,8 @@ rozszerza je przed użyciem (dokładny forward FP32, punkt odniesienia).
 Opcjonalna, domyślnie wyłączona (`quantization: none`), tylko CUDA z
 `dtype: f16` i kernelami `fused` (walidacja przed pobraniem modelu). Cztery
 macierze projekcji każdej warstwy (`wqkv`, `wo`, `wgu`, `wdown`) mają w
-`Layer` typ `ProjWeight`: `Dense(Tensor)` albo `Q8(Arc<QTensor>)`. Loader
+`Layer` typ `ProjWeight`: `Dense(Tensor)` albo `Quantized(Arc<QTensor>)`
+(typ bloków niesie `QTensor`; ten sam wariant dla `q4_k`). Loader
 czyta części bf16 tak jak dla gęstych wag (sklejone wzdłuż N), sprawdza
 kształt `[N, K]`, `K % 32 == 0`, przepełnienia i dokładną liczbę bloków,
 konwertuje wiersze do f32 na wszystkich rdzeniach (bez kopii f32 całej
@@ -126,7 +127,7 @@ Bloki muszą leżeć na tym samym urządzeniu Candle (`DeviceId`) co backend;
 dekwantyzacja idzie wyłącznie na `q.device()`, więc nie ma transferów.
 Wysłania i jednorazowa dekwantyzacja najmniejszej macierzy (ładuje moduł
 `QUANTIZED` i kernel przy starcie) są kolejkowane przed synchronizacją
-kończącą ładowanie. W forwardzie `matmul_t` dla `Q8` tworzy przejściowy
+kończącą ładowanie. W forwardzie `matmul_t` dla `Quantized` tworzy przejściowy
 tensor f16 macierzy (`dequantize_block_q8_0_f16`), podaje go temu samemu GEMM
 cuBLASLt f16 i zwalnia go po wywołaniu, na strumieniu wątku silnika. Tor
 `Dense` jest kodem sprzed zmiany; jedyną różnicą jest dopasowanie wariantu.
@@ -134,7 +135,46 @@ Forki silnika (tor długich żądań) współdzielą bloki przez `Arc`, a replik
 ładują własne. `basal profile` raportuje czas dekwantyzacji osobno
 (`q8_dequant_ms_per_item`, część sekcji projekcji, nie dodawana do
 `sections_sum_ms`). `QMatMul` Candle nie jest używany (kwantyzuje aktywacje
-do Q8_1). Własny kernel W8A16 i formaty 4-bitowe są poza tym etapem.
+do Q8_1). Własny kernel W8A16 jest poza zakresem.
+
+### Kwantyzacja W4A16 (`q4_k`)
+
+Ta sama ścieżka co `q8_0` (walidacja, zakres tensorów, `ProjWeight::Quantized`,
+urządzenie, strumienie, forki i repliki, przejściowy f16 przed tym samym GEMM
+cuBLASLt), z blokami GGML Q4_K (`BlockQ4K`, 256 wartości wzdłuż K, 144 B,
+padding Candle 288 B na macierz). Loader generyczny względem typu bloku
+(`load_blocks`) wykonuje dla `q8_0` te same wywołania w tej samej kolejności;
+tor hosta Q8 (`quantize_q8_0`) jest bez zmian. Dla `q4_k` (`quantize_q4_k`)
+sprawdza przed pracą dodatnie wymiary, `K % 256 == 0`, przepełnienia,
+`N·K ≤ i32::MAX` i długość danych, a dla każdego wiersza: skończone wartości
+wejścia, brak stałych niezerowych grup 32 wartości (przypięty
+`make_qkx1_quants` zwraca dla nich `(0, 0)`, więc rekonstruowałyby się do
+zer), długości przed `from_float` i `to_float` (Candle sprawdza je tylko w
+buildzie debug), skończone `to_float` i rekonstrukcję f16 (RNE) przed
+statystykami i wysłaniem. Błąd wskazuje tensor checkpointu, jego wiersz i
+kolumnę (dla q|k|v i gate|up pierwotny tensor) oraz liczby NaN, +inf i −inf
+w wierszu. Statystyki f64 (`Σe²`, `Σw²`, `max|e|`, grupy zerowe i
+spłaszczone, bez progów) są liczone w stałych kawałkach 16 wierszy,
+zapisywane pod indeksem kawałka i redukowane w kolejności kawałków, macierzy
+i warstw (q|k|v, o, gate|up, down) — wynik nie zależy od liczby wątków
+(co najwyżej `available_parallelism`, każdy z ciągłym zakresem kawałków,
+uruchamiane przez `Builder::spawn_scoped` z łączeniem wszystkich przed
+zwróceniem błędu). Ta kolejność i wyrażenia odpowiadają diagnostyce P0.
+W S1 pełny obiekt `quantization` zapisało 14 z 21 ładowań i jego statystyki
+zbiorcze (model i cztery typy projekcji) są równe P0; pozostałe 7 zapisało
+tylko linię logu ([raport](../reports/w4a16-s1-2026-10-12/README.md)).
+Kernel `dequantize_block_q4_K_f16` nie ma argumentu długości ani kontroli
+zakresu, więc przed pierwszym uruchomieniem loader sprawdza na wysłanym
+tensorze typ Q4K, kształt, `K % 256`, `N·K ≤ i32::MAX`, liczbę bloków i bajty
+(`check_q4k_resident`). Warm-up dekwantyzuje na GPU najmniejszą według
+`projection_shapes` macierz warstwy 0 (jej bloki hosta są zachowane tylko do
+tej kontroli), kopiuje wynik f16 do hosta i porównuje wzorce bitowe (także znak
+zera) z `f16(to_float)` tych bloków; różnica jest błędem ładowania, bez
+fallbacku. Kontrola obejmuje jedną macierz, nie wszystkie. `describe` dla
+`q4_k` podaje obiekt `quantization` z błędem rekonstrukcji modelu i typów
+projekcji (deterministyczny: bez czasów i liczby wątków); `basal profile`
+podaje `dequant_ms_per_item`, `dequant_values_per_item`, `dequant_format` i
+`dequant_scope` (ten sam zakres co klucze `q8_dequant_*`).
 
 ### Niezależność od partii
 
@@ -338,6 +378,23 @@ scrape nie przechodzi przez kolejkę inferencji. Szczegółowa semantyka i PromQ
   (basal-1.5-mini i 4.5B), wydłuża czas (4.5B) i zmienia część decyzji oraz
   granic evidence wobec FP32 ([raport](../reports/w8a16-2026-10-11/README.md));
   model max, inne karty i obciążenia nie zostały zmierzone.
+- `quantization: q4_k` ma te same ograniczenia; dodatkowo wymaga
+  `K % 256 == 0` każdej projekcji. To opcjonalny tryb eksperymentalny,
+  włączany jawnie; domyślne i zalecane jest `none`. Na RTX 6000 Ada
+  (basal-1.5-mini i 4.5B) nie spełnia kryterium FP32 i zmienia decyzje oraz
+  granice evidence wyraźnie bardziej niż `q8_0`
+  ([raport](../reports/w4a16-s1-2026-10-12/README.md)). Bloki Q4_K są przed
+  każdym GEMM dekwantyzowane do f16; nie ma kernela int4 ani rdzeni
+  tensorowych int4, a 4 bity dotyczą tylko wag czterech projekcji. Dla 4.5B
+  na GPU 0 jednej RTX 6000 Ada zmniejsza pulę alokatora po załadowaniu do
+  2 996 968 960 B (f16: 9 644 216 320 B, `q8_0`: 5 309 140 480 B), ale wobec
+  f16 obniża żądania/s o około 33% sekwencyjnie i 7% przy 16 klientach
+  ([S2](../reports/w4a16-s2-2026-10-12/README.md)); wobec `q8_0` różnice
+  żądań/s wynoszą +0,43–1,70%
+  ([S3](../reports/w4a16-s3-2026-10-12/README.md)). To opis dwóch osobnych
+  sesji, bez kryterium szybkości i ustalonej przyczyny. Pulę mini zmierzono w
+  jednym przebiegu, bez szybkości żądań. Czas kwantyzacji na hoście, model max
+  i inne karty nie zostały zmierzone.
 - Repliki wymagają kart jednego typu i wspólnej tabeli GEMM niezależnej od
   partii; mieszane grupy wymagają osobnej decyzji numerycznej. Zgodność
   konfiguracji nie zastępuje pomiaru równości wyników na obu kartach.
