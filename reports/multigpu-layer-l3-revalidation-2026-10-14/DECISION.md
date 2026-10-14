@@ -1,6 +1,16 @@
 # Rozstrzygnięcie koordynatora o wyniku L3 `q4_k`, 2026-10-14
 
-Dotyczy [raportu L3](README.md) i [`facts.json`](facts.json). Raport i jego
+> **Dane JSON w archiwum.** Pliki `facts.json`, `provenance.json` i `validation.json` z tego katalogu są poza
+> Gitem, w archiwum pomiarów `multigpu-2026-10-14` (SHA-256 `71acff72…`), pod ścieżką
+> `reports/multigpu-layer-l3-revalidation-2026-10-14/<plik>`. Odwołania do nich w tekście dotyczą plików z
+> archiwum. Opis końca zegara `load_s` w tym pliku poprawia
+> [erratum `load_s`](../multigpu-layer-revalidation-2026-10-14/LOAD_S.md). Pobieranie i sumy kontrolne:
+> [MEASUREMENT_ARTIFACTS.md](../../docs/MEASUREMENT_ARTIFACTS.md). Archiwum zawiera też wersję tego pliku
+> sprzed dopisania tej noty. Przeniesienie danych nie jest nowym pomiarem: liczby, statusy i rozstrzygnięcia
+> raportu są bez zmian. Bieżący stan funkcji i wyników opisuje
+> [zestawienie z 2026-10-14](../multigpu-results-2026-10-14/README.md).
+
+Dotyczy [raportu L3](README.md) i `facts.json` (w archiwum). Raport i jego
 pliki pozostają bez zmian. Zdania raportu „Ta decyzja jeszcze nie zapadła”
 i sekcja „Decyzja użytkownika (oczekująca)” opisują stan sprzed tego
 rozstrzygnięcia i są historyczną migawką. Aktualny stan opisuje ten plik.

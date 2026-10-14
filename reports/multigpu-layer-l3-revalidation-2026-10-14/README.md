@@ -1,5 +1,16 @@
 # Etap 05, podział warstw — rewalidacja L3 bieżącego kandydata, 2026-10-14
 
+> **Dane JSON w archiwum.** Pliki `facts.json`, `provenance.json` i `validation.json` z tego katalogu są poza
+> Gitem, w archiwum pomiarów `multigpu-2026-10-14` (SHA-256 `71acff72…`), pod ścieżką
+> `reports/multigpu-layer-l3-revalidation-2026-10-14/<plik>`. Odwołania do nich w tekście dotyczą plików z
+> archiwum. Opis końca zegara `load_s` w tym pliku poprawia
+> [erratum `load_s`](../multigpu-layer-revalidation-2026-10-14/LOAD_S.md). Plik
+> `reports/w4a16-p0-2026-10-12/facts.json` także jest w tym archiwum. Pobieranie i sumy kontrolne:
+> [MEASUREMENT_ARTIFACTS.md](../../docs/MEASUREMENT_ARTIFACTS.md). Archiwum zawiera też wersję tego pliku
+> sprzed dopisania tej noty. Przeniesienie danych nie jest nowym pomiarem: liczby, statusy i rozstrzygnięcia
+> raportu są bez zmian. Bieżący stan funkcji i wyników opisuje
+> [zestawienie z 2026-10-14](../multigpu-results-2026-10-14/README.md).
+
 Stan: raport danych z jednej zakończonej sesji L3 (pomiar 2026-10-14 UTC)
 dla bieżącego kandydata etapu 05 (źródła `831e68e0…`, 66 plików). Sesja
 mierzy regresję toru jednego GPU w trybach `q8_0` i `q4_k` parami ab.py i

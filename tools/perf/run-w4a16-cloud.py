@@ -22,7 +22,16 @@ runs, and the candidate's source digest and embedded assets are compared with th
 The helpers are imported unchanged and their SHA-256 checked first: run-w8a16-cloud.py (and through it
 run-replicas-cloud.py, run-isolation-cloud.py, run-multigpu-cloud.py) and tools/bench/ab.py. Prerequisites as for
 the W8 runner (synced to /work, weights in HF_HOME=/data/hf, CUDA libraries in BASAL_HOME=/data/basal), plus
-reports/w4a16-p0-2026-10-12/facts.json (the approved P0 weight diagnostic, SHA-256 pinned below).
+reports/w4a16-p0-2026-10-12/facts.json (the approved P0 weight diagnostic, SHA-256 pinned below) under
+--measurement-artifacts.
+
+Archived measurement inputs. The P0 facts and the W8 reports of the plan (reports/w8a16-2026-10-11/commands.json,
+reports/multigpu-w8-none-2026-10-11/facts.json, reports/multigpu-w8-original-2026-10-11/perf-q8-original.json) are
+not in Git: they are read from --measurement-artifacts DIR at the same relative paths (DIR/reports/...), the
+directory the archive described in docs/MEASUREMENT_ARTIFACTS.md is extracted into; a relative DIR is taken from
+the repository root (/work on the machine: sync it there). The runner downloads nothing. A file missing there is
+treated as before: no P0 facts is a GAP (and no P0 allowance in the plan), no W8 report a missing plan source.
+The records keep the logical path reports/... and the SHA-256, never the local directory.
 
 Sessions (separate invocations; the parent audits the raw data between them, nothing later runs by default):
   S1  --campaigns 'correctness quality profile memory-mini' (default)
@@ -198,6 +207,8 @@ HELPERS_SHA256 = {
     "tools/perf/run-multigpu-cloud.py": "1ddd4910c6a1ff79c297e42a70efc5cae975289147f911700e20e403e2a351d8",
     "tools/bench/ab.py": "17b188dcdf5a6986f4930c63994046111ba7ce80fea89bde820c97d425ac7bec",
 }
+# archived measurement inputs: logical paths under the artifact root (--measurement-artifacts), not in Git
+MEASUREMENT_ARTIFACTS = Path(".cache/measurement-artifacts/multigpu-2026-10-14")
 P0_FACTS = "reports/w4a16-p0-2026-10-12/facts.json"
 P0_FACTS_SHA256 = "44005ecc347b52b5f2295ee9b54edbebc7f014e006b2c2fd86e9dcef7c5cbf68"
 P0_CHUNK_ROWS = 16
@@ -350,9 +361,10 @@ def read_provenance(path, binary_sha):
     return v, mg.sha256(path)
 
 
-def load_p0(root):
-    """(facts or None, provenance): the approved P0 facts, only with the pinned SHA-256."""
-    path = root / P0_FACTS
+def load_p0(artifacts):
+    """(facts or None, provenance): the approved P0 facts at their logical path under the measurement artifact root
+    `artifacts`, only with the pinned SHA-256 (the provenance names the logical path, not the directory)."""
+    path = artifacts / P0_FACTS
     if not path.is_file():
         return None, {"file": P0_FACTS, "sha256": None, "expected": P0_FACTS_SHA256, "usable": False}
     sha = mg.sha256(path)
@@ -2135,20 +2147,21 @@ LIFE_MINUTES = 120  # creation to deletion of a machine (plan)
 
 
 class PlanSources:
-    """The tracked W8 reports (a), private raw W8 run directories (b, --w8-raw) and the P0 facts (allowance); every
-    value comes with its file, SHA-256 and field. Reads files only."""
+    """The archived W8 reports (a, under the measurement artifact root `artifacts`), private raw W8 run directories
+    (b, --w8-raw) and the P0 facts (allowance, also archived); every value comes with its file (the logical path for
+    a), SHA-256 and field. Reads files only."""
 
-    def __init__(self, root, raw_dirs):
+    def __init__(self, root, raw_dirs, artifacts):
         self.root, self.tracked, self.private, self.servers, self.sessions = root, [], [], {}, []
         for path in (W8_COMMANDS, W8_Q8_ORIGINAL):
-            p = root / path
+            p = artifacts / path
             if p.is_file():
                 steps = {}
                 for c in read_json(p).get("commands", []):
                     if w8.finite(c.get("seconds")):
                         steps.setdefault(c["step"], c["seconds"])
                 self.tracked.append((path, mg.sha256(p), steps))
-        p = root / W8_NONE_FACTS
+        p = artifacts / W8_NONE_FACTS
         self.none_facts = (W8_NONE_FACTS, mg.sha256(p), read_json(p)) if p.is_file() else None
         for d in raw_dirs:
             found = [d / "commands.jsonl"] if (d / "commands.jsonl").is_file() else sorted(d.glob("*/commands.jsonl"))
@@ -2169,7 +2182,7 @@ class PlanSources:
                             (times[-1] - times[0], {"kind": "b", "file": rel(root, t), "sha256": mg.sha256(t),
                                                     "field": "last t - first t (server lifetime)", "private": True}))
                 self.session_wall(f.parent, sum(sum(x) for x in steps.values()), served)
-        facts, self.p0_provenance = load_p0(root)
+        facts, self.p0_provenance = load_p0(artifacts)
         self.p0 = {s: ((p0_model(facts, s) or {}).get("formats", {}).get(Q4, {}).get("aggregate", {})
                        .get("host_pass_seconds")) for s in SHORTS} if facts else {}
         self.p0_hash = {s: ((p0_model(facts, s) or {}).get("seconds") or {}).get("hash") for s in SHORTS} \
@@ -2191,7 +2204,7 @@ class PlanSources:
                               "servers_min": servers_s / 60})
 
     def cmd(self, step):
-        """(seconds, [source]) of a W8 command: a tracked report first, else the largest of the private records."""
+        """(seconds, [source]) of a W8 command: an archived report first, else the largest of the private records."""
         for path, sha, steps in self.tracked:
             if step in steps:
                 return steps[step], [{"kind": "a", "file": path, "sha256": sha,
@@ -2315,7 +2328,7 @@ def plan_rows(args, root, src):
     def setup_rows(session, shorts, note):
         row(session, "setup", f"SHA-256 of the {' and '.join(shorts)} weights ({note})", 1,
             ("assume", sum(src.p0_hash.get(s) or 0.0 for s in shorts) or None, "the local P0 hash seconds of "
-             f"{' and '.join(shorts)} (tracked P0 facts models[].seconds.hash); not a cloud measurement"), "setup")
+             f"{' and '.join(shorts)} (archived P0 facts models[].seconds.hash); not a cloud measurement"), "setup")
 
     def serve_rows(session, campaign):
         row(session, campaign, "mini q8_0 export of the served request bodies", 1,
@@ -2476,9 +2489,9 @@ def session_summary(args, rs, title):
 
 def plan_report(args, root):
     """The forecast of every session from its sources; minutes and seconds only, nothing measured here."""
-    src = PlanSources(root, args.w8_raw)
+    src = PlanSources(root, args.w8_raw, root / args.measurement_artifacts)
     rows, facts = plan_rows(args, root, src)
-    out = {"scope": "planning estimate from W8 records (a tracked, b private) and explicit assumptions (c); the P0 "
+    out = {"scope": "planning estimate from W8 records (a archived, b private) and explicit assumptions (c); the P0 "
                     "q4_k host pass per q4_k load is an uncalibrated allowance, not a measured engine overhead or a "
                     "bound; GPU kernels, dequantization, cloud CPU and the warm-up D2H check are unknown; nothing "
                     "here is a measurement of this campaign",
@@ -2519,8 +2532,14 @@ def print_plan(args, root):
     print(f"\nthis invocation's --campaigns {' '.join(args.campaigns)}: session {', '.join(chosen)}; every session "
           "of the plan follows (S1 -> parent audit of the raw data -> S2 -> S3; after an actual code fix only, the one "
           "conditional revalidation session: the revalidate invocation R1 and the affected families R2 / R3)")
-    print(f"\nsources: (a) tracked W8 report, (b) private raw W8 record (--w8-raw: {len(args.w8_raw)} given), "
-          "(c) explicit assumption; P0 allowance per q4_k load (tracked P0 facts "
+    artifacts = root / args.measurement_artifacts
+    print(f"\narchived measurement inputs (--measurement-artifacts {rel(root, artifacts)}, "
+          f"{'a directory' if artifacts.is_dir() else 'NOT FOUND'}; docs/MEASUREMENT_ARTIFACTS.md):")
+    for path in (P0_FACTS, W8_COMMANDS, W8_NONE_FACTS, W8_Q8_ORIGINAL):
+        f = artifacts / path
+        print(f"  {path}: {'sha256 ' + mg.sha256(f) if f.is_file() else 'missing'}")
+    print(f"\nsources: (a) archived W8 report, (b) private raw W8 record (--w8-raw: {len(args.w8_raw)} given), "
+          "(c) explicit assumption; P0 allowance per q4_k load (archived P0 facts "
           f"{P0_FACTS}, sha256 {plan['p0_facts']['sha256']}, usable {plan['p0_facts']['usable']}): "
           f"{ {k: v for k, v in plan['p0_allowance_seconds_per_load'].items()} } s")
     print(plan["scope"])
@@ -2655,6 +2674,9 @@ def parse_args():
                          "of it and --deadline-minutes applies")
     ap.add_argument("--no-weight-hash", action="store_true",
                     help="skip the SHA-256 of the weights (recorded; P0 equality and revalidation become GAPs)")
+    ap.add_argument("--measurement-artifacts", type=Path, default=MEASUREMENT_ARTIFACTS,
+                    help="root of the extracted archived measurement inputs (DIR/reports/...: P0 facts, W8 plan "
+                         "reports; docs/MEASUREMENT_ARTIFACTS.md); relative to the repository root; never downloaded")
     ap.add_argument("--plan-only", action="store_true", help="print the plan and forecast; no GPU, binary or network")
     ap.add_argument("--w8-raw", type=Path, action="append", default=[],
                     help="plan: a private raw W8 run directory (commands.jsonl; server telemetry), repeatable")
@@ -2829,7 +2851,7 @@ def main():
     ctx.exports, ctx.export_runs, ctx.q8_diagnostics, ctx.results, ctx.ran_steps = {}, {}, {}, {}, []
     ctx.q4_objects, ctx.served_inputs, ctx.setup_stop = {}, None, None
     ctx.previous, ctx.s1 = previous, s1
-    ctx.p0, ctx.p0_provenance = load_p0(root)
+    ctx.p0, ctx.p0_provenance = load_p0(root / args.measurement_artifacts)
     ctx.bench_items = {s: mg.line_count(reference(ctx, s) / "bench.jsonl") for s in SHORTS}
     try:
         ctx.inputs900_summary = w8.write_900(root, out / "inputs-900", sorted(set(shorts)))
@@ -2843,7 +2865,8 @@ def main():
     fp = ctx.fp = fingerprint(rec, args, ctx, gpus)
     params = {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()
               if k not in ("base", "candidate", "out", "hf_home", "basal_home", "plan_only", "previous_run", "s1_run",
-                           "prepare_900", "w8_raw", "plan_json", "base_provenance", "candidate_provenance")}
+                           "prepare_900", "w8_raw", "plan_json", "base_provenance", "candidate_provenance",
+                           "measurement_artifacts")}
     params = w8.scrubbed(params)
     params["env"] = {k: ctx.env[k] for k in ("BASAL_NO_UPDATE_CHECK", "CUDA_DEVICE_ORDER", "HF_HUB_OFFLINE")}
     mg.write_json(out / "run.json", {"fingerprint": fp, "parameters": params, "previous": previous, "s1_evidence": s1,

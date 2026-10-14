@@ -1,5 +1,13 @@
 # W4A16 S1: jakość i poprawność q4_k, 2026-10-12
 
+> **Dane JSON w archiwum.** Pliki `facts.json`, `quality-44-34.json`, `quality-900.json` i `validation.json` z
+> tego katalogu są poza Gitem, w archiwum pomiarów `multigpu-2026-10-14` (SHA-256 `71acff72…`), pod ścieżką
+> `reports/w4a16-s1-2026-10-12/<plik>`. Odwołania do nich w tekście dotyczą plików z archiwum. Pobieranie i
+> sumy kontrolne: [MEASUREMENT_ARTIFACTS.md](../../docs/MEASUREMENT_ARTIFACTS.md). Archiwum zawiera też wersję
+> tego pliku sprzed dopisania tej noty. Przeniesienie danych nie jest nowym pomiarem: liczby, statusy i
+> rozstrzygnięcia raportu są bez zmian. Bieżący stan funkcji i wyników opisuje
+> [zestawienie z 2026-10-14](../multigpu-results-2026-10-14/README.md).
+
 Stan: zamrożony pakiet danych do niezależnego review. To nie jest akceptacja
 etapu 04 ani decyzja M2. Ścisłe kryterium FP32 dla `q4_k` ma wynik FAIL na
 obu modelach (klasa `quality-criterion`). Wymagana jest decyzja użytkownika

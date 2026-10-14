@@ -1,5 +1,13 @@
 # W4A16 P0 — diagnostyka wag, 2026-10-12
 
+> **Dane JSON w archiwum.** Pliki `facts.json`, `provenance.json` i `validation.json` z tego katalogu są poza
+> Gitem, w archiwum pomiarów `multigpu-2026-10-14` (SHA-256 `71acff72…`), pod ścieżką
+> `reports/w4a16-p0-2026-10-12/<plik>`. Odwołania do nich w tekście dotyczą plików z archiwum. Pobieranie i
+> sumy kontrolne: [MEASUREMENT_ARTIFACTS.md](../../docs/MEASUREMENT_ARTIFACTS.md). Archiwum zawiera też wersję
+> tego pliku sprzed dopisania tej noty. Przeniesienie danych nie jest nowym pomiarem: liczby, statusy i
+> rozstrzygnięcia raportu są bez zmian. Bieżący stan funkcji i wyników opisuje
+> [zestawienie z 2026-10-14](../multigpu-results-2026-10-14/README.md).
+
 Stan: pakiet do niezależnego review danych. Narzędzie wskazuje q4_k; koordynator zastosuje delegowaną regułę wyboru po zamknięciu review. Etap W4 i jakość modelu pozostają otwarte.
 
 Q4_K ma niższe R niż Q4_0 na obu przypiętych modelach. R = suma kwadratów błędu rekonstrukcji / suma kwadratów dokładnych wag bf16, po wszystkich czterech projekcjach każdej warstwy. Rekonstrukcja to przypięty Candle to_float → f16 RNE → f32; sumy f64 w kanonicznej kolejności z C=16. To wybór w przestrzeni wag; trafność i zachowanie odpowiedzi wymagają osobnej kampanii GPU.

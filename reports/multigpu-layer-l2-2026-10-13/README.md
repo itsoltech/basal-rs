@@ -1,5 +1,13 @@
 # Etap 05, podział warstw między GPU — sesja L2, 2026-10-13
 
+> **Dane JSON w archiwum.** Pliki `facts.json`, `provenance.json` i `validation.json` z tego katalogu są poza
+> Gitem, w archiwum pomiarów `multigpu-2026-10-14` (SHA-256 `71acff72…`), pod ścieżką
+> `reports/multigpu-layer-l2-2026-10-13/<plik>`. Odwołania do nich w tekście dotyczą plików z archiwum.
+> Pobieranie i sumy kontrolne: [MEASUREMENT_ARTIFACTS.md](../../docs/MEASUREMENT_ARTIFACTS.md). Archiwum
+> zawiera też wersję tego pliku sprzed dopisania tej noty. Przeniesienie danych nie jest nowym pomiarem:
+> liczby, statusy i rozstrzygnięcia raportu są bez zmian. Bieżący stan funkcji i wyników opisuje
+> [zestawienie z 2026-10-14](../multigpu-results-2026-10-14/README.md).
+
 Stan: raport danych z jednej zakończonej sesji L2. Sesja mierzy regresję
 toru domyślnego jednego GPU i opisuje kompromis podziału `none`. To nie jest
 akceptacja etapu 05 ani końcowe review. Sesja L3 (tryby kwantyzowane) jest

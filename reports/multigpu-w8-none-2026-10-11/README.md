@@ -1,5 +1,13 @@
 # W8: wydajność none, zamknięty wycinek pomiaru
 
+> **Dane JSON w archiwum.** Plik `facts.json` z tego katalogu jest poza Gitem, w archiwum pomiarów
+> `multigpu-2026-10-14` (SHA-256 `71acff72…`), pod ścieżką `reports/multigpu-w8-none-2026-10-11/<plik>`.
+> Odwołania do nich w tekście dotyczą plików z archiwum. Pobieranie i sumy kontrolne:
+> [MEASUREMENT_ARTIFACTS.md](../../docs/MEASUREMENT_ARTIFACTS.md). Archiwum zawiera też wersję tego pliku
+> sprzed dopisania tej noty. Przeniesienie danych nie jest nowym pomiarem: liczby, statusy i rozstrzygnięcia
+> raportu są bez zmian. Bieżący stan funkcji i wyników opisuje
+> [zestawienie z 2026-10-14](../multigpu-results-2026-10-14/README.md).
+
 Nie wykazano powtarzalnego spadku przy zmierzonej rozdzielczości.
 Osiem metryk gorszych dla B w obu parach rundy podstawowej przestało
 być jednokierunkowo gorsze po wymaganej rundzie potwierdzenia.

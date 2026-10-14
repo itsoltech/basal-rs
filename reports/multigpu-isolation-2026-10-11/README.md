@@ -1,5 +1,13 @@
 # Izolacja dwóch modeli i koszt obsługi wielu GPU
 
+> **Dane JSON w archiwum.** Plik `measurements.json` z tego katalogu jest poza Gitem, w archiwum pomiarów
+> `multigpu-2026-10-14` (SHA-256 `71acff72…`), pod ścieżką `reports/multigpu-isolation-2026-10-11/<plik>`.
+> Odwołania do nich w tekście dotyczą plików z archiwum. Pobieranie i sumy kontrolne:
+> [MEASUREMENT_ARTIFACTS.md](../../docs/MEASUREMENT_ARTIFACTS.md). Archiwum zawiera też wersję tego pliku
+> sprzed dopisania tej noty. Przeniesienie danych nie jest nowym pomiarem: liczby, statusy i rozstrzygnięcia
+> raportu są bez zmian. Bieżący stan funkcji i wyników opisuje
+> [zestawienie z 2026-10-14](../multigpu-results-2026-10-14/README.md).
+
 Na dwóch RTX 6000 Ada mini na GPU 1 zachowało zbliżone opóźnienia przy
 obciążonym 4.5B na GPU 0: zmiana mediany p99 wyniosła −0,12%, +0,37%
 i −0,86% dla trzech rodzajów ruchu. Porównanie starej i nowej binarki
@@ -116,7 +124,7 @@ wpływają na jego skrót. Binarka kandydata była zbudowana przed commitem,
 więc jej tekst wersji zawiera bazowy SHA; identyfikuje ją SHA-256 binarki.
 
 Odciski modeli, binarek, tabel, wejść i narzędzi oraz cztery wartości
-każdej statystyki A/B są w [measurements.json](measurements.json).
+każdej statystyki A/B są w `measurements.json`.
 Surowe dane pozostają poza Gitem. Runner przeszedł trzy rundy review
 Opus 5.5 high i GPT 6 Astra xhigh; ostatnia bez konkretnych uwag.
 Dwa review dowodów i raportu przez te same modele zakończyły się

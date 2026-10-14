@@ -1,5 +1,16 @@
 # Podział warstw — zestawienie pomiarów bieżących źródeł, 2026-10-14
 
+> **Dane JSON w archiwum.** Pliki `facts.json`, `provenance.json` i `validation.json` sesji L1, L2 i L3 z tabeli
+> „Pliki (SHA-256)” są poza Gitem, w archiwum pomiarów `multigpu-2026-10-14` (SHA-256 `71acff72…`), pod tymi samymi
+> ścieżkami w `reports/`. Sumy plików tych sesji w tabeli dotyczą wersji z chwili zestawienia. Dokładnie te wersje,
+> także plików Markdown, są w archiwum. Pliki Markdown sesji mają w Gicie później dopisaną notę o archiwum, więc ich
+> bieżące sumy są inne. Dwóch ostatnich plików tabeli (`multigpu-layer-2026-10-13/README.md` i `SCOPE.md`) nie ma w
+> archiwum; są w Gicie bez zmian. Opis końca zegara `load_s` w tym pliku poprawia [erratum `load_s`](LOAD_S.md).
+> Pobieranie i sumy kontrolne: [MEASUREMENT_ARTIFACTS.md](../../docs/MEASUREMENT_ARTIFACTS.md). Archiwum zawiera też
+> wersję tego pliku sprzed dopisania tej noty. Przeniesienie danych nie jest nowym pomiarem: liczby, statusy i
+> rozstrzygnięcia raportu są bez zmian. Bieżący stan funkcji i wyników opisuje
+> [zestawienie z 2026-10-14](../multigpu-results-2026-10-14/README.md).
+
 Stan: zestawienie trzech zakończonych sesji pomiarowych (L1, L2, L3)
 bieżącego kandydata etapu 05, źródła `831e68e0…` (66 plików). To nie jest
 nowy pomiar, akceptacja etapu 05 ani końcowe review. Niezależne końcowe

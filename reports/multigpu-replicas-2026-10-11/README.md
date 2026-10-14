@@ -1,5 +1,13 @@
 # Repliki jednego modelu na dwóch GPU
 
+> **Dane JSON w archiwum.** Plik `measurements.json` z tego katalogu jest poza Gitem, w archiwum pomiarów
+> `multigpu-2026-10-14` (SHA-256 `71acff72…`), pod ścieżką `reports/multigpu-replicas-2026-10-11/<plik>`.
+> Odwołania do nich w tekście dotyczą plików z archiwum. Pobieranie i sumy kontrolne:
+> [MEASUREMENT_ARTIFACTS.md](../../docs/MEASUREMENT_ARTIFACTS.md). Archiwum zawiera też wersję tego pliku
+> sprzed dopisania tej noty. Przeniesienie danych nie jest nowym pomiarem: liczby, statusy i rozstrzygnięcia
+> raportu są bez zmian. Bieżący stan funkcji i wyników opisuje
+> [zestawienie z 2026-10-14](../multigpu-results-2026-10-14/README.md).
+
 Dwie repliki mini na RTX 6000 Ada dały 2,06× i 2,07× przepustowość jednej
 repliki przy 16 i 32 klientach. p99 zmalało odpowiednio z 246,822 do
 140,742 ms i z 444,795 do 252,106 ms. Wszystkie mierzone odpowiedzi były
@@ -176,7 +184,7 @@ się przy tej korekcie. Diff Rust względem `6ef86665`, z prefiksami c/w,
 ma SHA `959a0c8d…`; binarka bazowa ma SHA `f8528cc9…`, kandydat
 `289a2eac…`. Wersja tekstowa wskazuje HEAD z chwili budowy przed
 commitem, dlatego binarki identyfikuje pełny SHA-256 w
-[measurements.json](measurements.json).
+`measurements.json`.
 
 Kod i runner przeszły review Opus 5.5 high i GPT 6 Astra xhigh;
 ostatnie R5 bez konkretnych uwag. Kontrole: fmt, Clippy, Rustdoc,

@@ -7,15 +7,22 @@ raportów; surowe dane przechowujemy poza Gitem. Starsze katalogi mogą
 zawierać dane pomiarowe.
 Metodyka: [docs/BENCHMARKS.md](../docs/BENCHMARKS.md).
 
+Pliki JSON z wynikami nowych pomiarów nie trafiają do Gita. Są w archiwach w
+Hugging Face Storage Bucket; pobieranie i sumy kontrolne opisuje
+[MEASUREMENT_ARTIFACTS.md](../docs/MEASUREMENT_ARTIFACTS.md). Dotyczy to
+raportów wiele GPU, W8A16 i W4A16 z 2026-10-11 – 2026-10-14.
+
 Odsyłacze starszych raportów do lokalnego katalogu `.itsol/` mają
 [publiczne odpowiedniki](multigpu-link-corrections-2026-10-14/README.md).
 
-## Kampanie optymalizacji
+## Wiele GPU i kwantyzacja wag
+
+Bieżący stan funkcji, wyników, sygnałów i ograniczeń:
+[zestawienie z 2026-10-14](multigpu-results-2026-10-14/README.md).
 
 | Katalog | Zawartość |
 |---|---|
-| [inference-campaign-2026-10-09](inference-campaign-2026-10-09/README.md) | H100 i RTX 6000 Ada: SiLU, RMSNorm, cache stanów, budżet partii i harmonogram; zgodność wyników, latency i throughput |
-| [inference-profile-h100-2026-10-09](inference-profile-h100-2026-10-09/README.md) | H100: Nsight Systems/Compute, SW128 w WGMMA, bitowa zgodność, latency/throughput oraz HTTP A/B/B/A |
+| [multigpu-results-2026-10-14](multigpu-results-2026-10-14/README.md) | zestawienie: placement, repliki, podział warstw, `q8_0` i `q4_k`; zgodność, jakość, pamięć, czas, sygnały i rozstrzygnięcia |
 | [multigpu-placement-2026-10-11](multigpu-placement-2026-10-11/README.md) | 4.5B i mini na dwóch RTX 6000 Ada: bitowa zgodność, przypisanie modeli do GPU, ruch równoległy i widoczność CUDA |
 | [multigpu-isolation-2026-10-11](multigpu-isolation-2026-10-11/README.md) | RTX 6000 Ada: mini bez/z obciążonym 4.5B, stare/nowe single-GPU, identyczny ruch A/B/B/A i pełne odpowiedzi |
 | [multigpu-replicas-2026-10-11](multigpu-replicas-2026-10-11/README.md) | RTX 6000 Ada: jedna i dwie repliki mini, zgodność i routing, single-GPU A/B z obserwowanym spadkiem mediany przepustowości |
@@ -25,6 +32,23 @@ Odsyłacze starszych raportów do lokalnego katalogu `.itsol/` mają
 | [multigpu-layer-l2-revalidation-2026-10-14](multigpu-layer-l2-revalidation-2026-10-14/README.md) | podział warstw L2: regresja `none` na jednym GPU, kompromis podziału; [decyzja użytkownika](multigpu-layer-l2-revalidation-2026-10-14/DECISION.md) |
 | [multigpu-layer-l3-revalidation-2026-10-14](multigpu-layer-l3-revalidation-2026-10-14/README.md) | podział warstw L3: regresja `q8_0` i `q4_k` na jednym GPU, podział w tych trybach; [rozstrzygnięcie koordynatora](multigpu-layer-l3-revalidation-2026-10-14/DECISION.md) |
 | [multigpu-layer-2026-10-13](multigpu-layer-2026-10-13/README.md) | podział warstw, poprzedni kandydat (historia): zestawienie L1–L3 z [poprawką zakresu](multigpu-layer-2026-10-13/SCOPE.md) |
+| [multigpu-layer-l1-2026-10-13](multigpu-layer-l1-2026-10-13/README.md), [L2](multigpu-layer-l2-2026-10-13/README.md), [L3](multigpu-layer-l3-2026-10-13/README.md) | sesje podziału warstw poprzedniego kandydata (historia) |
+| [w8a16-2026-10-11](w8a16-2026-10-11/README.md) | końcowy pomiar opcjonalnego `q8_0`: pamięć, czas, profile, poprawność |
+| [multigpu-w8-quality-2026-10-11](multigpu-w8-quality-2026-10-11/README.md) | jakość `q8_0` wobec FP32: granice evidence, 900 pytań |
+| [multigpu-w8-none-2026-10-11](multigpu-w8-none-2026-10-11/README.md) | wydajność `none` po zmianach W8 |
+| [multigpu-w8-original-2026-10-11](multigpu-w8-original-2026-10-11/README.md) | pierwsza kampania W8 z zachowanymi lukami (historia) |
+| [w4a16-p0-2026-10-12](w4a16-p0-2026-10-12/README.md) | wybór formatu 4-bit z błędu rekonstrukcji wag |
+| [w4a16-s1-2026-10-12](w4a16-s1-2026-10-12/README.md) | jakość i poprawność eksperymentalnego `q4_k` |
+| [w4a16-s2-2026-10-12](w4a16-s2-2026-10-12/README.md) | wydajność `none` i `q4_k` wobec f16 |
+| [w4a16-s3-2026-10-12](w4a16-s3-2026-10-12/README.md) | wydajność `q8_0` i `q4_k` wobec `q8_0`; decyzja użytkownika |
+| [multigpu-link-corrections-2026-10-14](multigpu-link-corrections-2026-10-14/README.md) | publiczne odpowiedniki odsyłaczy do lokalnego `.itsol/` |
+
+## Kampanie optymalizacji
+
+| Katalog | Zawartość |
+|---|---|
+| [inference-campaign-2026-10-09](inference-campaign-2026-10-09/README.md) | H100 i RTX 6000 Ada: SiLU, RMSNorm, cache stanów, budżet partii i harmonogram; zgodność wyników, latency i throughput |
+| [inference-profile-h100-2026-10-09](inference-profile-h100-2026-10-09/README.md) | H100: Nsight Systems/Compute, SW128 w WGMMA, bitowa zgodność, latency/throughput oraz HTTP A/B/B/A |
 
 ## basal-1.5-max
 

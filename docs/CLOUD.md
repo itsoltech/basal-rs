@@ -35,7 +35,7 @@ python3 tools/cloud/basal-cloud.py push
 python3 tools/cloud/basal-cloud.py sync tools/bench tools/perf crates/basal-cli/gemm-tables \
   reports/reference-basal-1.5-4.5B-fp32 reports/reference-1.5-max-fp32
 python3 tools/cloud/basal-cloud.py run 'nohup bash tools/perf/run-wg-cloud.sh > wg.log 2>&1 < /dev/null &'
-python3 tools/cloud/basal-cloud.py pull out/wg reports/NOWY-RAPORT
+python3 tools/cloud/basal-cloud.py pull out/wg .cache/cloud/wg
 python3 tools/cloud/basal-cloud.py down
 python3 tools/cloud/basal-cloud.py ls                               # nic nie powinno zostać
 ```
@@ -309,6 +309,32 @@ tabele GEMM i wejścia, ukończony eksport `q8_0` tree na GPU 0 każdego modelu)
 i zapisuje SHA-256 kandydata, odcisk źródeł oraz eksportów obu sesji. Surowe
 wyniki zawierają ścieżki: pobieraj je do `.cache/cloud`.
 
+Wyniki JSON wcześniejszych pomiarów multi-GPU (W8, W4A16, podział warstw)
+nie są w Git. Archiwum z tymi plikami, jego SHA-256 i sposób pobrania opisuje
+[MEASUREMENT_ARTIFACTS.md](MEASUREMENT_ARTIFACTS.md). Runnery potrzebują
+czterech plików z tego archiwum. `run-w4a16-cloud.py` czyta fakty P0
+(`reports/w4a16-p0-2026-10-12/facts.json`, SHA-256 przypięte w runnerze) oraz
+trzy raporty W8 dla `--plan-only` (`reports/w8a16-2026-10-11/commands.json`,
+`reports/multigpu-w8-none-2026-10-11/facts.json`,
+`reports/multigpu-w8-original-2026-10-11/perf-q8-original.json`).
+`run-layer-split-cloud.py` czyta fakty P0. Oba runnery szukają tych plików pod
+tymi samymi ścieżkami `reports/...` w katalogu `--measurement-artifacts
+KATALOG`, czyli w katalogu, do którego rozpakowano archiwum. Domyślny katalog
+to `.cache/measurement-artifacts/multigpu-2026-10-14`; ścieżka względna
+liczy się od katalogu głównego repozytorium (na maszynie `/work`). Runnery
+niczego nie pobierają. Brak pliku daje ten sam wynik co dawniej brak pliku w
+Git: bez faktów P0 runner W4 zapisuje GAP, a runner podziału warstw odmawia
+uruchomienia sesji; bez raportu W8 krok planu nie ma źródła. `--plan-only`
+runnera W4 wypisuje, które z czterech plików znalazł, i ich SHA-256. Zapisy
+przebiegu podają ścieżkę logiczną `reports/...` i SHA-256, bez lokalnego
+katalogu. Przed sesją prześlij rozpakowany katalog na maszynę. Przesyłaj
+zwykły katalog, nie dowiązanie symboliczne, bo `rsync` skopiowałby samo
+dowiązanie:
+
+```sh
+python3 tools/cloud/basal-cloud.py sync .cache/measurement-artifacts/multigpu-2026-10-14
+```
+
 `run-w4a16-cloud.py` (W4A16, `quantization: q4_k`) korzysta bez zmian z
 `run-w8a16-cloud.py` (a przez niego z trzech powyższych runnerów) i z
 `tools/bench/ab.py`; przed startem sprawdza ich SHA-256. Sesje to osobne
@@ -345,9 +371,9 @@ podaje tak, jak definiuje ją plan: jedna maszyna z wywołaniem `revalidate`
 (R1) i dotkniętymi rodzinami (R2 `none`, R3 `q8_0`), w wariantach R1+R2, R1+R3
 i R1+R2+R3. Osobne maszyny R1, R2 i R3 są tylko proponowanym podziałem: przed
 zakupem wymaga on rewizji planu i prognozy przez koordynatora. Szacunek czasu
-każdego kroku ma źródło: (a) śledzony raport W8 z SHA-256 i polem, (b)
-prywatny surowy rekord W8 (`--w8-raw KATALOG`, ścieżka względna i SHA-256)
-albo (c) jawne założenie. Czas procesu `q4_k` to czas tego samego procesu
+każdego kroku ma źródło: (a) zarchiwizowany raport W8 (`--measurement-artifacts`)
+z SHA-256 i polem, (b) prywatny surowy rekord W8 (`--w8-raw KATALOG`,
+ścieżka względna i SHA-256) albo (c) jawne założenie. Czas procesu `q4_k` to czas tego samego procesu
 `q8_0` z W8 plus bezwzględny czas toru hosta Q4_K z P0 na każde ładowanie:
 nieskalibrowany zapas, nie zmierzony narzut ani granica. Runner podaje też,
 czy sesja z założonym przygotowaniem maszyny i rezerwą (`--bootstrap-minutes`,
@@ -376,7 +402,8 @@ niego runnery W8, replik, izolacji i rozmieszczenia) oraz `tools/bench/ab.py`
 i przed załadowaniem sprawdza ich SHA-256; `cuda-reserve.py` uruchamia jako
 osobny proces tylko w przypiętej wersji. Wymagania maszyny jak dla runnera
 W4 (drzewo w `/work`, wagi w `HF_HOME`, biblioteki CUDA w `BASAL_HOME`,
-wbudowane tabele GEMM karty). `--base` to przebudowana binarka `d42a400`,
+wbudowane tabele GEMM karty, fakty P0 w `--measurement-artifacts`).
+`--base` to przebudowana binarka `d42a400`,
 `--candidate` binarka z podziałem, obie z jednego przepisu; wymagane są obie
 sumy `--expect-*-sha256`, `--base-label`, `--candidate-label` i
 `--deadline-minutes`. Jedno wywołanie to jedna sesja, a koordynator audytuje
@@ -449,6 +476,7 @@ tożsamość nie jest ustalona. Wcześniejsze sesje poprzedniego kandydata
 pozostają historią. Każda sesja GPU wymaga zgody użytkownika na kartę i
 budżet według [Zgoda i budżet](#zgoda-i-budżet).
 
-Do `reports/` zapisuj krótkie wyniki i zakres weryfikacji. Pełne eksporty, logi
-i profile pobieraj do ignorowanego `.cache/` i archiwizuj poza Gitem.
+Do `reports/` zapisuj opis wyników i zakres weryfikacji w Markdown. Pełne
+eksporty, logi, profile i pliki wyników JSON pobieraj do ignorowanego `.cache/`
+i archiwizuj poza Gitem ([MEASUREMENT_ARTIFACTS.md](MEASUREMENT_ARTIFACTS.md)).
 Czasów spod profilera nie używaj jako pomiaru przyspieszenia inferencji.

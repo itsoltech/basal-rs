@@ -1,5 +1,14 @@
 # W8A16 — końcowy pomiar opcjonalnego Q8
 
+> **Dane JSON w archiwum.** Pliki `commands.json`, `correctness.json`, `perf-q8.json`, `profile-memory.json`,
+> `provenance.json`, `raw-manifest.json` i `static-validation.json` z tego katalogu są poza Gitem, w archiwum
+> pomiarów `multigpu-2026-10-14` (SHA-256 `71acff72…`), pod ścieżką `reports/w8a16-2026-10-11/<plik>`.
+> Odwołania do nich w tekście dotyczą plików z archiwum. Pobieranie i sumy kontrolne:
+> [MEASUREMENT_ARTIFACTS.md](../../docs/MEASUREMENT_ARTIFACTS.md). Archiwum zawiera też wersję tego pliku
+> sprzed dopisania tej noty. Przeniesienie danych nie jest nowym pomiarem: liczby, statusy i rozstrzygnięcia
+> raportu są bez zmian. Bieżący stan funkcji i wyników opisuje
+> [zestawienie z 2026-10-14](../multigpu-results-2026-10-14/README.md).
+
 `q8_0` zmniejsza rezydentną pamięć projekcji kosztem czasu i jawnych
 różnic jakości. Zalecanym domyślnym trybem pozostaje `none`.
 Ten pakiet łączy odnośniki do zamkniętych wcześniejszych dowodów

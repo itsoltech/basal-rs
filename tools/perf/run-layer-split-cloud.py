@@ -24,7 +24,9 @@ Imported unchanged and SHA-256-checked before they are loaded: tools/perf/run-w4
 replicas, isolation and placement runners, and tools/bench/ab.py; tools/perf/cuda-reserve.py (the capacity helper,
 run as its own process) must have the SHA-256 pinned here (RESERVE_HELPER_SHA256). Prerequisites as for the W4
 runner: the tree synced to /work, weights in HF_HOME=/data/hf, CUDA libraries in BASAL_HOME=/data/basal, the bundled
-GEMM tables of the card.
+GEMM tables of the card, and for a run the approved P0 facts (reports/w4a16-p0-2026-10-12/facts.json) under
+--measurement-artifacts DIR (the archive of docs/MEASUREMENT_ARTIFACTS.md extracted there, not in Git; a relative
+DIR is taken from the repository root, so sync it to /work; missing: the run is refused, nothing is downloaded).
 
 Sessions (one campaign per invocation; the parent audits the raw data between them):
   l1  units C1-C6 (--units narrows it only for a reviewed revalidation of whole units). Hard cap 85 min from the
@@ -153,7 +155,7 @@ W4_RUNNER = HERE.with_name("run-w4a16-cloud.py")
 RESERVE_HELPER = HERE.with_name("cuda-reserve.py")
 # the helpers this runner was written against, relative to the repository root (checked before loading)
 HELPERS_SHA256 = {
-    "tools/perf/run-w4a16-cloud.py": "97e9df05d8b07e7a72c0e4011db9555f45ea88888a5a71b3e6d27837d8ffc917",
+    "tools/perf/run-w4a16-cloud.py": "10dbe0b28bf9f5a8236dc267982ff386434fe0a6dfc13fdc68381ef51719ef74",
     "tools/perf/run-w8a16-cloud.py": "92b47c9e341f47fe7a538cbd42a0f0e152ae7199720bda2b5d15f79f83d945ea",
     "tools/perf/run-replicas-cloud.py": "cb22ac7a498522374c4ea0f09cbbb6317a657acf70f05299f182552c332963dc",
     "tools/perf/run-isolation-cloud.py": "c460aee1b21da0e3a8418f9d7c19fc7b4cf5e1d84ebdfe43f98456fb9ca0f582",
@@ -163,6 +165,8 @@ HELPERS_SHA256 = {
 RESERVE_HELPER_PATH = "tools/perf/cuda-reserve.py"  # run as its own process; this exact version only
 RESERVE_HELPER_SHA256 = "ebea01edcd9ff59320fd31c9c22fb8863141e3f19c49088230eb9d9ac04cf090"
 SPLIT_SOURCE = "crates/basal-gpu/src/split.rs"
+# the W4 runner's MEASUREMENT_ARTIFACTS (its default root of the archived P0 facts; parsed before it is imported)
+MEASUREMENT_ARTIFACTS = Path(".cache/measurement-artifacts/multigpu-2026-10-14")
 
 # --------------------------------------------------------------------------- the shared engine/runner contract
 
@@ -3080,6 +3084,9 @@ def parse_args():
                     help="optional absolute end (Unix time) of the runner's share of the machine's life")
     ap.add_argument("--no-weight-hash", action="store_true",
                     help="skip the SHA-256 of the weights (recorded; P0 equality and l1 identity become GAPs)")
+    ap.add_argument("--measurement-artifacts", type=Path, default=MEASUREMENT_ARTIFACTS,
+                    help="run: root of the extracted archived measurement inputs (DIR/reports/...: the P0 facts; "
+                         "docs/MEASUREMENT_ARTIFACTS.md); relative to the repository root; never downloaded")
     ap.add_argument("--plan-only", action="store_true", help="print the plan and forecast; no GPU, binary or network")
     ap.add_argument("--forecast", type=Path, help="plan: the private forecast JSON (its sources name the W4 records)")
     ap.add_argument("--plan-json", type=Path, help="plan: also write the plan as JSON to this new file")
@@ -3140,11 +3147,14 @@ def validate(ap, args, root):
     if not helper.is_file() or mg.sha256(helper) != RESERVE_HELPER_SHA256:
         ap.error(f"{RESERVE_HELPER_PATH}: SHA-256 {mg.sha256(helper) if helper.is_file() else None}, expected "
                  f"{RESERVE_HELPER_SHA256}")
-    missing = [p for p in (w8.SEQUENTIAL, w8.LOCK, w8.BUILD_BENCHMARK, w8.AB, w8.LONG, w4.P0_FACTS,
+    missing = [p for p in (w8.SEQUENTIAL, w8.LOCK, w8.BUILD_BENCHMARK, w8.AB, w8.LONG,
                            *(w8.DECISIONS.format(s) for s in SHORTS),
                            *(w8.REFERENCE.format(s) + "/bench.jsonl" for s in SHORTS)) if not (root / p).is_file()]
     if missing:
         ap.error(f"run in the repository root (/work): missing {missing}")
+    if not (root / args.measurement_artifacts / w4.P0_FACTS).is_file():
+        ap.error(f"missing {w4.P0_FACTS} under --measurement-artifacts {args.measurement_artifacts} (the archived "
+                 "measurement inputs, docs/MEASUREMENT_ARTIFACTS.md)")
 
 
 def run_campaign(ap, args, root):
@@ -3247,7 +3257,7 @@ def run_campaign(ap, args, root):
     ctx.export_checks, ctx.http_ref_checks = {}, {}  # name -> (first, end) of its records in rec.checks
     ctx.http_ref_complete = {}  # key -> the reference session returned normally (reference_server)
     ctx.units = args.units if args.campaign == "l1" else []
-    ctx.p0, ctx.p0_provenance = w4.load_p0(root)
+    ctx.p0, ctx.p0_provenance = w4.load_p0(root / args.measurement_artifacts)
     ctx.bench_items = {s: mg.line_count(w4.reference(ctx, s) / "bench.jsonl") for s in SHORTS}
     try:
         ctx.inputs900_summary = w8.write_900(root, out / "inputs-900", list(SHORTS)) if args.campaign == "l1" else None
@@ -3261,7 +3271,8 @@ def run_campaign(ap, args, root):
     fp = ctx.fp = fingerprint(rec, args, ctx, gpus)
     params = {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()
               if k not in ("base", "candidate", "out", "hf_home", "basal_home", "plan_only", "l1_run", "prepare_900",
-                           "prepared_900", "plan_json", "forecast", "base_provenance", "candidate_provenance")}
+                           "prepared_900", "plan_json", "forecast", "base_provenance", "candidate_provenance",
+                           "measurement_artifacts")}
     params = w8.scrubbed(params)
     params["env"] = {k: ctx.env[k] for k in ("BASAL_NO_UPDATE_CHECK", "CUDA_DEVICE_ORDER", "HF_HUB_OFFLINE")}
     mg.write_json(out / "run.json", {"fingerprint": fp, "parameters": params, "l1_evidence": l1,

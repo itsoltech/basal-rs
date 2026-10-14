@@ -10,3 +10,9 @@ target-clippy/
 *.nsys-rep
 *.sqlite
 tools/bench/mixed.jsonl
+# Wyniki JSON raportów wiele GPU, W8A16 i W4A16 są w archiwum HF Storage
+# (docs/MEASUREMENT_ARTIFACTS.md); w Gicie zostaje Markdown. Nowe wyniki
+# pomiarów zapisujemy w .cache/measurement-artifacts/.
+/reports/multigpu-*/*.json
+/reports/w4a16-*/*.json
+/reports/w8a16-*/*.json

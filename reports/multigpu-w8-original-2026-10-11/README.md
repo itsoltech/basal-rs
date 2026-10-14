@@ -1,5 +1,14 @@
 # W8 — zamknięta pierwsza kampania, z zachowanymi lukami
 
+> **Dane JSON w archiwum.** Pliki `correctness.json`, `disposition.json`, `perf-q8-original.json`,
+> `quality-primary.json` i `raw-manifest.json` z tego katalogu są poza Gitem, w archiwum pomiarów
+> `multigpu-2026-10-14` (SHA-256 `71acff72…`), pod ścieżką `reports/multigpu-w8-original-2026-10-11/<plik>`.
+> Odwołania do nich w tekście dotyczą plików z archiwum. Pobieranie i sumy kontrolne:
+> [MEASUREMENT_ARTIFACTS.md](../../docs/MEASUREMENT_ARTIFACTS.md). Archiwum zawiera też wersję tego pliku
+> sprzed dopisania tej noty. Przeniesienie danych nie jest nowym pomiarem: liczby, statusy i rozstrzygnięcia
+> raportu są bez zmian. Bieżący stan funkcji i wyników opisuje
+> [zestawienie z 2026-10-14](../multigpu-results-2026-10-14/README.md).
+
 Ten pakiet opisuje historyczną kampanię z 2026-10-11, zamrożony runner R4
 i binarkę W8. Nie jest akceptacją całego etapu. Oryginalny wynik pozostaje
 `complete: false`, `exit_status: 1`: 302 PASS, 3 FAIL, 15 GAP, 4 SIGNAL.

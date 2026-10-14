@@ -1,5 +1,13 @@
 # Etap 05, podział warstw — rewalidacja L2 bieżącego kandydata, 2026-10-14
 
+> **Dane JSON w archiwum.** Pliki `facts.json`, `provenance.json` i `validation.json` z tego katalogu są poza
+> Gitem, w archiwum pomiarów `multigpu-2026-10-14` (SHA-256 `71acff72…`), pod ścieżką
+> `reports/multigpu-layer-l2-revalidation-2026-10-14/<plik>`. Odwołania do nich w tekście dotyczą plików z
+> archiwum. Pobieranie i sumy kontrolne: [MEASUREMENT_ARTIFACTS.md](../../docs/MEASUREMENT_ARTIFACTS.md).
+> Archiwum zawiera też wersję tego pliku sprzed dopisania tej noty. Przeniesienie danych nie jest nowym
+> pomiarem: liczby, statusy i rozstrzygnięcia raportu są bez zmian. Bieżący stan funkcji i wyników opisuje
+> [zestawienie z 2026-10-14](../multigpu-results-2026-10-14/README.md).
+
 Stan: raport danych z jednej zakończonej sesji L2 (pomiar 2026-10-13 UTC)
 dla bieżącego kandydata etapu 05 (źródła `831e68e0…`, 66 plików). Sesja
 mierzy regresję toru domyślnego jednego GPU i opisuje kompromis podziału

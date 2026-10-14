@@ -1,5 +1,14 @@
 # Podział warstw — erratum zakresu `load_s`, 2026-10-14
 
+> **Dane JSON w archiwum.** Fakty L3 (`reports/multigpu-layer-l3-revalidation-2026-10-14/facts.json`) są poza
+> Gitem, w archiwum pomiarów `multigpu-2026-10-14` (SHA-256 `71acff72…`). Numery wierszy podane niżej dotyczą
+> wersji plików zachowanych w archiwum. W Gicie każdy z trzech plików Markdown ma na początku dopisaną notę o
+> archiwum, która przesuwa numery wierszy: zestawienie o 11, raport L3 o 11, rozstrzygnięcie L3 o 10.
+> Pobieranie i sumy kontrolne: [MEASUREMENT_ARTIFACTS.md](../../docs/MEASUREMENT_ARTIFACTS.md). Archiwum
+> zawiera też wersję tego pliku sprzed dopisania tej noty. Przeniesienie danych nie jest nowym pomiarem:
+> liczby, statusy i rozstrzygnięcia raportu są bez zmian. Bieżący stan funkcji i wyników opisuje
+> [zestawienie z 2026-10-14](../multigpu-results-2026-10-14/README.md).
+
 Dotyczy czterech miejsc, które opisują koniec zegara `load_s` w wersji
 bazowej `d42a400` (BASE) i w kandydacie (CAND, źródła `831e68e0…`):
 
@@ -9,7 +18,7 @@ bazowej `d42a400` (BASE) i w kandydacie (CAND, źródła `831e68e0…`):
   „Poza oknem `dec_s`” (wiersze 475–479),
 - [rozstrzygnięcie L3](../multigpu-layer-l3-revalidation-2026-10-14/DECISION.md),
   punkt o `load_s` A i B (wiersze 95–98),
-- [fakty L3](../multigpu-layer-l3-revalidation-2026-10-14/facts.json), pole
+- fakty L3 (`reports/multigpu-layer-l3-revalidation-2026-10-14/facts.json` w archiwum), pole
   `memory_sources.load_s`.
 
 Te pliki pozostają bez zmian. To erratum zastępuje tylko opisane niżej

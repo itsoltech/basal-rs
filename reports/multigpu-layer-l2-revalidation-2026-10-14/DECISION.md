@@ -1,6 +1,14 @@
 # Decyzja użytkownika o wyniku L2, 2026-10-14
 
-Dotyczy [raportu L2](README.md) i [`facts.json`](facts.json). Raport i jego
+> **Dane JSON w archiwum.** Pliki `facts.json`, `provenance.json` i `validation.json` z tego katalogu są poza
+> Gitem, w archiwum pomiarów `multigpu-2026-10-14` (SHA-256 `71acff72…`), pod ścieżką
+> `reports/multigpu-layer-l2-revalidation-2026-10-14/<plik>`. Odwołania do nich w tekście dotyczą plików z
+> archiwum. Pobieranie i sumy kontrolne: [MEASUREMENT_ARTIFACTS.md](../../docs/MEASUREMENT_ARTIFACTS.md).
+> Archiwum zawiera też wersję tego pliku sprzed dopisania tej noty. Przeniesienie danych nie jest nowym
+> pomiarem: liczby, statusy i rozstrzygnięcia raportu są bez zmian. Bieżący stan funkcji i wyników opisuje
+> [zestawienie z 2026-10-14](../multigpu-results-2026-10-14/README.md).
+
+Dotyczy [raportu L2](README.md) i `facts.json` (w archiwum). Raport i jego
 pliki pozostają bez zmian. Zdanie raportu „Decyzja nie jest podjęta” opisuje
 stan sprzed tej decyzji; aktualny stan opisuje ten plik.
 

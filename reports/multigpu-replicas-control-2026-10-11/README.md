@@ -1,5 +1,13 @@
 # Repliki: kontrola porównania na jednym GPU
 
+> **Dane JSON w archiwum.** Plik `measurements.json` z tego katalogu jest poza Gitem, w archiwum pomiarów
+> `multigpu-2026-10-14` (SHA-256 `71acff72…`), pod ścieżką
+> `reports/multigpu-replicas-control-2026-10-11/<plik>`. Odwołania do nich w tekście dotyczą plików z
+> archiwum. Pobieranie i sumy kontrolne: [MEASUREMENT_ARTIFACTS.md](../../docs/MEASUREMENT_ARTIFACTS.md).
+> Archiwum zawiera też wersję tego pliku sprzed dopisania tej noty. Przeniesienie danych nie jest nowym
+> pomiarem: liczby, statusy i rozstrzygnięcia raportu są bez zmian. Bieżący stan funkcji i wyników opisuje
+> [zestawienie z 2026-10-14](../multigpu-results-2026-10-14/README.md).
+
 Te same binarki placementu i replik dały mediany 70,564 / 70,585
 odpowiedzi/s (+0,030%) przy 16 klientach i żądaniu zegara SM 1200 MHz.
 W ośmiu sąsiednich parach przepustowość B była wyższa sześć razy, niższa
@@ -76,7 +84,7 @@ p50 latency od −2,045% do +2,007%, p95 od −4,052% do +1,651%,
 p99 od −2,742% do +1,677%. B było gorsze w 2/8 parach przepustowości,
 3/8 p50 latency, 4/8 p95, 5/8 p99 oraz 4/8 p50 i 6/8 p99 kolejki.
 Wszystkie wartości, różnice par i rozkłady partii są w
-[measurements.json](measurements.json). Nie stosowano progu akceptacji.
+`measurements.json`. Nie stosowano progu akceptacji.
 
 Opisowo porównano również dokładnie równe histogramy wielkości partii.
 Histogram `{15: 1860, 10: 10, 1: 130}` wystąpił w 4/8 przypadków A

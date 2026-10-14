@@ -1,5 +1,14 @@
 # W8: dane do decyzji o jakości, pomiar częściowy
 
+> **Dane JSON w archiwum.** Pliki `endpoint-answers-4.5B.json`, `endpoint-answers-mini.json`, `facts.json`,
+> `quality-900-4.5B.json` i `quality-900-mini.json` z tego katalogu są poza Gitem, w archiwum pomiarów
+> `multigpu-2026-10-14` (SHA-256 `71acff72…`), pod ścieżką `reports/multigpu-w8-quality-2026-10-11/<plik>`.
+> Odwołania do nich w tekście dotyczą plików z archiwum. Pobieranie i sumy kontrolne:
+> [MEASUREMENT_ARTIFACTS.md](../../docs/MEASUREMENT_ARTIFACTS.md). Archiwum zawiera też wersję tego pliku
+> sprzed dopisania tej noty. Przeniesienie danych nie jest nowym pomiarem: liczby, statusy i rozstrzygnięcia
+> raportu są bez zmian. Bieżący stan funkcji i wyników opisuje
+> [zestawienie z 2026-10-14](../multigpu-results-2026-10-14/README.md).
+
 Q8_0 ma nowe różnice publicznych pól evidence względem FP32: mini zmienia
 3 pola w 2 pytaniach, 4.5B zmienia 2 pola w 1 pytaniu. Kontrolne F16
 z tej samej sesji zachowuje wszystkie granice evidence w tych pytaniach.
