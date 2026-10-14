@@ -11,6 +11,7 @@ Metodyka: [docs/BENCHMARKS.md](../docs/BENCHMARKS.md).
 
 | Katalog | Zawartość |
 |---|---|
+| [upstream-2.0-refactor-2026-10-14](upstream-2.0-refactor-2026-10-14/README.md) | review Opus 5.5, precyzja nieznanych repozytoriów, wspólne serializery 529/metadanych i bitowe A/B Intel |
 | [upstream-2.0-final-2026-10-14](upstream-2.0-final-2026-10-14/README.md) | końcowe buildy, CUDA/Metal/Intel, rzeczywiste act/certyfikaty i media, kontekst, pamięć i wydajność; niepowodzenia zachowane |
 | [upstream-2.0-metal-context-2026-10-14](upstream-2.0-metal-context-2026-10-14/README.md) | Metal 4.5B, 32768 tokenów: próba przerwana przez kontrolę pamięci; pochodna analiza progu noul z loadtestu |
 | [upstream-2.0-review-2026-10-14](upstream-2.0-review-2026-10-14/README.md) | niezależny przegląd, model domyślny 2.0, korekty opisów i budżetu levels, kontrole końcowych źródeł |

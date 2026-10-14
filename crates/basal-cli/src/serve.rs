@@ -404,14 +404,11 @@ async fn decide(
     let slot = Inflight(&app.inflight);
     if app.inflight.fetch_add(1, Ordering::SeqCst) >= app.max_inflight {
         // 529 as the TypeSafe API when it is overloaded; its SDKs (and most HTTP clients) retry 5xx with backoff
-        let body = match dialect {
-            Dialect::TypeSafe => json!({"detail": {"error_type": "overloaded_error",
-                                                   "message": "Too many requests in flight. Retry after a short delay."}}),
-            Dialect::Upstream => json!({"error": "overloaded: too many requests in flight"}),
-        };
-        let mut r = error_response(StatusCode::from_u16(529).unwrap(), body);
-        r.headers_mut().insert(axum::http::header::RETRY_AFTER, HeaderValue::from_static("1"));
-        return r;
+        return overloaded(
+            dialect,
+            "Too many requests in flight. Retry after a short delay.",
+            "overloaded: too many requests in flight",
+        );
     }
     let model = match model {
         Ok(m) => m,
@@ -420,15 +417,11 @@ async fn decide(
     let job_permit = match app.jobs.clone().try_acquire_owned() {
         Ok(permit) => permit,
         Err(_) => {
-            let body = match dialect {
-                Dialect::TypeSafe => {
-                    json!({"detail":{"error_type":"overloaded_error","message":"Too many queued or running requests. Retry after a short delay."}})
-                }
-                Dialect::Upstream => json!({"error":"overloaded: too many queued or running requests"}),
-            };
-            let mut response = error_response(StatusCode::from_u16(529).expect("529 is a valid HTTP status"), body);
-            response.headers_mut().insert(axum::http::header::RETRY_AFTER, HeaderValue::from_static("1"));
-            return response;
+            return overloaded(
+                dialect,
+                "Too many queued or running requests. Retry after a short delay.",
+                "overloaded: too many queued or running requests",
+            );
         }
     };
     let expanded = match basal_core::request::prepared_input_bytes(&body) {
@@ -439,15 +432,11 @@ async fn decide(
         match app.large_bodies.clone().try_acquire_owned() {
             Ok(permit) => large = Some(Arc::new(permit)),
             Err(_) => {
-                let body = match dialect {
-                    Dialect::TypeSafe => {
-                        json!({"detail":{"error_type":"overloaded_error","message":"Too many expanded requests in flight. Retry after a short delay."}})
-                    }
-                    Dialect::Upstream => json!({"error":"overloaded: too many expanded requests in flight"}),
-                };
-                let mut response = error_response(StatusCode::from_u16(529).expect("529 is a valid HTTP status"), body);
-                response.headers_mut().insert(axum::http::header::RETRY_AFTER, HeaderValue::from_static("1"));
-                return response;
+                return overloaded(
+                    dialect,
+                    "Too many expanded requests in flight. Retry after a short delay.",
+                    "overloaded: too many expanded requests in flight",
+                );
             }
         }
     }
@@ -456,15 +445,11 @@ async fn decide(
         match app.media_requests.clone().try_acquire_owned() {
             Ok(permit) => Some(permit),
             Err(_) => {
-                let body = match dialect {
-                    Dialect::TypeSafe => {
-                        json!({"detail":{"error_type":"overloaded_error","message":"Too many media requests in flight. Retry after a short delay."}})
-                    }
-                    Dialect::Upstream => json!({"error":"overloaded: too many media requests in flight"}),
-                };
-                let mut response = error_response(StatusCode::from_u16(529).expect("529 is a valid HTTP status"), body);
-                response.headers_mut().insert(axum::http::header::RETRY_AFTER, HeaderValue::from_static("1"));
-                return response;
+                return overloaded(
+                    dialect,
+                    "Too many media requests in flight. Retry after a short delay.",
+                    "overloaded: too many media requests in flight",
+                );
             }
         }
     } else {
@@ -550,14 +535,12 @@ async fn large_body_admission(State(app): State<Arc<App>>, mut request: Request,
         match app.large_bodies.clone().try_acquire_owned() {
             Ok(permit) => Some(Arc::new(permit)),
             Err(_) => {
-                let body = if request.uri().path() == "/v1/basal" {
-                    json!({"error":"overloaded: too many large requests in flight"})
-                } else {
-                    json!({"detail":{"error_type":"overloaded_error","message":"Too many large requests in flight. Retry after a short delay."}})
-                };
-                let mut response = error_response(StatusCode::from_u16(529).expect("529 is a valid HTTP status"), body);
-                response.headers_mut().insert(axum::http::header::RETRY_AFTER, HeaderValue::from_static("1"));
-                return response;
+                let dialect = if request.uri().path() == "/v1/basal" { Dialect::Upstream } else { Dialect::TypeSafe };
+                return overloaded(
+                    dialect,
+                    "Too many large requests in flight. Retry after a short delay.",
+                    "overloaded: too many large requests in flight",
+                );
             }
         }
     } else {
@@ -617,6 +600,37 @@ pub(crate) fn serve_benchmark<B: Backend + Send + 'static>(
     serve_inner(models, opts, Some((listener, stop)))
 }
 
+/// Preserve the dialect's overload body and the retry contract at every admission boundary.
+fn overloaded(dialect: Dialect, typesafe: &str, upstream: &str) -> Response {
+    let body = match dialect {
+        Dialect::TypeSafe => json!({"detail": {"error_type": "overloaded_error", "message": typesafe}}),
+        Dialect::Upstream => json!({"error": upstream}),
+    };
+    let mut response = error_response(StatusCode::from_u16(529).expect("529 is a valid HTTP status"), body);
+    response.headers_mut().insert(axum::http::header::RETRY_AFTER, HeaderValue::from_static("1"));
+    response
+}
+
+fn metadata_for_model<B: Backend>(engine: &Engine<B>) -> Value {
+    let manifest = &engine.manifest;
+    let temperatures: serde_json::Map<String, Value> =
+        manifest.temperatures.iter().map(|(k, v)| (k.as_str().into(), json!(v))).collect();
+    let mut metadata = json!({
+        "name": manifest.name,
+        "description": "basal typed-decision model (choice / noul / score / act / multi / tool), Polish and English",
+        "mode": "basal-rs",
+        "early_exit": [],
+        "prompt_format": manifest.prompt_format,
+        "orders": manifest.orders.metadata(),
+        "temperature_per_prim": temperatures
+    });
+    let media = engine.backend.media_kinds();
+    if !media.is_empty() {
+        metadata["media"] = json!(media.iter().map(|kind| kind.as_str()).collect::<Vec<_>>());
+    }
+    metadata
+}
+
 fn serve_inner<B: Backend + Send + 'static>(
     models: Vec<ServedModel<B>>,
     opts: ServeOptions,
@@ -629,13 +643,7 @@ fn serve_inner<B: Backend + Send + 'static>(
     );
     let names: Vec<String> = models.iter().map(|m| m.engine.manifest.name.clone()).collect();
     let supports_media = models.iter().any(|m| !m.engine.backend.media_kinds().is_empty());
-    let model_metadata: Vec<Value> = models.iter().map(|m| {
-        let manifest = &m.engine.manifest;
-        let temperatures: serde_json::Map<String, Value> = manifest.temperatures.iter().map(|(k,v)| (k.as_str().into(), json!(v))).collect();
-        let mut metadata=json!({"name": manifest.name, "description": "basal typed-decision model (choice / noul / score / act / multi / tool), Polish and English", "mode": "basal-rs", "early_exit": [], "prompt_format": manifest.prompt_format, "orders": manifest.orders.metadata(), "temperature_per_prim": temperatures});
-        let media=m.engine.backend.media_kinds();if !media.is_empty() {metadata["media"]=json!(media.iter().map(|kind|kind.as_str()).collect::<Vec<_>>());}
-        metadata
-    }).collect();
+    let model_metadata: Vec<Value> = models.iter().map(|m| metadata_for_model(&m.engine)).collect();
     for (i, n) in names.iter().enumerate() {
         anyhow::ensure!(!names[..i].contains(n), "model {n} configured twice");
     }

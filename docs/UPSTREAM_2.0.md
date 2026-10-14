@@ -26,7 +26,7 @@ Aliasy `mini`, `4.5B` i `max` nadal wskazują modele basal-1.5.
 Jawna konfiguracja zachowuje swoją listę modeli oraz wybór `default_model`;
 bez `default_model` żądanie trafia do pierwszego modelu z tej listy.
 Wagi są z przypiętych podstawowych checkpointów BF16. Dla Llamy `auto` nadal
-wybiera FP16 wykonania; dla omni BF16. FP8, GGUF i MLX 8-bit są poza zakresem.
+wybiera FP16 wykonania; dla omni BF16. FP8, GGUF i MLX 8-bit są poza zakresem. Dla nieznanych repozytoriów `--model owner/name` precyzja auto jest rozwiązywana z architektury po odczycie metadanych (Llama FP16, Gemma BF16), tak jak dla lokalnego katalogu; jawne dtype w konfiguracji pozostaje nadrzędne.
 
 ```bash
 basal init --model 2.0-mini --model 2.0-4.5B --model 2.0-max --model omni-mini --model omni-max

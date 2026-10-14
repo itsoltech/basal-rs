@@ -262,7 +262,13 @@ pub fn model_ref(s: &str) -> Result<ModelConfig> {
         };
         ensure!(repo.split('/').count() == 2, "model {s:?}: expected name, owner/name or a local directory");
         let rev = rev.map(str::to_string).or_else(|| known.map(|k| k.revision.to_string()));
-        let dtype = if known.is_some_and(|m| m.short.starts_with("omni-")) { "bf16" } else { "f16" };
+        // Unknown repositories need architecture-aware precision after their metadata is loaded.
+        // Keep explicit defaults for known checkpoints and their generated configuration.
+        let dtype = match known {
+            Some(m) if m.short.starts_with("omni-") => "bf16",
+            Some(_) => "f16",
+            None => "auto",
+        };
         serde_json::json!({ "repo": repo, "revision": rev, "dtype": dtype })
     };
     Ok(serde_json::from_value(entry)?)
