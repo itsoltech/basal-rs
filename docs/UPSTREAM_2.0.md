@@ -21,7 +21,7 @@ dodatkowej pamięci na aktywacje/KV i należy dobrać listę do dostępnej VRAM.
 
 Bez konfiguracji i `--model` serwer wybiera przypięty `basal-2.0-4.5B`.
 Ten sam model wybierają domyślnie `basal init` i `basal setup`.
-Pomiar runtime tej rodziny obejmuje CUDA H100; Metal i Intel pozostają niezmierzone.
+Pomiary runtime obejmują CUDA H100, trzy Llamy na Metal M2 Max oraz mini/4.5B na Intel Arc Meteor Lake. Intel max nie uruchomił benchmarku z powodu dostępnej pamięci; jego jakość na tym sprzęcie pozostaje niepotwierdzona. [Końcowy raport](../reports/upstream-2.0-final-2026-10-14/README.md) podaje korpusy, kontekst i niepowodzenia.
 Aliasy `mini`, `4.5B` i `max` nadal wskazują modele basal-1.5.
 Jawna konfiguracja zachowuje swoją listę modeli oraz wybór `default_model`;
 bez `default_model` żądanie trafia do pierwszego modelu z tej listy.
@@ -82,7 +82,7 @@ kalibrację, odpowiedzi oraz kształty/hashe cech procesora. Opcja `--cases-only
 kolejności 1/2; adaptacyjne wykonanie sprawdza się osobno przez serwer. Natywny
 `basal export --upstream` wybiera ten sam dialekt; bez flagi zachowuje TypeSafe. Kompilacja
 nie stanowi dowodu zgodności numerycznej ani wydajności. Wyniki porównań należą
-do nowych raportów; Metal i Intel wymagają osobnych pomiarów runtime'u.
+do nowych raportów; zgodność na każdym backendzie wymaga pomiarów runtime'u.
 
 `basal bench` nadal mierzy jawnie warianty lat1/lat2; jakość i throughput tej
 komendy używają dwóch kolejności niezależnie od domyślnej polityki serwowania.
@@ -95,3 +95,5 @@ osobne pięć BF16 auto zachowało wybór. Porównania obejmują opcje, narzędz
 i odroczenie narzędzi; dla noul stronę progu, a dla score najbardziej prawdopodobny poziom. `act` sprawdzono osobno:
 17/17 porównań reguł hosta dla tych samych prawdopodobieństw, bez forwardu modeli. Confidence i score mogą różnić się
 numerycznie. Zgodność dotyczy opisanego korpusu, nie wszystkich możliwych wejść.
+
+[Końcowa kampania](../reports/upstream-2.0-final-2026-10-14/README.md) potwierdziła dodatkowo 100/100 rzeczywistych pytań act na pięciu modelach CUDA oraz 40/40 pytań z istniejącym certyfikatem 0.05. Metal: 60/60 pytań act, Intel mini/4.5B: 40/40. Domyślny HTTP i lokalny klient wskazały basal-2.0-4.5B. Próby pojemności oraz długiego kontekstu zawierają opisane ograniczenia.

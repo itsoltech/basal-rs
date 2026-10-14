@@ -92,8 +92,8 @@ Docker: [niżej](#uruchomienie-w-dockerze). Wymagania, ścieżki i szczegóły:
 | `Remek/basal-1.5-4.5B`, rewizja `784a683b` | CUDA ([zgodność](reports/compat-1.5-small/README.md), [wydajność](reports/perf-1.5-small/README.md)), Metal ([M2 Max](reports/metal-m2-max-1.5/README.md), [M1 Pro](reports/metal-m1-pro-1.5/README.md)) |
 | `Remek/basal-1.5-mini` (1.5B), rewizja `1978d070` | CUDA ([zgodność](reports/compat-1.5-small/README.md), [wydajność](reports/perf-1.5-small/README.md)), Metal ([M2 Max](reports/metal-m2-max-1.5/README.md), [M1 Pro](reports/metal-m1-pro-1.5/README.md)) |
 | `Remek/basal-1.0-4.5B`, rewizja `b9528804` | CUDA, Metal ([M1 Pro](reports/metal-m1-pro/README.md)) |
-| basal-2.0 mini / 4.5B / max, podstawowe BF16 | format 2, CUDA (H100); Metal/Intel: niezmierzone; [pomiary H100](reports/upstream-2.0-h100-2026-10-14/README.md); [kontrakt i aliasy](docs/UPSTREAM_2.0.md) |
-| basal-omni mini / max, podstawowe BF16 | natywne Gemma 4 / Unified, CUDA, [pomiary i różnice BF16](reports/upstream-2.0-h100-2026-10-14/README.md); [obraz i audio](docs/OMNI.md) |
+| basal-2.0 mini / 4.5B / max, podstawowe BF16 | format 2, CUDA H100 i Metal M2 Max; Intel mini/4.5B, max niepotwierdzony; [wyniki i ograniczenia](reports/upstream-2.0-final-2026-10-14/README.md); [kontrakt i aliasy](docs/UPSTREAM_2.0.md) |
+| basal-omni mini / max, podstawowe BF16 | natywne Gemma 4 / Unified, CUDA; [realne media, kontekst i wydajność](reports/upstream-2.0-final-2026-10-14/README.md); [obraz i audio](docs/OMNI.md) |
 
 Modele format 2 mają natywny odczyt 2–255 opcji oraz typ `tool`.
 Domyślnie serwujemy `basal-2.0-4.5B`. Aliasy `mini`, `4.5B` i `max` nadal wskazują modele basal-1.5.

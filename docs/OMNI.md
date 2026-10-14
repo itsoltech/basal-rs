@@ -80,3 +80,5 @@ promptów. Brak głowicy evidence i nieobsługiwane opcje kończą się jawnym b
 Thinking, early exit, MCP server oraz trenowanie kalibracji nie należą do tego portu.
 
 Zaobserwowaną zgodność i ograniczenia numeryczne opisuje [raport H100](../reports/upstream-2.0-h100-2026-10-14/README.md).
+
+[Końcowa kampania](../reports/upstream-2.0-final-2026-10-14/README.md) obejmuje po 38/38 zgodnych wyborów każdego omni na rzeczywistych obrazach, mowie WAV/FLAC/OGG/MP3 i wejściach mieszanych oraz po 2/2 na skonstruowanym oknie 30 s. Są to wybory względem FP32 i ustalonych etykiet, nie pomiar ASR/WER ani walidacja kalibracji mediów. Długi kontekst nie jest potwierdzony w całym limicie config: mini 131072 i max 8192/262144 przekroczyły limit czasu procesu eksportu. Native omni max było też wolniejsze od upstream eager w opisanym krótkim obciążeniu tekstowym.

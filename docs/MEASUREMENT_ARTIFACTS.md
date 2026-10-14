@@ -84,3 +84,11 @@ Po rozpakowaniu dawny `reports/<katalog>/<plik>.json` jest pod
 `$BASAL_ARTIFACT_ROOT/reports/<katalog>/<plik>.json`. Oryginalne README są historycznymi
 kopiami sprzed dopisania not o archiwum; aktualne podsumowania i publiczne odsyłacze
 pozostają w Gicie. Lokalnego stanu inicjatywy `.itsol/` nie publikujemy.
+
+## Końcowa kampania upstream 2.0
+
+[Podsumowanie](../reports/upstream-2.0-final-2026-10-14/README.md) opisuje CUDA, Metal, Intel, rzeczywiste media, act, kontekst i wydajność. Nowe archiwum: `hf://buckets/itsoltech/basal-rs/measurements/upstream-2.0-final-2026-10-14/3bf4dac1aab9a203d731cd67feae1372ea1bf7eaea46f9baf5b2bfc64c474f61/measurement-data.tar.gz`, SHA-256 `3bf4dac1aab9a203d731cd67feae1372ea1bf7eaea46f9baf5b2bfc64c474f61`, 3 148 341 B. Pobranie z autoryzacją i anonimowo potwierdziło 639/639 sum plików.
+
+Użyj powyższej procedury z nazwą `upstream-2.0-final-2026-10-14`, tym prefiksem i tą sumą. Dane są pod `reports/upstream-2.0-final-2026-10-14/` wewnątrz archiwum. Media base64 zastąpiono hashami i liczbą bajtów; przed ponownym forwardem odtwórz je z `inputs/media-source-manifest.json`. Archiwum nie rozprowadza zdjęć/nagrań ani prywatnych danych maszyn; zachowuje logity, tokeny, prawdopodobieństwa, odpowiedzi i niepowodzenia.
+
+Dodatkowy [benchmark Metal 32768](../reports/upstream-2.0-metal-context-2026-10-14/README.md): `hf://buckets/itsoltech/basal-rs/measurements/upstream-2.0-metal-context-2026-10-14/e6f30d416ec8037ca6cb78a85ac8b6e48ffd5fc90cead619a35a8c5a0db2bfb2/measurement-data.tar.gz`, SHA-256 `e6f30d416ec8037ca6cb78a85ac8b6e48ffd5fc90cead619a35a8c5a0db2bfb2`, 10 829 B; 15/15 sum potwierdzonych z autoryzacją i anonimowo. Zawiera również pochodną analizę progu noul z poprzedniego loadtestu. Dane pod `reports/upstream-2.0-metal-context-2026-10-14/`; użyj procedury z nowym prefiksem, nazwą i sumą.
