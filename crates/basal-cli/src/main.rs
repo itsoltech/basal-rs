@@ -40,11 +40,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use basal_core::pack::Packed;
 use basal_core::{Backend, DecideError, Engine, ModelManifest};
-#[cfg(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos")))]
-use basal_gpu::intel::IntelBackend as GpuBackend;
-#[cfg(not(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos"))))]
-use basal_gpu::GpuBackend;
-use basal_gpu::{Kernels, Precision, Readout};
+use basal_gpu::RuntimeBackend as GpuBackend;
+use basal_gpu::{Kernels, Readout};
 use clap::{Args, Parser, Subcommand};
 use serde_json::{json, Value};
 
@@ -131,9 +128,14 @@ impl ModelArgs {
 
 #[derive(Args, Clone)]
 struct GpuArgs {
-    /// Weight/activation precision: f16 (default; closest to f32 on the reference sets), bf16 (checkpoint dtype) or
-    /// f32 (numerical reference, slow)
-    #[arg(long, default_value = "f16")]
+    /// Enable image/audio processors and native encoders (omni CUDA, bf16 or f32)
+    #[arg(long)]
+    media: bool,
+    /// Option orders: 1, 2, auto or `2le<N>`; default 2 for format 1, 1 for format 2
+    #[arg(long)]
+    orders: Option<String>,
+    /// Weight/activation precision: auto (Llama f16, Gemma bf16), f16, bf16 or f32 (numerical reference)
+    #[arg(long, default_value = "auto")]
     dtype: String,
     /// Letter logits: f32, or bf16 (f32 rounded to bf16, diagnostic emulation of a bf16 lm_head)
     #[arg(long, default_value = "f32")]
@@ -186,6 +188,12 @@ enum Cmd {
     Prepare {
         #[command(flatten)]
         m: ModelArgs,
+        /// Prepare the upstream request dialect, including multi branches
+        #[arg(long)]
+        upstream: bool,
+        /// Option orders: 1, 2, auto or `2le<N>`
+        #[arg(long)]
+        orders: Option<String>,
         #[arg(long, default_value = "-")]
         request: String,
     },
@@ -209,6 +217,9 @@ enum Cmd {
         inputs: PathBuf,
         #[arg(long)]
         out: PathBuf,
+        /// Prepare/export the upstream endpoint dialect (default: TypeSafe)
+        #[arg(long)]
+        upstream: bool,
         /// Forwards of the bench items: single (one question each), budget or tree
         #[arg(long, default_value = "single")]
         batching: String,
@@ -518,25 +529,31 @@ fn gpu_engine(m: &ModelArgs, g: &GpuArgs) -> Result<Engine<GpuBackend>> {
 fn gpu_engine_at(dir: &Path, g: &GpuArgs) -> Result<Engine<GpuBackend>> {
     #[cfg(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos")))]
     anyhow::ensure!(g.state_cache_mb == 0, "Intel state cache is not implemented; use --state-cache-mb 0");
-    let manifest = ModelManifest::load(dir)?;
+    let manifest = ModelManifest::load_with_orders(dir, g.orders.as_deref())?;
     let readout = match g.readout.as_str() {
         "f32" => Readout::F32,
         "bf16" => Readout::Bf16Rounded,
         r => bail!("unknown readout {r:?} (f32, bf16)"),
     };
-    let backend =
-        GpuBackend::load(dir, &manifest.config, Precision::parse(&g.dtype)?, readout, Kernels::parse(&g.kernels)?)?;
-    crate::done!("{} loaded on the GPU in {:.1}s", manifest.name, backend.load_s);
+    let backend = GpuBackend::load(
+        dir,
+        &manifest.config,
+        basal_gpu::model_precision(&g.dtype, &manifest.config)?,
+        readout,
+        Kernels::parse(&g.kernels)?,
+        g.media,
+    )?;
+    crate::done!("{} loaded on the GPU in {:.1}s", manifest.name, backend.load_s());
     let mut backend = backend;
     if let Some(p) = &g.gemm_table {
         let n = backend.load_gemm_table(p)?;
         crate::note!("{n} GEMM classes from {}", crate::term::P(&p));
     }
-    backend.state_cache_bytes = g.state_cache_mb << 20;
+    backend.set_state_cache_bytes(g.state_cache_mb.checked_mul(1 << 20).context("state cache budget overflow")?)?;
     let mut engine = Engine::new(manifest, backend)?;
     engine.mark_state = g.state_cache_mb > 0;
     engine.tree_max_tokens = g.tree_max_tokens;
-    if !g.no_prefix_cache {
+    if !g.no_prefix_cache && engine.backend.supports_prefix_cache() {
         let lens = engine.warm_static_prefixes()?;
         crate::note!("template prefixes precomputed ({lens:?} tokens)");
     }
@@ -610,9 +627,15 @@ fn run() -> Result<()> {
                 }
             }
         }
-        Cmd::Prepare { m, request } => {
-            let engine = Engine::new(ModelManifest::load(&m.dir()?)?, NoBackend)?;
-            match engine.prepare_request(&read_request(&request)?) {
+        Cmd::Prepare { m, request, upstream, orders } => {
+            let engine = Engine::new(ModelManifest::load_with_orders(&m.dir()?, orders.as_deref())?, NoBackend)?;
+            let body = read_request(&request)?;
+            let prepared = if upstream {
+                engine.plan_request_as(&body, basal_core::request::Dialect::Upstream).map(|p| p.prepared)
+            } else {
+                engine.prepare_request(&body)
+            };
+            match prepared {
                 Ok(p) => println!("{}", serde_json::to_string_pretty(&p)?),
                 Err(DecideError::Internal(e)) => return Err(e),
                 Err(e) => {
@@ -636,14 +659,15 @@ fn run() -> Result<()> {
                 None => println!("{}", serde_json::to_string_pretty(&report)?),
             }
         }
-        Cmd::Export { m, g, inputs, out, batching } => {
+        Cmd::Export { m, g, inputs, out, batching, upstream } => {
             let mut engine = gpu_engine(&m, &g)?;
-            let load_s = engine.backend.load_s;
+            let load_s = engine.backend.load_s();
             export::export(
                 &mut engine,
                 &inputs,
                 &out,
                 parse_batching(&batching)?,
+                if upstream { basal_core::request::Dialect::Upstream } else { basal_core::request::Dialect::TypeSafe },
                 json!({"dtype": g.dtype, "readout": g.readout, "kernels": g.kernels, "prefix_cache": !g.no_prefix_cache, "load_s": load_s}),
             )?;
         }
@@ -658,7 +682,7 @@ fn run() -> Result<()> {
             let mut r = bench::bench_requests(&mut engine, &requests, reps)?;
             r["backend"] = engine.backend.describe();
             r["state_cache"] =
-                json!({"hits": engine.backend.state_cache_hits, "inserts": engine.backend.state_cache_inserts});
+                json!({"hits": engine.backend.state_cache_stats().0, "inserts": engine.backend.state_cache_stats().1});
             write_json(&out, &r)?;
         }
         Cmd::EvalChoiceSet { m, g, set, out, strategies, limit } => {
@@ -678,10 +702,7 @@ fn run() -> Result<()> {
             let prep: Vec<_> =
                 recs.iter().take(n + 1).map(|r| engine.prepare(reference::bench_item(r)?)).collect::<Result<_>>()?;
             engine.run(&prep[..1], basal_core::Batching::Single)?; // warm-up
-            engine.backend.profile = Some(Default::default());
-            if residual_max {
-                engine.backend.residual_max = Some(Default::default());
-            }
+            engine.backend.enable_profile(residual_max)?;
             // items after the warm-up one (the reference may hold fewer than n + 1)
             let n = prep.len() - 1;
             let t = std::time::Instant::now();
@@ -689,9 +710,9 @@ fn run() -> Result<()> {
                 engine.run(c, basal_core::Batching::Budget)?;
             }
             let total = t.elapsed().as_secs_f64() * 1e3 / n as f64;
-            let prof = engine.backend.profile.take().unwrap().into_inner();
-            let rmax = engine.backend.residual_max.take().map(|r| r.into_inner()).unwrap_or_default();
-            let nl = engine.manifest.config.num_layers;
+            let prof = engine.backend.take_profile();
+            let rmax = engine.backend.take_residual_max();
+            let nl = engine.manifest.config.num_layers();
             let per_layer: Vec<f32> =
                 (0..nl).map(|l| rmax.iter().skip(l).step_by(nl).copied().fold(0.0f32, f32::max)).collect();
             let sum: f64 = prof.values().sum::<f64>() / n as f64;
@@ -787,7 +808,9 @@ fn run() -> Result<()> {
             if !matches!(source, config::Source::File(_)) {
                 // models from the command line: the options of the command line
                 for m in &mut c.models {
-                    m.dtype = g.dtype.clone();
+                    if g.dtype != "auto" {
+                        m.dtype = g.dtype.clone();
+                    }
                     m.gemm_table = match &g.gemm_table {
                         Some(t) => t.display().to_string(),
                         None => "auto".into(),
@@ -814,6 +837,8 @@ fn run() -> Result<()> {
             let mut served = Vec::new();
             for ((mc, table), dir) in c.models.iter().zip(tables).zip(dirs) {
                 let mg = GpuArgs {
+                    media: mc.media || g.media,
+                    orders: mc.orders.clone().or_else(|| g.orders.clone()),
                     dtype: mc.dtype.clone(),
                     readout: g.readout.clone(),
                     kernels: g.kernels.clone(),
@@ -860,7 +885,7 @@ fn run() -> Result<()> {
                 } else {
                     (16..=512).step_by(16).chain((640..=max_m).step_by(128)).collect()
                 };
-                let shapes = basal_gpu::projection_shapes(&ModelManifest::load(&m.dir()?)?.config);
+                let shapes = basal_gpu::projection_shapes(ModelManifest::load(&m.dir()?)?.config.llama()?);
                 let t = basal_gpu::gemm_search(&classes, &shapes, &dtype, invariant)?;
                 write_json(&out, &t)?;
             }
@@ -913,7 +938,7 @@ fn run() -> Result<()> {
         }
         Cmd::Bench { m, g, reference, out, lat_n, batching } => {
             let mut engine = gpu_engine(&m, &g)?;
-            let load_s = engine.backend.load_s;
+            let load_s = engine.backend.load_s();
             let batch = match batching.as_str() {
                 "budget" => basal_core::Batching::Budget,
                 "tree" => basal_core::Batching::Tree,

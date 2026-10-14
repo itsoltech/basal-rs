@@ -44,7 +44,7 @@ Rozwijamy ten silnik, by ułatwiać korzystanie z polskich modeli na NVIDIA,
 Apple Silicon i Intel Arc oraz wspierać rozwój polskiego AI.
 
 Runtime odtwarza protokół decyzyjny upstream: ten sam prompt, te same
-token IDs, oba porządki opcji, uśrednienie i kalibracja z `CALIBRATION.json`.
+token IDs, skonfigurowane porządki opcji, uśrednienie i kalibracja z `CALIBRATION.json`.
 Różni się sposobem wykonania: pakowaniem promptów w drzewo wspólnych
 prefiksów, własnymi kernelami i harmonogramem serwera. Zgodność decyzji
 z referencją FP32 oraz różnice numeryczne opisują [pomiary poniżej](#wyniki).
@@ -92,8 +92,13 @@ Docker: [niżej](#uruchomienie-w-dockerze). Wymagania, ścieżki i szczegóły:
 | `Remek/basal-1.5-4.5B`, rewizja `784a683b` | CUDA ([zgodność](reports/compat-1.5-small/README.md), [wydajność](reports/perf-1.5-small/README.md)), Metal ([M2 Max](reports/metal-m2-max-1.5/README.md), [M1 Pro](reports/metal-m1-pro-1.5/README.md)) |
 | `Remek/basal-1.5-mini` (1.5B), rewizja `1978d070` | CUDA ([zgodność](reports/compat-1.5-small/README.md), [wydajność](reports/perf-1.5-small/README.md)), Metal ([M2 Max](reports/metal-m2-max-1.5/README.md), [M1 Pro](reports/metal-m1-pro-1.5/README.md)) |
 | `Remek/basal-1.0-4.5B`, rewizja `b9528804` | CUDA, Metal ([M1 Pro](reports/metal-m1-pro/README.md)) |
+| basal-2.0 mini / 4.5B / max, podstawowe BF16 | format 2, [pomiary H100](reports/upstream-2.0-h100-2026-10-14/README.md); [kontrakt i aliasy](docs/UPSTREAM_2.0.md) |
+| basal-omni mini / max, podstawowe BF16 | natywne Gemma 4 / Unified, CUDA, [pomiary i różnice BF16](reports/upstream-2.0-h100-2026-10-14/README.md); [obraz i audio](docs/OMNI.md) |
 
-Typy pytań: `choice` (2–10 opcji oraz 11–255 przybliżoną strategią grupową), `noul`,
+Modele format 2 mają natywny odczyt 2–255 opcji oraz typ `tool`. Stare aliasy
+`mini`, `4.5B`, `max` i domyślny `basal-1.5-4.5B` pozostają bez zmian.
+
+Typy pytań format 1: `choice` (2–10 opcji oraz 11–255 przybliżoną strategią grupową), `noul`,
 `score`, a z basal-1.5 także `multi`, `act`, `facts: "auto"` i `evidence`.
 Strategia dla ponad 10 opcji jest rozszerzeniem runtime'u, ocenianym osobno od
 zgodności z upstream: na zbiorach intencji z 59–150 opcjami basal-1.5-max

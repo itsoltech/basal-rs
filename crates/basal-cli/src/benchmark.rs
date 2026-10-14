@@ -256,7 +256,7 @@ fn execute(
         crate::config::check_gemm_coverage(&engine.manifest.name, &engine.backend.gemm_table_missing(), table)?;
     }
     report["model"]["name"] = json!(engine.manifest.name);
-    report["model"]["load_s"] = json!(engine.backend.load_s);
+    report["model"]["load_s"] = json!(engine.backend.load_s());
     report["backend"] = engine.backend.describe();
     // File name only: an automatic table lives in the user's cache directory, whose path identifies the machine.
     let gemm_table = gpu_settings.gemm_table.as_deref().and_then(Path::file_name).map(|n| n.to_string_lossy());

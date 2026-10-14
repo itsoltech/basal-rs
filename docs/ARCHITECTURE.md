@@ -24,6 +24,9 @@ W trybie lokalnym jeden `Engine` przetwarza rekordy kolejno; ładowanie i infere
 Tokio, bez serwera i jego harmonogramu. Wybór tabel GEMM używa konfiguracji `serve`. Kontrakt promptu i odpowiedzi
 pozostaje w `basal-core`. Interfejs i przykłady: [CLIENT.md](CLIENT.md).
 
+Nowe rodziny, format 2, wybór kolejności i kalibracja: [UPSTREAM_2.0.md](UPSTREAM_2.0.md).
+Natywne architektury i lifecycle mediów omni: [OMNI.md](OMNI.md).
+
 ## Kontrakt promptu
 
 Prompt, szablon czatu, heurystyka języka (polskie znaki), serializacja stanu,
@@ -37,7 +40,8 @@ Runtime stosuje `"first"` jak upstream i wyłącza obcinanie oraz padding z
 `tokenizer.json` (obcinanie do 1536 tokenów zmieniałoby prompty długich
 stanów).
 
-Każde pytanie to dwa prompty z opcjami w dwóch porządkach. Z logitów liter
+W format 1 pytanie domyślnie ma dwa prompty z opcjami w dwóch porządkach.
+Format 2 domyślnie wykonuje jeden; `--orders` może zmienić tę politykę. Z logitów liter
 liczymy softmax osobno dla każdego porządku, odwracamy permutację, uśredniamy
 i stosujemy temperaturę typu pytania:
 

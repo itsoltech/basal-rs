@@ -7,7 +7,7 @@
 use anyhow::Result;
 use serde_json::{json, Value};
 
-use crate::prompt::render;
+use crate::prompt::{render_format, PromptFormat};
 use crate::request::Item;
 use crate::tokenize::BasalTokenizer;
 
@@ -27,8 +27,12 @@ pub struct EvidenceInput {
 
 /// `Evidence.spans` up to the head call; `None` when no token lies inside the state (upstream returns no spans).
 pub fn input(tok: &BasalTokenizer, bos: &str, item: &Item) -> Result<Option<EvidenceInput>> {
+    input_format(tok, bos, item, PromptFormat::One)
+}
+
+pub fn input_format(tok: &BasalTokenizer, bos: &str, item: &Item, fmt: PromptFormat) -> Result<Option<EvidenceInput>> {
     let opts: Vec<&str> = item.options.iter().map(String::as_str).collect();
-    let prompt = render(bos, &item.state, &item.question, &opts, item.lang);
+    let prompt = render_format(fmt, bos, &item.state, &item.question, &opts, item.lang)?;
     let needle = format!("\n{}", item.state);
     let Some(byte) = prompt.find(&needle) else { return Ok(None) };
     let s0 = prompt[..byte].chars().count() + 1;

@@ -38,6 +38,31 @@ pub fn calibrate(p: &[f64], t: f64) -> Vec<f64> {
     softmax(&p.iter().map(|v| v.max(1e-12).ln() / t).collect::<Vec<_>>())
 }
 
+/// Format-2 readout arithmetic follows upstream FP32; the format-1 path above retains its existing FP64 math.
+pub fn softmax32(x: &[f32]) -> Vec<f64> {
+    let m = x.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let e: Vec<f32> = x.iter().map(|v| (v - m).exp()).collect();
+    let s: f32 = e.iter().sum();
+    e.into_iter().map(|v| f64::from(v / s)).collect()
+}
+
+pub fn canonical_average32(perms: &[Vec<usize>], probs: &[Vec<f64>]) -> Vec<f64> {
+    let mut out = vec![0.0f32; perms[0].len()];
+    for (perm, p) in perms.iter().zip(probs) {
+        for (pos, &j) in perm.iter().enumerate() {
+            out[j] += p[pos] as f32;
+        }
+    }
+    out.into_iter().map(|v| f64::from(v / perms.len() as f32)).collect()
+}
+
+pub fn calibrate32(p: &[f64], t: f64) -> Vec<f64> {
+    if t == 1.0 {
+        return p.to_vec();
+    }
+    softmax32(&p.iter().map(|v| (*v as f32).max(1e-12).ln() / t as f32).collect::<Vec<_>>())
+}
+
 /// First index of the maximum (Python `max` keeps the first of equal values).
 pub fn argmax(p: &[f64]) -> usize {
     let mut best = 0;
@@ -84,7 +109,25 @@ pub fn num(v: f64) -> Value {
 /// System One answer for one question from its final (averaged, calibrated) distribution.
 /// `multi` answer from the calibrated P(yes) of every label (upstream `multi_answer`): labels with P >= threshold by
 /// descending P (stable), cut to `max`, at least the top `min`; `set_confidence` = probability of exactly that set.
-fn multi_answer(item: &Item, m: &crate::request::MultiSpec, p_yes: &[f64]) -> Value {
+pub(crate) fn multi_answer(item: &Item, m: &crate::request::MultiSpec, p_yes: &[f64]) -> Value {
+    if item.prompt_format == crate::prompt::PromptFormat::Two || m.rules.extended() {
+        let selection = crate::sets::select(&item.keys, p_yes, m);
+        let confidence: f64 =
+            p_yes.iter().enumerate().map(|(i, p)| if selection.indices.contains(&i) { *p } else { 1.0 - p }).product();
+        let probs: serde_json::Map<String, Value> =
+            item.keys.iter().cloned().zip(p_yes.iter().map(|v| num(*v))).collect();
+        let mut answer = serde_json::json!({"type": "multi", "selected": selection.indices.iter().map(|&i| &item.keys[i]).collect::<Vec<_>>(), "probabilities": probs, "set_confidence": confidence});
+        if m.rules.objective == crate::sets::Objective::Threshold {
+            answer["threshold"] = num(m.threshold);
+        } else {
+            answer["objective"] = m.rules.objective.as_str().into();
+            answer["expected_score"] = selection.score.map_or(Value::Null, num);
+        }
+        if let Some(constraints) = selection.constraints {
+            answer["constraints_applied"] = constraints;
+        }
+        return answer;
+    }
     let mut order: Vec<usize> = (0..p_yes.len()).collect();
     order.sort_by(|&a, &b| p_yes[b].partial_cmp(&p_yes[a]).unwrap_or(std::cmp::Ordering::Equal));
     let mut sel: Vec<usize> = order.iter().copied().filter(|&i| p_yes[i] >= m.threshold).collect();
@@ -125,24 +168,54 @@ fn act_answer(item: &Item, a: &crate::request::ActSpec, p: &[f64]) -> Result<Val
     ans.insert("action".into(), Value::String(a.costs[best].0.clone()));
     ans.insert(
         "expected_costs".into(),
-        Value::Object(a.costs.iter().zip(&exp).map(|((n, _), e)| (n.clone(), num(round6(*e)))).collect()),
+        Value::Object(
+            a.costs
+                .iter()
+                .zip(&exp)
+                .map(|((n, _), e)| {
+                    (
+                        n.clone(),
+                        num(if item.prompt_format == crate::prompt::PromptFormat::Two {
+                            format!("{e:.6}").parse().unwrap_or(*e)
+                        } else {
+                            round6(*e)
+                        }),
+                    )
+                })
+                .collect(),
+        ),
     );
     ans.insert("answer".into(), Value::String(item.keys[argmax(p)].clone()));
     ans.insert("probabilities".into(), Value::Object(probs));
     ans.insert("confidence".into(), num(conf));
     if a.max_error.is_some() {
-        match a.threshold {
-            None => {
-                ans.insert("max_error".into(), "no certified threshold for this target".into());
+        if item.prompt_format == crate::prompt::PromptFormat::Two {
+            let refused = a.threshold.is_none_or(|thr| conf < thr);
+            if a.threshold.is_none() {
+                ans.insert("max_error".into(), "no certified threshold for this type at this max_error".into());
             }
-            Some(thr) if conf < thr && Some(&a.costs[best].0) != a.defer.as_ref() => {
+            if refused && Some(&a.costs[best].0) != a.defer.as_ref() {
                 let Some(d) = &a.defer else {
                     return Err("max_error needs a defer action (\"defer\"/\"human\" or defer_action)".into());
                 };
-                ans.insert("action".into(), Value::String(d.clone()));
-                ans.insert("refused".into(), Value::String(a.costs[best].0.clone()));
+                ans.insert("action".into(), d.clone().into());
+                ans.insert("refused".into(), a.costs[best].0.clone().into());
             }
-            Some(_) => {}
+            ans.insert("deferred".into(), (ans.get("action").and_then(Value::as_str) == a.defer.as_deref()).into());
+        } else {
+            match a.threshold {
+                None => {
+                    ans.insert("max_error".into(), "no certified threshold for this target".into());
+                }
+                Some(thr) if conf < thr && Some(&a.costs[best].0) != a.defer.as_ref() => {
+                    let Some(d) = &a.defer else {
+                        return Err("max_error needs a defer action (\"defer\"/\"human\" or defer_action)".into());
+                    };
+                    ans.insert("action".into(), Value::String(d.clone()));
+                    ans.insert("refused".into(), Value::String(a.costs[best].0.clone()));
+                }
+                Some(_) => {}
+            }
         }
     }
     let validated = a.calibrated && (a.base == QType::Noul || a.hide);
@@ -153,9 +226,13 @@ fn act_answer(item: &Item, a: &crate::request::ActSpec, p: &[f64]) -> Result<Val
 /// Answer object of one question; `Err` for a request that cannot be answered (an `act` refusal without a defer
 /// action, as upstream).
 pub fn answer_checked(item: &Item, p: &[f64], dialect: crate::request::Dialect) -> Result<Value, String> {
+    if p.len() != item.keys.len() || p.is_empty() || p.iter().any(|x| !x.is_finite() || !(0.0..=1.0).contains(x)) {
+        return Err("invalid readout probability vector".into());
+    }
     match &item.ext {
         crate::request::Ext::Multi(m) => Ok(multi_answer(item, m, p)),
         crate::request::Ext::Act(a) => act_answer(item, a, p),
+        crate::request::Ext::Tool(t) => Ok(crate::tools::answer(item, t, p)),
         crate::request::Ext::None if dialect == crate::request::Dialect::Upstream => Ok(answer_upstream(item, p)),
         crate::request::Ext::None => Ok(answer(item, p)),
     }
@@ -201,7 +278,7 @@ pub fn answer(item: &Item, p: &[f64]) -> Value {
             a.insert("probabilities", Value::Object(probs));
             a.insert("confidence", choice_confidence(p).map(num).unwrap_or(Value::Null));
         }
-        QType::Multi | QType::Act => unreachable!("multi and act answers come from answer_checked"),
+        QType::Multi | QType::Act | QType::Tool => unreachable!("multi and act answers come from answer_checked"),
         QType::Score => {
             a.insert("score", num(p.iter().enumerate().map(|(i, v)| i as f64 * v).sum()));
             let legend = item.keys.iter().cloned().zip(item.legend.iter().cloned()).collect();

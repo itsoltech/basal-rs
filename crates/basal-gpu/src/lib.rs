@@ -34,10 +34,14 @@ use serde_json::{json, Value};
 #[cfg(feature = "cuda")]
 mod cublaslt;
 mod fused;
+mod gemma;
+mod gemma_encoders;
 #[cfg(all(feature = "intel", not(target_os = "macos")))]
 pub mod intel;
 mod memory;
+mod runtime;
 pub use memory::{gpu_memory, GpuMemory, GpuMemoryProbe};
+pub use runtime::RuntimeBackend;
 #[cfg(target_os = "macos")]
 pub mod gemm;
 use fused::HeadDims;
@@ -73,6 +77,18 @@ pub enum Precision {
     Bf16,
     F16,
     F32,
+}
+
+/// Preserve the Llama default while using the published BF16 serving dtype for a Gemma checkpoint.
+pub fn model_precision(value: &str, cfg: &basal_core::architecture::Architecture) -> Result<Precision> {
+    if value == "auto" {
+        Ok(match cfg {
+            basal_core::architecture::Architecture::Llama(_) => Precision::F16,
+            basal_core::architecture::Architecture::Gemma4(_) => Precision::Bf16,
+        })
+    } else {
+        Precision::parse(value)
+    }
 }
 
 impl Precision {

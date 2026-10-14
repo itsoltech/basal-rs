@@ -39,5 +39,6 @@ pub fn bench_item(rec: &Value) -> Result<Item> {
         ext: Default::default(),
         evidence: false,
         uncalibrated: false,
+        prompt_format: Default::default(),
     })
 }

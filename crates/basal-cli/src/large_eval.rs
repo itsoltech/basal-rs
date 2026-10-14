@@ -101,6 +101,7 @@ pub(crate) fn choice_item(name: String, state: &str, question: &str, options: Ve
         ext: Default::default(),
         evidence: false,
         uncalibrated: false,
+        prompt_format: Default::default(),
     }
 }
 

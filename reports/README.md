@@ -3,9 +3,19 @@
 Nowe raporty zapisują tylko: co sprawdzono, wynik, zmierzoną poprawę lub
 regresję oraz zakres weryfikacji. Warunki i ograniczenia podajemy krótko,
 gdy są potrzebne do interpretacji liczb. Hipotezy i plany nie trafiają do
-raportów; surowe dane przechowujemy poza Gitem. Starsze katalogi mogą
+raportów; nowe dane wynikowe przechowujemy w [HF Storage Bucket](../docs/MEASUREMENT_ARTIFACTS.md), poza Gitem. Starsze katalogi mogą
 zawierać dane pomiarowe.
 Metodyka: [docs/BENCHMARKS.md](../docs/BENCHMARKS.md).
+
+## Basal v2 i Omni
+
+| Katalog | Zawartość |
+|---|---|
+| [upstream-2.0-decisions-2026-10-14](upstream-2.0-decisions-2026-10-14/README.md) | ponowna analiza rzeczywistych decyzji względem upstream FP32: opcje/akcje/tools/zbiory/odroczenia, bez wymogu identycznego confidence/score |
+| [upstream-2.0-h100-2026-10-14](upstream-2.0-h100-2026-10-14/README.md) | pięć BF16 checkpointów: FP32/FP16/BF16 readout, tekst i media obu omni, API/usage/kolejki, bitowe A/B basal-1.5, ograniczenia numeryczne |
+| [upstream-2.0-cpu-2026-10-14](upstream-2.0-cpu-2026-10-14/README.md) | prompty/tokeny, procesory obrazu/audio, reguły decyzji i błędy wejścia |
+| [upstream-2.0-boundaries-2026-10-14](upstream-2.0-boundaries-2026-10-14/README.md) | per-type certificates, pliki o2/mismatch, duże koszty act i budżet promptów |
+| [upstream-2.0-discovery-2026-10-14](upstream-2.0-discovery-2026-10-14/README.md) | pierwotny audyt przypiętych modeli, sprzed implementacji |
 
 ## Kampanie optymalizacji
 

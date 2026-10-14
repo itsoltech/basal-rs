@@ -75,7 +75,7 @@ pub struct ModelConfig {
     /// Branch, tag or commit of `repo` (default: main). A commit pins the weights.
     #[serde(default)]
     pub revision: Option<String>,
-    /// f16 (default), bf16 or f32.
+    /// auto (Llama f16, Gemma bf16), f16, bf16 or f32.
     #[serde(default = "default_dtype")]
     pub dtype: String,
     /// `auto`: the table of this model and GPU from `gemm_cache`, generated when missing or not valid here; `none`:
@@ -97,6 +97,12 @@ pub struct ModelConfig {
     pub tree_max_tokens: usize,
     #[serde(default)]
     pub no_prefix_cache: bool,
+    /// Upstream option orders: 1, 2, auto or `2le<N>`; absent uses the trained format's default.
+    #[serde(default)]
+    pub orders: Option<String>,
+    /// Enable native image/audio processing for an omni model on CUDA.
+    #[serde(default)]
+    pub media: bool,
 }
 
 fn default_addr() -> SocketAddr {
@@ -115,7 +121,7 @@ pub fn default_gemm_cache() -> PathBuf {
     crate::paths::cache_dir().join("gemm")
 }
 fn default_dtype() -> String {
-    "f16".into()
+    "auto".into()
 }
 fn default_gemm_table() -> String {
     "auto".into()
@@ -140,7 +146,7 @@ impl ServeConfig {
     }
 
     fn parse(text: &str) -> Result<Self> {
-        let c: Self = serde_yaml::from_str(text)?;
+        let c: Self = serde_saphyr::from_str(text)?;
         ensure!(!c.models.is_empty(), "no models");
         Ok(c)
     }
@@ -153,7 +159,7 @@ impl ServeConfig {
     }
 }
 
-/// A basal model published by its author, with the revision this runtime was checked with.
+/// A published basal model pinned to a metadata revision. Runtime verification is recorded separately in reports.
 pub struct KnownModel {
     /// short name for `basal init --model`
     pub short: &'static str,
@@ -163,7 +169,7 @@ pub struct KnownModel {
     pub size_gb: f64,
 }
 
-pub const KNOWN_MODELS: [KnownModel; 3] = [
+pub const KNOWN_MODELS: [KnownModel; 8] = [
     KnownModel {
         short: "mini",
         repo: "Remek/basal-1.5-mini",
@@ -182,6 +188,36 @@ pub const KNOWN_MODELS: [KnownModel; 3] = [
         revision: "be1b5ee7e7a9755a931262fa7fab4f59be0fd03c",
         size_gb: 22.3,
     },
+    KnownModel {
+        short: "2.0-mini",
+        repo: "Remek/basal-2.0-mini",
+        revision: "cb81b32ce89b0b87e62fcdad28f0435e25c953f3",
+        size_gb: 3.1,
+    },
+    KnownModel {
+        short: "2.0-4.5B",
+        repo: "Remek/basal-2.0-4.5B",
+        revision: "e5ba9149760d99b73b1963d8e0ccf948b58afacb",
+        size_gb: 9.1,
+    },
+    KnownModel {
+        short: "2.0-max",
+        repo: "Remek/basal-2.0-max",
+        revision: "2fffc5cc41e5cf7a2f752f38f17e7b4d9a4a8252",
+        size_gb: 22.3,
+    },
+    KnownModel {
+        short: "omni-mini",
+        repo: "Remek/basal-omni-1.0-mini",
+        revision: "73c993dc3d9ab3cb8887ac0b1ee1cf1c92783240",
+        size_gb: 15.9,
+    },
+    KnownModel {
+        short: "omni-max",
+        repo: "Remek/basal-omni-1.0-max",
+        revision: "e538228c4f3ffd96dde298a073ed10247da0d637",
+        size_gb: 23.9,
+    },
 ];
 
 /// Model of the built-in configuration: the main basal-1.5 model (fits a 16 GB Mac and a 12 GB GPU).
@@ -194,7 +230,7 @@ pub const DEFAULT_OWNER: &str = "Remek";
 /// a local model directory (an existing path, or one starting with `/`, `.` or `~`), else a Hugging Face repository
 /// `owner/name` or `name` (owner Remek; mini, 4.5B and max for the basal-1.5 models), each with an optional
 /// `@revision` (branch, tag or commit). Without a revision a model of [`KNOWN_MODELS`] is the revision this runtime
-/// was checked with, any other repository its main branch.
+/// pins, any other repository its main branch.
 pub fn model_ref(s: &str) -> Result<ModelConfig> {
     let s = s.trim();
     ensure!(!s.is_empty(), "empty model");
@@ -224,7 +260,8 @@ pub fn model_ref(s: &str) -> Result<ModelConfig> {
         };
         ensure!(repo.split('/').count() == 2, "model {s:?}: expected name, owner/name or a local directory");
         let rev = rev.map(str::to_string).or_else(|| known.map(|k| k.revision.to_string()));
-        serde_json::json!({ "repo": repo, "revision": rev })
+        let dtype = if known.is_some_and(|m| m.short.starts_with("omni-")) { "bf16" } else { "f16" };
+        serde_json::json!({ "repo": repo, "revision": rev, "dtype": dtype })
     };
     Ok(serde_json::from_value(entry)?)
 }
@@ -271,12 +308,21 @@ pub fn template(models: &[ModelConfig]) -> String {
             (None, Some(p)) => s += &format!("  - path: {}\n", p.display()),
             _ => {}
         }
+        if m.dtype != "auto" && m.dtype != "f16" {
+            s += &format!("    dtype: {}\n", m.dtype);
+        }
+        if m.media {
+            s += "    media: true\n";
+        }
+        if let Some(orders) = &m.orders {
+            s += &format!("    orders: {orders:?}\n");
+        }
     }
     s
 }
 
 /// Files of a model directory the runtime reads (`evidence_head.pt` is optional: without it `evidence` is refused).
-const MODEL_FILES: [&str; 8] = [
+const MODEL_FILES: [&str; 14] = [
     "config.json",
     "basal.json",
     "tokenizer.json",
@@ -285,6 +331,12 @@ const MODEL_FILES: [&str; 8] = [
     "CALIBRATION.json",
     "model.safetensors",
     "evidence_head.pt",
+    "CALIBRATION.o*.json",
+    "model.safetensors.index.json",
+    "model-*.safetensors",
+    "processor_config.json",
+    "preprocessor_config.json",
+    "audio_preprocessor_config.json",
 ];
 
 /// Where the configuration of `basal serve` (and `basal doctor`) comes from.
@@ -374,9 +426,13 @@ fn download(repo: &str, revision: Option<&str>) -> Result<PathBuf> {
                 .with_context(|| format!("{repo}@{at}: download failed ({e}) and no cached copy"))?
         }
     };
-    for f in &MODEL_FILES[..7] {
+    for f in &MODEL_FILES[..6] {
         ensure!(dir.join(f).exists(), "{repo}@{at}: {f} missing in {}", crate::term::P(&dir));
     }
+    ensure!(
+        dir.join("model.safetensors").exists() || dir.join("model.safetensors.index.json").exists(),
+        "{repo}@{at}: model checkpoint missing"
+    );
     let s = t.elapsed().as_secs_f64();
     let bytes = progress.state.lock().unwrap().0;
     if bytes > 0 {
@@ -453,16 +509,32 @@ impl hf_hub::progress::ProgressHandler for DownloadLog {
 /// this model, dtype, GPU and cuBLASLt version, generated (one-time, minutes to an hour) when it is missing, was made
 /// on another GPU or cuBLASLt, or does not cover the model's weight shapes.
 pub fn gemm_table(m: &ModelConfig, manifest: &ModelManifest, cache: &Path) -> Result<Option<PathBuf>> {
+    let mut resolved = m.clone();
+    resolved.dtype = match basal_gpu::model_precision(&m.dtype, &manifest.config)? {
+        basal_gpu::Precision::F16 => "f16",
+        basal_gpu::Precision::Bf16 => "bf16",
+        basal_gpu::Precision::F32 => "f32",
+    }
+    .into();
+    let m = &resolved;
+    if matches!(manifest.config, basal_core::architecture::Architecture::Gemma4(_)) {
+        ensure!(matches!(m.gemm_table.as_str(), "auto" | "none"), "Gemma does not support Llama GEMM tables");
+        return Ok(None);
+    }
     match m.gemm_table.as_str() {
         "none" => return Ok(None),
         "auto" => {}
         p => return Ok(Some(PathBuf::from(p))),
     }
+    // The algorithm search supports half precision only; FP32 uses the reference matmul path.
+    if m.dtype == "f32" {
+        return Ok(None);
+    }
     let Some(version) = basal_gpu::cublaslt_version() else {
         return Ok(None); // Metal: no cuBLASLt tables
     };
     let gpu = basal_gpu::gpu_name()?;
-    let shapes = basal_gpu::projection_shapes(&manifest.config);
+    let shapes = basal_gpu::projection_shapes(manifest.config.llama()?);
     let path = cache.join(format!("{}-{}.json", manifest.name, m.dtype));
     let problem = match std::fs::read_to_string(&path) {
         Err(_) => Some("no table".to_string()),

@@ -29,6 +29,9 @@ enum Probe {
 }
 
 impl GpuMemoryProbe {
+    pub(crate) fn candle(dev: Device) -> Self {
+        Self(Probe::Candle(dev))
+    }
     #[cfg(all(feature = "intel", not(target_os = "macos")))]
     pub(crate) fn intel(probe: crate::intel::telemetry::Probe) -> Self {
         Self(Probe::Intel(probe))

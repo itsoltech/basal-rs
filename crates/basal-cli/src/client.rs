@@ -75,7 +75,7 @@ pub(super) struct ClientArgs {
     /// Select the state inside each JSON input, e.g. /text; output retains the entire input
     #[arg(long)]
     state_pointer: Option<String>,
-    /// Print just the single answer: choice/action as text, noul/score as number, multi as JSON array
+    /// Print one value: choice/action/tool as text, noul/score as number, sets as arrays (deferred tool: null)
     #[arg(long, conflicts_with = "keep_going")]
     value: bool,
     /// Continue after failed stream records; emit error records and exit 1 after EOF
@@ -106,8 +106,14 @@ pub(super) struct ClientArgs {
     #[arg(long)]
     local: bool,
     /// Local weight/activation precision
-    #[arg(long, default_value = "f16", requires = "local")]
+    #[arg(long, default_value = "auto", requires = "local")]
     dtype: String,
+    /// Enable image and audio input on a local omni CUDA model
+    #[arg(long, requires = "local")]
+    media: bool,
+    /// Local option orders: 1, 2, auto or 2leN
+    #[arg(long, requires = "local")]
+    orders: Option<String>,
     /// Local CUDA GEMM table (default: same automatic table selection as serve)
     #[arg(long, requires = "local")]
     gemm_table: Option<PathBuf>,
@@ -231,6 +237,8 @@ fn answer_value(response: &Value) -> Result<&Value, Failure> {
         Some("score") => "score",
         Some("multi") => "selected",
         Some("act") => "action",
+        Some("tool") if answer.get("multi") == Some(&Value::Bool(true)) => "tools",
+        Some("tool") => "tool",
         _ => return Err(Failure::message("output", "unknown answer type")),
     };
     answer.get(field).ok_or_else(|| Failure::message("output", format!("missing answer field {field}")))
@@ -453,13 +461,19 @@ fn run_local(
 fn load_local(args: &ClientArgs, name: &str) -> Result<basal_core::Engine<crate::GpuBackend>> {
     let mut model = crate::config::model_ref(name)?;
     model.dtype = args.dtype.clone();
+    model.media = args.media;
+    if args.orders.is_some() {
+        model.orders.clone_from(&args.orders);
+    }
     if let Some(table) = &args.gemm_table {
         model.gemm_table = table.display().to_string();
     }
     let dir = crate::config::model_dir(&model)?;
-    let manifest = ModelManifest::load(&dir)?;
+    let manifest = ModelManifest::load_with_orders(&dir, model.orders.as_deref())?;
     let table = crate::config::gemm_table(&model, &manifest, &crate::config::default_gemm_cache())?;
     let gpu = crate::GpuArgs {
+        media: model.media,
+        orders: model.orders.clone(),
         dtype: args.dtype.clone(),
         readout: "f32".into(),
         kernels: "fused".into(),

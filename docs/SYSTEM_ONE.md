@@ -5,7 +5,7 @@ konwencjach żądań oraz odpowiedzi:
 
 - `POST /v1/systemone`: kontrakt TypeSafe System One. Na nim opiera się
   integracja z aplikacjami.
-- `POST /v1/basal`: konwencje `Server.decide` upstream basal v1.5.0, dla
+- `POST /v1/basal`: konwencje `Server.decide` upstream basal v2.0.0, dla
   klientów napisanych pod serwer upstream.
 
 `GET /v1/models` zwraca listę TypeSafe `ModelMetadataList` (`name`,

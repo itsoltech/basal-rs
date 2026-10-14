@@ -411,3 +411,5 @@ CUDA graphs), czyli w trybie, w którym serwuje.
 Zestawy odniesienia (44 przykłady autora, 34 żądania System One dla
 basal-1.5) wystarczają do sprawdzenia zgodności z upstream, ale nie do oceny
 jakości na danych konkretnej aplikacji.
+
+Nowe dane wynikowe zapisujemy poza Gitem i archiwizujemy według [MEASUREMENT_ARTIFACTS.md](MEASUREMENT_ARTIFACTS.md). W `reports/` pozostają precyzyjne podsumowania Markdown.
