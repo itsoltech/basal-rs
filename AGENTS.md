@@ -91,5 +91,7 @@ Opis projektu: [README.md](README.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.
   pobranie bez autoryzacji. Dopiero wtedy usuń zbędne kopie wyników z Git
   i opisz publikację jako potwierdzoną. Zachowaj lokalną kopię archiwum.
 - Raport Markdown musi podawać URI, SHA-256 archiwum, ścieżki danych w nim
-  i sposób ich odtworzenia. Runnery korzystają z rozpakowanych wejść przez
-  `--measurement-artifacts`; szczegóły są w procedurze i `docs/CLOUD.md`.
+  i sposób ich odtworzenia. Nowe lub migrowane runnery, które czytają takie
+  dane, mają przyjmować ich katalog przez `--measurement-artifacts`.
+  To konwencja dla tych runnerów, nie istniejąca opcja CLI basal.
+  Szczegóły są w procedurze.

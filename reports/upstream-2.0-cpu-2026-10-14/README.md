@@ -18,16 +18,16 @@ Jednorazowe wywołania rzeczywistego core/CLI i upstream; bez frameworków/brame
 52 porównania procesorów na deterministycznych obrazach i stereo sinusach o różnych
 częstotliwościach próbkowania. Wszystkie kształty, pozycje, maski i soft tokeny zgodne.
 20 obrazów PNG jest bitowo równych (w tym skrajne proporcje, default/high, oba modele).
-WAV/FLAC: mini mel max |Δ| 4,77e-7; unified waveform bitowo równy w tych przypadkach.
-Dekodery stratne różnią się: OGG mel do 8,11e-4, MP3 do 1,56e-3; waveform odpowiednio
-do 5,96e-8 i 2,68e-7. Dane: procesory (`processors.json`).
+WAV/FLAC: mini mel max |Δ| 4.77e-7; unified waveform bitowo równy w tych przypadkach.
+Dekodery stratne różnią się: OGG mel do 8.11e-4, MP3 do 1.56e-3; waveform odpowiednio
+do 5.96e-8 i 2.68e-7. Dane: procesory (`processors.json`).
 
 Porównania wykryły i doprowadziły do naprawy uint8 bicubic (stałoprzecinkowe wagi,
 poziomy/pionowy przebieg i zaokrąglanie jak PyTorch), pustego znacznika kanału Unified
 przy wyłączonym thinking oraz maskowania ostatniej niepełnej ramki mel.
 Żadne z tych porównań nie wykonuje forwardu GPU ani nie dowodzi jakości modelu,
 zgodności wszystkich kodeków/obrazów czy przyspieszenia. PNG i syntetyczne sinusy nie
-zastępują korpusu rzeczywistych obrazów/mowy. Liczb progów kalibracji nie trenowano.
+zastępują korpusu rzeczywistych obrazów/mowy. Nie trenowano progów kalibracji.
 
 ## Dane poza Gitem
 

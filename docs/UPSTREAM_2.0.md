@@ -19,7 +19,12 @@ Stare modele format 1 zachowują dziesięć liter i istniejącą strategię duż
 Suma samych pięciu checkpointów to około 75 GB; jednoczesne serwowanie wymaga
 dodatkowej pamięci na aktywacje/KV i należy dobrać listę do dostępnej VRAM.
 
-Aliasów `mini`, `4.5B`, `max` oraz domyślnego `basal-1.5-4.5B` nie przepinamy.
+Bez konfiguracji i `--model` serwer wybiera przypięty `basal-2.0-4.5B`.
+Ten sam model wybierają domyślnie `basal init` i `basal setup`.
+Pomiar runtime tej rodziny obejmuje CUDA H100; Metal i Intel pozostają niezmierzone.
+Aliasy `mini`, `4.5B` i `max` nadal wskazują modele basal-1.5.
+Jawna konfiguracja zachowuje swoją listę modeli oraz wybór `default_model`;
+bez `default_model` żądanie trafia do pierwszego modelu z tej listy.
 Wagi są z przypiętych podstawowych checkpointów BF16. Dla Llamy `auto` nadal
 wybiera FP16 wykonania; dla omni BF16. FP8, GGUF i MLX 8-bit są poza zakresem.
 
@@ -85,6 +90,8 @@ komendy używają dwóch kolejności niezależnie od domyślnej polityki serwowa
 Zaobserwowaną zgodność i ograniczenia numeryczne opisuje [raport H100](../reports/upstream-2.0-h100-2026-10-14/README.md).
 
 W [analizie decyzji względem upstream FP32](../reports/upstream-2.0-decisions-2026-10-14/README.md)
-wszystkie 450 odpowiedzi pytań orders=1 i pięć BF16 auto zachowały wybór
-opcji/akcji/narzędzi/etykiet oraz odroczenie. Confidence i score mogą różnić się
+450 porównań odpowiedzi orders=1 zachowało wybory i pomocnicze klasyfikacje;
+osobne pięć BF16 auto zachowało wybór. Porównania obejmują opcje, narzędzia, etykiety
+i odroczenie narzędzi; dla noul stronę progu, a dla score najbardziej prawdopodobny poziom. `act` sprawdzono osobno:
+17/17 porównań reguł hosta dla tych samych prawdopodobieństw, bez forwardu modeli. Confidence i score mogą różnić się
 numerycznie. Zgodność dotyczy opisanego korpusu, nie wszystkich możliwych wejść.

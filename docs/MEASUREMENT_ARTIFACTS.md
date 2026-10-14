@@ -8,7 +8,7 @@ Rozszerzenie pliku samo w sobie nie rozstrzyga, czy jest wynikiem, czy potrzebny
 
 Wspólne zasady są w [AGENTS.md](../AGENTS.md). Procedura pochodzi z
 [PR #7](https://github.com/itsoltech/basal-rs/pull/7), z instrukcji przy commicie
-`0af3f4e471a044fbbf9bad2f976d4aa8060bd895`. Dane poprzedniej kampanii multiGPU mają
+`0af3f4e471a044fbbf9bad2f976d4aa8060bd895` z tego niezmergowanego PR. Dane poprzedniej kampanii multiGPU mają
 [osobny katalog i instrukcję](https://github.com/itsoltech/basal-rs/blob/0af3f4e471a044fbbf9bad2f976d4aa8060bd895/docs/MEASUREMENT_ARTIFACTS.md).
 
 ## Publikacja i integralność
@@ -34,9 +34,10 @@ URI `hf://buckets/itsoltech/basal-rs/`. Buckety nie mają historii wersji
 7. Dopiero po obu weryfikacjach usuń zbędne kopie wyników z Git i dopisz do raportów
    URI, SHA-256, ścieżki danych i sposób ich odtworzenia. Zachowaj lokalne archiwum.
 
-Dane pobieramy jawnie przed analizą; runtime nie pobiera archiwów wyników. Runnery,
+Dane pobieramy jawnie przed analizą; runtime nie pobiera archiwów wyników. Nowe lub migrowane runnery,
 które odczytują archiwizowane wyniki, powinny przyjmować katalog przez
 `--measurement-artifacts`, bez automatycznej zależności sieciowej.
+To konwencja dla takich runnerów. CLI basal w tej gałęzi nie ma tej opcji.
 
 ## Archiwum `upstream-2.0-2026-10-14`
 
@@ -68,14 +69,16 @@ Katalog docelowy rozpakowania musi być nowy. Polecenia nie zastępują istniej�
 BASAL_ARTIFACT_PREFIX=measurements/upstream-2.0-2026-10-14/c762b90c590e5db3d308df714faef9545e727eb7fc97af2edb403456db725536
 BASAL_ARTIFACT_DL=.cache/measurement-download/upstream-2.0-2026-10-14
 BASAL_ARTIFACT_ROOT=.cache/measurement-artifacts/upstream-2.0-2026-10-14
-mkdir -p .cache/measurement-download .cache/measurement-artifacts
-mkdir "$BASAL_ARTIFACT_DL" || exit 1
-hf buckets cp "hf://buckets/itsoltech/basal-rs/$BASAL_ARTIFACT_PREFIX/measurement-data.tar.gz" "$BASAL_ARTIFACT_DL/measurement-data.tar.gz"
-echo "c762b90c590e5db3d308df714faef9545e727eb7fc97af2edb403456db725536  $BASAL_ARTIFACT_DL/measurement-data.tar.gz" | sha256sum -c - &&
+mkdir -p .cache/measurement-download .cache/measurement-artifacts &&
+  mkdir "$BASAL_ARTIFACT_DL" &&
+  hf buckets cp "hf://buckets/itsoltech/basal-rs/$BASAL_ARTIFACT_PREFIX/measurement-data.tar.gz" "$BASAL_ARTIFACT_DL/measurement-data.tar.gz" &&
+  echo "c762b90c590e5db3d308df714faef9545e727eb7fc97af2edb403456db725536  $BASAL_ARTIFACT_DL/measurement-data.tar.gz" | sha256sum -c - &&
   mkdir "$BASAL_ARTIFACT_ROOT" &&
   tar -xzf "$BASAL_ARTIFACT_DL/measurement-data.tar.gz" -C "$BASAL_ARTIFACT_ROOT" &&
   (cd "$BASAL_ARTIFACT_ROOT" && sha256sum -c SHA256SUMS)
 ```
+
+Na macOS użyj `shasum -a 256 -c` zamiast `sha256sum -c` w obu miejscach.
 
 Po rozpakowaniu dawny `reports/<katalog>/<plik>.json` jest pod
 `$BASAL_ARTIFACT_ROOT/reports/<katalog>/<plik>.json`. Oryginalne README są historycznymi

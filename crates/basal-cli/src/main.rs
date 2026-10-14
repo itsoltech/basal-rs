@@ -380,8 +380,9 @@ enum Cmd {
     },
     /// Write a configuration file for `basal serve` (basal-serve.yml in the working directory)
     Init {
-        /// Served models: name (owner Remek; mini, 4.5B, max), owner/name, @revision, or a local directory; repeat
-        /// for several (default: basal-1.5-4.5B)
+        /// Served models: 2.0-mini/2.0-4.5B/2.0-max, omni-mini/omni-max, name (owner Remek), owner/name,
+        /// @revision, or a local directory; mini/4.5B/max select basal-1.5. Repeat
+        /// for several (default: basal-2.0-4.5B)
         #[arg(long = "model")]
         models: Vec<String>,
         /// Configuration file to write (default: basal-serve.yml in the working directory, which `basal serve` there
@@ -393,14 +394,15 @@ enum Cmd {
         force: bool,
     },
     /// System One HTTP server: POST /v1/systemone, POST /v1/basal, GET /v1/models, GET /health. Models from --model,
-    /// --config, basal-serve.yml in the working directory, else basal-1.5-4.5B from Hugging Face
+    /// --config, basal-serve.yml in the working directory, else basal-2.0-4.5B from Hugging Face
     Serve {
         /// YAML file with the served models and their options (serve.example.yml); replaces the model, GPU and
         /// admission options below. Default: BASAL_CONFIG, else basal-serve.yml in the working directory
         #[arg(long, conflicts_with_all = ["models", "gemm_table"])]
         config: Option<PathBuf>,
-        /// Model to serve: name (owner Remek; mini, 4.5B, max), owner/name, @revision, or a local directory; repeat
-        /// for several (the options below apply to each). Without --model and a configuration file: basal-1.5-4.5B
+        /// Model to serve: 2.0-mini/2.0-4.5B/2.0-max, omni-mini/omni-max, name (owner Remek), owner/name,
+        /// @revision, or a local directory; mini/4.5B/max select basal-1.5. Repeat
+        /// for several (the options below apply to each). Without --model and a configuration file: basal-2.0-4.5B
         #[arg(long = "model")]
         models: Vec<String>,
         #[command(flatten)]
@@ -800,7 +802,8 @@ fn run() -> Result<()> {
                 config::Source::File(p) => crate::note!("configuration {}", crate::term::P(p)),
                 config::Source::Models => {}
                 config::Source::Builtin => crate::note!(
-                    "no `--model` and no {} here: serving {} (`--model mini|4.5B|max` picks another)",
+                    "no `--model` and no {} here: serving {} (`--model 2.0-mini|2.0-max` selects another 2.0 model; \
+                     `--model mini|4.5B|max` selects basal-1.5)",
                     paths::CONFIG_NAME,
                     config::DEFAULT_MODEL.repo
                 ),

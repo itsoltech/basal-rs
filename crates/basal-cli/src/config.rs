@@ -220,15 +220,17 @@ pub const KNOWN_MODELS: [KnownModel; 8] = [
     },
 ];
 
-/// Model of the built-in configuration: the main basal-1.5 model (fits a 16 GB Mac and a 12 GB GPU).
-pub const DEFAULT_MODEL: &KnownModel = &KNOWN_MODELS[1];
+/// Model of the built-in configuration: the pinned basal-2.0-4.5B checkpoint.
+/// Keep index 4 assigned to basal-2.0-4.5B when changing [`KNOWN_MODELS`].
+pub const DEFAULT_MODEL: &KnownModel = &KNOWN_MODELS[4];
 
 /// Owner of a repository given without one (`--model basal-1.5-max` is `Remek/basal-1.5-max`).
 pub const DEFAULT_OWNER: &str = "Remek";
 
 /// A model on the command line (`basal serve --model`, `basal init --model`, the `--model` of the other commands):
 /// a local model directory (an existing path, or one starting with `/`, `.` or `~`), else a Hugging Face repository
-/// `owner/name` or `name` (owner Remek; mini, 4.5B and max for the basal-1.5 models), each with an optional
+/// `owner/name` or `name` (owner Remek; 2.0-mini/2.0-4.5B/2.0-max and omni-mini/omni-max;
+/// mini/4.5B/max for basal-1.5), each with an optional
 /// `@revision` (branch, tag or commit). Without a revision a model of [`KNOWN_MODELS`] is the revision this runtime
 /// pins, any other repository its main branch.
 pub fn model_ref(s: &str) -> Result<ModelConfig> {
@@ -292,7 +294,7 @@ pub fn template(models: &[ModelConfig]) -> String {
          # `basal serve --config FILE` (every option: serve.example.yml in the basal-rs repository).\n\
          # Models are downloaded from Hugging Face at the first start (HF_HOME, HF_TOKEN for private ones).\n\n\
          addr: 127.0.0.1:8000             # 0.0.0.0:8000 to serve other machines\n\
-         # default_model: basal-1.5-4.5B  # /v1/basal requests without \"model\" (default: the first model)\n\
+         # default_model: basal-2.0-4.5B  # /v1/basal requests without \"model\" (default: the first model)\n\
          # access_log: true               # one log line per request\n\
          # metrics: true                  # enable Prometheus at /metrics (default: false)\n\n\
          models:\n",

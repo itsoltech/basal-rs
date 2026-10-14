@@ -29,8 +29,11 @@ pub(crate) fn prepared_input_bytes(body: &Value) -> Result<usize, DecideError> {
         let count = if multi { labels.max(1) } else { 1 };
         branches = branches.saturating_add(count);
         let shared = state.saturating_add(text_bytes(&q["instructions"])).saturating_add(512);
-        let options =
-            text_bytes(&q["criteria"]).saturating_add(text_bytes(&q["tools"])).saturating_add(text_bytes(&q["costs"]));
+        // Include both score fields conservatively: `levels` is an accepted alias of `criteria`.
+        let options = text_bytes(&q["criteria"])
+            .saturating_add(q.get("levels").map_or(0, text_bytes))
+            .saturating_add(text_bytes(&q["tools"]))
+            .saturating_add(text_bytes(&q["costs"]));
         bytes = bytes.saturating_add(shared.saturating_mul(count).saturating_add(options).saturating_mul(2));
         if branches > MAX_BRANCHES || bytes > MAX_TEXT_BYTES {
             return Err(DecideError::Unsupported(vec![FieldError::new(
