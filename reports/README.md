@@ -7,6 +7,9 @@ raportów; surowe dane przechowujemy poza Gitem. Starsze katalogi mogą
 zawierać dane pomiarowe.
 Metodyka: [docs/BENCHMARKS.md](../docs/BENCHMARKS.md).
 
+Odsyłacze starszych raportów do lokalnego katalogu `.itsol/` mają
+[publiczne odpowiedniki](multigpu-link-corrections-2026-10-14/README.md).
+
 ## Kampanie optymalizacji
 
 | Katalog | Zawartość |
