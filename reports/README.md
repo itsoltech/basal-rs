@@ -11,8 +11,10 @@ Metodyka: [docs/BENCHMARKS.md](../docs/BENCHMARKS.md).
 
 | Katalog | Zawartość |
 |---|---|
+| [upstream-2.0-final-2026-10-14](upstream-2.0-final-2026-10-14/README.md) | końcowe buildy, CUDA/Metal/Intel, rzeczywiste act/certyfikaty i media, kontekst, pamięć i wydajność; niepowodzenia zachowane |
+| [upstream-2.0-metal-context-2026-10-14](upstream-2.0-metal-context-2026-10-14/README.md) | Metal 4.5B, 32768 tokenów: próba przerwana przez kontrolę pamięci; pochodna analiza progu noul z loadtestu |
 | [upstream-2.0-review-2026-10-14](upstream-2.0-review-2026-10-14/README.md) | niezależny przegląd, model domyślny 2.0, korekty opisów i budżetu levels, kontrole końcowych źródeł |
-| [upstream-2.0-decisions-2026-10-14](upstream-2.0-decisions-2026-10-14/README.md) | ponowna analiza rzeczywistych decyzji względem upstream FP32: opcje/akcje/tools/zbiory/odroczenia, bez wymogu identycznego confidence/score |
+| [upstream-2.0-decisions-2026-10-14](upstream-2.0-decisions-2026-10-14/README.md) | ponowna analiza choice/noul/score/multi/tool względem FP32, z klasyfikacjami pomocniczymi, bez act i bez wymogu identycznego confidence/score |
 | [upstream-2.0-h100-2026-10-14](upstream-2.0-h100-2026-10-14/README.md) | pięć BF16 checkpointów: FP32/FP16/BF16 readout, tekst i media obu omni, API/usage/kolejki, bitowe A/B basal-1.5, ograniczenia numeryczne |
 | [upstream-2.0-cpu-2026-10-14](upstream-2.0-cpu-2026-10-14/README.md) | prompty/tokeny, procesory obrazu/audio, reguły decyzji i błędy wejścia |
 | [upstream-2.0-boundaries-2026-10-14](upstream-2.0-boundaries-2026-10-14/README.md) | per-type certificates, pliki o2/mismatch, duże koszty act i budżet promptów |
