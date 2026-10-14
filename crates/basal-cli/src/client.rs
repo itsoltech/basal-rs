@@ -260,7 +260,7 @@ pub(super) fn run(args: ClientArgs) -> Result<u8> {
     );
     ensure!(!args.keep_going || format.stream(), "--keep-going requires --input lines or jsonl");
     ensure!(!args.local || args.jobs == 1, "--local processes records sequentially; --jobs must be 1");
-    if args.local {
+    if args.local && args.dtype != "auto" {
         basal_gpu::Precision::parse(&args.dtype)?;
     }
     if let Some(pointer) = &args.state_pointer {
