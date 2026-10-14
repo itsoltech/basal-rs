@@ -256,7 +256,7 @@ fn candle_gpu(r: &mut Report) -> Option<Vec<Gpu>> {
         match basal_gpu::metal_info() {
             Some((name, ws)) => {
                 r.ok("gpu", format!("{name}, Metal; recommended working set {:.1} GiB", ws as f64 / GIB));
-                return Some(vec![Gpu { name, memory: Some(ws), cap: None }]);
+                return Some(vec![Gpu { name, memory: Some(ws), cap: None, sms: None }]);
             }
             None => r.fail("gpu", "no Metal device", "Metal is part of macOS on Apple Silicon; check the system"),
         }
@@ -514,8 +514,8 @@ fn models(r: &mut Report, c: &ServeConfig, gpus: Option<&[Gpu]>) {
     // checkpoint bytes of the models of each device
     let mut resident = std::collections::BTreeMap::<usize, u64>::new();
     let mut repos = Vec::new();
-    // replica groups (several devices) whose GPUs are compared below
-    let mut groups = Vec::new();
+    // replica groups and layer splits (several devices) whose GPUs are compared below
+    let mut groups: Vec<(String, config::Placement)> = Vec::new();
     // the backend of `basal serve`: this build's, or the CUDA build of the Linux package
     let cuda = cfg!(feature = "cuda") || crate::paths::cuda_binary().is_some();
     for m in &c.models {
@@ -528,19 +528,31 @@ fn models(r: &mut Report, c: &ServeConfig, gpus: Option<&[Gpu]>) {
                 continue;
             }
         };
-        let devices = match m.placement() {
-            Ok(d) => d,
+        let placement = match m.placement() {
+            Ok(p) => p,
             Err(e) => {
                 r.fail(
                     "models",
                     format!("{}: {e:#}", config::describe(m)),
-                    "`device: N` for one GPU, or `replica_devices: [N, M]` (distinct CUDA devices) for replicas",
+                    "`device: N` for one GPU, `replica_devices: [N, M]` (distinct CUDA devices) for replicas, or \
+                     `layer_split: [{device: N, layers: K}, ...]` for one model over several GPUs",
                 );
                 continue;
             }
         };
-        if devices.len() > 1 {
-            groups.push((config::describe(m), devices.clone()));
+        // the static checks `basal serve` makes of a layer split before any download
+        if let Some(split) = placement.split() {
+            if let Err(e) = config::check_layer_split(&config::describe(m), split, &m.dtype, "fused", cuda) {
+                r.fail(
+                    "models",
+                    format!("{e:#}"),
+                    "`layer_split` runs on the CUDA build with `dtype: f16`; otherwise give the model one `device`",
+                );
+                continue;
+            }
+        }
+        if placement.shared_devices().is_some() {
+            groups.push((config::describe(m), placement.clone()));
         }
         // the checkpoint is loaded on every device of the model
         let mut bytes = 0u64;
@@ -589,15 +601,32 @@ fn models(r: &mut Report, c: &ServeConfig, gpus: Option<&[Gpu]>) {
             }
             _ => {}
         }
+        let checkpoint = bytes;
         if quantization != basal_gpu::Quantization::None {
             bytes = quantized_bytes(r, m, model_dir.as_deref(), bytes, quantization);
         }
-        for d in devices {
-            *resident.entry(d).or_default() += bytes;
+        match placement.split() {
+            // the checkpoint is loaded on every device of the model
+            None => {
+                for devices in placement.instances() {
+                    for d in devices {
+                        *resident.entry(d).or_default() += bytes;
+                    }
+                }
+            }
+            // each stage holds its part of the weights
+            Some(split) => {
+                for (d, b) in split_bytes(r, m, split, model_dir.as_deref(), checkpoint, bytes, quantization) {
+                    *resident.entry(d).or_default() += b;
+                }
+            }
         }
     }
-    for (model, devices) in &groups {
+    for (model, placement) in &groups {
+        let Some(devices) = placement.shared_devices() else { continue };
+        let split = placement.split().is_some();
         if !cuda {
+            // a layer split was refused above without the CUDA backend
             r.fail(
                 "models",
                 format!("{model}: replicas on devices {devices:?} need the CUDA build"),
@@ -619,11 +648,21 @@ fn models(r: &mut Report, c: &ServeConfig, gpus: Option<&[Gpu]>) {
                     format!("device {d}: {}, compute capability {cap}, {sms} SMs", g.name)
                 })
                 .collect();
-            r.fail(
-                "models",
-                format!("{model}: replicas need GPUs of one type ({})", listed.join("; ")),
-                "list devices of one GPU type in `replica_devices`; models of their own may use other GPUs",
-            );
+            if split {
+                r.fail(
+                    "models",
+                    format!("{model}: a layer split needs GPUs of one type ({})", listed.join("; ")),
+                    "list devices of one GPU type in `layer_split`; models of their own may use other GPUs",
+                );
+            } else {
+                r.fail(
+                    "models",
+                    format!("{model}: replicas need GPUs of one type ({})", listed.join("; ")),
+                    "list devices of one GPU type in `replica_devices`; models of their own may use other GPUs",
+                );
+            }
+        } else if split {
+            r.ok("models", format!("{model}: layer split over devices {devices:?} ({})", kinds[0].name));
         } else {
             r.ok("models", format!("{model}: {} replicas on devices {devices:?} ({})", devices.len(), kinds[0].name));
         }
@@ -724,10 +763,7 @@ fn quantized_bytes(
     checkpoint: u64,
     q: basal_gpu::Quantization,
 ) -> u64 {
-    let cfg = dir.context("not downloaded yet").and_then(|d| {
-        let text = std::fs::read_to_string(d.join("config.json")).context("reading config.json")?;
-        basal_core::manifest::parse_config(&serde_json::from_str(&text).context("parsing config.json")?)
-    });
+    let cfg = model_config(dir);
     if let (Ok(cfg), basal_gpu::Quantization::Q4K, Some(block)) = (&cfg, q, q.block_values()) {
         if let Some((n, k)) = basal_gpu::projection_shapes(cfg).into_iter().find(|&(_, k)| !k.is_multiple_of(block)) {
             r.fail(
@@ -758,6 +794,76 @@ fn quantized_bytes(
                 ),
             );
             checkpoint
+        }
+    }
+}
+
+/// The configuration (`config.json`) of a model directory on this machine.
+fn model_config(dir: Option<&Path>) -> Result<basal_core::manifest::LlamaConfig> {
+    let d = dir.context("not downloaded yet")?;
+    let text = std::fs::read_to_string(d.join("config.json")).context("reading config.json")?;
+    basal_core::manifest::parse_config(&serde_json::from_str(&text).context("parsing config.json")?)
+}
+
+/// Estimated GPU bytes of each stage of a layer split (format arithmetic): with the model's configuration the layers'
+/// share plus the embedding on the first and lm_head and norm on the last stage
+/// ([`basal_gpu::estimated_stage_weight_bytes`]), after checking that the split covers the model's layers; without
+/// it, `total` (the whole model's estimate) in proportion to the stages' layer counts.
+fn split_bytes(
+    r: &mut Report,
+    m: &config::ModelConfig,
+    split: &basal_gpu::LayerSplit,
+    dir: Option<&Path>,
+    checkpoint: u64,
+    total: u64,
+    q: basal_gpu::Quantization,
+) -> Vec<(usize, u64)> {
+    let stages = split.stages();
+    let proportional = || {
+        let layers: u128 = stages.iter().map(|s| s.layers as u128).sum();
+        stages
+            .iter()
+            .map(|s| {
+                (s.device, u64::try_from(u128::from(total) * s.layers as u128 / layers.max(1)).unwrap_or(u64::MAX))
+            })
+            .collect::<Vec<_>>()
+    };
+    let Ok(cfg) = model_config(dir) else { return proportional() };
+    if let Err(e) = config::check_split_coverage(&config::describe(m), split, cfg.num_layers) {
+        r.fail(
+            "models",
+            format!("{e:#}"),
+            format!("give `layer_split` layer counts that add up to the model's {} layers", cfg.num_layers),
+        );
+        return proportional();
+    }
+    let last = stages.len().saturating_sub(1);
+    let estimates = stages
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            basal_gpu::estimated_stage_weight_bytes(&cfg, checkpoint, q, s.layers, i == 0, i == last)
+                .map(|b| (s.device, b))
+        })
+        .collect::<Result<Vec<_>>>();
+    match estimates {
+        Ok(e) => {
+            let per: Vec<String> = e.iter().map(|(d, b)| format!("device {d} ~{:.1} GB", *b as f64 / GB)).collect();
+            r.ok(
+                "models",
+                format!("{}: layer split {split}, weights {} (estimate)", config::describe(m), per.join(", ")),
+            );
+            e
+        }
+        Err(e) => {
+            r.info(
+                "models",
+                format!(
+                    "{}: layer split weight estimate unavailable ({e:#}); shares of the whole",
+                    config::describe(m)
+                ),
+            );
+            proportional()
         }
     }
 }

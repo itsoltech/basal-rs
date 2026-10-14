@@ -83,6 +83,14 @@ pub struct IntelBackend {
 }
 
 impl IntelBackend {
+    /// Estimate resident GPU weight buffers from the validated checkpoint header, without loading tensors.
+    /// Embedding/head rows, prefix caches, forward scratch and driver allocations need additional headroom.
+    pub fn estimated_weight_bytes(dir: &Path, cfg: &LlamaConfig) -> std::result::Result<u64, IntelError> {
+        Checkpoint::open(&dir.join("model.safetensors"))
+            .and_then(|checkpoint| checkpoint.resident_weight_bytes(cfg))
+            .map_err(IntelError::Model)
+    }
+
     pub fn load(
         dir: &Path,
         cfg: &LlamaConfig,

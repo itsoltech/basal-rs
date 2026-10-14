@@ -22,10 +22,25 @@ fn main(@builtin(workgroup_id) g: vec3<u32>, @builtin(local_invocation_id) l: ve
             a[j] = av; b[c * 32u + r] = bv;
         }
         workgroupBarrier();
-        for(var z = 0u; z < 32u; z++) {
-            let off = z * 32u + l.x * 4u;
-            let bv = vec4<f32>(f32(b[off]), f32(b[off+1u]), f32(b[off+2u]), f32(b[off+3u]));
-            for(var r = 0u; r < 4u; r++) { sums[r] = fma(vec4<f32>(f32(a[(l.y*4u+r)*32u+z])), bv, sums[r]); }
+        // Explicit rows and two K steps reduce loop/indexing overhead on Intel Arc.
+        // Preserve the ascending K order of every FP32 FMA, including the zero-padded tail.
+        for(var z = 0u; z < 32u; z += 2u) {
+            {
+                let off = z * 32u + l.x * 4u;
+                let bv = vec4<f32>(f32(b[off]), f32(b[off+1u]), f32(b[off+2u]), f32(b[off+3u]));
+                sums[0] = fma(vec4<f32>(f32(a[(l.y*4u)*32u+z])), bv, sums[0]);
+                sums[1] = fma(vec4<f32>(f32(a[(l.y*4u+1u)*32u+z])), bv, sums[1]);
+                sums[2] = fma(vec4<f32>(f32(a[(l.y*4u+2u)*32u+z])), bv, sums[2]);
+                sums[3] = fma(vec4<f32>(f32(a[(l.y*4u+3u)*32u+z])), bv, sums[3]);
+            }
+            {
+                let off = (z + 1u) * 32u + l.x * 4u;
+                let bv = vec4<f32>(f32(b[off]), f32(b[off+1u]), f32(b[off+2u]), f32(b[off+3u]));
+                sums[0] = fma(vec4<f32>(f32(a[(l.y*4u)*32u+z+1u])), bv, sums[0]);
+                sums[1] = fma(vec4<f32>(f32(a[(l.y*4u+1u)*32u+z+1u])), bv, sums[1]);
+                sums[2] = fma(vec4<f32>(f32(a[(l.y*4u+2u)*32u+z+1u])), bv, sums[2]);
+                sums[3] = fma(vec4<f32>(f32(a[(l.y*4u+3u)*32u+z+1u])), bv, sums[3]);
+            }
         }
         workgroupBarrier();
     }

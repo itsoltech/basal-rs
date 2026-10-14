@@ -49,8 +49,9 @@ pub(super) struct Metrics {
 const BATCH_SIZES: &[f64] = &[1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0];
 
 impl Metrics {
-    /// Registry of the served models, each with the device ordinals of its replicas (one for a single instance).
-    pub fn new(models: &[(String, Vec<usize>)], max_inflight: usize) -> prometheus::Result<Self> {
+    /// Registry of the served models, each with the device ordinals of its replicas (one replica for a single
+    /// instance; a layer-split instance lists the ordinals of its stages).
+    pub fn new(models: &[(String, Vec<Vec<usize>>)], max_inflight: usize) -> prometheus::Result<Self> {
         let registry = Registry::new();
         let counter = |name, help, labels| {
             let c = IntCounterVec::new(Opts::new(name, help), labels)?;
@@ -127,6 +128,8 @@ impl Metrics {
             )?,
             replica_info: gauge(
                 "basal_replica_info",
+                // a layer-split instance labels `device` with its stages' ordinals in order, comma-separated; the help
+                // text stays as before
                 "Configured instances of each model (1): replica index and the CUDA device ordinal it runs on.",
                 &["model", "replica", "device"],
             )?,
@@ -191,9 +194,10 @@ impl Metrics {
             m.questions.with_label_values(&[name]);
             m.model_replicas.with_label_values(&[name]).set(devices.len() as i64);
             m.model_replicas_available.with_label_values(&[name]);
-            for (index, device) in devices.iter().enumerate() {
+            for (index, stages) in devices.iter().enumerate() {
                 let replica = index.to_string();
-                m.replica_info.with_label_values(&[name, &replica, &device.to_string()]).set(1);
+                let device = stages.iter().map(ToString::to_string).collect::<Vec<_>>().join(",");
+                m.replica_info.with_label_values(&[name, &replica, &device]).set(1);
                 m.replica_routed.with_label_values(&[name, &replica]);
                 m.replica_inflight.with_label_values(&[name, &replica]);
                 m.replica_available.with_label_values(&[name, &replica]);

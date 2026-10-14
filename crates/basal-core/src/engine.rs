@@ -49,6 +49,14 @@ pub trait Backend {
     /// Share the device with another engine through `gate` (urgent lane, or preemptible between layers).
     /// Default: ignored.
     fn set_gate(&mut self, _gate: std::sync::Arc<crate::gate::Gate>, _urgent: bool) {}
+    /// Share device `device` (an ordinal this backend runs on) with other engines through `gate`. A backend placed on
+    /// several devices takes one gate per device and holds at most one of them at a time. Default: [`Backend::set_gate`]
+    /// (a backend on one device).
+    fn set_device_gate(&mut self, device: usize, gate: std::sync::Arc<crate::gate::Gate>, urgent: bool) -> Result<()> {
+        let _ = device;
+        self.set_gate(gate, urgent);
+        Ok(())
+    }
     /// Readiness of this backend's device, shared with its forks. Default: not reported.
     fn device_health(&self) -> Option<DeviceHealth> {
         None

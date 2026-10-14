@@ -14,15 +14,17 @@
 //! evaluated, in f32, at the readout positions.
 
 use std::collections::BTreeMap;
+use std::ops::Range;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{bail, ensure, Context, Result};
-use basal_core::gate::Gate;
+use basal_core::gate::{Gate, GateGuard};
 use basal_core::manifest::LlamaConfig;
 use basal_core::pack::Packed;
-use basal_core::Backend;
+use basal_core::{Backend, DeviceHealth};
 use candle_core::safetensors::MmapedSafetensors;
 use candle_core::{DType, Device, Tensor};
 #[cfg(target_os = "macos")]
@@ -38,9 +40,11 @@ mod fused;
 pub mod intel;
 mod memory;
 mod quant;
+mod split;
 pub use memory::{gpu_memory, pool_probe, GpuMemory, GpuMemoryProbe, PoolProbe, PoolUsage};
-pub use quant::{estimated_weight_bytes, ParseQuantizationError, Quantization};
+pub use quant::{estimated_stage_weight_bytes, estimated_weight_bytes, ParseQuantizationError, Quantization};
 use quant::{ProjWeight, Projection};
+pub use split::{LayerSplit, LayerSplitError, StageSpec};
 #[cfg(target_os = "macos")]
 pub mod gemm;
 use fused::HeadDims;
@@ -233,22 +237,35 @@ fn prefix_bytes(cfg: &LlamaConfig, tokens: usize, hilo: bool) -> usize {
     tokens * cfg.num_layers * 2 * cfg.kv_heads * cfg.head_dim * 4 * if hilo { 2 } else { 1 }
 }
 
+/// K/V of a precomputed prefix for the layers of one stage, on the stage's GPU.
 #[derive(Clone)]
-struct PrefixKv {
-    ids: Vec<u32>,
+struct StageKv {
+    /// The stage's layers in order.
     kv: LayerKv,
     /// CUDA tensor-core attention: per layer the K and V split into f16 hi / lo planes (`fused::split_hilo`).
     #[cfg_attr(not(feature = "cuda"), allow(dead_code, reason = "Hi/lo KV planes are used only by CUDA attention"))]
     hl: Vec<(Tensor, Tensor)>,
+}
+
+#[derive(Clone)]
+struct PrefixKv {
+    ids: Vec<u32>,
+    /// One part per stage, in stage order: the K/V of a layer lies on the GPU of its stage.
+    parts: Vec<OnStage<StageKv>>,
     /// Template prefixes are permanent; state prefixes live in the bounded LRU.
     pinned: bool,
     last_use: u64,
 }
 
 impl PrefixKv {
-    /// Device memory: f32 K/V, plus the same again for the f16 hi / lo planes when present.
+    /// Device memory of all stages: f32 K/V, plus the same again for the f16 hi / lo planes when present.
     fn bytes(&self, cfg: &LlamaConfig) -> usize {
-        prefix_bytes(cfg, self.ids.len(), !self.hl.is_empty())
+        prefix_bytes(cfg, self.ids.len(), self.parts.iter().any(|p| !p.get().hl.is_empty()))
+    }
+
+    /// The part of stage `s`.
+    fn part(&self, s: usize) -> Result<&StageKv> {
+        Ok(self.parts.get(s).with_context(|| format!("prefix has no part for stage {s}"))?.get())
     }
 }
 
@@ -377,8 +394,28 @@ pub fn gpu_device(device: usize) -> Result<Device> {
             // cudarc creates two CUDA events for every allocation, which it records and waits on only when the context
             // has streams of its own (`is_in_multi_stream_mode`); candle and this crate use only the per-thread default
             // stream, so the events are created and destroyed unused, two driver calls each per tensor.
-            // SAFETY: no stream is created here or in candle's CUDA backend (Device::new_cuda), so no allocation is
-            // ever shared between streams that the events would have to order; set before the first allocation.
+            // SAFETY: set before the first allocation of this device. Without tracking, cudarc requires that no
+            // allocation is used on a stream before its allocation there completed, freed before its last use on
+            // another stream completed, or written by two streams at once. Every allocation here lives on the
+            // per-thread stream of the thread that made it (candle and this crate create no streams; a handle of
+            // that stream resolves to the context current on the calling thread), and the engines guarantee:
+            // (a) weights, the evidence head, cuBLASLt workspaces and pinned prefix K/V written at start-up are read
+            //     by other threads' streams only after the publication barriers that synchronise every stage (end of
+            //     `load_stages`, end of `add_prefix`), and are only read afterwards;
+            // (b) a layer-split boundary copy is queued only after an `Ok` drain of its source stage and of the
+            //     destination's initialisation; the destination is used and the source freed only after `Ok`
+            //     synchronisations of this thread's per-thread stream in both contexts (the copy lands on one of
+            //     them); boundary buffers are freed with their owner's context bound only when no copy is or may be
+            //     in flight, and are otherwise retained forever (`StageCopy`);
+            // (c) a stage's work, including its cuBLASLt workspace, is drained with `Ok` before its gate is released
+            //     (or its last host readout drained it), so lanes sharing the workspace never overlap; an
+            //     unconfirmed drain marks the lineage lost and nothing of it runs again;
+            // (d) no allocation is written by two streams at once: weights and pinned prefixes are only read after
+            //     publication, and every lane writes only its own temporaries and state-cache entries;
+            // (e) memory of a stage is freed only with that stage's context current, on the stream of the thread that
+            //     queued its uses (stream order) or after their end was confirmed: stage temporaries as locals of the
+            //     stage body, the final readout in the last stage's scope, groups through `OnStage` (binding first);
+            //     an unconfirmed bind or a lost lineage leaks instead. Being on the same thread alone is not relied on.
             unsafe { d.disable_event_tracking() };
             use candle_core::cuda_backend::cudarc::driver::sys::CUdevice_attribute as A;
             let ctx = d.cuda_stream().context().clone();
@@ -407,9 +444,13 @@ pub fn gpu_device(device: usize) -> Result<Device> {
 }
 
 pub struct GpuBackend {
-    dev: Device,
-    /// The ordinal `dev` was opened with ([`gpu_device`]).
-    device: usize,
+    /// Consecutive layer ranges in layer order, each on its own GPU; one stage holds the whole model on one GPU (the
+    /// path without a layer split). Never empty.
+    stages: Vec<Stage>,
+    /// Health (and on CUDA the quarantine) of this loaded model, shared with its forks.
+    lineage: Lineage,
+    /// Layer split: transfer counters per boundary, shared with the forks; None on one GPU.
+    transfers: Option<Arc<TransferStats>>,
     /// Precomputed prefixes (prompt template up to the state, and with a state cache the shared prefix of recent
     /// single-row forwards); a row that starts with one of them skips its tokens.
     prefixes: Vec<PrefixKv>,
@@ -423,13 +464,9 @@ pub struct GpuBackend {
     precision: Precision,
     readout: Readout,
     kernels: Kernels,
-    embed: Tensor,
-    layers: Vec<Layer>,
-    norm: Tensor,
-    lm_head: Tensor,
     inv_freq: Vec<f64>,
     /// RoPE cos and sin of every position below `cfg.max_positions` (`rope_row`), `[pos][cos: hd/2 | sin: hd/2]`:
-    /// computed once instead of per token and forward
+    /// computed once instead of per token and forward; host memory shared by the stages
     rope: std::sync::Arc<[f32]>,
     pub load_s: f64,
     /// When set, every forward section is synchronised and timed (slows the forward; diagnostic only).
@@ -447,13 +484,639 @@ pub struct GpuBackend {
     pub residual_max: Option<std::cell::RefCell<Vec<f32>>>,
     /// Timing of the last call in milliseconds: host preparation, GPU forward + readout (synchronised).
     pub last_timing: (f64, f64),
+}
+
+/// One consecutive range of decoder layers on one GPU.
+struct Stage {
+    /// `gpu_device(device)` of this stage: its own candle device (handles, kernel caches) on the GPU's primary context.
+    dev: Device,
+    /// The ordinal `dev` was opened with ([`gpu_device`]).
+    device: usize,
+    /// Global indices of the stage's layers.
+    layers: Range<usize>,
+    /// Device memory of the stage (weights, its cuBLASLt handle), freed with the stage's context bound.
+    w: OnStage<StageWeights>,
+    /// Device shared with other engines ([`Backend::set_device_gate`]): the gate and whether this one is the urgent
+    /// lane.
+    gate: Option<(Arc<Gate>, bool)>,
+}
+
+/// Weights of one stage, all on its GPU.
+#[derive(Clone, Default)]
+struct StageWeights {
+    /// The stage's layers in order.
+    layers: Vec<Layer>,
+    /// Before a boundary: a copy of the `input_layernorm` of the next stage's first layer (the same bits), so that
+    /// the residual add of the stage's last layer fuses the next block's RMSNorm as on one GPU.
+    next_ln1: Option<Tensor>,
+    /// Stage 0: the embedding.
+    embed: Option<Tensor>,
+    /// Last stage: final norm, lm_head and the evidence head.
+    head: Option<Head>,
     /// CUDA: f16/bf16 projections through cuBLASLt with measured algorithms (None = candle's cuBLAS matmul).
     #[cfg(feature = "cuda")]
     lt: Option<Arc<cublaslt::Lt>>,
+}
+
+/// Readout weights of the last stage.
+#[derive(Clone)]
+struct Head {
+    norm: Tensor,
+    /// bf16 (checkpoint dtype); only the letter rows are gathered and converted to f32 per call.
+    lm_head: Tensor,
     /// basal-1.5 evidence head (`evidence_head.pt`, f32): ws, us, we, ue `[k, d]`, bs, be `[1, d]`.
     evidence: Option<EvidenceHead>,
-    /// Device shared with another engine ([`Backend::set_gate`]): the gate and whether this one is the urgent lane.
-    gate: Option<(Arc<Gate>, bool)>,
+}
+
+/// What `transfer`'s boundary time covers (`describe` of a layer split): fixed text, no measured numbers.
+const STAGE_TRANSFER: &str = "Sequential device-to-device API copy after source drain and destination initialization; destination and source PTDS completion are confirmed. Boundary time includes allocation, initialization, synchronization, source release and context binding; physical copy route is not established.";
+
+/// Error of a call to a model whose lineage was marked lost.
+const LOST: &str = "the GPU work of this model could not be confirmed after an earlier failure: model disabled until it is loaded again";
+
+/// Health of one loaded model and its forks (lanes): once marked lost, entry points refuse work before any GPU call.
+#[derive(Clone, Default)]
+struct Lineage {
+    health: DeviceHealth,
+    /// Buffers whose last GPU use could not be confirmed (layer split boundaries), never freed.
+    #[cfg(feature = "cuda")]
+    quarantine: Arc<std::sync::Mutex<Quarantine>>,
+}
+
+#[cfg(feature = "cuda")]
+impl Lineage {
+    /// Keep `value` alive until the end of the process instead of freeing memory a GPU may still use.
+    fn retain<T: Send + 'static>(&self, value: T) {
+        self.quarantine.lock().unwrap_or_else(std::sync::PoisonError::into_inner).held.push(Box::new(value));
+    }
+}
+
+/// Retained buffers of a lineage. A lane holds at most one boundary copy and stops at its next health check once the
+/// lineage is lost, so it adds at most its two buffers (source and destination, each at most `2 * M * H` f16 of its
+/// largest forward); later calls are refused before any allocation.
+#[cfg(feature = "cuda")]
+#[derive(Default)]
+struct Quarantine {
+    held: Vec<Box<dyn std::any::Any + Send>>,
+}
+
+#[cfg(feature = "cuda")]
+impl Drop for Quarantine {
+    fn drop(&mut self) {
+        // deliberately leaked: freeing could release memory a copy still reads or writes
+        std::mem::forget(std::mem::take(&mut self.held));
+    }
+}
+
+/// Device memory of one stage. Drop binds the stage context first (two attempts), so cudarc's stream-ordered free
+/// lands on the owning GPU; a lost lineage or an unconfirmed bind leaks the value instead of freeing it. Ownership is
+/// per group (a stage's weights, one stage's part of a prefix), never per tensor.
+struct OnStage<T> {
+    /// The stage's context; None outside CUDA (the wrapper is then transparent).
+    #[cfg(feature = "cuda")]
+    ctx: Option<Arc<candle_core::cuda_backend::cudarc::driver::CudaContext>>,
+    /// Bind before freeing; false only for state-cache parts on one GPU (their thread only uses that context).
+    bind: bool,
+    health: DeviceHealth,
+    /// Invariant: `Some` from construction until `release` or `drop` takes it.
+    value: Option<T>,
+}
+
+impl<T> OnStage<T> {
+    fn new(dev: &Device, bind: bool, health: &DeviceHealth, value: T) -> Self {
+        #[cfg(feature = "cuda")]
+        let ctx = match dev {
+            Device::Cuda(d) => Some(d.cuda_stream().context().clone()),
+            _ => None,
+        };
+        #[cfg(not(feature = "cuda"))]
+        let _ = dev;
+        Self {
+            #[cfg(feature = "cuda")]
+            ctx,
+            bind,
+            health: health.clone(),
+            value: Some(value),
+        }
+    }
+
+    fn get(&self) -> &T {
+        self.value.as_ref().expect("OnStage holds its value until release or drop")
+    }
+
+    fn get_mut(&mut self) -> &mut T {
+        self.value.as_mut().expect("OnStage holds its value until release or drop")
+    }
+
+    /// Free the value now (error paths), returning a cleanup error instead of printing it.
+    fn release(mut self) -> Result<()> {
+        match self.value.take() {
+            Some(v) => self.free(v),
+            None => Ok(()),
+        }
+    }
+
+    fn free(&self, value: T) -> Result<()> {
+        if self.health.is_lost() {
+            // work of this lineage may still run: never free its memory
+            std::mem::forget(value);
+            return Ok(());
+        }
+        #[cfg(feature = "cuda")]
+        if let (true, Some(ctx)) = (self.bind, &self.ctx) {
+            if let Twice::Neither(a, b) = twice(|| ctx.bind_to_thread()) {
+                self.health.mark_lost();
+                std::mem::forget(value);
+                bail!(
+                    "binding CUDA device {} to free its memory failed twice ({a}; {b}): memory retained, model \
+                     disabled until it is loaded again",
+                    ctx.ordinal()
+                );
+            }
+        }
+        drop(value);
+        Ok(())
+    }
+}
+
+impl<T> Drop for OnStage<T> {
+    fn drop(&mut self) {
+        if let Some(v) = self.value.take() {
+            if let Err(e) = self.free(v) {
+                cleanup_note(format_args!("{e:#}"));
+            }
+        }
+    }
+}
+
+/// Last-resort diagnostic of a destructor, written after its cleanup (free, retention, lost marking) is done. A failed
+/// write to stderr is deliberately ignored: `eprintln!` would panic, and a second panic while unwinding aborts.
+fn cleanup_note(message: std::fmt::Arguments<'_>) {
+    use std::io::Write as _;
+    let _ = writeln!(std::io::stderr().lock(), "basal: {message}");
+}
+
+impl<T: Clone> Clone for OnStage<T> {
+    fn clone(&self) -> Self {
+        Self {
+            #[cfg(feature = "cuda")]
+            ctx: self.ctx.clone(),
+            bind: self.bind,
+            health: self.health.clone(),
+            value: self.value.clone(),
+        }
+    }
+}
+
+/// Outcome of a CUDA call tried at most twice. cudarc first returns (and clears) an error that a `Drop` stored on the
+/// context object (`check_err`) and then does not make the call, so a first `Err` does not show that the call ran;
+/// only `Ok` proves it. Repeated errors prove nothing more, so there is no third attempt.
+enum Twice<E> {
+    First,
+    Second(E),
+    Neither(E, E),
+}
+
+fn twice<E>(mut f: impl FnMut() -> std::result::Result<(), E>) -> Twice<E> {
+    match f() {
+        Ok(()) => Twice::First,
+        Err(a) => match f() {
+            Ok(()) => Twice::Second(a),
+            Err(b) => Twice::Neither(a, b),
+        },
+    }
+}
+
+/// Bind the context of CUDA device `dev` to this thread (two attempts); a no-op outside CUDA.
+fn bind_twice(dev: &Device) -> Twice<String> {
+    #[cfg(feature = "cuda")]
+    if let Device::Cuda(d) = dev {
+        let ctx = d.cuda_stream().context().clone();
+        return match twice(|| ctx.bind_to_thread()) {
+            Twice::First => Twice::First,
+            Twice::Second(e) => Twice::Second(e.to_string()),
+            Twice::Neither(a, b) => Twice::Neither(a.to_string(), b.to_string()),
+        };
+    }
+    let _ = dev;
+    Twice::First
+}
+
+/// Free `value` (CUDA memory of `ctx`) with `ctx` bound, two attempts; otherwise retain it and mark the lineage lost.
+#[cfg(feature = "cuda")]
+fn free_on<T: Send + 'static>(
+    ctx: &candle_core::cuda_backend::cudarc::driver::CudaContext,
+    value: T,
+    lineage: &Lineage,
+) -> std::result::Result<(), String> {
+    if let Twice::Neither(a, b) = twice(|| ctx.bind_to_thread()) {
+        lineage.retain(value);
+        lineage.health.mark_lost();
+        return Err(format!("binding CUDA device {} failed twice ({a}; {b}): buffer retained", ctx.ordinal()));
+    }
+    drop(value);
+    Ok(())
+}
+
+/// Free the stages of a failed load in stage order, each with its own context bound; the load error stays the cause
+/// and cleanup errors become its context. A stage whose context cannot be bound (two attempts) is leaked and marks the
+/// not yet published lineage lost, after which the later stages are leaked as well (`OnStage::free`): a conservative
+/// end of a start-up that fails anyway.
+fn release_built(built: Vec<OnStage<StageWeights>>, mut err: anyhow::Error) -> anyhow::Error {
+    for w in built {
+        if let Err(c) = w.release() {
+            err = err.context(format!("cleanup after the failed load: {c:#}"));
+        }
+    }
+    err
+}
+
+/// What is known about a boundary copy ([`GpuBackend::transfer`]); it decides how its buffers may end.
+#[cfg(feature = "cuda")]
+#[derive(Clone, Copy)]
+enum CopyState {
+    /// The source is written completely and nothing reads it; no destination yet.
+    Drained,
+    /// The destination is allocated; its memset may still be pending on this thread's stream of its GPU; no copy.
+    Allocated,
+    /// The memset completed; no copy queued.
+    Initialized,
+    /// The copy may have been queued on either GPU (set before the call, kept after `Ok` and `Err`).
+    MaybeInFlight,
+    /// Both GPUs confirmed: the copy finished or never ran; nothing reads the source or writes the destination.
+    Completed,
+    /// The buffers left the copy (freed, retained or handed on).
+    Done,
+}
+
+/// The two buffers of one boundary copy, owned from before the destination is allocated until a final state. Buffers
+/// known idle are freed with their owner's context bound (two attempts, otherwise retained); in `MaybeInFlight` both
+/// are retained and the lineage marked lost, without GPU calls. `Drop` (a panic) applies the same rules.
+#[cfg(feature = "cuda")]
+struct StageCopy<'a> {
+    state: CopyState,
+    /// The source buffer (the whole storage: the views of the stage body are gone).
+    src: Option<Tensor>,
+    dst: Option<candle_core::cuda_backend::cudarc::driver::CudaSlice<half::f16>>,
+    src_ctx: Arc<candle_core::cuda_backend::cudarc::driver::CudaContext>,
+    dst_ctx: Arc<candle_core::cuda_backend::cudarc::driver::CudaContext>,
+    lineage: &'a Lineage,
+    /// "stage transfer {s}→{s+1}, CUDA device {a}→{b}, {bytes} B"
+    what: String,
+}
+
+#[cfg(feature = "cuda")]
+impl StageCopy<'_> {
+    /// The conditions cudarc leaves to the caller (it asserts the lengths): one contiguous f16 storage of `n` values
+    /// from offset 0, shaped `[2, M, H]`. Returns the shape.
+    fn check(&self, n: usize) -> Result<Vec<usize>> {
+        let src = self.src.as_ref().context("the source buffer")?;
+        ensure!(src.dtype() == DType::F16, "boundary buffer of dtype {:?}, f16 expected", src.dtype());
+        let dims = src.dims().to_vec();
+        ensure!(dims.len() == 3 && dims[0] == 2, "boundary buffer of shape {dims:?}, [2, M, H] expected");
+        let (st, l) = src.storage_and_layout();
+        ensure!(l.is_contiguous() && l.start_offset() == 0, "boundary buffer is not contiguous from offset 0");
+        let candle_core::Storage::Cuda(cs) = &*st else { bail!("boundary buffer is not on a CUDA device") };
+        let len = cs.as_cuda_slice::<half::f16>()?.len();
+        ensure!(len == n, "boundary buffer storage holds {len} values, {n} expected");
+        Ok(dims)
+    }
+
+    /// Queue the device-to-device copy of the whole source storage into the destination, on the destination's stream.
+    fn copy_on(&mut self, dst_dev: &candle_core::CudaDevice) -> Result<()> {
+        let (Some(src), Some(dst)) = (&self.src, &mut self.dst) else { bail!("the boundary buffers are missing") };
+        let (st, _) = src.storage_and_layout();
+        let candle_core::Storage::Cuda(cs) = &*st else { bail!("boundary buffer is not on a CUDA device") };
+        dst_dev.cuda_stream().memcpy_dtod(cs.as_cuda_slice::<half::f16>()?, dst)?;
+        Ok(())
+    }
+
+    /// Free the buffers (none in flight), each with its owner's context bound; returns the cleanup errors.
+    fn release(&mut self) -> Vec<String> {
+        let mut errors = Vec::new();
+        if let Some(src) = self.src.take() {
+            errors.extend(free_on(&self.src_ctx, src, self.lineage).err());
+        }
+        if let Some(dst) = self.dst.take() {
+            errors.extend(free_on(&self.dst_ctx, dst, self.lineage).err());
+        }
+        errors
+    }
+
+    fn quarantine(&mut self) {
+        if let Some(src) = self.src.take() {
+            self.lineage.retain(src);
+        }
+        if let Some(dst) = self.dst.take() {
+            self.lineage.retain(dst);
+        }
+        self.lineage.health.mark_lost();
+    }
+
+    /// The request fails with nothing of this copy in flight: free both buffers; `err` stays the cause, cleanup
+    /// errors become its context.
+    fn fail(&mut self, err: anyhow::Error) -> anyhow::Error {
+        let cleanup = self.release();
+        self.state = CopyState::Done;
+        let mut err = err.context(self.what.clone());
+        for c in cleanup {
+            err = err.context(format!("cleanup: {c}"));
+        }
+        err
+    }
+
+    /// The request fails and the end of GPU work on the buffers is unknown: retain both, mark the lineage lost.
+    fn retain(&mut self, reason: String) -> anyhow::Error {
+        self.quarantine();
+        self.state = CopyState::Done;
+        anyhow::anyhow!("{}: {reason}: buffers retained, model disabled until it is loaded again", self.what)
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl Drop for StageCopy<'_> {
+    fn drop(&mut self) {
+        match self.state {
+            CopyState::Done => {}
+            CopyState::MaybeInFlight => {
+                self.quarantine();
+                cleanup_note(format_args!(
+                    "{}: interrupted with the copy possibly in flight: buffers retained, model disabled until it is \
+                     loaded again",
+                    self.what
+                ));
+            }
+            CopyState::Drained | CopyState::Allocated | CopyState::Initialized | CopyState::Completed => {
+                for e in self.release() {
+                    cleanup_note(format_args!("{}: cleanup: {e}", self.what));
+                }
+            }
+        }
+    }
+}
+
+/// Counters of one stage boundary (host clock, relaxed atomics: independent counters read for reports).
+struct BoundaryStats {
+    from_device: usize,
+    to_device: usize,
+    copies: AtomicU64,
+    bytes: AtomicU64,
+    /// Steps 4–9 of `transfer` after the context binding of step 4: allocation, initialisation drain, copy, both
+    /// confirmations, source release, final binding.
+    transfer_ns: AtomicU64,
+    /// Steps 2–3 of `transfer` and the binding of step 4: releasing this stage, taking the next stage's gate and
+    /// binding its context.
+    gate_wait_ns: AtomicU64,
+}
+
+/// Transfer counters of a layer split, per boundary (only with a split).
+struct TransferStats {
+    boundaries: Vec<BoundaryStats>,
+}
+
+impl TransferStats {
+    fn new(stages: &[Stage]) -> Self {
+        Self {
+            boundaries: stages
+                .windows(2)
+                .map(|p| BoundaryStats {
+                    from_device: p[0].device,
+                    to_device: p[1].device,
+                    copies: AtomicU64::new(0),
+                    bytes: AtomicU64::new(0),
+                    transfer_ns: AtomicU64::new(0),
+                    gate_wait_ns: AtomicU64::new(0),
+                })
+                .collect(),
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn record(&self, boundary: usize, bytes: usize, gate_wait: std::time::Duration, transfer: std::time::Duration) {
+        if let Some(b) = self.boundaries.get(boundary) {
+            let ns = |d: std::time::Duration| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX);
+            b.copies.fetch_add(1, Ordering::Relaxed);
+            b.bytes.fetch_add(u64::try_from(bytes).unwrap_or(u64::MAX), Ordering::Relaxed);
+            b.transfer_ns.fetch_add(ns(transfer), Ordering::Relaxed);
+            b.gate_wait_ns.fetch_add(ns(gate_wait), Ordering::Relaxed);
+        }
+    }
+}
+
+/// Transfer counters of a layer-split model (shared with its forks) for reports: per boundary the device-to-device
+/// API calls, bytes and host time. They observe the API calls; they do not establish the physical copy route.
+#[derive(Clone)]
+pub struct StageTransfers(Arc<TransferStats>);
+
+impl StageTransfers {
+    /// The counters as JSON, one object per boundary in stage order.
+    pub fn report(&self) -> Value {
+        let ms = |a: &AtomicU64| a.load(Ordering::Relaxed) as f64 / 1e6;
+        Value::Array(
+            self.0
+                .boundaries
+                .iter()
+                .enumerate()
+                .map(|(i, b)| {
+                    json!({"from_stage": i, "to_stage": i + 1, "from_device": b.from_device, "to_device": b.to_device,
+                        "copies": b.copies.load(Ordering::Relaxed), "bytes": b.bytes.load(Ordering::Relaxed),
+                        "transfer_ms": ms(&b.transfer_ns), "gate_wait_ms": ms(&b.gate_wait_ns),
+                        "scope": "host time of successful boundary transfers: transfer_ms covers allocation and initialisation of the destination, its drain, the device-to-device API copy, confirmation on both GPUs, source release and the final context binding; gate_wait_ms covers taking the next GPU's gate and binding its context; the physical copy route is not established"})
+                })
+                .collect(),
+        )
+    }
+
+    /// Start counting from zero (outside measured intervals).
+    pub fn reset(&self) {
+        for b in &self.0.boundaries {
+            for a in [&b.copies, &b.bytes, &b.transfer_ns, &b.gate_wait_ns] {
+                a.store(0, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+/// Owners a call borrows its gates from, cloned at the call's start, so that the guards do not borrow the backend
+/// (helpers taking `&mut self` can carry them).
+struct GateOwners {
+    gates: Vec<Option<(Arc<Gate>, bool)>>,
+    devs: Vec<Device>,
+    health: DeviceHealth,
+    split: bool,
+}
+
+/// The stage gates of one call: at most one held at a time (no hold-and-wait between GPUs). Leaving a stage releases
+/// its gate only after this thread's work on that GPU was drained with `Ok` (a synchronisation, or a synchronous host
+/// readout marked with [`StageGates::mark_drained`]). With a split, entering a stage binds its context.
+struct StageGates<'g> {
+    owners: &'g GateOwners,
+    /// Stage entered last (its gate held when it has one).
+    current: Option<usize>,
+    guard: Option<GateGuard<'g>>,
+    /// The work of this thread on `current` is known to be complete.
+    drained: bool,
+    /// A preemptible lane has started its task: later entries continue it (`Gate::resume`).
+    started: bool,
+}
+
+impl<'g> StageGates<'g> {
+    fn new(owners: &'g GateOwners) -> Self {
+        Self { owners, current: None, guard: None, drained: false, started: false }
+    }
+
+    /// Enter stage `s` (nothing when it is already the current one): leave the current stage, take the gate of `s`,
+    /// check the lineage's health and, with a split, bind the stage's context.
+    fn switch_to(&mut self, s: usize) -> Result<()> {
+        if self.current == Some(s) {
+            return Ok(());
+        }
+        self.leave()?;
+        let o = self.owners;
+        if let Some((g, urgent)) = &o.gates[s] {
+            self.guard = Some(if *urgent {
+                g.enter(true)
+            } else if self.started {
+                g.resume()
+            } else {
+                g.enter(false)
+            });
+        }
+        self.started = true;
+        self.current = Some(s);
+        self.drained = false;
+        ensure!(!o.health.is_lost(), LOST);
+        if o.split {
+            match bind_twice(&o.devs[s]) {
+                Twice::Neither(a, b) => bail!("binding stage {s} failed twice ({a}; {b})"),
+                Twice::Second(e) => bail!("binding stage {s}: first attempt failed ({e})"),
+                Twice::First => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// The last work of this call on the current stage was a synchronous host readout: nothing of it is pending.
+    fn mark_drained(&mut self) {
+        self.drained = true;
+    }
+
+    /// Preemptible lane between two layers: drain the current stage, then let an urgent caller run if one waits.
+    /// After it yielded, the lineage's health is checked again (the urgent caller may have marked it lost before
+    /// releasing the gate), as on every gate entry.
+    fn checkpoint(&mut self) -> Result<()> {
+        if let Some(c) = self.current {
+            if let Some((g, false)) = &self.owners.gates[c] {
+                self.owners.devs[c].synchronize()?;
+                if g.checkpoint() {
+                    ensure!(!self.owners.health.is_lost(), LOST);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Success-path exit from the current stage: drain unless drained (`Ok` required), then release the gate. Two
+    /// failed drains mark the lineage lost before the gate is released.
+    ///
+    /// A stage without a gate is left without a drain, also with a split: no other lane of this model uses that GPU
+    /// (serve gates every GPU of a model with a long lane), and this thread's later work there (the next request's
+    /// stage body after binding the context, LRU frees after binding it) is queued on the same per-thread stream of
+    /// that context, after the pending work. A boundary copy confirms both GPUs itself (`transfer`), and the error
+    /// path confirms the current stage ([`StageGates::release_on_error`]).
+    fn leave(&mut self) -> Result<()> {
+        let Some(c) = self.current.take() else { return Ok(()) };
+        let Some(guard) = self.guard.take() else { return Ok(()) };
+        if self.drained {
+            drop(guard);
+            return Ok(());
+        }
+        match twice(|| self.owners.devs[c].synchronize()) {
+            Twice::First => {
+                drop(guard);
+                Ok(())
+            }
+            Twice::Second(e) => {
+                drop(guard);
+                bail!("draining stage {c} before releasing its gate: first attempt failed ({e})")
+            }
+            Twice::Neither(a, b) => {
+                self.owners.health.mark_lost();
+                drop(guard);
+                bail!("draining stage {c} before releasing its gate failed twice ({a}; {b}): {LOST}")
+            }
+        }
+    }
+
+    /// Error-path exit: always synchronise the current stage (two attempts) when its gate is held or the model is
+    /// split (also a stage without a gate); unconfirmed, mark the lineage lost before a held gate is released. One GPU
+    /// without a gate keeps today's error path: no synchronisation. Returns the cleanup error, if any.
+    fn release_on_error(&mut self) -> Option<String> {
+        let c = self.current.take()?;
+        let guard = self.guard.take();
+        if guard.is_none() && !self.owners.split {
+            return None;
+        }
+        let cleanup = match twice(|| self.owners.devs[c].synchronize()) {
+            Twice::First => None,
+            Twice::Second(e) => Some(format!("draining stage {c} after the error: first attempt failed ({e})")),
+            Twice::Neither(a, b) => {
+                self.owners.health.mark_lost();
+                Some(format!("draining stage {c} after the error failed twice ({a}; {b}): {LOST}"))
+            }
+        };
+        drop(guard);
+        cleanup
+    }
+
+    /// End of the call: the result on success (after a drained release), else the original error with the cleanup
+    /// errors as context.
+    fn end<T>(mut self, result: Result<T>) -> Result<T> {
+        match result {
+            Ok(v) => {
+                self.leave()?;
+                Ok(v)
+            }
+            Err(e) => Err(match self.release_on_error() {
+                Some(cleanup) => e.context(cleanup),
+                None => e,
+            }),
+        }
+    }
+}
+
+impl Drop for StageGates<'_> {
+    /// Panic safeguard: the error-path release, with the cleanup error on stderr.
+    fn drop(&mut self) {
+        if let Some(cleanup) = self.release_on_error() {
+            cleanup_note(format_args!("{cleanup}"));
+        }
+    }
+}
+
+/// Host inputs of one ragged forward, shared by its stages.
+struct Ragged<'a, 'p> {
+    ids: &'a [u32],
+    cos_sin: &'a [f32],
+    segs: &'a [Segment<'p>],
+    read: &'a [u32],
+    /// Capture mode (one segment, no readout): `Some(bind)` with the `OnStage::bind` of the captured parts.
+    capture: Option<bool>,
+    dims: HeadDims,
+    /// CUDA: the blocks of all rows as tree-attention units (compact offsets; prefix addresses set per layer).
+    #[cfg(feature = "cuda")]
+    units: Vec<(fused::TreeUnit, Option<&'p PrefixKv>)>,
+    #[cfg(target_os = "macos")]
+    metal_units: Vec<fused::MetalTreeUnit>,
+    #[cfg(target_os = "macos")]
+    metal_pasts: Vec<&'p PrefixKv>,
+}
+
+/// What leaves a stage body: the boundary buffer `[2, M, H]` for the next stage, or the last stage's final normalised
+/// hidden states (None in capture mode).
+enum StageOut {
+    Boundary(Tensor),
+    Final(Option<Tensor>),
 }
 
 #[derive(Clone)]
@@ -654,8 +1317,59 @@ impl GpuBackend {
         device: usize,
     ) -> Result<Self> {
         quantization.check(precision, kernels, cfg!(feature = "cuda"))?;
+        Self::load_stages(model_dir, cfg, precision, readout, kernels, quantization, &[(device, 0..cfg.num_layers)])
+    }
+
+    /// Load a model split by consecutive layer ranges over several CUDA devices ([`LayerSplit`]): every stage holds its
+    /// layers, cuBLASLt handle and prefix K/V on its GPU; stage 0 also the embedding, the last stage the final norm,
+    /// lm_head and evidence head. The split is checked against this build's backend, `precision`, `kernels` and the
+    /// model's layer count before anything is opened. Computations are those of one GPU (same kernels, GEMM tables
+    /// and bits of every weight); the activations move between GPUs at each boundary.
+    pub fn load_split(
+        model_dir: &Path,
+        cfg: &LlamaConfig,
+        precision: Precision,
+        readout: Readout,
+        kernels: Kernels,
+        quantization: Quantization,
+        split: &LayerSplit,
+    ) -> Result<Self> {
+        quantization.check(precision, kernels, cfg!(feature = "cuda"))?;
+        split.check(precision, kernels, cfg!(feature = "cuda"))?;
+        let ranges = split.ranges(cfg.num_layers)?;
+        let plan: Vec<(usize, Range<usize>)> = split.devices().into_iter().zip(ranges).collect();
+        Self::load_stages(model_dir, cfg, precision, readout, kernels, quantization, &plan)
+    }
+
+    /// Load the stages `plan` (device ordinal and global layer range of each, in layer order; one stage is the whole
+    /// model on one GPU). Stages are filled one after another; each stage's memory belongs to its entry of a local
+    /// `built` list from before its first allocation, so a failed load frees everything already loaded, each stage
+    /// with its own context bound.
+    fn load_stages(
+        model_dir: &Path,
+        cfg: &LlamaConfig,
+        precision: Precision,
+        readout: Readout,
+        kernels: Kernels,
+        quantization: Quantization,
+        plan: &[(usize, Range<usize>)],
+    ) -> Result<Self> {
         let t0 = Instant::now();
-        let dev = gpu_device(device)?;
+        ensure!(!plan.is_empty(), "a model needs at least one stage");
+        let split = plan.len() > 1;
+        let devs = plan
+            .iter()
+            .enumerate()
+            .map(|(s, (device, _))| {
+                let dev = gpu_device(*device);
+                if split {
+                    dev.with_context(|| format!("stage {s} (CUDA device {device})"))
+                } else {
+                    dev
+                }
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let kind = if devs[0].is_cuda() { "CUDA" } else { "GPU" };
         let path = model_dir.join("model.safetensors");
         // SAFETY: the checkpoint file is not modified while mapped.
         let st = unsafe { MmapedSafetensors::new(&path) }.with_context(|| format!("mapping {}", path.display()))?;
@@ -707,7 +1421,7 @@ impl GpuBackend {
         let dt = precision.storage();
         // the mapping above gives names and shapes; the data is read (see TensorReader)
         let reader = TensorReader::open(&path)?;
-        let load_cat = |names: &[String]| -> Result<Tensor> {
+        let load_cat = |names: &[String], dev: &Device| -> Result<Tensor> {
             let views = names.iter().map(|n| st.get(n)).collect::<candle_core::Result<Vec<_>>>()?;
             let mut shape = views[0].shape().to_vec();
             shape[0] = views.iter().map(|v| v.shape()[0]).sum();
@@ -716,23 +1430,24 @@ impl GpuBackend {
                 reader.read(n, &mut bytes)?;
             }
             Ok(match dt {
-                DType::BF16 => Tensor::from_raw_buffer(&bytes, DType::BF16, &shape, &dev)?,
+                DType::BF16 => Tensor::from_raw_buffer(&bytes, DType::BF16, &shape, dev)?,
                 DType::F16 => {
                     // on every core (the 11B checkpoint: ~11e9 values)
                     let mut h = vec![half::f16::ZERO; bytes.len() / 2];
                     bf16_to_f16(&bytes, &mut h);
-                    Tensor::from_vec(h, shape, &dev)?
+                    Tensor::from_vec(h, shape, dev)?
                 }
                 d => bail!("unsupported storage dtype {d:?}"),
             })
         };
-        let load = |name: &str| load_cat(&[name.to_string()]);
+        let load = |name: &str, dev: &Device| load_cat(&[name.to_string()], dev);
         // Projection weights: dense as above, or q8_0 / q4_k blocks quantized on the host from the bf16 values and
-        // uploaded once (one allocation per matrix; no dense copy on the GPU).
+        // uploaded once (one allocation per matrix; no dense copy on the GPU). Statistics accumulate in layer order
+        // 0..L over all stages, as on one GPU.
         #[cfg(feature = "cuda")]
-        let mut q8_stats = quant::Q8Stats::default();
+        let q8_stats = std::cell::RefCell::new(quant::Q8Stats::default());
         #[cfg(feature = "cuda")]
-        let mut q4k_stats = quant::Q4KStats::default();
+        let q4k_stats = std::cell::RefCell::new(quant::Q4KStats::default());
         // q4_k: the host blocks of one matrix are kept for the warm-up check: the projection of layer 0 with the
         // fewest values in this architecture's shapes (the first of equals, as the q8_0 warm-up picks)
         #[cfg(feature = "cuda")]
@@ -743,25 +1458,26 @@ impl GpuBackend {
             .map(|(p, _)| p);
         // the kept matrix: its tensor, host blocks, source tensors and projection
         #[cfg(feature = "cuda")]
-        let mut q4k_warm = None;
+        let q4k_warm = std::cell::Cell::new(None);
         #[cfg_attr(
             not(feature = "cuda"),
-            allow(
-                unused_mut,
-                unused_variables,
-                reason = "only CUDA loads quantized weights and accumulates their diagnostics"
-            )
+            allow(unused_variables, reason = "only CUDA loads quantized weights and accumulates their diagnostics")
         )]
-        let mut load_proj = |layer: usize, projection: Projection, names: &[String]| -> Result<ProjWeight> {
+        let load_proj = |layer: usize,
+                         projection: Projection,
+                         names: &[String],
+                         dev: &Device,
+                         device: usize|
+         -> Result<ProjWeight> {
             match quantization {
-                Quantization::None => Ok(ProjWeight::Dense(load_cat(names)?)),
+                Quantization::None => Ok(ProjWeight::Dense(load_cat(names, dev)?)),
                 #[cfg(feature = "cuda")]
                 Quantization::Q8_0 => {
                     let what = || format!("{} as q8_0 on CUDA device {device}", names.join(" + "));
                     let (q, _, stats) =
-                        load_blocks(&st, &reader, names, &dev, quantization, false, quant::quantize_q8_0)
+                        load_blocks(&st, &reader, names, dev, quantization, false, quant::quantize_q8_0)
                             .with_context(what)?;
-                    q8_stats.add(&stats);
+                    q8_stats.borrow_mut().add(&stats);
                     Ok(ProjWeight::Quantized(Arc::new(q)))
                 }
                 #[cfg(feature = "cuda")]
@@ -770,15 +1486,15 @@ impl GpuBackend {
                     let parts = source_parts(&st, names).with_context(what)?;
                     let source = quant::Source { layer, projection, parts: &parts };
                     let keep = layer == 0 && q4k_warm_projection == Some(projection);
-                    let (q, kept, matrix) = load_blocks(&st, &reader, names, &dev, quantization, keep, |b, r, c| {
+                    let (q, kept, matrix) = load_blocks(&st, &reader, names, dev, quantization, keep, |b, r, c| {
                         quant::quantize_q4_k(b, r, c, &source)
                     })
                     .with_context(what)?;
                     quant::check_q4k_resident(&q, matrix.blocks()).with_context(what)?;
-                    q4k_stats.add(&matrix).with_context(what)?;
+                    q4k_stats.borrow_mut().add(&matrix).with_context(what)?;
                     let q = Arc::new(q);
                     if let Some(blocks) = kept {
-                        q4k_warm = Some((Arc::clone(&q), blocks, parts, projection));
+                        q4k_warm.set(Some((Arc::clone(&q), blocks, parts, projection)));
                     }
                     Ok(ProjWeight::Quantized(q))
                 }
@@ -788,73 +1504,134 @@ impl GpuBackend {
         };
         // Models without biases (basal-1.5) get zero biases: the fused kernels then add exactly 0, which leaves every
         // rounding point as without a bias (T(T(y) + 0) = T(y)).
-        let biases = |names: &[String], len: usize| -> Result<Tensor> {
+        let biases = |names: &[String], len: usize, dev: &Device| -> Result<Tensor> {
             if cfg.bias {
-                load_cat(names)
+                load_cat(names, dev)
             } else {
-                Ok(Tensor::zeros(len, dt, &dev)?)
+                Ok(Tensor::zeros(len, dt, dev)?)
             }
         };
         let qd = cfg.heads * cfg.head_dim;
-        let mut layers = Vec::with_capacity(cfg.num_layers);
-        for l in 0..cfg.num_layers {
+        let load_layer = |l: usize, dev: &Device, device: usize| -> Result<Layer> {
             let p = |n: &str| format!("model.layers.{l}.{n}");
             let ps = |ns: &[&str]| ns.iter().map(|n| p(n)).collect::<Vec<_>>();
-            layers.push(Layer {
-                ln1: load(&p("input_layernorm.weight"))?,
+            Ok(Layer {
+                ln1: load(&p("input_layernorm.weight"), dev)?,
                 wqkv: load_proj(
                     l,
                     Projection::Qkv,
                     &ps(&["self_attn.q_proj.weight", "self_attn.k_proj.weight", "self_attn.v_proj.weight"]),
+                    dev,
+                    device,
                 )?,
                 bqkv: biases(
                     &ps(&["self_attn.q_proj.bias", "self_attn.k_proj.bias", "self_attn.v_proj.bias"]),
                     qd + 2 * kvd,
+                    dev,
                 )?,
-                wo: load_proj(l, Projection::O, &ps(&["self_attn.o_proj.weight"]))?,
-                bo: biases(&ps(&["self_attn.o_proj.bias"]), h)?,
-                ln2: load(&p("post_attention_layernorm.weight"))?,
-                wgu: load_proj(l, Projection::GateUp, &ps(&["mlp.gate_proj.weight", "mlp.up_proj.weight"]))?,
-                bgu: biases(&ps(&["mlp.gate_proj.bias", "mlp.up_proj.bias"]), 2 * i)?,
-                wdown: load_proj(l, Projection::Down, &ps(&["mlp.down_proj.weight"]))?,
-                bdown: biases(&ps(&["mlp.down_proj.bias"]), h)?,
-            });
-        }
-        let embed = load("model.embed_tokens.weight")?;
-        let norm = load("model.norm.weight")?;
-        // lm_head stays in the checkpoint dtype; only the letter rows are gathered and converted to f32 per call.
-        let lm_head = {
-            let v = st.get("lm_head.weight")?;
-            let mut bytes = Vec::new();
-            reader.read("lm_head.weight", &mut bytes)?;
-            Tensor::from_raw_buffer(&bytes, DType::BF16, v.shape(), &dev)?
+                wo: load_proj(l, Projection::O, &ps(&["self_attn.o_proj.weight"]), dev, device)?,
+                bo: biases(&ps(&["self_attn.o_proj.bias"]), h, dev)?,
+                ln2: load(&p("post_attention_layernorm.weight"), dev)?,
+                wgu: load_proj(
+                    l,
+                    Projection::GateUp,
+                    &ps(&["mlp.gate_proj.weight", "mlp.up_proj.weight"]),
+                    dev,
+                    device,
+                )?,
+                bgu: biases(&ps(&["mlp.gate_proj.bias", "mlp.up_proj.bias"]), 2 * i, dev)?,
+                wdown: load_proj(l, Projection::Down, &ps(&["mlp.down_proj.weight"]), dev, device)?,
+                bdown: biases(&ps(&["mlp.down_proj.bias"]), h, dev)?,
+            })
         };
-        // q8_0: load Candle's QUANTIZED module and its dequantization kernel now (a first use may compile the module's
-        // PTX), by dequantizing the smallest projection matrix once and discarding the result. Queued before the
-        // synchronisation below, like every upload: the engines run on the per-thread streams of other threads and
-        // event tracking is off (gpu_device), so this synchronisation is what makes the blocks visible to them.
-        #[cfg(feature = "cuda")]
-        if quantization == Quantization::Q8_0 {
-            if let Some(ProjWeight::Quantized(q)) = layers
-                .first()
-                .and_then(|l| [&l.wqkv, &l.wo, &l.wgu, &l.wdown].into_iter().min_by_key(|w| w.elem_count()))
-            {
-                drop(q.dequantize_f16(&q.device()).context("q8_0: warming up the dequantization kernel")?);
-            }
+        let lineage = Lineage::default();
+        let last = plan.len() - 1;
+        let mut built: Vec<OnStage<StageWeights>> = Vec::with_capacity(plan.len());
+        // Fill the stages in order. Filling stage `s` binds only its context; its temporaries die inside, with it
+        // current. On one GPU this is today's order: layers, embedding, final norm, lm_head, warm-ups.
+        let filled =
+            (|| -> Result<()> {
+                for (s, ((device, range), dev)) in plan.iter().zip(&devs).enumerate() {
+                    let device = *device;
+                    (|| -> Result<()> {
+                        if split {
+                            match bind_twice(dev) {
+                                Twice::First => {}
+                                Twice::Second(e) => bail!("binding the context: first attempt failed ({e})"),
+                                Twice::Neither(a, b) => bail!("binding the context failed twice ({a}; {b})"),
+                            }
+                        }
+                        built.push(OnStage::new(dev, true, &lineage.health, StageWeights::default()));
+                        let w = built.last_mut().context("the stage was just added")?.get_mut();
+                        for l in range.clone() {
+                            let layer = load_layer(l, dev, device)
+                                .with_context(|| format!("layer {l} of stage {s} on {kind} device {device}"))?;
+                            w.layers.push(layer);
+                        }
+                        if s == 0 {
+                            w.embed = Some(load("model.embed_tokens.weight", dev)?);
+                        }
+                        if s < last {
+                            // the next stage's first input_layernorm, converted by the same code: the same bits
+                            w.next_ln1 =
+                                Some(load(&format!("model.layers.{}.input_layernorm.weight", range.end), dev)?);
+                        }
+                        if s == last {
+                            let norm = load("model.norm.weight", dev)?;
+                            // lm_head stays in the checkpoint dtype; only the letter rows are gathered and converted to
+                            // f32 per call.
+                            let lm_head = {
+                                let v = st.get("lm_head.weight")?;
+                                let mut bytes = Vec::new();
+                                reader.read("lm_head.weight", &mut bytes)?;
+                                Tensor::from_raw_buffer(&bytes, DType::BF16, v.shape(), dev)?
+                            };
+                            w.head = Some(Head { norm, lm_head, evidence: None });
+                        }
+                        // q8_0: load Candle's QUANTIZED module and its dequantization kernel now (a first use may
+                        // compile the module's PTX), by dequantizing the smallest projection matrix of the stage's first
+                        // layer once and discarding the result. Queued before the synchronisation below, like every
+                        // upload: the engines run on the per-thread streams of other threads and event tracking is off
+                        // (gpu_device), so that synchronisation is what makes the blocks visible to them. Stages after
+                        // the first do this for q4_k too (the q4_k check below runs on stage 0 only).
+                        #[cfg(feature = "cuda")]
+                        if quantization == Quantization::Q8_0 || (s > 0 && quantization == Quantization::Q4K) {
+                            if let Some(ProjWeight::Quantized(q)) = w.layers.first().and_then(|l| {
+                                [&l.wqkv, &l.wo, &l.wgu, &l.wdown].into_iter().min_by_key(|w| w.elem_count())
+                            }) {
+                                drop(q.dequantize_f16(&q.device()).with_context(|| {
+                                    format!("{quantization}: warming up the dequantization kernel")
+                                })?);
+                            }
+                        }
+                        // q4_k: the same warm-up on the kept matrix (layer 0), plus a control: its f16 result copied back
+                        // to the host and compared bitwise (signed zeros included) with the host reconstruction of the
+                        // uploaded blocks. A difference is a load error. The kept host blocks are released afterwards;
+                        // the other matrices kept none.
+                        #[cfg(feature = "cuda")]
+                        if s == 0 && quantization == Quantization::Q4K {
+                            let (q, blocks, parts, projection) =
+                                q4k_warm.take().context("q4_k: no matrix was kept for the warm-up check")?;
+                            let source = quant::Source { layer: 0, projection, parts: &parts };
+                            let values = quant::check_q4k_warmup(&q, &blocks, &source)
+                                .with_context(|| format!("q4_k warm-up check on CUDA device {device}"))?;
+                            q4k_stats.borrow_mut().set_warmup(0, projection, values);
+                        }
+                        Ok(())
+                    })()
+                    .with_context(|| format!("stage {s} (layers {}–{})", range.start, range.end.saturating_sub(1)))?;
+                }
+                for (s, dev) in devs.iter().enumerate() {
+                    dev.synchronize().with_context(|| format!("synchronising stage {s} after the upload"))?;
+                }
+                Ok(())
+            })();
+        if let Err(e) = filled {
+            // q4_k: a matrix of stage 0 kept for its warm-up check (the fill failed in stage 0, still current)
+            #[cfg(feature = "cuda")]
+            drop(q4k_warm.take());
+            return Err(release_built(built, e));
         }
-        // q4_k: the same warm-up on the kept matrix, plus a control: its f16 result copied back to the host and
-        // compared bitwise (signed zeros included) with the host reconstruction of the uploaded blocks. A difference
-        // is a load error. The kept host blocks are released afterwards; the other matrices kept none.
-        #[cfg(feature = "cuda")]
-        if quantization == Quantization::Q4K {
-            let (q, blocks, parts, projection) =
-                q4k_warm.take().context("q4_k: no matrix was kept for the warm-up check")?;
-            let source = quant::Source { layer: 0, projection, parts: &parts };
-            let values = quant::check_q4k_warmup(&q, &blocks, &source)
-                .with_context(|| format!("q4_k warm-up check on CUDA device {device}"))?;
-            q4k_stats.set_warmup(0, projection, values);
-        }
-        dev.synchronize()?;
         let d = cfg.head_dim;
         let inv_freq: Vec<f64> = (0..d / 2).map(|j| 1.0 / cfg.rope_theta.powf((2 * j) as f64 / d as f64)).collect();
         let mut rope = vec![0f32; cfg.max_positions * d];
@@ -862,7 +1639,64 @@ impl GpuBackend {
             let (cos, sin) = row.split_at_mut(d / 2);
             rope_angles(&inv_freq, pos as f64, cos, sin);
         }
+        let load_s = t0.elapsed().as_secs_f64();
+        // The evidence head (last stage) and a cuBLASLt handle with its workspace per stage, each after binding its
+        // stage, then the publication barrier: these allocations were queued on this thread's streams after the
+        // synchronisation above, and the engines of other threads read them only after this synchronisation.
+        let published = (|| -> Result<()> {
+            let p = model_dir.join("evidence_head.pt");
+            if p.exists() {
+                if split {
+                    match bind_twice(&devs[last]) {
+                        Twice::First => {}
+                        Twice::Second(e) => {
+                            bail!("binding stage {last} for the evidence head: first attempt failed ({e})")
+                        }
+                        Twice::Neither(a, b) => {
+                            bail!("binding stage {last} for the evidence head failed twice ({a}; {b})")
+                        }
+                    }
+                }
+                let head = EvidenceHead::load(&p, cfg.hidden, &devs[last])?;
+                built[last].get_mut().head.as_mut().context("the last stage holds the head")?.evidence = Some(head);
+            }
+            #[cfg(feature = "cuda")]
+            for (s, dev) in devs.iter().enumerate() {
+                if let (Device::Cuda(d), false) = (dev, std::env::var("BASAL_GEMM").as_deref() == Ok("cublas")) {
+                    if split {
+                        match bind_twice(dev) {
+                            Twice::First => {}
+                            Twice::Second(e) => {
+                                bail!("binding stage {s} for its cuBLASLt handle: first attempt failed ({e})")
+                            }
+                            Twice::Neither(a, b) => {
+                                bail!("binding stage {s} for its cuBLASLt handle failed twice ({a}; {b})")
+                            }
+                        }
+                    }
+                    let lt = cublaslt::Lt::new(d).with_context(|| format!("cuBLASLt handle of stage {s}"))?;
+                    built[s].get_mut().lt = Some(Arc::new(lt));
+                }
+            }
+            for (s, dev) in devs.iter().enumerate() {
+                dev.synchronize().with_context(|| format!("publishing stage {s} (synchronising after the load)"))?;
+            }
+            Ok(())
+        })();
+        if let Err(e) = published {
+            return Err(release_built(built, e));
+        }
+        let stages: Vec<Stage> = plan
+            .iter()
+            .zip(devs)
+            .zip(built)
+            .map(|(((device, range), dev), w)| Stage { dev, device: *device, layers: range.clone(), w, gate: None })
+            .collect();
+        let transfers = split.then(|| Arc::new(TransferStats::new(&stages)));
         Ok(Self {
+            stages,
+            lineage,
+            transfers,
             prefixes: Vec::new(),
             state_cache_bytes: 0,
             clock: 0,
@@ -872,78 +1706,67 @@ impl GpuBackend {
             precision,
             readout,
             kernels,
-            embed,
-            layers,
-            norm,
-            lm_head,
             inv_freq,
             rope: rope.into(),
-            load_s: t0.elapsed().as_secs_f64(),
+            load_s,
             profile: None,
             quantization,
             #[cfg(feature = "cuda")]
             quant_stats: match quantization {
                 Quantization::None => None,
-                Quantization::Q8_0 => Some(quant::QuantStats::Q8(q8_stats)),
-                Quantization::Q4K => Some(quant::QuantStats::Q4K(Box::new(q4k_stats))),
+                Quantization::Q8_0 => Some(quant::QuantStats::Q8(q8_stats.into_inner())),
+                Quantization::Q4K => Some(quant::QuantStats::Q4K(Box::new(q4k_stats.into_inner()))),
             },
             dequant: std::cell::Cell::new((0.0, 0)),
             residual_max: None,
             last_timing: (0.0, 0.0),
-            evidence: {
-                let p = model_dir.join("evidence_head.pt");
-                if p.exists() {
-                    Some(EvidenceHead::load(&p, cfg.hidden, &dev)?)
-                } else {
-                    None
-                }
-            },
-            #[cfg(feature = "cuda")]
-            lt: match &dev {
-                Device::Cuda(d) if std::env::var("BASAL_GEMM").as_deref() != Ok("cublas") => {
-                    Some(Arc::new(cublaslt::Lt::new(d)?))
-                }
-                _ => None,
-            },
-            gate: None,
-            dev,
-            device,
         })
     }
 
     /// CUDA attention kernel of this forward precision.
     fn attention_kernel(&self) -> Result<&'static str> {
         #[cfg(feature = "cuda")]
-        if let Device::Cuda(d) = &self.dev {
+        if let Device::Cuda(d) = &self.stages[0].dev {
             return if self.tc_attention() { Ok(fused::tc_kernel(d)?) } else { Ok("attn_tree_f32") };
         }
         Ok(if self.tree_attention() { "attn_tree_f32" } else { "sdpa" })
     }
 
+    /// The model runs on CUDA (every stage: a split is CUDA only).
+    fn is_cuda(&self) -> bool {
+        self.stages[0].dev.is_cuda()
+    }
+
+    /// The model is split over several GPUs.
+    fn split(&self) -> bool {
+        self.stages.len() > 1
+    }
+
+    /// Readout weights (final norm, lm_head, evidence head) of the last stage.
+    fn head(&self) -> Result<&Head> {
+        self.stages.last().and_then(|s| s.w.get().head.as_ref()).context("the last stage holds the head")
+    }
+
+    /// Owners of this call's stage gates (see [`StageGates`]).
+    fn gate_owners(&self) -> GateOwners {
+        GateOwners {
+            gates: self.stages.iter().map(|s| s.gate.clone()).collect(),
+            devs: self.stages.iter().map(|s| s.dev.clone()).collect(),
+            health: self.lineage.health.clone(),
+            split: self.split(),
+        }
+    }
+
     /// Attention by tree units, invariant to packing: always on CUDA; on Metal unless `BASAL_ATT=sdpa` (the MLX SDPA
     /// kernel over each packed row with an additive mask, the earlier path, kept for comparison).
     fn tree_attention(&self) -> bool {
-        self.dev.is_cuda() || std::env::var("BASAL_ATT").as_deref() != Ok("sdpa")
+        self.is_cuda() || std::env::var("BASAL_ATT").as_deref() != Ok("sdpa")
     }
 
-    /// The device for one call (a no-op without a gate).
-    fn enter_gate(&self) -> Option<basal_core::gate::GateGuard<'_>> {
-        self.gate.as_ref().map(|(g, urgent)| g.enter(*urgent))
-    }
-
-    /// Preemptible lane between two layers: wait for the queued work, then let an urgent caller run if one waits.
-    fn layer_checkpoint(&self) -> Result<()> {
-        if let Some((g, false)) = &self.gate {
-            self.dev.synchronize()?;
-            g.checkpoint();
-        }
-        Ok(())
-    }
-
-    /// Profiling: synchronise and attribute the time since `*t` to `section`.
-    fn mark(&self, t: &mut Instant, section: &'static str) -> Result<()> {
+    /// Profiling: synchronise `dev` (the GPU of the running stage) and attribute the time since `*t` to `section`.
+    fn mark(&self, dev: &Device, t: &mut Instant, section: &'static str) -> Result<()> {
         if let Some(p) = &self.profile {
-            self.dev.synchronize()?;
+            dev.synchronize()?;
             let now = Instant::now();
             *p.borrow_mut().entry(section).or_insert(0.0) += (now - *t).as_secs_f64() * 1e3;
             *t = now;
@@ -960,45 +1783,49 @@ impl GpuBackend {
         Ok(x.matmul(&self.w(w)?.t()?)?.broadcast_add(&self.w(b)?)?)
     }
 
-    /// `x @ w^T`. candle tiles M by 64 rows; when the last row tile would be at most half used (M mod 64 in 1..=32,
-    /// small M) 32-row tiles of the same MLX kernel family skip that padding (measured with `basal gemm-tune`;
-    /// results are bitwise identical, the K reduction order does not change).
-    /// On CUDA: cuBLASLt with measured algorithms (f16/bf16), otherwise cuBLAS through candle.
+    /// `x @ w^T` with the weights of stage `sw`. candle tiles M by 64 rows; when the last row tile would be at most
+    /// half used (M mod 64 in 1..=32, small M) 32-row tiles of the same MLX kernel family skip that padding (measured
+    /// with `basal gemm-tune`; results are bitwise identical, the K reduction order does not change).
+    /// On CUDA: the stage's cuBLASLt handle with measured algorithms (f16/bf16), otherwise cuBLAS through candle.
     /// `q8_0` / `q4_k`: the weight is dequantized into a temporary f16 tensor of this call (freed on this thread's
     /// stream) and multiplied like a dense f16 weight.
-    fn matmul_t(&self, x: &Tensor, w: &ProjWeight) -> Result<Tensor> {
+    fn matmul_t(&self, sw: &StageWeights, x: &Tensor, w: &ProjWeight) -> Result<Tensor> {
         let w = match w {
             ProjWeight::Dense(w) => self.w(w)?,
             #[cfg(feature = "cuda")]
             ProjWeight::Quantized(q) => self.dequantize_blocks(q)?,
         };
         #[cfg(feature = "cuda")]
-        if let (Some(lt), DType::F16 | DType::BF16) = (&self.lt, w.dtype()) {
+        if let (Some(lt), DType::F16 | DType::BF16) = (&sw.lt, w.dtype()) {
             if x.is_contiguous() {
                 return Ok(cublaslt::matmul_nt(lt, x, &w)?);
             }
         }
+        #[cfg(not(feature = "cuda"))]
+        let _ = sw;
         #[cfg(target_os = "macos")]
         {
             let m = x.dim(0)?;
-            if self.dev.is_metal() && m <= 600 && (1..=32).contains(&(m % 64)) && x.is_contiguous() {
+            if self.stages[0].dev.is_metal() && m <= 600 && (1..=32).contains(&(m % 64)) && x.is_contiguous() {
                 return Ok(gemm::gemm_nt(x, &w, gemm::GemmConfig::new((32, 64, 16, 1, 2), 0))?);
             }
         }
         Ok(x.matmul(&w.t()?)?)
     }
 
-    /// f16 values of resident Q8_0 or Q4_K blocks, on the blocks' own candle device (the backend's, checked at load).
-    /// While profiling, synchronised before and after and timed into `dequant` (a part of the projection sections).
+    /// f16 values of resident Q8_0 or Q4_K blocks, on the blocks' own candle device (their stage's, checked at load).
+    /// While profiling, that device is synchronised before and after and the time added to `dequant` (a part of the
+    /// projection sections).
     #[cfg(feature = "cuda")]
     fn dequantize_blocks(&self, q: &candle_core::quantized::QTensor) -> Result<Tensor> {
         if self.profile.is_none() {
             return Ok(q.dequantize_f16(&q.device())?);
         }
-        self.dev.synchronize()?;
+        let dev = q.device();
+        dev.synchronize()?;
         let t = Instant::now();
-        let w = q.dequantize_f16(&q.device())?;
-        self.dev.synchronize()?;
+        let w = q.dequantize_f16(&dev)?;
+        dev.synchronize()?;
         let (ms, values) = self.dequant.get();
         self.dequant.set((ms + t.elapsed().as_secs_f64() * 1e3, values + q.shape().elem_count() as u64));
         Ok(w)
@@ -1021,7 +1848,7 @@ impl GpuBackend {
     fn attention(&self, q: &Tensor, k: &Tensor, v: &Tensor, mask: &Tensor, scale: f32) -> Result<Tensor> {
         let (_, nh, l, hd) = q.dims4()?;
         #[cfg(target_os = "macos")]
-        if self.dev.is_metal() {
+        if self.stages[0].dev.is_metal() {
             let m = mask.broadcast_as((1, nh, l, k.dim(2)?))?;
             return Ok(sdpa(q, k, v, Some(&m), false, scale, 1.0)?);
         }
@@ -1032,8 +1859,9 @@ impl GpuBackend {
         Ok(att.matmul(v)?.reshape((1, nh, l, hd))?)
     }
 
-    /// Stock-candle forward (first port, `--kernels candle`) on rows padded to `l`: final normalised hidden states
-    /// at `read` (flat indices into `[b * l]`). `cos_sin` = `[2, b, l, hd/2]`, `mask` = additive `[b, 1, l, l]` f32.
+    /// Stock-candle forward (first port, `--kernels candle`, one GPU only) on rows padded to `l`: final normalised
+    /// hidden states at `read` (flat indices into `[b * l]`). `cos_sin` = `[2, b, l, hd/2]`, `mask` = additive
+    /// `[b, 1, l, l]` f32.
     fn forward_padded(
         &self,
         ids: &[u32],
@@ -1043,19 +1871,24 @@ impl GpuBackend {
         l: usize,
         read: &[u32],
     ) -> Result<Tensor> {
+        ensure!(self.stages.len() == 1, "the candle kernel set runs a model on one GPU only");
         let c = &self.cfg;
         let (h, nh, nkv, hd) = (c.hidden, c.heads, c.kv_heads, c.head_dim);
         let eps = c.rms_eps as f32;
         let dt = self.precision.compute();
-        let dev = &self.dev;
+        let st = &self.stages[0];
+        let sw = st.w.get();
+        let dev = &st.dev;
+        let embed = sw.embed.as_ref().context("stage 0 holds the embedding")?;
+        let head = self.head()?;
         let ids = Tensor::from_slice(ids, (b * l,), dev)?;
         let cs = Tensor::from_slice(cos_sin, (2 * b * l * (hd / 2),), dev)?;
         let mask = Tensor::from_slice(mask, (b, 1, l, l), dev)?;
         let read_t = Tensor::from_slice(read, (read.len(),), dev)?;
         let scale = 1.0 / (hd as f64).sqrt();
         let mut t = Instant::now();
-        let mut x = self.embed.index_select(&ids, 0)?.to_dtype(dt)?; // [b*l, h]
-        self.mark(&mut t, "embed+inputs")?;
+        let mut x = embed.index_select(&ids, 0)?.to_dtype(dt)?; // [b*l, h]
+        self.mark(dev, &mut t, "embed+inputs")?;
         {
             {
                 let rep = nh / nkv;
@@ -1064,11 +1897,11 @@ impl GpuBackend {
                 let cos = cs.narrow(0, 0, half)?.reshape((b, l, hd / 2))?;
                 let sin = cs.narrow(0, half, half)?.reshape((b, l, hd / 2))?;
                 let inter = c.intermediate;
-                for ly in &self.layers {
+                for ly in &sw.layers {
                     let a = rms_norm(&x, &self.w(&ly.ln1)?, eps)?;
-                    self.mark(&mut t, "rms_norm")?;
+                    self.mark(dev, &mut t, "rms_norm")?;
                     let qkv = self.linear(&a, ly.wqkv.dense()?, &ly.bqkv)?;
-                    self.mark(&mut t, "qkv_proj")?;
+                    self.mark(dev, &mut t, "qkv_proj")?;
                     let heads = |off: usize, n: usize| -> Result<Tensor> {
                         Ok(qkv
                             .narrow(1, off, n * hd)?
@@ -1081,7 +1914,7 @@ impl GpuBackend {
                     let q = rope(&heads(0, nh)?, &cos, &sin)?;
                     let k = rope(&heads(h, nkv)?, &cos, &sin)?;
                     let v = heads(h + kvd, nkv)?;
-                    self.mark(&mut t, "bias+rope+heads")?;
+                    self.mark(dev, &mut t, "bias+rope+heads")?;
                     // GQA without repeating K/V: query head j uses kv head j / rep (as HF repeat_kv).
                     let q = (q * scale)?.reshape((b, nkv, rep * l, hd))?;
                     let att = q.matmul(&k.t()?)?.reshape((b, nh, l, l))?.broadcast_add(&mask)?;
@@ -1093,22 +1926,22 @@ impl GpuBackend {
                         .contiguous()?
                         .reshape((b * l, h))?
                         .to_dtype(dt)?;
-                    self.mark(&mut t, "attention")?;
+                    self.mark(dev, &mut t, "attention")?;
                     x = (x + self.linear(&o, ly.wo.dense()?, &ly.bo)?)?;
-                    self.mark(&mut t, "o_proj+bias+residual")?;
+                    self.mark(dev, &mut t, "o_proj+bias+residual")?;
                     let a = rms_norm(&x, &self.w(&ly.ln2)?, eps)?;
-                    self.mark(&mut t, "rms_norm")?;
+                    self.mark(dev, &mut t, "rms_norm")?;
                     let wgu = ly.wgu.dense()?;
                     let g = self.linear(&a, &wgu.narrow(0, 0, inter)?, &ly.bgu.narrow(0, 0, inter)?)?;
                     let u = self.linear(&a, &wgu.narrow(0, inter, inter)?, &ly.bgu.narrow(0, inter, inter)?)?;
-                    self.mark(&mut t, "gate_up_proj")?;
+                    self.mark(dev, &mut t, "gate_up_proj")?;
                     let act = (g.silu()? * u)?;
-                    self.mark(&mut t, "bias+silu*up")?;
+                    self.mark(dev, &mut t, "bias+silu*up")?;
                     x = (x + self.linear(&act, ly.wdown.dense()?, &ly.bdown)?)?;
-                    self.mark(&mut t, "down_proj+bias+residual")?;
+                    self.mark(dev, &mut t, "down_proj+bias+residual")?;
                 }
-                let out = rms_norm(&x.index_select(&read_t, 0)?, &self.w(&self.norm)?, eps)?;
-                self.mark(&mut t, "final_norm")?;
+                let out = rms_norm(&x.index_select(&read_t, 0)?, &self.w(&head.norm)?, eps)?;
+                self.mark(dev, &mut t, "final_norm")?;
                 Ok(out)
             }
         }
@@ -1116,44 +1949,26 @@ impl GpuBackend {
 
     /// Fused forward on a compact token list: the tokens of all segments back to back (no padding), so every GEMM,
     /// norm and MLP runs on exactly the real tokens; attention runs per segment over its own keys (optionally after
-    /// a precomputed prefix). `cos_sin` = `[2, total, hd/2]`. Returns the final normalised hidden states at `read`
-    /// (indices into the compact list) or, with `capture` (one segment, no readout), the K/V of every layer.
+    /// a precomputed prefix). `cos_sin` = `[2, total, hd/2]`. The stages run in order, each entered through `gates`;
+    /// a split moves the activations at every boundary (`GpuBackend::transfer`, CUDA). Returns the final normalised
+    /// hidden states at `read` (indices into the compact list) on the last stage's GPU, that stage entered and its
+    /// context current; or, with `capture` (`Some(bind)`: one segment, no readout), the K/V of every layer as one part
+    /// per stage. Nothing binds another stage's context after the last stage's body returned.
     fn forward_ragged(
         &self,
+        gates: &mut StageGates<'_>,
         ids: &[u32],
         cos_sin: &[f32],
         segs: &[Segment],
         read: &[u32],
-        capture: bool,
-    ) -> Result<(Option<Tensor>, LayerKv)> {
+        capture: Option<bool>,
+    ) -> Result<(Option<Tensor>, Vec<OnStage<StageKv>>)> {
         let c = &self.cfg;
-        let (nh, nkv, hd) = (c.heads, c.kv_heads, c.head_dim);
-        let total = ids.len();
-        let dims = HeadDims { b: 1, l: total, nh, nkv, hd };
-        let eps = c.rms_eps as f32;
-        let dt = self.precision.compute();
-        let dev = &self.dev;
-        ensure!(!capture || segs.len() == 1, "prefix capture takes one segment");
-        let ids = Tensor::from_slice(ids, (total,), dev)?;
-        let cs = Tensor::from_slice(cos_sin, (2 * total * (hd / 2),), dev)?;
-        // CUDA: one attention kernel per layer for all segments, masks in one buffer; also for a prefix capture, so
-        // that a cached prefix has bitwise the K/V the same tokens get when computed inside a row.
-        let ragged_cuda = cfg!(feature = "cuda") && dev.is_cuda();
-        // Metal: the same tree units through attn_tree_f32 of kernels.metal (one dispatch per prefix)
-        let ragged_metal = cfg!(target_os = "macos") && dev.is_metal() && self.tree_attention();
-        let masks: Vec<Tensor> = if ragged_cuda || ragged_metal {
-            Vec::new()
-        } else {
-            segs.iter()
-                .map(|sg| {
-                    let lk = sg.np() + sg.len;
-                    Ok(Tensor::from_slice(&sg.mask, (1, 1, sg.len, lk), dev)?)
-                })
-                .collect::<Result<_>>()?
-        };
+        let dims = HeadDims { b: 1, l: ids.len(), nh: c.heads, nkv: c.kv_heads, hd: c.head_dim };
+        ensure!(capture.is_none() || segs.len() == 1, "prefix capture takes one segment");
         // CUDA: the blocks of all rows as tree-attention units (compact offsets; prefix addresses set per layer).
         #[cfg(feature = "cuda")]
-        let mut units: Vec<(fused::TreeUnit, Option<&PrefixKv>)> = if ragged_cuda {
+        let units: Vec<(fused::TreeUnit, Option<&PrefixKv>)> = if self.is_cuda() {
             segs.iter()
                 .flat_map(|sg| {
                     sg.units.iter().map(move |u| {
@@ -1172,7 +1987,7 @@ impl GpuBackend {
             Vec::new()
         };
         #[cfg(target_os = "macos")]
-        let (metal_units, metal_pasts) = if ragged_metal {
+        let (metal_units, metal_pasts) = if self.stages[0].dev.is_metal() && self.tree_attention() {
             let mut pasts: Vec<&PrefixKv> = Vec::new();
             let mut units = Vec::new();
             for sg in segs {
@@ -1194,61 +2009,198 @@ impl GpuBackend {
         } else {
             (Vec::new(), Vec::new())
         };
+        let mut f = Ragged {
+            ids,
+            cos_sin,
+            segs,
+            read,
+            capture,
+            dims,
+            #[cfg(feature = "cuda")]
+            units,
+            #[cfg(target_os = "macos")]
+            metal_units,
+            #[cfg(target_os = "macos")]
+            metal_pasts,
+        };
+        let mut parts = Vec::with_capacity(self.stages.len());
+        let mut input = None;
+        let mut t = Instant::now();
+        for s in 0..self.stages.len() {
+            gates.switch_to(s)?;
+            match self.run_stage(gates, s, input.take(), &mut f, &mut t, &mut parts)? {
+                StageOut::Final(out) => return Ok((out, parts)),
+                StageOut::Boundary(buf) => input = Some(self.cross(gates, s, buf, &mut t)?),
+            }
+        }
+        bail!("the last stage returned no output")
+    }
+
+    /// The boundary after stage `s`: `GpuBackend::transfer` (CUDA; profiled as `stage_transfer`). Returns the
+    /// input of stage `s + 1`, entered.
+    fn cross(&self, gates: &mut StageGates<'_>, s: usize, buf: Tensor, t: &mut Instant) -> Result<Tensor> {
+        #[cfg(feature = "cuda")]
+        {
+            let input = self.transfer(gates, s, buf)?;
+            self.mark(&self.stages[s + 1].dev, t, "stage_transfer")?;
+            Ok(input)
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            let _ = (gates, s, buf, t);
+            bail!("a layer split needs the CUDA backend")
+        }
+    }
+
+    /// The body of stage `s`, entered with its gate held and (split) its context current: the stage's uploads, its
+    /// layers and, in capture mode, the hi/lo planes of its K/V. Every temporary tensor is a local of this call and
+    /// dies in it (also on `Err` and while unwinding) with the stage's context current, since the body binds no other
+    /// context and a failed bind leaves the current one unchanged. Only the boundary buffer, the captured part (owned
+    /// by its `OnStage`) and the last stage's final hidden states leave it.
+    fn run_stage(
+        &self,
+        gates: &mut StageGates<'_>,
+        s: usize,
+        input: Option<Tensor>,
+        f: &mut Ragged<'_, '_>,
+        t: &mut Instant,
+        parts: &mut Vec<OnStage<StageKv>>,
+    ) -> Result<StageOut> {
+        let (out, captured) = self.stage_layers(gates, s, input, f, t)?;
+        if let Some(bind) = f.capture {
+            // under this stage's gate, after its layers' temporaries were freed (as on one GPU, where the planes were
+            // split after the forward)
+            let hl = self.split_kv(&captured)?;
+            parts.push(OnStage::new(&self.stages[s].dev, bind, &self.lineage.health, StageKv { kv: captured, hl }));
+        }
+        Ok(out)
+    }
+
+    /// Uploads and layers of stage `s` ([`GpuBackend::run_stage`]); in capture mode also the stage's raw K/V.
+    fn stage_layers(
+        &self,
+        gates: &mut StageGates<'_>,
+        s: usize,
+        input: Option<Tensor>,
+        f: &mut Ragged<'_, '_>,
+        t: &mut Instant,
+    ) -> Result<(StageOut, LayerKv)> {
+        let st = &self.stages[s];
+        let sw = st.w.get();
+        let dev = &st.dev;
+        let c = &self.cfg;
+        let hd = c.head_dim;
+        let total = f.ids.len();
+        let eps = c.rms_eps as f32;
+        let dt = self.precision.compute();
+        let last_stage = s + 1 == self.stages.len();
+        let capture = f.capture.is_some();
+        let n_layers = c.num_layers;
+        let ids = if s == 0 { Some(Tensor::from_slice(f.ids, (total,), dev)?) } else { None };
+        let cs = Tensor::from_slice(f.cos_sin, (2 * total * (hd / 2),), dev)?;
+        // CUDA: one attention kernel per layer for all segments, masks in one buffer; also for a prefix capture, so
+        // that a cached prefix has bitwise the K/V the same tokens get when computed inside a row.
+        let ragged_cuda = cfg!(feature = "cuda") && dev.is_cuda();
+        // Metal: the same tree units through attn_tree_f32 of kernels.metal (one dispatch per prefix)
+        let ragged_metal = cfg!(target_os = "macos") && dev.is_metal() && self.tree_attention();
+        let masks: Vec<Tensor> = if ragged_cuda || ragged_metal {
+            Vec::new()
+        } else {
+            f.segs
+                .iter()
+                .map(|sg| {
+                    let lk = sg.np() + sg.len;
+                    Ok(Tensor::from_slice(&sg.mask, (1, 1, sg.len, lk), dev)?)
+                })
+                .collect::<Result<_>>()?
+        };
         // (a zero-length device buffer cannot be created on Metal; a captured prefix has no readout)
-        let read_t = if read.is_empty() { None } else { Some(Tensor::from_slice(read, (read.len(),), dev)?) };
+        let read_t = if last_stage && !f.read.is_empty() {
+            Some(Tensor::from_slice(f.read, (f.read.len(),), dev)?)
+        } else {
+            None
+        };
         let scale = (1.0 / (hd as f64).sqrt()) as f32;
         let mut captured = Vec::new();
-        let mut t = Instant::now();
-        let mut x = self.embed.index_select(&ids, 0)?.to_dtype(dt)?; // [total, h]
-        self.mark(&mut t, "embed+inputs")?;
-        let n_layers = self.layers.len();
         // CUDA: the RMSNorm of the next block (after the last block: the final norm) comes out of the residual add of
-        // the previous one (one kernel)
-        let mut normed: Option<Tensor> = None;
-        for (li, ly) in self.layers.iter().enumerate() {
+        // the previous one (one kernel); after a boundary it arrives with the residual stream
+        let (mut x, mut normed) = match input {
+            None => {
+                *t = Instant::now();
+                let ids = ids.as_ref().context("stage 0 reads the token ids")?;
+                let embed = sw.embed.as_ref().context("stage 0 holds the embedding")?;
+                let x = embed.index_select(ids, 0)?.to_dtype(dt)?; // [total, h]
+                self.mark(dev, t, "embed+inputs")?;
+                (x, None)
+            }
+            Some(buf) => (buf.get(0)?, Some(buf.get(1)?)),
+        };
+        let mut boundary = None;
+        for (i, ly) in sw.layers.iter().enumerate() {
+            let li = st.layers.start + i;
             let a = match normed.take() {
                 Some(a) => a,
                 None => rms_norm(&x, &self.w(&ly.ln1)?, eps)?,
             };
-            self.mark(&mut t, "rms_norm")?;
-            let qkv = self.matmul_t(&a, &ly.wqkv)?;
-            self.mark(&mut t, "qkv_proj")?;
+            self.mark(dev, t, "rms_norm")?;
+            let qkv = self.matmul_t(sw, &a, &ly.wqkv)?;
+            self.mark(dev, t, "qkv_proj")?;
             // CUDA tensor-core attention: K and V come split into hi / lo planes from the same kernel
             #[cfg(feature = "cuda")]
             let (_flat, q, k, v, hl) = if ragged_cuda && self.tc_attention() {
                 let v_lo = self.precision != Precision::F16;
-                let (f, q, k, v, hl) = fused::qkv_rope_hilo(&qkv, &self.w(&ly.bqkv)?, &cs, dims, v_lo, capture)?;
-                (f, q, k, v, Some(hl))
+                let (fl, q, k, v, hl) = fused::qkv_rope_hilo(&qkv, &self.w(&ly.bqkv)?, &cs, f.dims, v_lo, capture)?;
+                (fl, q, k, v, Some(hl))
             } else {
-                let (f, q, k, v) = fused::qkv_rope(&qkv, &self.w(&ly.bqkv)?, &cs, dims)?;
-                (f, q, k, v, None)
+                let (fl, q, k, v) = fused::qkv_rope(&qkv, &self.w(&ly.bqkv)?, &cs, f.dims)?;
+                (fl, q, k, v, None)
             };
             #[cfg(not(feature = "cuda"))]
-            let (_flat, q, k, v) = fused::qkv_rope(&qkv, &self.w(&ly.bqkv)?, &cs, dims)?;
-            self.mark(&mut t, "bias+rope+heads")?;
+            let (_flat, q, k, v) = fused::qkv_rope(&qkv, &self.w(&ly.bqkv)?, &cs, f.dims)?;
+            self.mark(dev, t, "bias+rope+heads")?;
             #[cfg(feature = "cuda")]
             let ragged_o = if ragged_cuda {
                 // f16/bf16 forwards: tensor cores (BASAL_ATT=simt keeps the f32 SIMT kernel, for A/B); the f32
                 // reference forward always uses the f32 kernel.
                 let tc = self.tc_attention();
-                for (u, past) in units.iter_mut() {
+                let split = self.split();
+                // the kernel reads prefix K/V by raw address: with a split, they must lie on this stage's GPU
+                let here = |p: &Tensor| -> Result<()> {
+                    if split {
+                        ensure!(
+                            p.device().location() == dev.location(),
+                            "prefix K/V of layer {li} on {:?}, stage {s} runs on {:?}",
+                            p.device().location(),
+                            dev.location()
+                        );
+                    }
+                    Ok(())
+                };
+                for (u, past) in f.units.iter_mut() {
                     if let Some(p) = past {
-                        u.pk = fused::device_addr_f32(&p.kv[li].0)?;
-                        u.pv = fused::device_addr_f32(&p.kv[li].1)?;
+                        let pp = p.part(s)?;
+                        let (pk, pv) = &pp.kv[i];
+                        here(pk)?;
+                        here(pv)?;
+                        u.pk = fused::device_addr_f32(pk)?;
+                        u.pv = fused::device_addr_f32(pv)?;
                         if tc {
-                            u.pkh = fused::device_addr_f16(&p.hl[li].0)?;
-                            u.pvh = fused::device_addr_f16(&p.hl[li].1)?;
+                            let (pkh, pvh) = &pp.hl[i];
+                            here(pkh)?;
+                            here(pvh)?;
+                            u.pkh = fused::device_addr_f16(pkh)?;
+                            u.pvh = fused::device_addr_f16(pvh)?;
                         }
                     }
                 }
-                let us: Vec<fused::TreeUnit> = units.iter().map(|(u, _)| u.clone()).collect();
+                let us: Vec<fused::TreeUnit> = f.units.iter().map(|(u, _)| u.clone()).collect();
                 if let Some(hl) = &hl {
-                    let nk = nkv * total * hd;
+                    let nk = c.kv_heads * total * hd;
                     let (khl, vhl) = (hl.narrow(0, 0, 2 * nk)?, hl.narrow(0, 2 * nk, 2 * nk)?);
                     let v_exact = self.precision == Precision::F16;
-                    Some(fused::attention_tree(&_flat, &us, dims, scale, Some((&khl, &vhl, v_exact)), Some(dt))?)
+                    Some(fused::attention_tree(&_flat, &us, f.dims, scale, Some((&khl, &vhl, v_exact)), Some(dt))?)
                 } else {
-                    Some(fused::attention_tree(&_flat, &us, dims, scale, None, Some(dt))?)
+                    Some(fused::attention_tree(&_flat, &us, f.dims, scale, None, Some(dt))?)
                 }
             } else {
                 None
@@ -1257,30 +2209,35 @@ impl GpuBackend {
             let ragged_o: Option<Tensor> = None;
             #[cfg(target_os = "macos")]
             let ragged_o = if ragged_metal {
-                let pasts: Vec<(&Tensor, &Tensor)> = metal_pasts.iter().map(|p| (&p.kv[li].0, &p.kv[li].1)).collect();
-                Some(fused::attention_tree_metal(&_flat, &metal_units, &pasts, dims, scale)?)
+                let pasts: Vec<(&Tensor, &Tensor)> = f
+                    .metal_pasts
+                    .iter()
+                    .map(|p| p.part(s).map(|pp| (&pp.kv[i].0, &pp.kv[i].1)))
+                    .collect::<Result<_>>()?;
+                Some(fused::attention_tree_metal(&_flat, &f.metal_units, &pasts, f.dims, scale)?)
             } else {
                 ragged_o
             };
-            let mut outs = Vec::with_capacity(segs.len());
-            for (si, sg) in segs.iter().enumerate() {
+            let mut outs = Vec::with_capacity(f.segs.len());
+            for (si, sg) in f.segs.iter().enumerate() {
                 if ragged_o.is_some() && !capture {
                     break;
                 }
-                let one = segs.len() == 1;
+                let one = f.segs.len() == 1;
                 let part = |x: &Tensor| -> Result<Tensor> {
                     Ok(if one { x.clone() } else { x.narrow(2, sg.off, sg.len)?.contiguous()? })
                 };
                 let (qs, mut ks, mut vs) = (part(&q)?, part(&k)?, part(&v)?);
                 if let Some(p) = sg.past {
-                    let (pk, pv) = &p.kv[li];
+                    let (pk, pv) = &p.part(s)?.kv[i];
                     ks = Tensor::cat(&[pk, &ks], 2)?;
                     vs = Tensor::cat(&[pv, &vs], 2)?;
                 }
                 if capture {
                     captured.push((ks.contiguous()?, vs.contiguous()?));
                     if li + 1 == n_layers {
-                        return Ok((None, captured)); // a captured prefix needs no output of the last layer
+                        // a captured prefix needs no output of the last layer
+                        return Ok((StageOut::Final(None), captured));
                     }
                 }
                 if ragged_o.is_none() {
@@ -1293,60 +2250,231 @@ impl GpuBackend {
                 None => Tensor::cat(&outs, 2)?,
             };
             // the CUDA tree attention returns merged heads [total, NH * HD] in the forward's dtype
-            let mut o = if ragged_cuda { o } else { fused::merge_heads(&o, dims, dt)? };
-            self.mark(&mut t, "attention")?;
+            let mut o = if ragged_cuda { o } else { fused::merge_heads(&o, f.dims, dt)? };
+            self.mark(dev, t, "attention")?;
             if let (true, Some(rt)) = (li + 1 == n_layers, &read_t) {
                 // Only the readout positions are needed after the last attention.
                 o = o.index_select(rt, 0)?;
                 x = x.index_select(rt, 0)?;
             }
-            let y = self.matmul_t(&o, &ly.wo)?;
+            let y = self.matmul_t(sw, &o, &ly.wo)?;
             let a;
-            (x, a) = self.residual_norm(&x, &y, &ly.bo, &ly.ln2, eps)?;
-            self.mark(&mut t, "o_proj+bias+residual+rms_norm")?;
-            let gu = self.matmul_t(&a, &ly.wgu)?;
-            self.mark(&mut t, "gate_up_proj")?;
+            (x, a) = self.residual_norm(dev, &x, &y, &ly.bo, &ly.ln2, eps)?;
+            self.mark(dev, t, "o_proj+bias+residual+rms_norm")?;
+            let gu = self.matmul_t(sw, &a, &ly.wgu)?;
+            self.mark(dev, t, "gate_up_proj")?;
             let act = fused::bias_silu_mul(&gu, &self.w(&ly.bgu)?)?;
-            self.mark(&mut t, "bias+silu*up")?;
-            let y = self.matmul_t(&act, &ly.wdown)?;
-            if self.dev.is_cuda() {
-                // the next block's RMSNorm, after the last block the final norm
-                let last = li + 1 == n_layers;
-                let ln = if last { &self.norm } else { &self.layers[li + 1].ln1 };
-                let a;
-                (x, a) = self.residual_norm(&x, &y, &ly.bdown, ln, eps)?;
-                normed = Some(a);
+            self.mark(dev, t, "bias+silu*up")?;
+            let y = self.matmul_t(sw, &act, &ly.wdown)?;
+            if dev.is_cuda() {
+                // the next block's RMSNorm (at a boundary: of the next stage's first block, through its copy
+                // `next_ln1`, the same values), after the last block the final norm
+                let ln = if li + 1 == n_layers {
+                    &self.head()?.norm
+                } else if i + 1 < sw.layers.len() {
+                    &sw.layers[i + 1].ln1
+                } else {
+                    sw.next_ln1.as_ref().context("a stage before a boundary holds the next input_layernorm")?
+                };
+                if i + 1 == sw.layers.len() && !last_stage {
+                    // the residual stream and its normalised copy as the one buffer the next stage receives
+                    let buf = self.boundary_norm(&x, &y, &ly.bdown, ln, eps)?;
+                    x = buf.get(0)?;
+                    boundary = Some(buf);
+                } else {
+                    let a;
+                    (x, a) = self.residual_norm(dev, &x, &y, &ly.bdown, ln, eps)?;
+                    normed = Some(a);
+                }
             } else {
                 x = fused::bias_residual(&x, &y, &self.w(&ly.bdown)?)?;
             }
-            self.mark(&mut t, "down_proj+bias+residual")?;
+            self.mark(dev, t, "down_proj+bias+residual")?;
             if let Some(rm) = &self.residual_max {
                 let m = x.abs()?.to_dtype(DType::F32)?.max_all()?.to_scalar::<f32>()?;
                 rm.borrow_mut().push(m);
-                t = Instant::now();
+                *t = Instant::now();
             }
             if li + 1 < n_layers {
-                self.layer_checkpoint()?;
+                gates.checkpoint()?;
             }
         }
+        if let Some(buf) = boundary {
+            return Ok((StageOut::Boundary(buf), captured));
+        }
+        ensure!(last_stage, "stage {s} ended without its boundary buffer");
         let out = match normed {
             Some(a) => a,
-            None => rms_norm(&x, &self.w(&self.norm)?, eps)?,
+            None => rms_norm(&x, &self.w(&self.head()?.norm)?, eps)?,
         };
-        self.mark(&mut t, "final_norm")?;
-        Ok((Some(out), captured))
+        self.mark(dev, t, "final_norm")?;
+        Ok((StageOut::Final(Some(out)), captured))
+    }
+
+    /// Move the boundary buffer of stage `s` (`[2, M, H]` f16: the residual stream and its normalised copy) to stage
+    /// `s + 1` and enter that stage; split only. Protocol:
+    /// - step 1: drain stage `s`: the buffer is written completely and nothing of this thread runs on GPU `s`;
+    /// - steps 2–3: release gate `s`, take gate `s + 1` (health check), bind context `s + 1`;
+    /// - step 4: allocate and zero the destination on GPU `s + 1`;
+    /// - step 5: drain stage `s + 1`, so the memset completed before any copy is queued;
+    /// - step 6: `memcpy_dtod` on the destination stream. cudarc destroys its temporary source event inside that
+    ///   call, which binds the source context, so the copy lands on this thread's per-thread stream of either context;
+    /// - step 7: confirm the end of the copy: drain `s + 1`, then `s` (both always);
+    /// - step 8: free the source with `s` current;
+    /// - step 9: bind `s + 1` and wrap the destination as the next stage's input.
+    ///
+    /// Synchronisations and binds have two attempts each (`Twice`); every first-attempt error fails the request. A
+    /// buffer whose last use cannot be confirmed is quarantined, never freed, and marks the lineage lost; buffers
+    /// known to be idle are freed with their owner's context bound ([`StageCopy`]).
+    #[cfg(feature = "cuda")]
+    fn transfer(&self, gates: &mut StageGates<'_>, s: usize, buf: Tensor) -> Result<Tensor> {
+        use candle_core::cuda_backend::CudaStorage;
+        let (from, to) = (&self.stages[s], &self.stages[s + 1]);
+        let n = buf.elem_count();
+        let bytes = n * DType::F16.size_in_bytes();
+        let what = format!("stage transfer {s}→{}, CUDA device {}→{}, {bytes} B", s + 1, from.device, to.device);
+        let (Device::Cuda(src_dev), Device::Cuda(dst_dev)) = (&from.dev, &to.dev) else {
+            bail!("{what}: both stages must be CUDA devices");
+        };
+        // step 1
+        match twice(|| from.dev.synchronize()) {
+            Twice::First => {}
+            Twice::Second(e) => {
+                // drained after an earlier stored error surfaced: free the source (its context is current), fail
+                drop(buf);
+                gates.mark_drained();
+                return Err(anyhow::Error::new(e).context(format!("{what}: draining stage {s}: first attempt failed")));
+            }
+            Twice::Neither(a, b) => {
+                self.lineage.retain(buf);
+                self.lineage.health.mark_lost();
+                bail!(
+                    "{what}: draining stage {s} failed twice ({a}; {b}): buffers retained, model disabled until it is \
+                     loaded again"
+                );
+            }
+        }
+        let mut copy = StageCopy {
+            state: CopyState::Drained,
+            src: Some(buf),
+            dst: None,
+            src_ctx: src_dev.cuda_stream().context().clone(),
+            dst_ctx: dst_dev.cuda_stream().context().clone(),
+            lineage: &self.lineage,
+            what,
+        };
+        let shape = match copy.check(n) {
+            Ok(shape) => shape,
+            Err(e) => return Err(copy.fail(e)),
+        };
+        // steps 2–3
+        let waited = Instant::now();
+        gates.mark_drained();
+        if let Err(e) = gates.switch_to(s + 1) {
+            return Err(copy.fail(e));
+        }
+        let gate_wait = waited.elapsed();
+        let started = Instant::now();
+        // step 4
+        match dst_dev.alloc_zeros::<half::f16>(n) {
+            Ok(d) => {
+                copy.dst = Some(d);
+                copy.state = CopyState::Allocated;
+            }
+            Err(e) => return Err(copy.fail(e.into())),
+        }
+        // step 5
+        match twice(|| to.dev.synchronize()) {
+            Twice::First => copy.state = CopyState::Initialized,
+            Twice::Second(e) => {
+                return Err(copy.fail(anyhow::Error::new(e).context("draining the destination's initialisation")))
+            }
+            Twice::Neither(a, b) => {
+                return Err(copy.retain(format!("initialisation of the destination not confirmed ({a}; {b})")))
+            }
+        }
+        // step 6 (from here until both confirmations the copy may be queued on either GPU)
+        copy.state = CopyState::MaybeInFlight;
+        let copied = copy.copy_on(dst_dev);
+        // step 7
+        let on_dst = twice(|| to.dev.synchronize());
+        let on_src = twice(|| from.dev.synchronize());
+        let report = |t: &Twice<candle_core::Error>, stage: usize| match t {
+            Twice::First => None,
+            Twice::Second(e) => Some(format!("confirmation on stage {stage}: first attempt failed ({e})")),
+            Twice::Neither(a, b) => Some(format!("confirmation on stage {stage} failed twice ({a}; {b})")),
+        };
+        let problems: Vec<String> = copied
+            .as_ref()
+            .err()
+            .map(|e| format!("copy: {e:#}"))
+            .into_iter()
+            .chain(report(&on_dst, s + 1))
+            .chain(report(&on_src, s))
+            .collect();
+        if matches!(on_dst, Twice::Neither(..)) || matches!(on_src, Twice::Neither(..)) {
+            return Err(copy.retain(format!("end of the copy not confirmed ({})", problems.join("; "))));
+        }
+        copy.state = CopyState::Completed;
+        if !problems.is_empty() {
+            return Err(copy.fail(anyhow::anyhow!("{}", problems.join("; "))));
+        }
+        // step 8: stage s is current: its confirmation bound it
+        drop(copy.src.take());
+        // step 9
+        match bind_twice(&to.dev) {
+            Twice::First => {}
+            Twice::Second(e) => {
+                return Err(
+                    copy.fail(anyhow::anyhow!("binding stage {} after the copy: first attempt failed ({e})", s + 1))
+                )
+            }
+            Twice::Neither(a, b) => {
+                return Err(copy.retain(format!("binding stage {} after the copy failed twice ({a}; {b})", s + 1)))
+            }
+        }
+        let dst = copy.dst.take().context("the destination of the transfer")?;
+        copy.state = CopyState::Done;
+        let storage = candle_core::Storage::Cuda(CudaStorage::wrap_cuda_slice(dst, dst_dev.clone()));
+        let out = Tensor::from_storage(storage, shape, candle_core::op::BackpropOp::none(), false);
+        if let Some(stats) = &self.transfers {
+            stats.record(s, bytes, gate_wait, started.elapsed());
+        }
+        Ok(out)
     }
 
     /// `x + (y + b)` and its RMSNorm with `ln`: one fused kernel on CUDA, the two separate ops elsewhere (bitwise the
     /// same results).
-    fn residual_norm(&self, x: &Tensor, y: &Tensor, b: &Tensor, ln: &Tensor, eps: f32) -> Result<(Tensor, Tensor)> {
+    fn residual_norm(
+        &self,
+        dev: &Device,
+        x: &Tensor,
+        y: &Tensor,
+        b: &Tensor,
+        ln: &Tensor,
+        eps: f32,
+    ) -> Result<(Tensor, Tensor)> {
         #[cfg(feature = "cuda")]
-        if self.dev.is_cuda() {
+        if dev.is_cuda() {
             return Ok(fused::residual_rmsnorm(x, y, &self.w(b)?, &self.w(ln)?, eps)?);
         }
+        #[cfg(not(feature = "cuda"))]
+        let _ = dev;
         let x = fused::bias_residual(x, y, &self.w(b)?)?;
         let a = rms_norm(&x, &self.w(ln)?, eps)?;
         Ok((x, a))
+    }
+
+    /// [`GpuBackend::residual_norm`] of a stage's last layer before a boundary (CUDA): the same kernel and values, as
+    /// its one `[2, M, H]` buffer.
+    fn boundary_norm(&self, x: &Tensor, y: &Tensor, b: &Tensor, ln: &Tensor, eps: f32) -> Result<Tensor> {
+        #[cfg(feature = "cuda")]
+        return Ok(fused::residual_rmsnorm_buf(x, y, &self.w(b)?, &self.w(ln)?, eps)?);
+        #[cfg(not(feature = "cuda"))]
+        {
+            let _ = (x, y, b, ln, eps);
+            bail!("a layer split needs the CUDA backend")
+        }
     }
 
     fn rope_row(&self, pos: f64, cos: &mut [f32], sin: &mut [f32]) {
@@ -1364,10 +2492,11 @@ impl GpuBackend {
     /// CUDA attention on tensor cores (f16 / bf16 forwards; `BASAL_ATT=simt` selects the f32 kernel for A/B).
     #[cfg_attr(not(feature = "cuda"), allow(dead_code, reason = "Tensor-core attention is a CUDA-only kernel"))]
     fn tc_attention(&self) -> bool {
-        self.dev.is_cuda() && self.precision != Precision::F32 && std::env::var("BASAL_ATT").as_deref() != Ok("simt")
+        self.is_cuda() && self.precision != Precision::F32 && std::env::var("BASAL_ATT").as_deref() != Ok("simt")
     }
 
-    /// The prefix K / V of every layer split into f16 hi / lo planes, when the tensor-core attention reads them.
+    /// The prefix K / V of every layer (of one stage) split into f16 hi / lo planes, when the tensor-core attention
+    /// reads them.
     fn split_kv(&self, kv: &LayerKv) -> Result<Vec<(Tensor, Tensor)>> {
         #[cfg(feature = "cuda")]
         if self.tc_attention() {
@@ -1380,8 +2509,15 @@ impl GpuBackend {
         Ok(Vec::new())
     }
 
-    /// K/V of all layers for `ids` at positions 0..len, continuing a precomputed `past` prefix of it.
-    fn capture_prefix(&self, ids: &[u32], past: Option<usize>) -> Result<LayerKv> {
+    /// K/V of all layers for `ids` at positions 0..len, continuing a precomputed `past` prefix of it: one part per
+    /// stage, each with `OnStage::bind = bind`. Ends with the last stage entered.
+    fn capture_prefix(
+        &self,
+        gates: &mut StageGates<'_>,
+        ids: &[u32],
+        past: Option<usize>,
+        bind: bool,
+    ) -> Result<Vec<OnStage<StageKv>>> {
         let np = past.map_or(0, |i| self.prefixes[i].ids.len());
         let l = ids.len() - np;
         let lk = ids.len();
@@ -1400,14 +2536,16 @@ impl GpuBackend {
         }
         let units = vec![Unit { q_off: 0, q_len: l, ranges: vec![(0, l)] }];
         let seg = Segment { off: 0, len: l, past: past.map(|i| &self.prefixes[i]), mask, units };
-        let (_, kv) = self.forward_ragged(&ids[np..], &cs, &[seg], &[], true)?;
-        Ok(kv)
+        let (_, parts) = self.forward_ragged(gates, &ids[np..], &cs, &[seg], &[], Some(bind))?;
+        Ok(parts)
     }
 
     /// State cache: for a single row whose template + state prefix (`Packed::state_len`) extends a known prefix by at least `MIN_STATE_TOKENS`,
     /// compute the root block once, keep its K/V (bounded LRU) and return its index. Exact: the root is visible to
-    /// every token of the row, and later rows use it only on an exact token-prefix match.
-    fn cache_state(&mut self, row: &Packed, past: Option<usize>) -> Result<Option<usize>> {
+    /// every token of the row, and later rows use it only on an exact token-prefix match. With a split, the capture
+    /// ends on the last stage, and an evicted entry frees each part with its stage's context bound (no computation:
+    /// no gate needed).
+    fn cache_state(&mut self, gates: &mut StageGates<'_>, row: &Packed, past: Option<usize>) -> Result<Option<usize>> {
         const MIN_STATE_TOKENS: usize = 32;
         let np = past.map_or(0, |i| self.prefixes[i].ids.len());
         let root = row.state_len.min(row.ids.len() - 1);
@@ -1423,9 +2561,9 @@ impl GpuBackend {
             return Ok(past);
         }
         let ids = row.ids[..root].to_vec();
-        let kv = self.capture_prefix(&ids, past)?;
-        let hl = self.split_kv(&kv)?;
-        let entry = PrefixKv { ids, kv, hl, pinned: false, last_use: self.clock };
+        // one GPU: the parts are freed without binding, as before (the lane's thread uses only that context)
+        let parts = self.capture_prefix(gates, &ids, past, self.split())?;
+        let entry = PrefixKv { ids, parts, pinned: false, last_use: self.clock };
         loop {
             let used: usize = self.prefixes.iter().filter(|p| !p.pinned).map(|p| p.bytes(&self.cfg)).sum();
             if used + need <= self.state_cache_bytes {
@@ -1496,43 +2634,74 @@ impl GpuBackend {
 }
 
 impl GpuBackend {
-    /// Projection weight shapes (N, K) that the loaded GEMM table does not cover (CUDA with cuBLASLt; empty
-    /// otherwise). Such shapes use algorithms timed at first use, whose results may depend on the batch.
+    /// Projection weight shapes (N, K) that the loaded GEMM table does not cover on some stage (CUDA with cuBLASLt;
+    /// empty otherwise). Such shapes use algorithms timed at first use, whose results may depend on the batch.
     pub fn gemm_table_missing(&self) -> Vec<(usize, usize)> {
         #[cfg(feature = "cuda")]
-        if let Some(lt) = &self.lt {
+        {
             let dt = self.precision.compute();
-            return projection_shapes(&self.cfg).into_iter().filter(|&(n, k)| !lt.covers(n, k, dt)).collect();
+            let mut missing = Vec::new();
+            for lt in self.stages.iter().filter_map(|s| s.w.get().lt.as_ref()) {
+                for (n, k) in projection_shapes(&self.cfg) {
+                    if !lt.covers(n, k, dt) && !missing.contains(&(n, k)) {
+                        missing.push((n, k));
+                    }
+                }
+            }
+            missing
         }
+        #[cfg(not(feature = "cuda"))]
         Vec::new()
     }
 
     fn gemm_desc(&self) -> &'static str {
         #[cfg(feature = "cuda")]
-        if self.lt.as_ref().is_some_and(|lt| lt.is_invariant()) {
-            return "cuBLASLt, f32 accumulation, batch-invariant: one algorithm per weight shape for every M, no split-K (--gemm-table from gemm-search --invariant); a row's result does not depend on its batch";
-        }
-        #[cfg(feature = "cuda")]
-        if self.lt.is_some() {
+        if let Some(lt) = &self.stages[0].w.get().lt {
+            // every stage loads the same table in the same mode (load_gemm_table)
+            if lt.is_invariant() {
+                return "cuBLASLt, f32 accumulation, batch-invariant: one algorithm per weight shape for every M, no split-K (--gemm-table from gemm-search --invariant); a row's result does not depend on its batch";
+            }
             return "cuBLASLt, f32 accumulation; algorithm per (N, K, M class: 16 up to 512, then 128) from the --gemm-table search, else the fastest of up to 16 heuristic algorithms timed at first use";
         }
         "cuBLAS (candle), f32 accumulation"
     }
 
-    /// cuBLASLt: classes taken from a search table and classes tuned at run time (heuristic timing), as JSON.
+    /// cuBLASLt: classes taken from a search table and classes tuned at run time (heuristic timing), as JSON; with a
+    /// split one object per stage.
     pub fn gemm_tuning(&self) -> Value {
         #[cfg(feature = "cuda")]
-        if let Some(lt) = &self.lt {
-            let t = lt.tuned.lock().unwrap();
-            return json!({"from_table": *lt.from_table.lock().unwrap(), "tuned_at_run_time": t.iter().map(|e| json!({"m_class": e.m_class, "n": e.n, "k": e.k, "ms": e.ms, "heuristic_first_ms": e.heuristic_ms})).collect::<Vec<_>>()});
+        {
+            let tuning = |lt: &cublaslt::Lt| {
+                let t = lt.tuned.lock().unwrap();
+                json!({"from_table": *lt.from_table.lock().unwrap(), "tuned_at_run_time": t.iter().map(|e| json!({"m_class": e.m_class, "n": e.n, "k": e.k, "ms": e.ms, "heuristic_first_ms": e.heuristic_ms})).collect::<Vec<_>>()})
+            };
+            if !self.split() {
+                return self.stages[0].w.get().lt.as_deref().map_or(Value::Null, tuning);
+            }
+            Value::Array(
+                self.stages
+                    .iter()
+                    .enumerate()
+                    .map(|(s, st)| {
+                        let mut v = st.w.get().lt.as_deref().map_or(Value::Null, tuning);
+                        if let Some(o) = v.as_object_mut() {
+                            o.insert("stage".into(), json!(s));
+                            o.insert("device".into(), json!(st.device));
+                        }
+                        v
+                    })
+                    .collect(),
+            )
         }
+        #[cfg(not(feature = "cuda"))]
         Value::Null
     }
 
-    /// Use a cuBLASLt algorithm table written by `gemm_search` (CUDA; rejected if the cuBLASLt version differs).
+    /// Use a cuBLASLt algorithm table written by `gemm_search` (CUDA; rejected if the cuBLASLt version differs), on
+    /// every stage: the same table, checked against the GPU name of each stage, so all stages run the same mode.
     pub fn load_gemm_table(&mut self, path: &Path) -> Result<usize> {
         #[cfg(feature = "cuda")]
-        if let Some(lt) = &self.lt {
+        if self.stages.iter().all(|s| s.w.get().lt.is_some()) {
             let v: Value = serde_json::from_str(&std::fs::read_to_string(path)?)?;
             ensure!(
                 v["cublaslt_version"].as_u64() == Some(cublaslt::version() as u64),
@@ -1541,19 +2710,42 @@ impl GpuBackend {
                 v["cublaslt_version"],
                 cublaslt::version()
             );
-            if let (Some(t), Device::Cuda(d)) = (v["gpu"].as_str(), &self.dev) {
-                let here = d.cuda_stream().context().name()?;
-                ensure!(t == here, "{}: table for {t}, this GPU is {here}", path.display());
+            for (s, st) in self.stages.iter().enumerate() {
+                if let (Some(t), Device::Cuda(d)) = (v["gpu"].as_str(), &st.dev) {
+                    let here = d.cuda_stream().context().name()?;
+                    if self.stages.len() > 1 {
+                        ensure!(t == here, "{}: table for {t}, the GPU of stage {s} is {here}", path.display());
+                    } else {
+                        ensure!(t == here, "{}: table for {t}, this GPU is {here}", path.display());
+                    }
+                }
             }
             let entries = table_entries(&v)?;
-            if v["invariant"].as_bool() == Some(true) {
-                lt.load_invariant(&entries)?;
-            } else {
-                lt.load(&entries);
+            for lt in self.stages.iter().filter_map(|s| s.w.get().lt.as_ref()) {
+                if v["invariant"].as_bool() == Some(true) {
+                    lt.load_invariant(&entries)?;
+                } else {
+                    lt.load(&entries);
+                }
             }
             return Ok(entries.len());
         }
         bail!("--gemm-table needs the CUDA backend with cuBLASLt ({})", path.display())
+    }
+
+    /// The device of the first stage (the only one on one GPU).
+    fn first_device(&self) -> &Device {
+        &self.stages[0].dev
+    }
+
+    /// Ordinal and device of every stage, in stage order.
+    fn stage_devices(&self) -> impl Iterator<Item = (usize, &Device)> {
+        self.stages.iter().map(|s| (s.device, &s.dev))
+    }
+
+    /// Transfer counters of a layer split (shared with the forks); None on one GPU.
+    pub fn stage_transfers(&self) -> Option<StageTransfers> {
+        self.transfers.as_ref().map(|t| StageTransfers(Arc::clone(t)))
     }
 }
 
@@ -1627,13 +2819,180 @@ fn bf16_round(v: f32) -> f32 {
     half::bf16::from_f32(v).to_f32()
 }
 
-impl Backend for GpuBackend {
-    fn has_evidence(&self) -> bool {
-        self.evidence.is_some()
+impl GpuBackend {
+    /// [`Backend::letter_logits`] inside the stage gates of the call: stage 0 is entered before anything else (as the
+    /// gate of one GPU was), and the readout runs in a scope of the last stage only.
+    fn letter_logits_gated(
+        &mut self,
+        gates: &mut StageGates<'_>,
+        rows: &[&Packed],
+        letters: &[&[Vec<u32>]],
+    ) -> Result<Vec<Vec<Vec<f32>>>> {
+        gates.switch_to(0)?;
+        let t0 = Instant::now();
+        let b = rows.len();
+        let l = rows.iter().map(|r| r.ids.len()).max().unwrap_or(0);
+        ensure!(l > 0, "empty batch");
+        // positions restart in every branch of a tree row: the limit applies to the longest prompt, not the row
+        let max_pos = rows.iter().flat_map(|r| r.pos.iter()).copied().max().unwrap_or(0) as usize;
+        ensure!(
+            max_pos < self.cfg.max_positions,
+            "a prompt of {} tokens exceeds the model limit {}",
+            max_pos + 1,
+            self.cfg.max_positions
+        );
+        let half = self.cfg.head_dim / 2;
+        // Union of letter ids of the batch -> one small f32 product.
+        let mut uniq: Vec<u32> = letters.iter().flat_map(|g| g.iter().flatten().copied()).collect();
+        uniq.sort_unstable();
+        uniq.dedup();
+        // Readout scope of the last stage: the final hidden states and every tensor below live on its GPU, with its
+        // context current and (with a gate) its gate held. Nothing enters or binds another stage until they are gone
+        // at the end of this block, also on `Err` and while unwinding, so before the gates are finished or aborted.
+        let (logits, t1) = {
+            let (hidden, t1) = if self.kernels == Kernels::Candle {
+                let (ids, cs, mask, read) = self.padded_inputs(rows, l);
+                let t1 = Instant::now();
+                (self.forward_padded(&ids, &cs, &mask, b, l, &read)?, t1)
+            } else {
+                // Every row uses its own longest precomputed prefix; a single-row forward may add its state to the
+                // cache.
+                self.clock += 1;
+                let mut past: Vec<Option<usize>> = rows.iter().map(|r| self.best_prefix(r)).collect();
+                for &i in past.iter().flatten() {
+                    self.prefixes[i].last_use = self.clock;
+                    if !self.prefixes[i].pinned {
+                        self.state_cache_hits += 1;
+                    }
+                }
+                if b == 1 && past[0].is_none_or(|i| self.prefixes[i].pinned) {
+                    past[0] = self.cache_state(gates, rows[0], past[0])?;
+                }
+                let total: usize = rows
+                    .iter()
+                    .zip(&past)
+                    .map(|(r, p)| r.ids.len() - p.map_or(0, |i| self.prefixes[i].ids.len()))
+                    .sum();
+                let mut ids = Vec::with_capacity(total);
+                let mut cs = vec![0f32; 2 * total * half];
+                let mut read = Vec::new();
+                let mut segs = Vec::with_capacity(b);
+                for (p, pi) in rows.iter().zip(&past) {
+                    let np = pi.map_or(0, |i| self.prefixes[i].ids.len());
+                    let off = ids.len();
+                    let n = p.ids.len() - np;
+                    ids.extend_from_slice(&p.ids[np..]);
+                    let nodes = p.parent.len();
+                    // visible[a * nodes + b]: block a is block b or one of its ancestors
+                    let visible: Vec<bool> = (0..nodes * nodes)
+                        .map(|k| p.is_ancestor_or_self((k / nodes) as u32, (k % nodes) as u32))
+                        .collect();
+                    let lk = np + n;
+                    let tree = self.tree_attention();
+                    let mut mask = if tree { Vec::new() } else { vec![MASKED; n * lk] };
+                    for t in 0..n {
+                        let (cos, sin) = cs.split_at_mut(total * half);
+                        let c0 = (off + t) * half;
+                        self.rope_row(p.pos[np + t] as f64, &mut cos[c0..c0 + half], &mut sin[c0..c0 + half]);
+                        if tree {
+                            continue;
+                        }
+                        let row = &mut mask[t * lk..(t + 1) * lk];
+                        row[..np].fill(0.0); // the precomputed prefix is visible to every token
+                        row[np + t] = 0.0;
+                        let ni = p.node[np + t] as usize;
+                        for (s, m) in row[np..].iter_mut().enumerate().take(t) {
+                            if visible[p.node[np + s] as usize * nodes + ni] {
+                                *m = 0.0;
+                            }
+                        }
+                    }
+                    read.extend(p.last.iter().map(|&c| (off + c - np) as u32));
+                    let units = if tree { row_units(p, np)? } else { Vec::new() };
+                    segs.push(Segment { off, len: n, past: pi.map(|i| &self.prefixes[i]), mask, units });
+                }
+                let t1 = Instant::now();
+                (self.forward_ragged(gates, &ids, &cs, &segs, &read, None)?.0.context("readout")?, t1)
+            };
+            let last = self.stages.last().context("a model has a stage")?;
+            let head = self.head()?;
+            let ids_t = Tensor::from_slice(&uniq, (uniq.len(),), &last.dev)?;
+            #[cfg(feature = "cuda")]
+            let cuda_readout = last.dev.is_cuda();
+            #[cfg(not(feature = "cuda"))]
+            let cuda_readout = false;
+            let logits: Vec<Vec<f32>> = if cuda_readout {
+                #[cfg(feature = "cuda")]
+                {
+                    let lt = fused::letter_logits(&hidden.contiguous()?, &head.lm_head, &ids_t)?;
+                    let enqueued = Instant::now();
+                    let v = lt.to_vec2()?;
+                    if host_timing() {
+                        // BASAL_HOST_TIMING: host preparation, enqueueing of the forward, wait for the GPU and the copy
+                        eprintln!(
+                            "host-timing rows {b} prepare {:.3} ms enqueue {:.3} ms wait {:.3} ms",
+                            (t1 - t0).as_secs_f64() * 1e3,
+                            (enqueued - t1).as_secs_f64() * 1e3,
+                            enqueued.elapsed().as_secs_f64() * 1e3
+                        );
+                    }
+                    v
+                }
+                #[cfg(not(feature = "cuda"))]
+                unreachable!()
+            } else {
+                let w = head.lm_head.index_select(&ids_t, 0)?.to_dtype(DType::F32)?;
+                hidden.to_dtype(DType::F32)?.matmul(&w.t()?)?.to_vec2()?
+            };
+            // the synchronous copy to the host was the last GPU work of this call on the last stage (only the
+            // stream-ordered frees of this scope's tensors follow, on that stage's stream)
+            gates.mark_drained();
+            (logits, t1)
+        };
+        let t2 = Instant::now();
+        let col = |id: u32| uniq.binary_search(&id).expect("letter in union");
+        let mut out = Vec::with_capacity(b);
+        let mut ri = 0;
+        for g in letters {
+            let mut orders = Vec::with_capacity(g.len());
+            for ids in g.iter() {
+                let row = &logits[ri];
+                orders.push(
+                    ids.iter()
+                        .map(|&id| {
+                            let v = row[col(id)];
+                            if self.readout == Readout::Bf16Rounded {
+                                bf16_round(v)
+                            } else {
+                                v
+                            }
+                        })
+                        .collect(),
+                );
+                ri += 1;
+            }
+            out.push(orders);
+        }
+        ensure!(ri == logits.len(), "readout count mismatch");
+        // A non-finite logit (e.g. an f16 overflow) is an error, never a decision.
+        ensure!(
+            logits.iter().flatten().all(|v| v.is_finite()),
+            "non-finite letter logits ({:?} forward)",
+            self.precision
+        );
+        self.last_timing = ((t1 - t0).as_secs_f64() * 1e3, (t2 - t1).as_secs_f64() * 1e3);
+        Ok(out)
     }
 
-    fn evidence_scores(&mut self, ids: &[u32], t0: usize, t1: usize) -> Result<(Vec<f32>, Vec<f32>)> {
-        let _gpu = self.enter_gate();
+    /// [`Backend::evidence_scores`] inside the stage gates of the call (readout scope as in `letter_logits_gated`).
+    fn evidence_gated(
+        &self,
+        gates: &mut StageGates<'_>,
+        ids: &[u32],
+        t0: usize,
+        t1: usize,
+    ) -> Result<(Vec<f32>, Vec<f32>)> {
+        gates.switch_to(0)?;
         let n = ids.len();
         ensure!(t0 < t1 && t1 <= n, "evidence: token range {t0}..{t1} outside {n} tokens");
         ensure!(n <= self.cfg.max_positions, "evidence: {n} tokens exceed the model limit");
@@ -1654,18 +3013,49 @@ impl Backend for GpuBackend {
         let units = vec![Unit { q_off: 0, q_len: n, ranges: vec![(0, n)] }];
         let seg = Segment { off: 0, len: n, past: None, mask, units };
         let read: Vec<u32> = (t0 as u32..t1 as u32).chain(std::iter::once(n as u32 - 1)).collect();
-        let (h, _) = self.forward_ragged(ids, &cs, &[seg], &read, false)?;
+        // readout scope of the last stage: `h`, its f32 copy and the head's intermediates are on its GPU and die
+        // in this call, before the gates end
+        let (h, _) = self.forward_ragged(gates, ids, &cs, &[seg], &read, None)?;
         let h = h.context("evidence readout")?.to_dtype(DType::F32)?;
         let m = t1 - t0;
-        let head = self.evidence.as_ref().context("this model has no evidence head")?;
-        head.scores(&h.narrow(0, 0, m)?, &h.narrow(0, m, 1)?)
+        let head = self.head()?.evidence.as_ref().context("this model has no evidence head")?;
+        let scores = head.scores(&h.narrow(0, 0, m)?, &h.narrow(0, m, 1)?)?;
+        // the second side's synchronous copy to the host was the last GPU work of this call
+        gates.mark_drained();
+        Ok(scores)
+    }
+}
+
+impl Backend for GpuBackend {
+    fn has_evidence(&self) -> bool {
+        self.head().is_ok_and(|h| h.evidence.is_some())
+    }
+
+    fn evidence_scores(&mut self, ids: &[u32], t0: usize, t1: usize) -> Result<(Vec<f32>, Vec<f32>)> {
+        ensure!(!self.lineage.health.is_lost(), LOST);
+        let owners = self.gate_owners();
+        let mut gates = StageGates::new(&owners);
+        let result = self.evidence_gated(&mut gates, ids, t0, t1);
+        gates.end(result)
     }
 
     fn fork(&self) -> Result<Self> {
         ensure!(self.profile.is_none() && self.residual_max.is_none(), "fork: diagnostics are per backend");
+        ensure!(!self.lineage.health.is_lost(), "fork: {LOST}");
         Ok(Self {
-            dev: self.dev.clone(),
-            device: self.device,
+            stages: self
+                .stages
+                .iter()
+                .map(|s| Stage {
+                    dev: s.dev.clone(),
+                    device: s.device,
+                    layers: s.layers.clone(),
+                    w: s.w.clone(),
+                    gate: None,
+                })
+                .collect(),
+            lineage: self.lineage.clone(),
+            transfers: self.transfers.clone(),
             prefixes: self.prefixes.iter().filter(|p| p.pinned).cloned().collect(),
             state_cache_bytes: self.state_cache_bytes,
             clock: 0,
@@ -1675,10 +3065,6 @@ impl Backend for GpuBackend {
             precision: self.precision,
             readout: self.readout,
             kernels: self.kernels,
-            embed: self.embed.clone(),
-            layers: self.layers.clone(),
-            norm: self.norm.clone(),
-            lm_head: self.lm_head.clone(),
             inv_freq: self.inv_freq.clone(),
             rope: self.rope.clone(),
             load_s: 0.0,
@@ -1689,33 +3075,59 @@ impl Backend for GpuBackend {
             dequant: std::cell::Cell::new((0.0, 0)),
             residual_max: None,
             last_timing: (0.0, 0.0),
-            #[cfg(feature = "cuda")]
-            lt: self.lt.clone(),
-            evidence: self.evidence.clone(),
-            gate: None,
         })
     }
 
+    /// One GPU: the gate of its stage. A split takes one gate per device ([`Backend::set_device_gate`]); given one gate
+    /// here, every stage uses it (one at a time, as with separate gates), which serialises its GPUs.
     fn set_gate(&mut self, gate: Arc<Gate>, urgent: bool) {
-        self.gate = Some((gate, urgent));
+        for s in &mut self.stages {
+            s.gate = Some((gate.clone(), urgent));
+        }
+    }
+
+    fn set_device_gate(&mut self, device: usize, gate: Arc<Gate>, urgent: bool) -> Result<()> {
+        let devices: Vec<usize> = self.stages.iter().map(|s| s.device).collect();
+        let stage = self
+            .stages
+            .iter_mut()
+            .find(|s| s.device == device)
+            .with_context(|| format!("a gate for device {device}, this model runs on device(s) {devices:?}"))?;
+        stage.gate = Some((gate, urgent));
+        Ok(())
+    }
+
+    /// CUDA: the lineage's health, marked lost when the end of this model's own GPU work could not be confirmed (two
+    /// failed synchronisations or context binds); not a hardware check.
+    fn device_health(&self) -> Option<DeviceHealth> {
+        self.is_cuda().then(|| self.lineage.health.clone())
     }
 
     fn add_prefix(&mut self, ids: &[u32]) -> Result<()> {
         if self.kernels != Kernels::Fused || ids.is_empty() || self.prefixes.iter().any(|p| p.ids == ids) {
             return Ok(());
         }
-        let kv = self.capture_prefix(ids, None)?;
-        let hl = self.split_kv(&kv)?;
-        self.prefixes.push(PrefixKv { ids: ids.to_vec(), kv, hl, pinned: true, last_use: 0 });
+        ensure!(!self.lineage.health.is_lost(), LOST);
+        let owners = self.gate_owners();
+        let mut gates = StageGates::new(&owners);
+        let captured = self.capture_prefix(&mut gates, ids, None, true);
+        let parts = gates.end(captured)?;
+        // Publication barrier: the lanes on other threads read the pinned K/V and their hi/lo planes only after this.
+        for (s, st) in self.stages.iter().enumerate() {
+            st.dev
+                .synchronize()
+                .with_context(|| format!("publishing the precomputed prefix: synchronising stage {s}"))?;
+        }
+        self.prefixes.push(PrefixKv { ids: ids.to_vec(), parts, pinned: true, last_use: 0 });
         Ok(())
     }
 
     fn describe(&self) -> Value {
-        let cuda = self.dev.is_cuda();
-        #[cfg_attr(not(feature = "cuda"), allow(unused_mut, reason = "only CUDA describes quantized weights"))]
+        let cuda = self.is_cuda();
+        let device = self.stages[0].device;
         let mut d = json!({
             "backend": if cuda { "cuda" } else { "metal" },
-            "device": if cuda { format!("NVIDIA GPU through candle Device::new_cuda({})", self.device) } else { format!("Apple GPU through candle Device::new_metal({})", self.device) },
+            "device": if cuda { format!("NVIDIA GPU through candle Device::new_cuda({device})") } else { format!("Apple GPU through candle Device::new_metal({device})") },
             "tensor_library": if cuda { "candle-core 0.11.0 (CUDA; matmul = cuBLAS, no TF32)" } else { "candle-core 0.11.0 (Metal; matmul = MLX steel GEMM port)" },
             "weights": match self.precision {
                 Precision::Bf16 => "bf16 (checkpoint)",
@@ -1759,149 +3171,48 @@ impl Backend for GpuBackend {
             };
             d["quantization"] = stats.describe();
         }
+        // a layer split changes only `device` and adds its placement and the transfer protocol (no measured values);
+        // one GPU keeps the description above unchanged
+        if self.split() {
+            let calls: Vec<String> = self.stages.iter().map(|s| format!("Device::new_cuda({})", s.device)).collect();
+            let list = match calls.split_last() {
+                Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+                _ => calls.concat(),
+            };
+            d["device"] = json!(format!("NVIDIA GPUs through candle {list}, consecutive layer ranges"));
+            let evidence = self.has_evidence();
+            let last = self.stages.len() - 1;
+            d["layer_split"] = Value::Array(
+                self.stages
+                    .iter()
+                    .enumerate()
+                    .map(|(s, st)| {
+                        let mut holds = Vec::new();
+                        if s == 0 {
+                            holds.push("embed");
+                        }
+                        if s == last {
+                            holds.extend(["norm", "lm_head"]);
+                            if evidence {
+                                holds.push("evidence_head");
+                            }
+                        }
+                        json!({"stage": s, "device": st.device, "first_layer": st.layers.start,
+                            "last_layer": st.layers.end.saturating_sub(1), "holds": holds})
+                    })
+                    .collect(),
+            );
+            d["stage_transfer"] = json!(STAGE_TRANSFER);
+        }
         d
     }
 
     fn letter_logits(&mut self, rows: &[&Packed], letters: &[&[Vec<u32>]]) -> Result<Vec<Vec<Vec<f32>>>> {
-        let gate = self.gate.clone();
-        let _gpu = gate.as_ref().map(|(g, urgent)| g.enter(*urgent));
-        let t0 = Instant::now();
-        let b = rows.len();
-        let l = rows.iter().map(|r| r.ids.len()).max().unwrap_or(0);
-        ensure!(l > 0, "empty batch");
-        // positions restart in every branch of a tree row: the limit applies to the longest prompt, not the row
-        let max_pos = rows.iter().flat_map(|r| r.pos.iter()).copied().max().unwrap_or(0) as usize;
-        ensure!(
-            max_pos < self.cfg.max_positions,
-            "a prompt of {} tokens exceeds the model limit {}",
-            max_pos + 1,
-            self.cfg.max_positions
-        );
-        let half = self.cfg.head_dim / 2;
-        // Union of letter ids of the batch -> one small f32 product.
-        let mut uniq: Vec<u32> = letters.iter().flat_map(|g| g.iter().flatten().copied()).collect();
-        uniq.sort_unstable();
-        uniq.dedup();
-        let (hidden, t1) = if self.kernels == Kernels::Candle {
-            let (ids, cs, mask, read) = self.padded_inputs(rows, l);
-            let t1 = Instant::now();
-            (self.forward_padded(&ids, &cs, &mask, b, l, &read)?, t1)
-        } else {
-            // Every row uses its own longest precomputed prefix; a single-row forward may add its state to the cache.
-            self.clock += 1;
-            let mut past: Vec<Option<usize>> = rows.iter().map(|r| self.best_prefix(r)).collect();
-            for &i in past.iter().flatten() {
-                self.prefixes[i].last_use = self.clock;
-                if !self.prefixes[i].pinned {
-                    self.state_cache_hits += 1;
-                }
-            }
-            if b == 1 && past[0].is_none_or(|i| self.prefixes[i].pinned) {
-                past[0] = self.cache_state(rows[0], past[0])?;
-            }
-            let total: usize =
-                rows.iter().zip(&past).map(|(r, p)| r.ids.len() - p.map_or(0, |i| self.prefixes[i].ids.len())).sum();
-            let mut ids = Vec::with_capacity(total);
-            let mut cs = vec![0f32; 2 * total * half];
-            let mut read = Vec::new();
-            let mut segs = Vec::with_capacity(b);
-            for (p, pi) in rows.iter().zip(&past) {
-                let np = pi.map_or(0, |i| self.prefixes[i].ids.len());
-                let off = ids.len();
-                let n = p.ids.len() - np;
-                ids.extend_from_slice(&p.ids[np..]);
-                let nodes = p.parent.len();
-                // visible[a * nodes + b]: block a is block b or one of its ancestors
-                let visible: Vec<bool> =
-                    (0..nodes * nodes).map(|k| p.is_ancestor_or_self((k / nodes) as u32, (k % nodes) as u32)).collect();
-                let lk = np + n;
-                let tree = self.tree_attention();
-                let mut mask = if tree { Vec::new() } else { vec![MASKED; n * lk] };
-                for t in 0..n {
-                    let (cos, sin) = cs.split_at_mut(total * half);
-                    let c0 = (off + t) * half;
-                    self.rope_row(p.pos[np + t] as f64, &mut cos[c0..c0 + half], &mut sin[c0..c0 + half]);
-                    if tree {
-                        continue;
-                    }
-                    let row = &mut mask[t * lk..(t + 1) * lk];
-                    row[..np].fill(0.0); // the precomputed prefix is visible to every token
-                    row[np + t] = 0.0;
-                    let ni = p.node[np + t] as usize;
-                    for (s, m) in row[np..].iter_mut().enumerate().take(t) {
-                        if visible[p.node[np + s] as usize * nodes + ni] {
-                            *m = 0.0;
-                        }
-                    }
-                }
-                read.extend(p.last.iter().map(|&c| (off + c - np) as u32));
-                let units = if tree { row_units(p, np)? } else { Vec::new() };
-                segs.push(Segment { off, len: n, past: pi.map(|i| &self.prefixes[i]), mask, units });
-            }
-            let t1 = Instant::now();
-            (self.forward_ragged(&ids, &cs, &segs, &read, false)?.0.context("readout")?, t1)
-        };
-        let ids_t = Tensor::from_slice(&uniq, (uniq.len(),), &self.dev)?;
-        #[cfg(feature = "cuda")]
-        let cuda_readout = self.dev.is_cuda();
-        #[cfg(not(feature = "cuda"))]
-        let cuda_readout = false;
-        let logits: Vec<Vec<f32>> = if cuda_readout {
-            #[cfg(feature = "cuda")]
-            {
-                let lt = fused::letter_logits(&hidden.contiguous()?, &self.lm_head, &ids_t)?;
-                let enqueued = Instant::now();
-                let v = lt.to_vec2()?;
-                if host_timing() {
-                    // BASAL_HOST_TIMING: host preparation, enqueueing of the forward, wait for the GPU and the copy
-                    eprintln!(
-                        "host-timing rows {b} prepare {:.3} ms enqueue {:.3} ms wait {:.3} ms",
-                        (t1 - t0).as_secs_f64() * 1e3,
-                        (enqueued - t1).as_secs_f64() * 1e3,
-                        enqueued.elapsed().as_secs_f64() * 1e3
-                    );
-                }
-                v
-            }
-            #[cfg(not(feature = "cuda"))]
-            unreachable!()
-        } else {
-            let w = self.lm_head.index_select(&ids_t, 0)?.to_dtype(DType::F32)?;
-            hidden.to_dtype(DType::F32)?.matmul(&w.t()?)?.to_vec2()?
-        };
-        let t2 = Instant::now();
-        let col = |id: u32| uniq.binary_search(&id).expect("letter in union");
-        let mut out = Vec::with_capacity(b);
-        let mut ri = 0;
-        for g in letters {
-            let mut orders = Vec::with_capacity(g.len());
-            for ids in g.iter() {
-                let row = &logits[ri];
-                orders.push(
-                    ids.iter()
-                        .map(|&id| {
-                            let v = row[col(id)];
-                            if self.readout == Readout::Bf16Rounded {
-                                bf16_round(v)
-                            } else {
-                                v
-                            }
-                        })
-                        .collect(),
-                );
-                ri += 1;
-            }
-            out.push(orders);
-        }
-        ensure!(ri == logits.len(), "readout count mismatch");
-        // A non-finite logit (e.g. an f16 overflow) is an error, never a decision.
-        ensure!(
-            logits.iter().flatten().all(|v| v.is_finite()),
-            "non-finite letter logits ({:?} forward)",
-            self.precision
-        );
-        self.last_timing = ((t1 - t0).as_secs_f64() * 1e3, (t2 - t1).as_secs_f64() * 1e3);
-        Ok(out)
+        ensure!(!self.lineage.health.is_lost(), LOST);
+        let owners = self.gate_owners();
+        let mut gates = StageGates::new(&owners);
+        let result = self.letter_logits_gated(&mut gates, rows, letters);
+        gates.end(result)
     }
 }
 

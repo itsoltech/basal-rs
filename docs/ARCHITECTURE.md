@@ -285,7 +285,8 @@ nie da się zapytać, doctor nie ocenia urządzeń modeli. Wybór PTX, kernela a
 (Hopper albo nie) i liczba SM są zapamiętywane osobno dla każdego GPU, więc
 karty różnych architektur w jednym procesie nie dziedziczą wyboru pierwszej.
 Ta sama nazwa modelu w dwóch wpisach kończy się błędem przed ładowaniem.
-Metal i Intel obsługują tylko GPU 0. Podziału jednego modelu między GPU nie ma.
+Metal i Intel obsługują tylko GPU 0. Podział jednego modelu warstwami między
+karty CUDA opisuje sekcja [Podział warstw między GPU](#podział-warstw-między-gpu-cuda).
 
 Repliki (`replica_devices`, CUDA) to niezależne instancje jednego modelu pod
 jedną nazwą, po jednej na każdy ordinal z listy. Walidacja konfiguracji
@@ -321,16 +322,96 @@ licznik admission handlerów (`max_inflight`) i gauge
 
 Replika jest niedostępna, gdy backend zgłosił utratę urządzenia
 (`DeviceHealth`) albo jej główny worker zamknął kolejkę; zamknięcie toru
-`long` tego nie zmienia, bo tor główny przejmuje jego żądania. CUDA nie
-raportuje `DeviceHealth`, więc na CUDA widoczne jest tylko zatrzymanie
-workera. Fatalny błąd CUDA może wymagać restartu całego procesu, więc
-repliki nie są izolacją awarii sprzętu. `/health` dla modeli z jedną
+`long` tego nie zmienia, bo tor główny przejmuje jego żądania. Backend CUDA
+raportuje `DeviceHealth` linii modelu (wspólne dla jej forków, np. toru
+długiego). Linia jest oznaczana jako utracona, gdy nie da się potwierdzić
+końca jej własnej pracy GPU: dwie nieudane synchronizacje przed zwolnieniem
+gate'u albo po błędzie żądania, albo dwa nieudane wiązania kontekstu przed
+zwolnieniem pamięci. Kolejne wywołania tej linii są odrzucane przed pracą
+GPU, a trwające wywołanie toru długiego, które oddało gate w `checkpoint`,
+kończy się tym samym błędem zaraz po jego odzyskaniu. Pamięć, której koniec
+użycia nie jest potwierdzony, jest celowo zatrzymana zamiast zwolniona. Zwykły OOM, błąd żądania i timeout nie
+oznaczają utraty. To nie jest wykrywanie awarii sprzętu: fatalny błąd CUDA
+może wymagać restartu całego procesu, także dla innych kart, więc repliki
+nie są izolacją awarii sprzętu. `/health` dla modeli z jedną
 instancją zachowuje dotychczasową treść i reguły (`device_lost`,
 `lost_models`). Grupa z częścią niedostępnych replik daje 200 ze
 `status: ok` i `degraded_models`, grupa bez dostępnych replik 503 ze
 `status: engine_stopped` i `unavailable_models`; wpis zawiera `model`,
 `replicas`, `available` i `unavailable` (`replica`, `device`, `reason`:
 `worker_closed` albo `device_lost`).
+
+### Podział warstw między GPU (CUDA)
+
+`layer_split` (YAML) i `--layer-split` (CLI) opisuje `basal_gpu::LayerSplit`
+(`crates/basal-gpu/src/split.rs`): etapy `{device, layers}` w kolejności
+warstw. Konstruktor wymaga co najmniej dwóch etapów, co najmniej jednej
+warstwy na etap i różnych kart. Zakres etapu `s` wynika z liczb warstw,
+`[Σ_{t<s} layers_t, Σ_{t≤s} layers_t)`, więc luki i nakładanie się są
+niemożliwe. Kolejność walidacji: parsowanie (clap/serde, nieznane pola
+odrzucone), `ModelConfig::placement` (konflikt z `device` i
+`replica_devices`; w CLI także `conflicts_with` dla `--device`,
+`--replica-devices` i `--config`), `LayerSplit::check` (backend CUDA, `f16`,
+kernele `fused`), `check_same_gpus` (każdy ordinal istnieje w procesie,
+jeden typ karty; sterownik bez tworzenia kontekstu), pokrycie liczby warstw
+z `config.json`, dopiero potem wagi. Serwer i `basal benchmark` rozwiązują
+tabelę GEMM na karcie etapu 0 i przed ładowaniem sprawdzają ją na każdej
+karcie podziału; pozostałe polecenia wczytują `--gemm-table` jak dla jednego
+GPU. Model z podziałem jest w
+serwerze jedną instancją (`Replica.devices` z ordinalami etapów); repliki
+takiego modelu nie są obsługiwane.
+
+`GpuBackend::load_split` tworzy dla każdego etapu urządzenie
+`Device::new_cuda(ordinal)` z własnymi wagami i uchwytem cuBLASLt z
+workspace. Etap 0 trzyma też embedding, ostatni końcową normę, `lm_head` i
+głowicę evidence. Jedyna kopia wag to `input_layernorm` pierwszej warstwy
+następnego etapu, trzymana na etapie przed granicą (`hidden` wartości f16).
+Wybór PTX, kernela attention i liczba SM są i tak zapamiętywane per GPU.
+Błąd ładowania ma kontekst etapu, karty i warstwy, a już załadowane etapy są
+zwalniane, każdy przy własnym kontekście.
+
+Forward (`forward_ragged`, ścieżka `fused`) liczy etapy po kolei. Na
+granicy źródło jest opróżniane, bufor celu `[2, M, H]` f16 alokowany i
+inicjalizowany na następnej karcie, potem następuje kopia API
+urządzenie–urządzenie, potwierdzenie zakończenia na obu kartach, zwolnienie
+źródła i wiązanie kontekstu celu. Peer access nie jest włączany, a fizyczna
+trasa kopii (P2P albo przez hosta w sterowniku) pozostaje nieustalona. K/V
+prefiksów szablonu i cache stanu warstwy `l` leżą na karcie warstwy `l`
+(część etapu). Stan końcowy, logity liter, odczyt evidence i ich pośrednie
+tensory istnieją tylko na ostatnim etapie i trafiają na hosta; logity nie
+wracają na etap 0. Pamięć urządzenia etapu (`OnStage`) jest zwalniana przy
+związanym kontekście swojej karty. Gdy wiązania nie da się potwierdzić albo
+linia modelu jest utracona, pamięć zostaje celowo zatrzymana zamiast
+zwolniona. Bufory granicy z niepotwierdzoną kopią trafiają do kwarantanny
+linii i oznaczają ją jako utraconą (`device_lost`, wyżej).
+
+Gate'y powstają z listy instancji; instancja z podziałem liczy się na każdej
+swojej karcie, a model z torem długim dostaje gate każdej karty. Wątek trzyma
+najwyżej jeden gate naraz i nie czeka na gate, trzymając inny, więc
+oczekiwanie między kartami nie tworzy zakleszczenia. Przed zwolnieniem gate'u
+etapu jego praca jest opróżniana. Modele, które dzielą kartę z etapem,
+korzystają z niej na zmianę z tym etapem, jak modele jednego GPU. Każdy etap
+ma własne wagi, K/V i workspace; strumienie są per wątek i kontekst. Tor
+główny wchodzi do gate'u każdego etapu jako pilny. Tor długi wznawia
+rozpoczęte zadanie na granicy przez `Gate::resume`: bilet w kolejce FIFO,
+której nowe żądania pilne ani wywłaszczalne nie wyprzedzają. Czeka więc
+najwyżej na resztę bieżącej tury, po jednej turze każdego wcześniejszego
+biletu i po jednej turze pilnej na każde oddanie w `checkpoint`. To
+ograniczenie wynika z protokołu i przeglądu kodu, a nie z pomiaru. Kolejność
+między torami pilnymi jednej karty pozostaje kolejnością `Condvar`, bez
+nowej gwarancji sprawiedliwości. Fork toru długiego współdzieli wagi i
+`Lt` etapów, liczniki transferów i `DeviceHealth`, ma własny pusty cache
+stanu i własne gate'y ustawiane przez serwer (`set_device_gate`); fork
+utraconej linii zwraca błąd.
+
+Liczniki transferów istnieją tylko przy podziale: na granicę liczba kopii,
+bajty, czas hosta kopii z jej synchronizacjami i czas czekania na gate
+następnej karty. Trafiają do `basal profile` i `basal benchmark`, a opis
+backendu podaje układ etapów i stały opis protokołu (`stage_transfer`), bez
+liczb. Metryk Prometheus dla transferów nie ma
+([Observability](OBSERVABILITY.md#podział-warstw)). Dla jednego GPU opis
+backendu, manifest eksportu, raporty i odpowiedzi zachowują dotychczasowy
+format.
 
 ### Pomiar scenariuszy HTTP
 
@@ -345,7 +426,8 @@ Payloady planuje `Engine::plan_request` raz na unikalne body, przed fazami.
 Właściciel serwera przekazuje sygnał zamknięcia, anuluje klientów i czeka
 na zakończenie workerów GPU. Zwykłe `serve` nadal używa SIGINT/SIGTERM.
 Monitor pamięci działa na osobnym wątku z uchwytem do rzeczywistego
-urządzenia silnika. Metodyka i ograniczenia: [Pomiary](BENCHMARKS.md).
+urządzenia silnika (przy podziale warstw: do urządzenia każdego etapu).
+Metodyka i ograniczenia: [Pomiary](BENCHMARKS.md).
 
 ### Metryki Prometheus
 
@@ -398,6 +480,24 @@ scrape nie przechodzi przez kolejkę inferencji. Szczegółowa semantyka i PromQ
 - Repliki wymagają kart jednego typu i wspólnej tabeli GEMM niezależnej od
   partii; mieszane grupy wymagają osobnej decyzji numerycznej. Zgodność
   konfiguracji nie zastępuje pomiaru równości wyników na obu kartach.
+- Podział warstw działa tylko na CUDA z `f16` i kernelami `fused`, na
+  kartach jednego typu; etapy liczą po kolei. Na dwóch RTX 6000 Ada (mini i
+  4.5B) wyniki z podziałem są bitowo równe jednemu GPU, a pod sztucznym
+  limitem wolnej pamięci podział uruchamia 4.5B, którego jeden GPU nie
+  mieści ([raport L1](../reports/multigpu-layer-l1-revalidation-2026-10-13/README.md)
+  bieżących źródeł). Wydajność 4.5B zmierzono opisowo, po jednej sesji na
+  tryb; sesje miały tę samą konfigurację kart, ale ich fizyczna tożsamość
+  nie jest ustalona
+  ([zestawienie](../reports/multigpu-layer-revalidation-2026-10-14/README.md)):
+  jedno żądanie jest z podziałem wolniejsze, a 16 klientów `none` dało
+  1,17–1,18× przepustowość jednego GPU przy innych warunkach termicznych
+  kart. Tor jednego GPU ma dwa utrzymane sygnały bez wskazanej przyczyny w
+  kodzie (`none` `mixed-c1 queue_ms.p99`, `q4_k` `dec_s`), przyjęte jako
+  konkretne wyniki, bez progu. Modelu max, innych kart, kart mieszanych ani
+  fizycznej trasy kopii nie zmierzono. Pomiary poprzedniego kandydata
+  ([zestawienie](../reports/multigpu-layer-2026-10-13/README.md),
+  [poprawka zakresu](../reports/multigpu-layer-2026-10-13/SCOPE.md))
+  pozostają historią.
 - 4.5B i mini na dwóch RTX 6000 Ada: bitowa zgodność z wersją sprzed zmiany,
   przypisanie urządzeń i ruch równoległy sprawdzone
   ([raport](../reports/multigpu-placement-2026-10-11/README.md)). Nie zmierzono

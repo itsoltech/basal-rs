@@ -27,6 +27,10 @@
 //! the job until it is answered or dropped. The model-level metrics aggregate the replicas, the `basal_replica_*`
 //! series split them.
 //!
+//! A model may instead be split by layers over several GPUs (`layer_split`, CUDA): one instance whose stages run one
+//! after another, each on its GPU. It takes the gate of every GPU it uses, at most one at a time, so engines of other
+//! models on one of those GPUs take turns with the stage there, and its long lane yields on every GPU.
+//!
 //! Timing headers (not part of the System One body): `x-basal-queue-ms` (arrival to the start of its batch),
 //! `x-basal-compute-ms` (planning + forwards of its batch), `x-basal-batch-requests`.
 
@@ -73,8 +77,9 @@ pub struct ServeOptions {
 /// One instance of a served model.
 pub struct Replica<B: Backend> {
     pub engine: Engine<B>,
-    /// GPU ordinal the engine was loaded on: engines with the same ordinal share one gate.
-    pub device: usize,
+    /// GPU ordinals the engine was loaded on: one, or the stages of a layer split in order. Engines using the same
+    /// ordinal share its gate.
+    pub devices: Vec<usize>,
 }
 
 /// One served model: its instances and admission options.
@@ -148,8 +153,8 @@ impl Drop for Reservation {
 /// Queue of one instance of a model.
 struct ReplicaRoute {
     tx: mpsc::UnboundedSender<Job>,
-    /// GPU ordinal of the instance.
-    device: usize,
+    /// GPU ordinals of the instance (one, or the stages of a layer split).
+    devices: Vec<usize>,
     /// Device readiness reported by its engines (none when its backend does not report it).
     health: Vec<DeviceHealth>,
     /// Always set in a replica group; for a single instance only with metrics.
@@ -171,8 +176,9 @@ impl ReplicaRoute {
     }
 
     /// Why the instance takes no requests: its backend reported the device lost, or its main worker stopped (a stopped
-    /// long lane is not counted: the main lane runs its requests). Not a check of the hardware: CUDA reports no device
-    /// loss, and a fatal CUDA error may leave the other GPUs of the process unusable too.
+    /// long lane is not counted: the main lane runs its requests). Not a check of the hardware: a CUDA backend reports
+    /// `device_lost` only when the end of its own GPU work could not be confirmed (two failed synchronisations or
+    /// context binds of that instance); a fatal CUDA error may leave the other GPUs of the process unusable too.
     fn unavailable(&self) -> Option<&'static str> {
         if self.health.iter().any(DeviceHealth::is_lost) {
             Some("device_lost")
@@ -637,7 +643,10 @@ async fn health(State(app): State<Arc<App>>) -> Response {
         let down: Vec<Value> = replicas
             .iter()
             .enumerate()
-            .filter_map(|(i, r)| r.unavailable().map(|why| json!({"replica": i, "device": r.device, "reason": why})))
+            // replicas run on one GPU each (a layer-split model has no replicas)
+            .filter_map(|(i, r)| {
+                r.unavailable().map(|why| json!({"replica": i, "device": r.devices[0], "reason": why}))
+            })
             .collect();
         if down.is_empty() {
             continue;
@@ -692,15 +701,18 @@ fn serve_inner<B: Backend + Send + 'static>(
     owned: Option<(std::net::TcpListener, oneshot::Receiver<()>)>,
 ) -> Result<()> {
     anyhow::ensure!(!models.is_empty(), "no models to serve");
-    let mut layout: Vec<(String, Vec<usize>)> = Vec::with_capacity(models.len());
+    let mut layout: Vec<(String, Vec<Vec<usize>>)> = Vec::with_capacity(models.len());
     for m in &models {
         let first = m.replicas.first().context("a served model needs at least one engine")?;
         let name = &first.engine.manifest.name;
-        let mut devices = Vec::with_capacity(m.replicas.len());
+        let mut devices: Vec<Vec<usize>> = Vec::with_capacity(m.replicas.len());
         for r in &m.replicas {
             anyhow::ensure!(r.engine.manifest.name == *name, "replicas of {name} load different models");
-            anyhow::ensure!(!devices.contains(&r.device), "{name}: two replicas on GPU {}", r.device);
-            devices.push(r.device);
+            anyhow::ensure!(!r.devices.is_empty(), "{name}: an instance without a GPU");
+            for d in &r.devices {
+                anyhow::ensure!(!devices.iter().flatten().any(|o| o == d), "{name}: two replicas on GPU {d}");
+            }
+            devices.push(r.devices.clone());
         }
         layout.push((name.clone(), devices));
     }
@@ -715,18 +727,21 @@ fn serve_inner<B: Backend + Send + 'static>(
         .then(|| Metrics::new(&layout, opts.max_inflight))
         .transpose()
         .context("initializing Prometheus metrics")?;
-    // Per GPU: with several engines (models or replicas of different models) or a long lane on it, every engine on that
-    // GPU takes turns through its gate (short batches of any of them before long requests, which yield between
-    // layers). GPUs do not wait for each other.
-    let instances: Vec<(usize, usize)> =
-        models.iter().flat_map(|m| m.replicas.iter().map(move |r| (r.device, m.long_tokens))).collect();
+    // Per GPU: with several engines (models or replicas of different models, a layer-split instance counting on each
+    // of its GPUs) or a long lane on it, every engine on that GPU takes turns through its gate (short batches of any of
+    // them before long requests, which yield between layers). GPUs do not wait for each other; a layer-split instance
+    // holds one of its gates at a time.
+    let instances: Vec<(&[usize], usize)> =
+        models.iter().flat_map(|m| m.replicas.iter().map(move |r| (r.devices.as_slice(), m.long_tokens))).collect();
     let mut gates: HashMap<usize, Arc<Gate>> = HashMap::new();
-    for &(device, long_tokens) in &instances {
-        let on_device = instances.iter().filter(|(d, _)| *d == device).count();
-        if on_device > 1 || long_tokens > 0 {
-            gates
-                .entry(device)
-                .or_insert_with(|| Arc::new(Gate::new(std::time::Duration::from_millis(opts.long_slice_ms))));
+    for &(devices, long_tokens) in &instances {
+        for &device in devices {
+            let on_device = instances.iter().filter(|(ds, _)| ds.contains(&device)).count();
+            if on_device > 1 || long_tokens > 0 {
+                gates
+                    .entry(device)
+                    .or_insert_with(|| Arc::new(Gate::new(std::time::Duration::from_millis(opts.long_slice_ms))));
+            }
         }
     }
     let mut threads = Vec::new();
@@ -737,19 +752,27 @@ fn serve_inner<B: Backend + Send + 'static>(
             let name = replicas[0].engine.manifest.name.clone();
             let group = replicas.len() > 1;
             let mut queues = Vec::with_capacity(replicas.len());
-            for (index, Replica { mut engine, device }) in replicas.into_iter().enumerate() {
+            for (index, Replica { mut engine, devices }) in replicas.into_iter().enumerate() {
                 // threads and messages: the model's name, with the replica index in a group
                 let label = if group { format!("{name}-r{index}") } else { name.clone() };
-                let gate = gates.get(&device);
-                let mut devices: Vec<DeviceHealth> = engine.backend.device_health().into_iter().collect();
+                let device_gates: Vec<(usize, &Arc<Gate>)> =
+                    devices.iter().filter_map(|&d| gates.get(&d).map(|g| (d, g))).collect();
+                let mut health: Vec<DeviceHealth> = engine.backend.device_health().into_iter().collect();
                 let (tx, rx) = mpsc::unbounded_channel();
                 let lane =
                     |kind| Lane::new(schedule, max_batch_tokens, metrics.as_ref().map(|m| m.lane(&name, kind, index)));
                 let long = if long_tokens > 0 {
                     let mut le = engine.fork().with_context(|| format!("{label}: second engine for the long lane"))?;
-                    let gate = gate.context("the long lane needs the gate of its GPU")?;
-                    le.backend.set_gate(gate.clone(), false);
-                    devices.extend(le.backend.device_health());
+                    anyhow::ensure!(
+                        device_gates.len() == devices.len(),
+                        "{label}: the long lane needs the gate of every GPU it uses"
+                    );
+                    for &(d, gate) in &device_gates {
+                        le.backend
+                            .set_device_gate(d, gate.clone(), false)
+                            .with_context(|| format!("{label}: long lane"))?;
+                    }
+                    health.extend(le.backend.device_health());
                     let (ltx, lrx) = std::sync::mpsc::channel();
                     let l = lane("long");
                     threads.push(
@@ -762,8 +785,8 @@ fn serve_inner<B: Backend + Send + 'static>(
                 } else {
                     None
                 };
-                if let Some(g) = gate {
-                    engine.backend.set_gate(g.clone(), true);
+                for &(d, gate) in &device_gates {
+                    engine.backend.set_device_gate(d, gate.clone(), true).with_context(|| label.clone())?;
                 }
                 let main_lane = lane("main");
                 threads.push(
@@ -772,8 +795,15 @@ fn serve_inner<B: Backend + Send + 'static>(
                         .spawn(move || scheduler(engine, rx, main_lane, long))
                         .context("starting a GPU thread")?,
                 );
+                let on = match devices.as_slice() {
+                    [device] => format!("GPU {device}"),
+                    stages => format!(
+                        "GPUs {} (layer split)",
+                        stages.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+                    ),
+                };
                 crate::note!(
-                    "serving {name}{} on GPU {device} (batch {max_batch_tokens} tokens, {schedule:?}{})",
+                    "serving {name}{} on {on} (batch {max_batch_tokens} tokens, {schedule:?}{})",
                     if group { format!(" replica {index}") } else { String::new() },
                     if long_tokens > 0 { format!(", long lane above {long_tokens} tokens") } else { String::new() }
                 );
@@ -784,7 +814,7 @@ fn serve_inner<B: Backend + Send + 'static>(
                         metrics: metrics.as_ref().map(|m| m.replica(&name, index)),
                     })
                 });
-                queues.push(ReplicaRoute { tx, device, health: devices, load });
+                queues.push(ReplicaRoute { tx, devices, health, load });
             }
             let route = if group {
                 Route::Group { replicas: queues.into_boxed_slice(), next: AtomicUsize::new(0) }

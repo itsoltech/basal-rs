@@ -249,6 +249,44 @@ pub fn estimated_weight_bytes(cfg: &LlamaConfig, checkpoint_bytes: u64, quantiza
     rest.checked_add(quantized).ok_or_else(overflow)
 }
 
+/// Estimated GPU bytes of the weights of one stage of a layer split (format arithmetic for preflight checks, not a
+/// measurement): the decoder layers' part of [`estimated_weight_bytes`] in proportion to the stage's `layers` of
+/// `cfg.num_layers`, plus the embedding on the `first` stage and lm_head and final norm on the `last` one (each
+/// `vocab × hidden` or `hidden` bf16 values of the checkpoint). Not included: the copy of the next stage's input norm
+/// (`hidden` values) and the evidence head, a separate file.
+pub fn estimated_stage_weight_bytes(
+    cfg: &LlamaConfig,
+    checkpoint_bytes: u64,
+    quantization: Quantization,
+    layers: usize,
+    first: bool,
+    last: bool,
+) -> Result<u64> {
+    ensure!(
+        cfg.num_layers > 0 && layers <= cfg.num_layers,
+        "a stage of {layers} layers in a model of {}",
+        cfg.num_layers
+    );
+    let overflow = || anyhow::anyhow!("weight sizes overflow");
+    let total = estimated_weight_bytes(cfg, checkpoint_bytes, quantization)?;
+    let matrix = cfg.vocab.checked_mul(cfg.hidden).and_then(|v| v.checked_mul(2)).ok_or_else(overflow)?;
+    let matrix = u64::try_from(matrix)?;
+    let norm = u64::try_from(cfg.hidden.checked_mul(2).ok_or_else(overflow)?)?;
+    let ends = matrix.checked_mul(2).and_then(|b| b.checked_add(norm)).ok_or_else(overflow)?;
+    let decoder = total.checked_sub(ends).with_context(|| {
+        format!("estimated weights of {total} bytes are smaller than the embedding, lm_head and norm ({ends} bytes)")
+    })?;
+    let share = u128::from(decoder) * layers as u128 / cfg.num_layers as u128;
+    let mut bytes = u64::try_from(share)?;
+    if first {
+        bytes = bytes.checked_add(matrix).ok_or_else(overflow)?;
+    }
+    if last {
+        bytes = bytes.checked_add(matrix).and_then(|b| b.checked_add(norm)).ok_or_else(overflow)?;
+    }
+    Ok(bytes)
+}
+
 /// Load diagnostics of the Q8_0 projection matrices of a model (sums over matrices).
 #[cfg(feature = "cuda")]
 #[derive(Clone, Copy, Debug, Default)]

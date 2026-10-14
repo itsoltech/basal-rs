@@ -75,6 +75,8 @@ Każdy skrypt opisuje w nagłówku, co mierzy, jakie ścieżki trzeba wcześniej
 | `tools/perf/run-replicas-cloud.py` | repliki jednego modelu (`replica_devices`) na dwóch identycznych kartach: eksporty binarki rozmieszczenia i kandydata na GPU 0 i 1, odrzucane konfiguracje, zgodność odpowiedzi HTTP, routing i metryki replik, admission 529, rozłączeni klienci, `CUDA_VISIBLE_DEVICES`, zamknięcie; wydajność jednej i dwóch replik A/B/B/A |
 | `tools/perf/run-w8a16-cloud.py` | opcjonalne wagi `q8_0` (W8A16) na dwóch identycznych kartach: tor `none` bajtowo wobec binarki etapu 02, spójność `q8_0` między trybami i kartami, odrzucane konfiguracje, HTTP z replikami, 44+34 i 900 pytań wobec FP32, wydajność `none` (A/B z potwierdzeniem) i `q8_0`, profil dekwantyzacji, pamięć puli |
 | `tools/perf/run-w4a16-cloud.py` | opcjonalne wagi `q4_k` (W4A16) na dwóch identycznych kartach: tory `none` i `q8_0` bajtowo wobec stabilnej binarki W8, spójność `q4_k` między trybami i kartami, diagnostyka ładowania wobec P0, odrzucane konfiguracje, HTTP z replikami, 44+34 i 900 pytań wobec FP32, profil, pamięć puli, rodziny wydajności `none` i `q8_0` (A B C C B A) |
+| `tools/perf/run-layer-split-cloud.py` | jeden model podzielony warstwami na dwie identyczne karty (`layer_split`): sesja L1 (tor jednego GPU bajtowo wobec bazy, podział bajtowo wobec jednego GPU, odrzucane konfiguracje, HTTP i `device="0,1"`, pojemność pod sztucznym limitem, profile `stage_transfer`), L2 (regresja `none` A/B i opisowy podział `none`), L3 (regresja `q8_0` i `q4_k` A/B i opisowy podział) |
+| `tools/perf/cuda-reserve.py` | pomocnik pojemności uruchamiany przez runner podziału: zajmuje rzeczywistą pamięć urządzenia do zadanego poziomu wolnej pamięci i próbkuje wolną pamięć każdej karty |
 | `tools/decision-sets/run-cloud.sh` | zestaw decyzji wobec upstream FP32 |
 
 ## Pilnowanie maszyny
@@ -367,6 +369,85 @@ raporcie S3; sygnał i statusy runnera pozostają, a decyzja nie tworzy progu.
 Poprawki kodu nie było, więc nie wykonano rewalidacji. Kolejne sesje GPU
 wymagają zgody użytkownika na kartę i budżet według
 [Zgoda i budżet](#zgoda-i-budżet).
+
+`run-layer-split-cloud.py` (etap 05, `layer_split`) wymaga maszyny z dwiema
+identycznymi kartami NVIDIA. Importuje bez zmian `run-w4a16-cloud.py` (a przez
+niego runnery W8, replik, izolacji i rozmieszczenia) oraz `tools/bench/ab.py`
+i przed załadowaniem sprawdza ich SHA-256; `cuda-reserve.py` uruchamia jako
+osobny proces tylko w przypiętej wersji. Wymagania maszyny jak dla runnera
+W4 (drzewo w `/work`, wagi w `HF_HOME`, biblioteki CUDA w `BASAL_HOME`,
+wbudowane tabele GEMM karty). `--base` to przebudowana binarka `d42a400`,
+`--candidate` binarka z podziałem, obie z jednego przepisu; wymagane są obie
+sumy `--expect-*-sha256`, `--base-label`, `--candidate-label` i
+`--deadline-minutes`. Jedno wywołanie to jedna sesja, a koordynator audytuje
+surowe dane między sesjami:
+
+```sh
+python3 tools/perf/run-layer-split-cloud.py --plan-only        # liczby kroków, źródła, bez GPU
+python3 tools/perf/run-layer-split-cloud.py --campaign l1 --base BAZA --expect-base-sha256 SUMA \
+  --base-label OPIS --candidate KANDYDAT --expect-candidate-sha256 SUMA --candidate-label OPIS \
+  --deadline-minutes MINUTY --out out/layer-split-l1
+python3 tools/perf/run-layer-split-cloud.py --campaign l2 --l1-run out/layer-split-l1 ... --out out/layer-split-l2
+```
+
+- L1 (jednostki C1–C6): eksporty toru jednego GPU bajtowo wobec bazy
+  (`none`, `q8_0`, `q4_k`, także na GPU 1 i dla 900 pytań); eksporty z
+  podziałem bajtowo wobec bazy na jednym GPU, z `basal compare` i kontraktem
+  manifestu (układy `0:30,1:30`, `0:1,1:59`, `0:59,1:1`, `1:30,0:30`,
+  `CUDA_VISIBLE_DEVICES=1,0`, cache, mini); niepoprawne konfiguracje przez
+  `serve`, `export`, `benchmark`, `decide`, `profile` i `doctor`; HTTP z
+  podziałem (odpowiedzi wobec referencji, `device="0,1"`, SIGTERM z żądaniami
+  w toku, równoległy ruch z mini na drugiej karcie); pojemność pod
+  sztucznym limitem (C5, metoda w [Pomiarach](BENCHMARKS.md#podział-warstw));
+  profile `stage_transfer` (diagnostyka).
+- L2: regresja toru domyślnego `none` (A baza, B kandydat na jednym GPU,
+  C kandydat z `0:30,1:30`; `basal benchmark` w kolejności A B C C B A i
+  `ab.py` A/B oraz B/C). Pola gorsze dla B w każdej parze uruchamiają jedną
+  rundę potwierdzenia; gorsze w obu rundach to SIGNAL, bez progu. Pary B/C
+  są opisowe.
+- L3: regresja `q8_0` i `q4_k` na jednym GPU (A/B, ta sama reguła) oraz
+  opisowe porównanie z podziałem w tych trybach.
+
+L2 i L3 wymagają `--l1-run` z tymi samymi binarkami, źródłami i zasobami,
+bez FAIL i ze wszystkimi jednostkami C1–C6; GAP pojemności nie blokuje
+kolejnych sesji. Każda sesja ma własny twardy limit czasu od żądania
+maszyny, a `--deadline-minutes` musi zostawić rezerwę na pobranie wyników.
+Każde polecenie, żądanie, zamknięcie serwera i akcja pomocnika ma własny
+limit; przekroczenie przez polecenie GPU to FAIL klasy `timeout` i koniec
+pracy GPU, a to, czego nie uruchomiono, jest GAP. Statusy PASS, FAIL (klasy
+`correctness`, `capacity`, `timeout`), GAP i SIGNAL oraz kody wyjścia (0
+same PASS, 1 FAIL, 4 SIGNAL bez FAIL, 3 tylko GAP, 2 błąd preflightu,
+128 + sygnał po przerwaniu) opisuje nagłówek pliku (`--help`). Runner nie
+wynajmuje, nie przedłuża i nie usuwa maszyn; surowe wyniki zawierają
+ścieżki, więc pobieraj je do `.cache/cloud`.
+
+`cuda-reserve.py` używa tylko biblioteki standardowej Pythona i sterownika
+CUDA (`libcuda.so.1`). `query` podaje wolną i całkowitą pamięć każdej karty,
+`monitor` próbkuje wolną pamięć (domyślnie co 50 ms) do pliku CSV, a
+`reserve --leave KARTA=MIB` najpierw alokuje rzeczywistą pamięć, aż sterownik
+pokaże zadaną wolną pamięć (tolerancja 64 MiB), potem próbkuje jak
+`monitor`. Kończy się sygnałem, po `--max-seconds` albo po zmianie procesu
+nadrzędnego i wtedy zwalnia zajętą pamięć (po błędzie sterownika w miarę
+możliwości; kody wyjścia w nagłówku). Pliki zawierają tylko ordinale, nazwy
+kart i liczby bajtów.
+
+Dla bieżących źródeł kandydata (`831e68e0…`) wykonano wszystkie trzy
+sesje, kompletnie: L1
+([raport](../reports/multigpu-layer-l1-revalidation-2026-10-13/README.md):
+599 PASS, 0 FAIL, 42 GAP, 0 SIGNAL, kod wyjścia 3), L2
+([raport](../reports/multigpu-layer-l2-revalidation-2026-10-14/README.md):
+107 PASS, 0 FAIL, 1 GAP, 1 SIGNAL, kod 4) i L3
+([raport](../reports/multigpu-layer-l3-revalidation-2026-10-14/README.md):
+172 PASS, 0 FAIL, 2 GAP, 1 SIGNAL, kod 4). Utrzymane sygnały L2 i L3 nie
+mają wskazanej przyczyny w kodzie; rozstrzygnięcia konkretnych wyników są
+w plikach `DECISION.md` obu raportów. Wyniki zestawia
+[raport zbiorczy](../reports/multigpu-layer-revalidation-2026-10-14/README.md):
+osobne sesje miały tę samą konfigurację dwóch kart, ale ich fizyczna
+tożsamość nie jest ustalona. Wcześniejsze sesje poprzedniego kandydata
+([zestawienie](../reports/multigpu-layer-2026-10-13/README.md) z
+[poprawką zakresu](../reports/multigpu-layer-2026-10-13/SCOPE.md))
+pozostają historią. Każda sesja GPU wymaga zgody użytkownika na kartę i
+budżet według [Zgoda i budżet](#zgoda-i-budżet).
 
 Do `reports/` zapisuj krótkie wyniki i zakres weryfikacji. Pełne eksporty, logi
 i profile pobieraj do ignorowanego `.cache/` i archiwizuj poza Gitem.

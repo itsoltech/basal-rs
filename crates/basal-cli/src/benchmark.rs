@@ -49,7 +49,7 @@ pub(crate) struct Options {
     /// Minimum available RAM to retain (GiB)
     #[arg(long, default_value_t = 2.0)]
     ram_reserve_gib: f64,
-    /// Minimum free VRAM / Metal working-set headroom (GiB)
+    /// Minimum free VRAM / Metal working-set / Vulkan heap headroom (GiB)
     #[arg(long, default_value_t = 1.0)]
     gpu_reserve_gib: f64,
     /// Packed tokens admitted per server batch; same setting as serve
@@ -118,7 +118,7 @@ struct Server {
 }
 
 impl Server {
-    fn start(engine: Engine<GpuBackend>, device: usize, options: &Options) -> Result<Self> {
+    fn start(engine: Engine<GpuBackend>, devices: Vec<usize>, options: &Options) -> Result<Self> {
         let listener =
             std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).context("binding benchmark listener")?;
         let addr = listener.local_addr()?;
@@ -132,7 +132,7 @@ impl Server {
             metrics: false,
         };
         let model = ServedModel {
-            replicas: vec![Replica { engine, device }],
+            replicas: vec![Replica { engine, devices }],
             max_batch_tokens: options.max_batch_tokens,
             schedule: options.schedule,
             long_tokens: options.long_tokens,
@@ -222,8 +222,9 @@ impl PoolTelemetry {
 
 pub(crate) fn run(model: &ModelArgs, gpu_options: &GpuArgs, options: &Options) -> Result<()> {
     options.validate()?;
-    // an unsupported weight format fails before any GPU check or download
+    // an unsupported weight format or layer split fails before any GPU check or download
     let quantization = gpu_options.quantization(&model.model)?;
+    gpu_options.check_layer_split(&model.model)?;
     let clients = if options.scenario == Scenario::Sequential {
         1
     } else {
@@ -270,6 +271,15 @@ pub(crate) fn run(model: &ModelArgs, gpu_options: &GpuArgs, options: &Options) -
     result
 }
 
+/// The model directory (downloaded when missing), its checkpoint size (also reported) and manifest.
+fn model_files(model: &ModelArgs, report: &mut Value) -> Result<(PathBuf, u64, ModelManifest)> {
+    let dir = model.dir()?;
+    let checkpoint_bytes = std::fs::metadata(dir.join("model.safetensors")).context("checkpoint size")?.len();
+    report["model"]["checkpoint_bytes"] = json!(checkpoint_bytes);
+    let manifest = ModelManifest::load(&dir)?;
+    Ok((dir, checkpoint_bytes, manifest))
+}
+
 fn execute(
     model: &ModelArgs,
     g: &GpuArgs,
@@ -278,25 +288,106 @@ fn execute(
     raw: workload::RawWorkload,
     report: &mut Value,
 ) -> Result<()> {
+    // The guards' host baseline (host counters only, no device) precedes the model files, so swap growth during a
+    // download still counts; the later checks sample the host again.
     let host = host_memory()?;
-    let gpu = basal_gpu::gpu_memory(g.device())?;
+    // A layer split's coverage needs the model's config.json and is refused before any device context (each probe
+    // below creates one), as in serve: its model files come next; one GPU keeps its device check before them.
+    let split_files = g
+        .layer_split
+        .as_ref()
+        .map(|split| {
+            let files = model_files(model, report)?;
+            crate::config::check_split_coverage(&files.2.name, split, files.2.config.num_layers)?;
+            anyhow::Ok(files)
+        })
+        .transpose()?;
+    // one GPU, or the stages of a layer split in order: the first one is the device the top-level fields describe,
+    // `layer_split` reports every stage's device (only with a split)
+    let devices = g.devices();
+    let gpu = basal_gpu::gpu_memory(devices[0])?;
     report["device"] = json!(gpu);
     let mut guard = Guard::new(host.clone(), &gpu, options);
     let first = guard.check(&host, &gpu, 0);
     report["resources"] = guard.report();
+    // the other stages' devices (a layer split)
+    let mut others = Vec::new();
+    for &d in &devices[1..] {
+        let gpu = basal_gpu::gpu_memory(d)?;
+        let mut guard = Guard::new(host.clone(), &gpu, options);
+        let checked = guard.check(&host, &gpu, 0).with_context(|| format!("device {d}"));
+        others.push((d, gpu, guard, checked));
+    }
+    if let Some(split) = &g.layer_split {
+        report["layer_split"] = json!({"stages": split.stages(), "devices": []});
+        report["layer_split"]["devices"] =
+            json!(std::iter::once(json!({"device": devices[0], "gpu": gpu, "resources": guard.report()}))
+                .chain(
+                    others
+                        .iter()
+                        .map(|(d, gpu, guard, _)| json!({"device": d, "gpu": gpu, "resources": guard.report()}))
+                )
+                .collect::<Vec<_>>());
+    }
     first?;
-    let dir = model.dir()?;
-    let checkpoint_bytes = std::fs::metadata(dir.join("model.safetensors")).context("checkpoint size")?.len();
-    report["model"]["checkpoint_bytes"] = json!(checkpoint_bytes);
-    let manifest = ModelManifest::load(&dir)?;
-    // none: the checkpoint size, as before; q8_0 / q4_k: the same with the projections at the format's block size
-    let weight_bytes = basal_gpu::estimated_weight_bytes(&manifest.config, checkpoint_bytes, quantization)?;
-    report["model"]["estimated_weight_bytes"] = json!({"bytes": weight_bytes, "quantization": quantization.as_str(),
-        "method": "estimate from format arithmetic (checkpoint size; q8_0 / q4_k: projection matrices at Q8_0 / Q4_K block size with padding), not a measurement"});
-    let preflight = guard.check(&host_memory()?, &basal_gpu::gpu_memory(g.device())?, weight_bytes);
-    report["resources"] = guard.report();
-    preflight?;
-    // Same automatic / bundled GEMM selection as serve, without ambient server configuration.
+    for (_, _, _, checked) in &mut others {
+        std::mem::replace(checked, Ok(()))?;
+    }
+    let (dir, checkpoint_bytes, manifest) = match split_files {
+        Some(files) => files,
+        None => model_files(model, report)?,
+    };
+    // none: the checkpoint size, as before; q8_0 / q4_k: the same with the projections at the format's block size;
+    // Intel (always none): the resident weight buffers from the validated checkpoint header
+    #[cfg(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos")))]
+    let (weight_bytes, method) = (GpuBackend::estimated_weight_bytes(&dir, &manifest.config)?,
+        "Intel: resident FP16 weight buffers estimated from the validated checkpoint header (embedding and lm_head rows are read on demand and excluded), not a measurement");
+    #[cfg(not(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos"))))]
+    let (weight_bytes, method) = (basal_gpu::estimated_weight_bytes(&manifest.config, checkpoint_bytes, quantization)?,
+        "estimate from format arithmetic (checkpoint size; q8_0 / q4_k: projection matrices at Q8_0 / Q4_K block size with padding), not a measurement");
+    report["model"]["estimated_weight_bytes"] =
+        json!({"bytes": weight_bytes, "quantization": quantization.as_str(), "method": method});
+    report["model"]["estimated_resident_weight_bytes"] = json!(weight_bytes);
+    match &g.layer_split {
+        None => {
+            let preflight = guard.check(&host_memory()?, &basal_gpu::gpu_memory(g.device())?, weight_bytes);
+            report["resources"] = guard.report();
+            preflight?;
+        }
+        Some(split) => {
+            // per stage its part of the weights (arithmetic): the layers' share, the embedding on the first stage,
+            // lm_head, final norm and the evidence head file on the last one
+            let evidence = std::fs::metadata(dir.join("evidence_head.pt")).map_or(0, |m| m.len());
+            let stages = split.stages();
+            let last = stages.len() - 1;
+            let mut checks = Vec::with_capacity(stages.len());
+            for (i, stage) in stages.iter().enumerate() {
+                let bytes = basal_gpu::estimated_stage_weight_bytes(
+                    &manifest.config,
+                    checkpoint_bytes,
+                    quantization,
+                    stage.layers,
+                    i == 0,
+                    i == last,
+                )? + if i == last { evidence } else { 0 };
+                let stage_guard = if i == 0 { &mut guard } else { &mut others[i - 1].2 };
+                let checked = stage_guard
+                    .check(&host_memory()?, &basal_gpu::gpu_memory(stage.device)?, bytes)
+                    .with_context(|| format!("stage {i} on device {}", stage.device));
+                let entry = &mut report["layer_split"]["devices"][i];
+                entry["estimated_weight_bytes"] = json!({"bytes": bytes, "layers": stage.layers,
+                    "method": "estimate from format arithmetic: the stage's share of the decoder layers, plus the embedding on the first stage and lm_head, final norm and the evidence head file on the last; not a measurement"});
+                entry["resources"] = stage_guard.report();
+                checks.push(checked);
+            }
+            report["resources"] = guard.report();
+            for c in checks {
+                c?;
+            }
+        }
+    }
+    // Same automatic / bundled GEMM selection as serve, without ambient server configuration; a layer split resolves
+    // it on its first device and checks it on every device before loading.
     let mut config = crate::config::model_ref(&model.model)?;
     report["model"]["resolved_revision"] = json!(config.revision);
     config.dtype = g.dtype.clone();
@@ -305,20 +396,31 @@ fn execute(
     }
     let mut gpu_settings = g.clone();
     gpu_settings.gemm_table =
-        crate::config::gemm_table(&config, &manifest, &crate::config::default_gemm_cache(), g.device())?;
+        crate::config::gemm_table(&config, &manifest, &crate::config::default_gemm_cache(), devices[0])?;
+    if let Some(split) = &g.layer_split {
+        crate::config::check_table_on_devices(
+            &manifest.name,
+            gpu_settings.gemm_table.as_deref(),
+            &crate::config::Placement::Split(split.clone()),
+        )?;
+    }
     // pool watermarks of the load alone: reset after the preflight and the GEMM table, outside load_s
-    let mut pool = PoolTelemetry::new(g.device());
-    pool.reset("reset before load");
+    let mut pools: Vec<PoolTelemetry> = devices.iter().map(|&d| PoolTelemetry::new(d)).collect();
+    for pool in &mut pools {
+        pool.reset("reset before load");
+    }
     let engine = crate::gpu_engine_at(&dir, &gpu_settings)?;
     // The prefix precomputation queues its temporaries' stream-ordered frees without a final synchronisation:
     // synchronise the context first (after load_s, before any measured work) so `used` counts only what stays.
-    if let Some(u) = pool.read("reading after load", true) {
-        pool.report["load_peak"] = json!({"used_bytes": u.used_high_bytes, "reserved_bytes": u.reserved_high_bytes,
-            "scope": "load, q8_0 / q4_k warm-up (q4_k: with its host/GPU check of one matrix) and template prefix precomputation"});
-        pool.report["resident_after_load"] = json!({"used_bytes": u.used_bytes, "reserved_bytes": u.reserved_bytes,
-            "scope": "the loaded engine (weights, precomputed prefixes, workspaces) before any request, after a context synchronisation"});
+    for pool in &mut pools {
+        if let Some(u) = pool.read("reading after load", true) {
+            pool.report["load_peak"] = json!({"used_bytes": u.used_high_bytes, "reserved_bytes": u.reserved_high_bytes,
+                "scope": "load, q8_0 / q4_k warm-up (q4_k: with its host/GPU check of one matrix) and template prefix precomputation"});
+            pool.report["resident_after_load"] = json!({"used_bytes": u.used_bytes, "reserved_bytes": u.reserved_bytes,
+                "scope": "the loaded engine (weights, precomputed prefixes, workspaces) before any request, after a context synchronisation"});
+        }
     }
-    report["memory_pool"] = pool.report.clone();
+    set_pools(report, &pools, g.layer_split.is_some());
     if let Some(table) = &gpu_settings.gemm_table {
         crate::config::check_gemm_coverage(&engine.manifest.name, &engine.backend.gemm_table_missing(), table)?;
     }
@@ -331,12 +433,34 @@ fn execute(
         "state_cache_mb": g.state_cache_mb, "gemm_table": gemm_table, "tree_max_tokens": g.tree_max_tokens,
         "max_batch_tokens": options.max_batch_tokens, "max_inflight": options.max_inflight, "schedule": format!("{:?}", options.schedule),
         "long_tokens": options.long_tokens, "long_slice_ms": options.long_slice_ms});
-    let loaded = guard.check(&host_memory()?, &engine.backend.memory()?, 0);
+    if let Some(split) = &g.layer_split {
+        report["settings"]["layer_split"] = json!(split.stages());
+    }
+    let probes = crate::split_backend::memory_probes(&engine.backend);
+    let host = host_memory()?;
+    let gpu = engine.backend.memory()?;
+    report["memory_after_load"] = json!({"host": host, "gpu": gpu});
+    let loaded = guard.check(&host, &gpu, 0);
     report["resources"] = guard.report();
     loaded?;
+    let mut monitored = vec![(devices[0], guard, engine.backend.memory_probe())];
+    for ((d, _, mut other, _), (pd, probe)) in others.into_iter().zip(probes.into_iter().skip(1)) {
+        anyhow::ensure!(d == pd, "memory probe of device {pd}, expected {d}");
+        let loaded = other.check(&host_memory()?, &probe.snapshot()?, 0).with_context(|| format!("device {d}"));
+        report["layer_split"]["devices"][monitored.len()]["resources"] = other.report();
+        loaded?;
+        monitored.push((d, other, probe));
+    }
     // runtime watermarks: from here through the drained shutdown of every phase
-    pool.reset("reset before the workloads");
-    let monitor = Monitor::start(guard, engine.backend.memory_probe())?;
+    for pool in &mut pools {
+        pool.reset("reset before the workloads");
+    }
+    // layer split: transfers of the workloads (warm-up requests included), from here through the shutdown
+    let transfers = crate::split_backend::transfers(&engine.backend);
+    if let Some(t) = &transfers {
+        t.reset();
+    }
+    let monitor = Monitor::start(monitored)?;
     let mut workloads = Vec::new();
     report["workloads"] = json!({});
     if options.scenario != Scenario::Mixed {
@@ -352,7 +476,7 @@ fn execute(
     for (name, work, _) in &workloads {
         ensure!(!work.is_empty(), "benchmark workload {name}: no requests within the model context limit");
     }
-    let server = Server::start(engine, g.device(), options)?;
+    let server = Server::start(engine, devices.clone(), options)?;
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let mut phases = Vec::new();
     report["status"] = json!("running");
@@ -377,13 +501,18 @@ fn execute(
     }
     // The server threads are joined: the engine and its forks are dropped (the monitor keeps only a device handle),
     // so after a context synchronisation (pending stream-ordered frees executed) `used` is what outlived them.
-    if let Some(u) = pool.read("reading after shutdown", true) {
-        pool.report["runtime_peak"] = json!({"used_bytes": u.used_high_bytes, "reserved_bytes": u.reserved_high_bytes,
-            "scope": "every phase of this run, warm-up requests and the drained shutdown; not per phase"});
-        pool.report["after_shutdown"] = json!({"used_bytes": u.used_bytes, "reserved_bytes": u.reserved_bytes,
-            "scope": "left after the engine was dropped and the context synchronised (leak diagnostic, not resident memory)"});
+    for pool in &mut pools {
+        if let Some(u) = pool.read("reading after shutdown", true) {
+            pool.report["runtime_peak"] = json!({"used_bytes": u.used_high_bytes, "reserved_bytes": u.reserved_high_bytes,
+                "scope": "every phase of this run, warm-up requests and the drained shutdown; not per phase"});
+            pool.report["after_shutdown"] = json!({"used_bytes": u.used_bytes, "reserved_bytes": u.reserved_bytes,
+                "scope": "left after the engine was dropped and the context synchronised (leak diagnostic, not resident memory)"});
+        }
     }
-    report["memory_pool"] = pool.report.clone();
+    set_pools(report, &pools, g.layer_split.is_some());
+    if let Some(t) = &transfers {
+        report["layer_split"]["transfers"] = t.report();
+    }
     let resources = monitor.finish()?;
     report["phases"] = json!(phases
         .iter()
@@ -412,6 +541,19 @@ fn execute(
         // The client side only sees that the server stopped; keep the server's own error chain as the cause.
         (Err(e), Err(server)) => Err(server.context(format!("{e:#}"))),
         (measured, shutdown) => measured.and(shutdown),
+    }
+}
+
+/// The pool telemetry of the report: the first device's as `memory_pool`; with a layer split also every stage
+/// device's in `layer_split.devices`.
+fn set_pools(report: &mut Value, pools: &[PoolTelemetry], split: bool) {
+    if let Some(first) = pools.first() {
+        report["memory_pool"] = first.report.clone();
+    }
+    if split {
+        for (i, pool) in pools.iter().enumerate() {
+            report["layer_split"]["devices"][i]["memory_pool"] = pool.report.clone();
+        }
     }
 }
 

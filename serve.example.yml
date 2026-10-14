@@ -36,8 +36,8 @@ models:
     # default fastest first, which may differ from nvidia-smi; CUDA_DEVICE_ORDER=PCI_BUS_ID: PCI order, as
     # nvidia-smi), then CUDA_VISIBLE_DEVICES selects, reorders and renumbers them from 0. `basal doctor`, run with
     # the same environment, lists the ordinals. Models on one device take turns on it, models on different
-    # devices run at the same time. Without replica_devices a model is loaded once, on one GPU. Metal and Intel: 0
-    # only. Not together with replica_devices (not even device: 0).
+    # devices run at the same time. Without replica_devices or layer_split a model is loaded once, on one GPU.
+    # Metal and Intel: 0 only. Not together with replica_devices or layer_split (not even device: 0).
     device: 0
     max_batch_tokens: 8192         # packed tokens of one batch
     schedule: hrrn                 # hrrn (default) or fifo
@@ -46,6 +46,15 @@ models:
 
   - path: .models/basal-1.5-4.5B   # or a local model directory
     # device: 1                    # e.g. 4.5B and mini on a second GPU
+    # CUDA layer split instead of device (optional, off by default): one model on several GPUs of one type,
+    # consecutive layer ranges in layer order, the stages computed one after another (for GPU memory, not for speed;
+    # not tensor parallelism). At least two stages on distinct ordinals, each with at least one layer, the counts
+    # adding up to the model's layers (mini 32, 4.5B 60, max 50); dtype f16 (the default) and the fused kernels; not
+    # together with device (not even device: 0) or replica_devices; quantization applies to every stage. Ordinals as
+    # for device (after CUDA_VISIBLE_DEVICES). Also `basal serve --model 4.5B --layer-split 0:30,1:30`.
+    # layer_split:
+    #   - {device: 0, layers: 30}  # layers 0-29 and the embedding
+    #   - {device: 1, layers: 30}  # layers 30-59, final norm, lm_head, evidence head
 
   - path: .models/basal-1.5-mini
     # device: 1

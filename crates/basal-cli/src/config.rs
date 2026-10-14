@@ -15,6 +15,10 @@
 //!   - path: .models/basal-1.5-4.5B
 //!     replica_devices: [2, 3]      # CUDA: one replica per device under one model name (GPUs of one type)
 //!     quantization: q8_0           # none (default) | q8_0 | q4_k: 8- or 4-bit projection weights (CUDA, dtype f16)
+//!   - path: .models/basal-1.5-max
+//!     layer_split:                 # CUDA: consecutive layer ranges of one model on several GPUs, in layer order
+//!       - {device: 4, layers: 25}  # layers 0-24 and the embedding
+//!       - {device: 5, layers: 25}  # layers 25-49, final norm, lm_head, evidence head
 //! ```
 //!
 //! A model is addressed by the name in its `basal.json` (the `model` field of requests).
@@ -24,7 +28,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
 use basal_core::ModelManifest;
-use basal_gpu::{Kernels, Precision, Quantization};
+use basal_gpu::{Kernels, LayerSplit, Precision, Quantization};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -101,6 +105,13 @@ pub struct ModelConfig {
     /// same as `device`.
     #[serde(default)]
     pub replica_devices: Option<Vec<usize>>,
+    /// CUDA: one model on several GPUs by consecutive layer ranges, `[{device, layers}, ...]` in layer order (at least
+    /// two stages on distinct GPUs of one type, every stage with at least one layer, together exactly the model's
+    /// layers); stage 0 also holds the embedding, the last stage the final norm, lm_head and evidence head. Needs
+    /// `dtype: f16` and the fused kernels; `quantization` applies to every stage. Not together with `device` or
+    /// `replica_devices`. Results are the same computations as on one GPU; the stages run one after another.
+    #[serde(default)]
+    pub layer_split: Option<LayerSplit>,
     /// `auto`: the table of this model and GPU from `gemm_cache`, generated when missing or not valid here; `none`:
     /// algorithms timed at first use (results may depend on the batch); otherwise the path of a table.
     #[serde(default = "default_gemm_table")]
@@ -165,11 +176,17 @@ impl ModelConfig {
         self.device.unwrap_or(0)
     }
 
-    /// Devices of the model's instances: `[device]`, or the validated `replica_devices` (non-empty, distinct, not
-    /// together with `device`; several need a GEMM table). Whether the ordinals exist and the GPUs match is checked
-    /// against the driver ([`check_replica_gpus`]).
-    pub fn placement(&self) -> Result<Vec<usize>> {
-        let Some(devices) = &self.replica_devices else { return Ok(vec![self.device()]) };
+    /// Where the model runs: one GPU (`device`), validated `replica_devices` (non-empty, distinct, not together with
+    /// `device`; several need a GEMM table) or a `layer_split` (not together with `device` or `replica_devices`; the
+    /// split itself is validated when parsed). Whether the ordinals exist and the GPUs match is checked against the
+    /// driver ([`check_same_gpus`]).
+    pub fn placement(&self) -> Result<Placement> {
+        if let Some(split) = &self.layer_split {
+            ensure!(self.device.is_none(), "give either `device` or `layer_split`, not both");
+            ensure!(self.replica_devices.is_none(), "replicas of a layer-split model are not supported");
+            return Ok(Placement::Split(split.clone()));
+        }
+        let Some(devices) = &self.replica_devices else { return Ok(Placement::Single(self.device())) };
         ensure!(self.device.is_none(), "give either `device` or `replica_devices`, not both");
         ensure!(!devices.is_empty(), "`replica_devices` is empty (give at least one CUDA device)");
         for (i, d) in devices.iter().enumerate() {
@@ -180,8 +197,79 @@ impl ModelConfig {
             "several `replica_devices` need one batch-invariant GEMM table shared by the replicas: use `gemm_table: \
              auto` or the path of a `basal gemm-search --invariant` table, not `none`"
         );
-        Ok(devices.clone())
+        Ok(Placement::Replicas(devices.clone()))
     }
+}
+
+/// Where a configured model runs ([`ModelConfig::placement`]).
+#[derive(Clone, Debug)]
+pub enum Placement {
+    /// One instance on one GPU.
+    Single(usize),
+    /// One independent instance per device (one device: a single instance).
+    Replicas(Vec<usize>),
+    /// One instance whose consecutive layer ranges run on the split's devices.
+    Split(LayerSplit),
+}
+
+impl Placement {
+    /// The devices of every instance: one device per instance, all the split's devices for its one instance.
+    pub fn instances(&self) -> Vec<Vec<usize>> {
+        match self {
+            Self::Single(d) => vec![vec![*d]],
+            Self::Replicas(ds) => ds.iter().map(|&d| vec![d]).collect(),
+            Self::Split(split) => vec![split.devices()],
+        }
+    }
+
+    /// The device a table `auto` is resolved on: the first instance's first device (a split's stage 0).
+    pub fn first_device(&self) -> usize {
+        match self {
+            Self::Single(d) => *d,
+            Self::Replicas(ds) => ds.first().copied().unwrap_or(0),
+            Self::Split(split) => split.devices().first().copied().unwrap_or(0),
+        }
+    }
+
+    /// Several GPUs that need one GPU type and one GEMM table checked on each: a replica group or a split.
+    pub fn shared_devices(&self) -> Option<Vec<usize>> {
+        match self {
+            Self::Single(_) => None,
+            Self::Replicas(ds) => (ds.len() > 1).then(|| ds.clone()),
+            Self::Split(split) => Some(split.devices()),
+        }
+    }
+
+    /// The layer split, if any.
+    pub fn split(&self) -> Option<&LayerSplit> {
+        match self {
+            Self::Split(split) => Some(split),
+            _ => None,
+        }
+    }
+}
+
+/// The static checks of a layer split of `model` before any download: the backend (`cuda_backend`: this build's, or
+/// the CUDA build of a Linux package for `basal doctor`), `dtype` and kernel set. The split's own form (stages,
+/// layers, distinct devices) was checked when it was parsed.
+pub fn check_layer_split(
+    model: &str,
+    split: &LayerSplit,
+    dtype: &str,
+    kernels: &str,
+    cuda_backend: bool,
+) -> Result<()> {
+    let precision = Precision::parse(dtype).with_context(|| format!("model {model}"))?;
+    let kernels = Kernels::parse(kernels).with_context(|| format!("model {model}"))?;
+    split.check(precision, kernels, cuda_backend).with_context(|| format!("model {model}: layer_split {split}"))?;
+    Ok(())
+}
+
+/// A layer split of `model` covers exactly its `num_layers` layers (after `config.json` is available, before any GEMM
+/// table or load).
+pub fn check_split_coverage(model: &str, split: &LayerSplit, num_layers: usize) -> Result<()> {
+    split.ranges(num_layers).with_context(|| format!("model {model}: layer_split {split}"))?;
+    Ok(())
 }
 
 /// The weight format `quantization` of `model`, checked with its `dtype` and the kernel set against the backend
@@ -204,35 +292,48 @@ pub fn check_quantization(
     Ok(q)
 }
 
-/// The GPUs of a replica group are of one type (name, compute capability, SM count), asked from the driver without
-/// creating a context, so a mixed group is refused before any download, GEMM table or load.
-pub fn check_replica_gpus(model: &str, devices: &[usize]) -> Result<()> {
+/// The GPUs of a replica group or a layer split are of one type (name, compute capability, SM count), asked from the
+/// driver without creating a context (every ordinal must exist for this process), so a mixed group is refused before
+/// any download, GEMM table or load.
+pub fn check_same_gpus(model: &str, placement: &Placement) -> Result<()> {
+    let Some(devices) = placement.shared_devices() else { return Ok(()) };
+    let (role, option) = match placement {
+        Placement::Split(_) => ("layer split", "`layer_split`"),
+        _ => ("replica", "`replica_devices`"),
+    };
     let ids = devices
         .iter()
-        .map(|&d| basal_gpu::gpu_identity(d).with_context(|| format!("{model}: replica device {d}")))
+        .map(|&d| basal_gpu::gpu_identity(d).with_context(|| format!("{model}: {role} device {d}")))
         .collect::<Result<Vec<_>>>()?;
     if ids.iter().any(|id| *id != ids[0]) {
         let gpus: Vec<String> = devices.iter().zip(&ids).map(|(d, id)| format!("device {d}: {id}")).collect();
+        let what = if matches!(placement, Placement::Split(_)) { "a layer split needs" } else { "replicas need" };
         bail!(
-            "{model}: replicas need GPUs of one type (name, compute capability, SM count), `replica_devices` mixes \
-             them ({})",
+            "{model}: {what} GPUs of one type (name, compute capability, SM count), {option} mixes them ({})",
             gpus.join("; ")
         );
     }
     Ok(())
 }
 
-/// The one GEMM table of a replica group is batch-invariant and valid on the GPU of every replica (cuBLASLt version,
-/// GPU name and every algorithm at its M class), checked before any replica loads.
-pub fn check_replica_table(name: &str, table: Option<&Path>, devices: &[usize]) -> Result<()> {
+/// The one GEMM table of a replica group or a layer split is batch-invariant and valid on every one of its GPUs
+/// (cuBLASLt version, GPU name and every algorithm at its M class), checked before anything loads. A replica group
+/// needs a table; a split without one (`gemm_table: none`) times its algorithms at first use on every GPU.
+pub fn check_table_on_devices(name: &str, table: Option<&Path>, placement: &Placement) -> Result<()> {
+    let Some(devices) = placement.shared_devices() else { return Ok(()) };
+    let split = matches!(placement, Placement::Split(_));
     let Some(path) = table else {
+        if split {
+            return Ok(());
+        }
         bail!("{name}: several `replica_devices` need a batch-invariant GEMM table (CUDA build, gemm_table not none)")
     };
     let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", crate::term::P(&path)))?;
     let v: Value = serde_json::from_str(&text).with_context(|| format!("parsing {}", crate::term::P(&path)))?;
-    for &d in devices {
+    let role = if split { "layer split" } else { "replica" };
+    for d in devices {
         basal_gpu::check_gemm_table(&v, d)
-            .with_context(|| format!("{name}: GEMM table {} on replica device {d}", crate::term::P(&path)))?;
+            .with_context(|| format!("{name}: GEMM table {} on {role} device {d}", crate::term::P(&path)))?;
     }
     Ok(())
 }
@@ -244,7 +345,8 @@ impl ServeConfig {
     }
 
     fn parse(text: &str) -> Result<Self> {
-        let c: Self = serde_yaml::from_str(text)?;
+        let c: Self = serde_saphyr::from_str_with_options(text, yaml_options())?;
+        ensure_single_document(text)?;
         ensure!(!c.models.is_empty(), "no models");
         Ok(c)
     }
@@ -255,6 +357,38 @@ impl ServeConfig {
         c.models = models;
         c
     }
+}
+
+/// Options of the configuration parser: duplicate keys, merge keys (`<<`) and YAML 1.1 boolean words (yes/no/on/off)
+/// are refused as with serde_yaml before; an error is one line with its line and column.
+fn yaml_options() -> serde_saphyr::Options {
+    serde_saphyr::options! {
+        duplicate_keys: serde_saphyr::DuplicateKeyPolicy::Error,
+        merge_keys: serde_saphyr::MergeKeyPolicy::Error,
+        strict_booleans: true,
+        no_schema: false,
+        legacy_octal_numbers: false,
+        reject_unsupported_tags: false,
+        with_snippet: false,
+        emit_comments: false,
+    }
+}
+
+/// The whole file must be one YAML document. serde-saphyr stops after the first one and ignores a syntax error that
+/// follows a document end, so this reads every event once more with the same parser and limits: the first syntax
+/// error is returned, and any further document, an empty one included, is refused.
+fn ensure_single_document(text: &str) -> Result<()> {
+    use serde_saphyr::granit_parser::{Event, Parser};
+
+    let options = serde_saphyr::granit_parser::options! { emit_comments: false };
+    let mut documents = 0_usize;
+    for event in Parser::new_from_str_with_options(text, options) {
+        if matches!(event?.0, Event::DocumentStart(..)) {
+            documents += 1;
+        }
+    }
+    ensure!(documents == 1, "a configuration must be one YAML document, found {documents}");
+    Ok(())
 }
 
 /// A basal model published by its author, with the revision this runtime was checked with.
@@ -555,8 +689,9 @@ impl hf_hub::progress::ProgressHandler for DownloadLog {
 
 /// GEMM table of a model: `None` for `gemm_table: none` and on builds without CUDA; for `auto` the cached table of
 /// this model, dtype, GPU `device` and cuBLASLt version, generated (one-time, minutes to an hour) on that GPU when it
-/// is missing, was made on another GPU or cuBLASLt, or does not cover the model's weight shapes. A replica group
-/// resolves its one table on its first device ([`check_replica_table`] then checks it on every device).
+/// is missing, was made on another GPU or cuBLASLt, or does not cover the model's weight shapes. A replica group or a
+/// layer split resolves its one table on its first device ([`check_table_on_devices`] then checks it on every device;
+/// the file name has no GPU identity, so a split needs GPUs of one type).
 pub fn gemm_table(m: &ModelConfig, manifest: &ModelManifest, cache: &Path, device: usize) -> Result<Option<PathBuf>> {
     match m.gemm_table.as_str() {
         "none" => return Ok(None),

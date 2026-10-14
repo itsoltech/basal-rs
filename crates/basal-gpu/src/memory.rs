@@ -203,12 +203,18 @@ impl PoolProbe {
 }
 
 impl crate::GpuBackend {
-    /// Retain a read-only device handle for monitoring while this engine serves requests on another thread.
+    /// Retain a read-only device handle for monitoring while this engine serves requests on another thread (a layer
+    /// split: the device of its first stage; [`crate::GpuBackend::memory_probes`] has all of them).
     pub fn memory_probe(&self) -> GpuMemoryProbe {
-        GpuMemoryProbe(Probe::Candle(self.dev.clone()))
+        GpuMemoryProbe(Probe::Candle(self.first_device().clone()))
     }
-    /// Inspect this engine's device outside the measured inference interval.
+    /// Inspect this engine's device outside the measured inference interval (a layer split: its first stage's).
     pub fn memory(&self) -> Result<GpuMemory> {
-        snapshot(&self.dev)
+        snapshot(self.first_device())
+    }
+    /// One read-only handle per stage, with its device ordinal, in stage order (one entry on one GPU). Each probe
+    /// queries one device and returns host data only.
+    pub fn memory_probes(&self) -> Vec<(usize, GpuMemoryProbe)> {
+        self.stage_devices().map(|(ordinal, dev)| (ordinal, GpuMemoryProbe(Probe::Candle(dev.clone())))).collect()
     }
 }

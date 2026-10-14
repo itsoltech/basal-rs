@@ -148,6 +148,92 @@ deterministyczny, więc powinien być równy między trybami, kartami i
 runner kampanii W4A16: `tools/perf/run-w4a16-cloud.py` (`--plan-only` bez GPU
 i bez chmury; sesje i reguły w [CLOUD.md](CLOUD.md)).
 
+### Podział warstw
+
+Podział warstw (`--layer-split`, `layer_split`) nie zmienia obliczeń: etapy
+liczą po kolei te same kernele i GEMM co jeden GPU, a granica tylko kopiuje
+aktywacje. Na kartach jednego typu eksport z podziałem musi więc być bajtowo
+równy eksportowi jednego GPU tego samego modelu, trybu (`none`, `q8_0`,
+`q4_k`), flag i tabeli GEMM (`bench.jsonl`, `systemone.jsonl`), a
+`basal compare` obu eksportów musi dać różnicę 0,0. Kryterium FP32 dla
+`q8_0` i `q4_k` pozostaje jak wyżej; podział go nie zmienia. Poza
+zmierzonymi czasami (`bench_s`, `total_s`, `run.load_s`) manifest eksportu z
+podziałem różni się tylko tekstem `backend.device` oraz polami
+`run.layer_split`, `backend.layer_split` i `backend.stage_transfer`:
+
+```sh
+# TABELA: tabela GEMM niezależna od partii dla tej karty, np. z crates/basal-cli/gemm-tables
+./target/release/basal export --model .models/basal-1.5-4.5B --gemm-table TABELA --layer-split 0:30,1:30 \
+  --batching tree --inputs reports/reference-basal-1.5-4.5B-fp32 --out reports/X/export-split
+./target/release/basal export --model .models/basal-1.5-4.5B --gemm-table TABELA --device 0 \
+  --batching tree --inputs reports/reference-basal-1.5-4.5B-fp32 --out reports/X/export-single
+cmp reports/X/export-split/bench.jsonl reports/X/export-single/bench.jsonl
+./target/release/basal compare --a reports/X/export-single --b reports/X/export-split --out reports/X/compare.json
+```
+
+Pojemność sprawdzamy pod jawnym, sztucznym limitem wolnej pamięci.
+`tools/perf/cuda-reserve.py` alokuje rzeczywistą pamięć urządzenia i
+próbkuje wolną pamięć (`cuMemGetInfo`) każdej karty. Z kalibracji bez limitu
+(`U_single`: spadek wolnej pamięci przy jednym GPU, `U_split_g`: na karcie
+`g` przy podziale) wynika limit
+`A = floor((U_single + max_g U_split_g) / 2)` MiB, ważny tylko w oknie
+`max_g U_split_g + 1 GiB ≤ A ≤ U_single − 1 GiB`. Przy rezerwacji
+zostawiającej `A` wolnej pamięci na każdej karcie jeden GPU musi skończyć się
+czystym OOM, a podział ma dać wyniki bitowo równe referencji bez limitu.
+Ciaśniejszy limit karty ostatniego etapu musi dać błąd z kontekstem tego
+etapu. Taki wynik dotyczy tego limitu i tych wejść, nie fizycznie mniejszej
+karty ani dużych partii.
+
+Bieżące źródła kandydata (`831e68e0…`) zmierzono w trzech osobnych sesjach,
+każda na maszynie z dwiema RTX 6000 Ada 48 GB
+([zestawienie](../reports/multigpu-layer-revalidation-2026-10-14/README.md)).
+Nie ustalono, czy sesje miały te same fizyczne karty: pary A/B i podział
+wobec jednego GPU porównujemy w obrębie sesji, a wyniki różnych sesji tylko
+opisowo.
+
+- [L1](../reports/multigpu-layer-l1-revalidation-2026-10-13/README.md)
+  (mini i 4.5B; 599 PASS, 0 FAIL, 42 GAP, 0 SIGNAL): 20 par toru jednego GPU
+  i 24 pary podziału są bajtowo równe referencji, 928 odpowiedzi HTTP
+  kandydata jest równych referencji, a pojemność pod sztucznym limitem ma
+  PASS. Odmowy niepoprawnych konfiguracji mają PASS, ale brak alokacji GPU w
+  nich nie został zmierzony (GAP: proces kończył się przed pierwszą próbką
+  NVML). Profile `stage_transfer` są diagnostyką, nie pomiarem szybkości.
+  Utraty urządzenia w `/health` nie wywoływano. Linia `compare` w
+  poleceniach ilustracyjnych raportu ma błędną składnię; poprawna postać
+  jest wyżej i w [poprawce](../reports/multigpu-layer-l1-revalidation-2026-10-13/COMMANDS.md)
+  (runner używał poprawnej, wyniki się nie zmieniają).
+- [L2](../reports/multigpu-layer-l2-revalidation-2026-10-14/README.md)
+  (107 PASS, 0 FAIL, 1 GAP, 1 SIGNAL): regresja toru domyślnego `none` (A
+  baza `d42a400`, B kandydat na jednym GPU) w parach A/B z regułą sygnału
+  bez progu. Z 9 sygnałów rundy głównej `basal benchmark` utrzymał się
+  jeden, `mixed-c1 queue_ms.p99` (+1,237 do +11,330 ms, +1,46 do +12,79%);
+  przyczyny w kodzie nie wskazano, a użytkownik przyjął ten konkretny wynik
+  ([decyzja](../reports/multigpu-layer-l2-revalidation-2026-10-14/DECISION.md)).
+  Pozostałe 8 nie utrzymało się, choć B jest w wielu z nich gorsze w 3 z 4
+  par. Opisowo podział `none` (C) wobec B: przy jednym kliencie
+  przepustowość HTTP 0,9626–0,9732, przy 16 klientach mieszanego ruchu
+  1,1801 i 1,1740 (latencja p95 0,7478 i 0,7398); GPU 0 w przebiegach A i B
+  miało 80–81 °C i zegar SM do 1035–1095 MHz, w C karty miały 70 i 74 °C.
+- [L3](../reports/multigpu-layer-l3-revalidation-2026-10-14/README.md)
+  (172 PASS, 0 FAIL, 2 GAP, 1 SIGNAL): regresja `q8_0` i `q4_k` na jednym
+  GPU tylko przez `ab.py` (A/B, ta sama reguła). `q8_0` `dec_s` nie utrzymał
+  się (B gorsze w 7 z 8 par). W `q4_k` utrzymał się `dec_s` (8 z 8 par, B/A
+  0,994438–0,999895, przebieg 44 pytań dłuższy o +0,082 do +4,366 ms), a
+  `lat2_ms` nie (7 z 8). Przyczyny w kodzie nie wskazano; koordynator przyjął
+  ten wynik w granicy 1–2% podanej wcześniej przez użytkownika
+  ([rozstrzygnięcie](../reports/multigpu-layer-l3-revalidation-2026-10-14/DECISION.md)).
+  Opisowo podział wobec jednego GPU tego samego kandydata: mediana stosunku
+  latencji pytania w parach 1,128–1,139 (`q8_0`) i 1,183–1,206 (`q4_k`).
+  `basal benchmark` z podziałem wykonano raz na tryb. HTTP jednego GPU
+  kandydata w `q8_0` i `q4_k` nie był mierzony (GAP).
+
+Utrzymany SIGNAL pozostaje SIGNAL-em, a przyjęcie konkretnego wyniku nie
+tworzy progu. Pola bez utrzymanego sygnału nie dowodzą braku narzutu. Pary
+podziału są opisowe i nie są ogólną obietnicą szybkości. Wcześniejsze sesje
+poprzedniego kandydata ([zestawienie](../reports/multigpu-layer-2026-10-13/README.md),
+[poprawka zakresu](../reports/multigpu-layer-2026-10-13/SCOPE.md)) pozostają
+historią.
+
 ## Wydajność
 
 | Narzędzie | Co mierzy |
@@ -401,21 +487,52 @@ Opcje `--max-batch-tokens`, `--max-inflight`, `--schedule`, `--long-tokens`
 i `--long-slice-ms` mają takie same domyślne wartości jak `serve`.
 Benchmark nie czyta ambientowej konfiguracji `basal-serve.yml`.
 
-Domyślne rezerwy to 2 GiB RAM (`--ram-reserve-gib`) i 1 GiB GPU/Metal
-working set (`--gpu-reserve-gib`). Przed ładowaniem dochodzi szacowany
-rozmiar wag; dla GPU zunifikowanego także w RAM. Szacunek
-(`model.estimated_weight_bytes`) to arytmetyka formatu, nie pomiar: rozmiar
-checkpointu, a dla `--quantization q8_0` albo `q4_k` ten rozmiar z macierzami
-projekcji w rozmiarze bloków Q8_0 albo Q4_K (z paddingiem Candle). Po
-załadowaniu monitor
+Domyślne rezerwy to 2 GiB RAM (`--ram-reserve-gib`) i 1 GiB VRAM / Metal
+working set / budżetu Vulkan (`--gpu-reserve-gib`). Przed ładowaniem dochodzi
+szacowany rozmiar wag; dla GPU zunifikowanego także w RAM. Szacunek
+(`model.estimated_weight_bytes`; ta sama liczba w
+`model.estimated_resident_weight_bytes`) to arytmetyka formatu, nie pomiar:
+na Metal i CUDA rozmiar checkpointu, a dla `--quantization q8_0` albo `q4_k`
+ten rozmiar z macierzami projekcji w rozmiarze bloków Q8_0 albo Q4_K (z
+paddingiem Candle); dla Intela szacunek z nagłówka opisany niżej.
+Rezerwy RAM i GPU
+są osobnymi ograniczeniami tej samej pamięci na iGPU, nie sumujemy ich.
+Dla zintegrowanego Intela kontrola wstępna wymaga miejsca w RAM na wagi
+i większą z obu rezerw. Bieżący budżet Vulkan musi mieścić same wagi
+oraz, osobno, rezerwę GPU: jest dynamiczną wskazówką sterownika, a nie
+pojemnością osobnej VRAM. Po załadowaniu modelu i podczas inferencji pełna
+rezerwa GPU jest sprawdzana względem rzeczywistego użycia. `memory_after_load`
+zapisuje oba odczyty (z podziałem warstw dla karty etapu 0, jak inne pola
+najwyższego poziomu), także gdy kontrola przerwie pomiar. Pozostałe backendy
+i osobne karty Intel nadal wymagają przed ładowaniem sumy wag i rezerwy GPU.
+`model.estimated_resident_weight_bytes` dla Intela obejmuje tensory BF16
+konwertowane do FP16 i współdzielony bufor zerowych biasów, bez pełnych
+embeddingów i `lm_head`: backend czyta tylko potrzebne wiersze tych macierzy.
+Szacunek korzysta ze zwalidowanego nagłówka safetensors, bez odczytywania wag.
+Dla Metal/CUDA nadal jest to szacunek z arytmetyki formatu podany wyżej.
+Cache prefiksów, bufory forwardu, wybrane wiersze i narzut sterownika nie są
+wagami: potrzebują dodatkowej pamięci. Rezerwa przed ładowaniem pozostawia
+na nie zapas, ale nie jest szacunkiem szczytu dla konkretnego obciążenia.
+Po załadowaniu monitor
 sprawdza pamięć mniej więcej co 200 ms, także podczas aktywnych forwardów
 i rozgrzewki. Utrata rezerwy, podwyższona presja pamięci macOS albo co
 najmniej 64 MiB przyrostu zajętego swapu/zapisów do swapu przerywa ruch.
 Swap jest globalny; wpływ innych aplikacji może zatrzymać benchmark.
 RAM macOS to szacunek wolnych, nieaktywnych i spekulacyjnych stron.
-Linux uwzględnia limity cgroup v1/v2 procesu i rodziców przy standardowym
-mount `/sys/fs/cgroup`. CUDA mierzy faktycznie wybrane urządzenie,
-z uwzględnieniem `CUDA_VISIBLE_DEVICES`; Metal zalecany working set.
+Linux bierze minimum systemowego `MemAvailable` i zapasu pod każdym limitem
+cgroup v1/v2 procesu i rodziców przy standardowym mount `/sys/fs/cgroup`.
+Zajętość cgroup pomniejszamy o nieaktywny cache plików, po odjęciu stron
+brudnych i w trakcie zapisu. Nie doliczamy aktywnego cache, pamięci wymagającej
+zapisu do swapu, shmem ani slab. Dla v1 używamy liczników `total_*`, obejmujących potomków;
+brak wymaganych liczników oznacza brak ulgi za cache. To szacunek możliwego
+odzysku, nie gwarancja natychmiastowej alokacji. `resources.before_load`
+zawiera `system_available_bytes` i `cgroups` z limitem, użyciem, szacowanym
+odzyskiwalnym cache i dostępnymi bajtami, bez ścieżek identyfikujących sesję.
+CUDA mierzy faktycznie wybrane urządzenie, z uwzględnieniem
+`CUDA_VISIBLE_DEVICES`; Metal zalecany working set, a Vulkan budżet sterownika.
+Odmowa podaje dostępne i wymagane GiB oraz składniki wymagania. Jawne
+zmniejszenie rezerwy nie wyłącza kontroli pamięci ani swapu; nie zmienia też
+limitu cgroup lub budżetu sterownika.
 W krótkiej fazie może zabraknąć próbek CPU; wtedy pole ma wartość null.
 Okna pamięci obejmują ostatnie 20000 próbek (około 67 minut przy 5 Hz);
 zbiorcze minima i wzrost swapu dotyczą całego monitorowanego przebiegu.
@@ -437,8 +554,25 @@ kontekst CUDA, moduły, uchwyty bibliotek i alokacje synchroniczne. Bez pul
 Uchwyt puli utrzymuje główny kontekst CUDA urządzenia od zerowania przed
 ładowaniem do końca komendy, więc `model.load_s` może nie obejmować tworzenia
 kontekstu, które w wersji bez tej telemetrii mogło przypaść na ładowanie;
-`load_s` obu wersji nie porównujemy bez uwzględnienia tej różnicy. Próbkowany
-całkowity VRAM nadal nie jest szczytem.
+`load_s` obu wersji nie porównujemy bez uwzględnienia tej różnicy. Na CUDA
+`load_s` (także w `basal bench` i manifeście eksportu) kończy się przed
+wczytaniem głowicy evidence i utworzeniem uchwytu cuBLASLt, zarówno w
+`d42a400`, jak i w wersji z podziałem warstw. Ta wersja dodaje po nich
+synchronizację publikacji każdego etapu, także poza `load_s`. Żaden z tych
+zegarów nie jest pełnym czasem uruchomienia, a różnica `load_s` tych wersji
+nie jest porównaniem czasu uruchomienia
+([erratum](../reports/multigpu-layer-revalidation-2026-10-14/LOAD_S.md)).
+Próbkowany całkowity VRAM nadal nie jest szczytem.
+
+Z `--layer-split` benchmark sprawdza zasoby osobno dla karty każdego etapu:
+preflight dolicza szacunek wag etapu (udział jego warstw, embedding na
+pierwszym, `lm_head`, norma i plik głowicy evidence na ostatnim; arytmetyka,
+nie pomiar), a monitor i liczniki puli działają na każdej karcie. Pola
+najwyższego poziomu opisują kartę etapu 0; `layer_split.devices` podaje
+każdą kartę, `layer_split.transfers` liczniki granic, a
+`settings.layer_split` etapy. Pokrycie warstw jest sprawdzane przed
+pierwszym kontekstem CUDA. Pola i ich zakres:
+[Observability](OBSERVABILITY.md#podział-warstw).
 
 Klient i serwer dzielą limit otwartych plików procesu, po dwa gniazda na
 klienta. Gdy limit jest mniejszy niż `2 × max(--concurrency) + 64`,

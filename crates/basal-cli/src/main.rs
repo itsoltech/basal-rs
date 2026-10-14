@@ -44,7 +44,7 @@ use basal_core::{Backend, DecideError, Engine, ModelManifest};
 use basal_gpu::intel::IntelBackend as GpuBackend;
 #[cfg(not(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos"))))]
 use basal_gpu::GpuBackend;
-use basal_gpu::{Kernels, Precision, Quantization, Readout};
+use basal_gpu::{Kernels, LayerSplit, Precision, Quantization, Readout};
 use clap::{Args, Parser, Subcommand};
 use serde_json::{json, Value};
 
@@ -165,12 +165,32 @@ struct GpuArgs {
     /// per model instead)
     #[arg(long)]
     device: Option<usize>,
+    /// CUDA: one model on several GPUs by consecutive layer ranges, DEVICE:LAYERS pairs in layer order (e.g. 0:30,1:30:
+    /// layers 0-29 and the embedding on device 0, layers 30-59 and the head on device 1). At least two distinct GPUs
+    /// of one type, counts adding up to the model's layers; --dtype f16 and --kernels fused; instead of --device. The
+    /// same computations as on one GPU, stage after stage. `basal serve`: the split of every --model (a configuration
+    /// file sets `layer_split` per model instead)
+    #[arg(long, conflicts_with = "device")]
+    layer_split: Option<LayerSplit>,
 }
 
 impl GpuArgs {
     /// The GPU ordinal (`--device`, default 0).
     fn device(&self) -> usize {
         self.device.unwrap_or(0)
+    }
+
+    /// The devices the model uses: the --layer-split stages, else `[--device]`.
+    fn devices(&self) -> Vec<usize> {
+        self.layer_split.as_ref().map_or_else(|| vec![self.device()], LayerSplit::devices)
+    }
+
+    /// `--layer-split` of `model` against this build's backend, --dtype and --kernels, then its GPUs against the
+    /// driver (every ordinal visible, one GPU type), before any download, GEMM table or load.
+    fn check_layer_split(&self, model: &str) -> Result<()> {
+        let Some(split) = &self.layer_split else { return Ok(()) };
+        config::check_layer_split(model, split, &self.dtype, &self.kernels, cfg!(feature = "cuda"))?;
+        config::check_same_gpus(model, &config::Placement::Split(split.clone()))
     }
 
     /// `--quantization` (default none) of `model`, checked with --dtype and --kernels for this build's backend.
@@ -415,7 +435,7 @@ enum Cmd {
     Serve {
         /// YAML file with the served models and their options (serve.example.yml); replaces the model, GPU and
         /// admission options below. Default: BASAL_CONFIG, else basal-serve.yml in the working directory
-        #[arg(long, conflicts_with_all = ["models", "gemm_table", "device", "replica_devices"])]
+        #[arg(long, conflicts_with_all = ["models", "gemm_table", "device", "replica_devices", "layer_split"])]
         config: Option<PathBuf>,
         /// Model to serve: name (owner Remek; mini, 4.5B, max), owner/name, @revision, or a local directory; repeat
         /// for several (the options below apply to each). Without --model and a configuration file: basal-1.5-4.5B
@@ -425,7 +445,7 @@ enum Cmd {
         g: GpuArgs,
         /// CUDA: independent replicas of every --model under its one name, one per listed device (e.g. 0,1; distinct
         /// GPUs of one type, instead of --device). A configuration file sets `replica_devices` per model instead
-        #[arg(long, value_delimiter = ',', conflicts_with = "device")]
+        #[arg(long, value_delimiter = ',', conflicts_with_all = ["device", "layer_split"])]
         replica_devices: Option<Vec<usize>>,
         /// Listen address (default: the configuration's, BASAL_ADDR, 127.0.0.1:8000)
         #[arg(long)]
@@ -551,9 +571,64 @@ fn read_request(src: &str) -> Result<Value> {
 }
 
 fn gpu_engine(m: &ModelArgs, g: &GpuArgs) -> Result<Engine<GpuBackend>> {
-    // an unsupported weight format fails before the model is downloaded
+    // an unsupported weight format or layer split fails before the model is downloaded
     g.quantization(&m.model)?;
+    g.check_layer_split(&m.model)?;
     gpu_engine_at(&m.dir()?, g)
+}
+
+/// The build runs the Intel Vulkan backend as `GpuBackend`: no layer split.
+#[cfg(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos")))]
+mod split_backend {
+    use super::*;
+
+    pub fn load(
+        _: &Path,
+        _: &basal_core::manifest::LlamaConfig,
+        _: Precision,
+        _: Readout,
+        _: Kernels,
+        _: Quantization,
+        split: &LayerSplit,
+    ) -> Result<GpuBackend> {
+        bail!("layer split {split}: needs the CUDA backend, this build runs Intel Vulkan")
+    }
+
+    pub fn transfers(_: &GpuBackend) -> Option<basal_gpu::StageTransfers> {
+        None
+    }
+
+    /// The one device of the Intel backend.
+    pub fn memory_probes(backend: &GpuBackend) -> Vec<(usize, basal_gpu::GpuMemoryProbe)> {
+        vec![(0, backend.memory_probe())]
+    }
+}
+
+/// Layer-split loading and telemetry of the candle backend (CUDA; other builds refuse a split before loading).
+#[cfg(not(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos"))))]
+mod split_backend {
+    use super::*;
+
+    pub fn load(
+        dir: &Path,
+        cfg: &basal_core::manifest::LlamaConfig,
+        precision: Precision,
+        readout: Readout,
+        kernels: Kernels,
+        quantization: Quantization,
+        split: &LayerSplit,
+    ) -> Result<GpuBackend> {
+        GpuBackend::load_split(dir, cfg, precision, readout, kernels, quantization, split)
+    }
+
+    pub fn transfers(backend: &GpuBackend) -> Option<basal_gpu::StageTransfers> {
+        backend.stage_transfers()
+    }
+
+    /// One memory probe per stage, with its device ordinal, in stage order.
+    pub fn memory_probes(backend: &GpuBackend) -> Vec<(usize, basal_gpu::GpuMemoryProbe)> {
+        backend.memory_probes()
+    }
 }
 
 fn gpu_engine_at(dir: &Path, g: &GpuArgs) -> Result<Engine<GpuBackend>> {
@@ -566,16 +641,30 @@ fn gpu_engine_at(dir: &Path, g: &GpuArgs) -> Result<Engine<GpuBackend>> {
         "bf16" => Readout::Bf16Rounded,
         r => bail!("unknown readout {r:?} (f32, bf16)"),
     };
-    let backend = GpuBackend::load(
-        dir,
-        &manifest.config,
-        Precision::parse(&g.dtype)?,
-        readout,
-        Kernels::parse(&g.kernels)?,
-        quantization,
-        g.device(),
-    )?;
-    crate::done!("{} loaded on GPU {} in {:.1}s", manifest.name, g.device(), backend.load_s);
+    let (precision, kernels) = (Precision::parse(&g.dtype)?, Kernels::parse(&g.kernels)?);
+    let backend = match &g.layer_split {
+        None => GpuBackend::load(dir, &manifest.config, precision, readout, kernels, quantization, g.device())
+            .with_context(|| format!("loading {}", manifest.name))?,
+        Some(split) => {
+            // the stages must cover the model's layers exactly: checked before any weight is read
+            config::check_split_coverage(&manifest.name, split, manifest.config.num_layers)?;
+            split_backend::load(dir, &manifest.config, precision, readout, kernels, quantization, split)
+                .with_context(|| format!("loading {} with layer split {split}", manifest.name))?
+        }
+    };
+    match &g.layer_split {
+        None => crate::done!("{} loaded on GPU {} in {:.1}s", manifest.name, g.device(), backend.load_s),
+        Some(split) => {
+            let ranges = split.ranges(manifest.config.num_layers)?;
+            let stages: Vec<String> = split
+                .devices()
+                .iter()
+                .zip(&ranges)
+                .map(|(d, r)| format!("{d} (layers {}-{})", r.start, r.end - 1))
+                .collect();
+            crate::done!("{} loaded on GPUs {} in {:.1}s", manifest.name, stages.join(", "), backend.load_s);
+        }
+    }
     match quantization {
         Quantization::None => {}
         Quantization::Q8_0 => {
@@ -722,13 +811,12 @@ fn run() -> Result<()> {
         Cmd::Export { m, g, inputs, out, batching } => {
             let mut engine = gpu_engine(&m, &g)?;
             let load_s = engine.backend.load_s;
-            export::export(
-                &mut engine,
-                &inputs,
-                &out,
-                parse_batching(&batching)?,
-                json!({"dtype": g.dtype, "quantization": g.quantization(&m.model)?.as_str(), "readout": g.readout, "kernels": g.kernels, "prefix_cache": !g.no_prefix_cache, "load_s": load_s}),
-            )?;
+            let mut run = json!({"dtype": g.dtype, "quantization": g.quantization(&m.model)?.as_str(), "readout": g.readout, "kernels": g.kernels, "prefix_cache": !g.no_prefix_cache, "load_s": load_s});
+            // only with a split: its stages as given (one GPU keeps the run object unchanged)
+            if let Some(split) = &g.layer_split {
+                run["layer_split"] = serde_json::to_value(split.stages())?;
+            }
+            export::export(&mut engine, &inputs, &out, parse_batching(&batching)?, run)?;
         }
         Cmd::BenchRequests { m, g, requests, out, reps, batching } => {
             let mut engine = gpu_engine(&m, &g)?;
@@ -761,6 +849,10 @@ fn run() -> Result<()> {
             let prep: Vec<_> =
                 recs.iter().take(n + 1).map(|r| engine.prepare(reference::bench_item(r)?)).collect::<Result<_>>()?;
             engine.run(&prep[..1], basal_core::Batching::Single)?; // warm-up
+            let transfers = split_backend::transfers(&engine.backend); // layer split: the profiled items only
+            if let Some(t) = &transfers {
+                t.reset();
+            }
             engine.backend.profile = Some(Default::default());
             if residual_max {
                 engine.backend.residual_max = Some(Default::default());
@@ -795,6 +887,9 @@ fn run() -> Result<()> {
                     out["dequant_scope"] = json!(format!("synchronised time of the {format} -> f16 dequantizations; included in the qkv_proj, o_proj, gate_up_proj and down_proj sections, not added to sections_sum_ms"));
                 }
                 None => {}
+            }
+            if let Some(t) = &transfers {
+                out["stage_transfers"] = t.report();
             }
             println!("{out}");
         }
@@ -897,6 +992,10 @@ fn run() -> Result<()> {
                     g.quantization.is_none(),
                     "--quantization applies to --model; with a configuration file set `quantization` per model in it"
                 );
+                anyhow::ensure!(
+                    g.layer_split.is_none(),
+                    "--layer-split applies to --model; with a configuration file set `layer_split` per model in it"
+                );
             } else {
                 // models from the command line: the options of the command line
                 for m in &mut c.models {
@@ -904,6 +1003,7 @@ fn run() -> Result<()> {
                     m.quantization = g.quantization.clone().unwrap_or_else(|| Quantization::None.as_str().into());
                     m.device = g.device;
                     m.replica_devices.clone_from(&replica_devices);
+                    m.layer_split.clone_from(&g.layer_split);
                     m.gemm_table = match &g.gemm_table {
                         Some(t) => t.display().to_string(),
                         None => "auto".into(),
@@ -919,24 +1019,30 @@ fn run() -> Result<()> {
                 c.long_slice_ms = long_slice_ms;
                 c.release_date = release_date;
             }
-            // devices of every model's instances and its weight format; the GPUs of a replica group are compared
-            // before any download
-            let placements: Vec<Vec<usize>> = c
+            // devices of every model's instances, its weight format and layer split; the GPUs of a replica group or
+            // a layer split are compared before any download
+            let placements: Vec<config::Placement> = c
                 .models
                 .iter()
                 .map(|m| {
                     let model = config::describe(m);
                     config::check_quantization(&model, &m.quantization, &m.dtype, &g.kernels, cfg!(feature = "cuda"))?;
-                    m.placement().with_context(|| format!("model {model}"))
+                    let placement = m.placement().with_context(|| format!("model {model}"))?;
+                    if let Some(split) = placement.split() {
+                        config::check_layer_split(&model, split, &m.dtype, &g.kernels, cfg!(feature = "cuda"))?;
+                    }
+                    Ok(placement)
                 })
                 .collect::<Result<_>>()?;
-            for (m, devices) in c.models.iter().zip(&placements).filter(|(_, d)| d.len() > 1) {
-                anyhow::ensure!(
-                    cfg!(feature = "cuda"),
-                    "model {}: several `replica_devices` need the CUDA build",
-                    config::describe(m)
-                );
-                config::check_replica_gpus(&format!("model {}", config::describe(m)), devices)?;
+            for (m, placement) in c.models.iter().zip(&placements) {
+                if matches!(placement, config::Placement::Replicas(d) if d.len() > 1) {
+                    anyhow::ensure!(
+                        cfg!(feature = "cuda"),
+                        "model {}: several `replica_devices` need the CUDA build",
+                        config::describe(m)
+                    );
+                }
+                config::check_same_gpus(&format!("model {}", config::describe(m)), placement)?;
             }
             // model files (local or downloaded), then GEMM tables (a search needs no model weights in GPU memory),
             // then the models
@@ -950,20 +1056,25 @@ fn run() -> Result<()> {
                     m.name
                 );
             }
-            // one table per model, resolved on its first device; a replica group's table is checked on every device
-            // before any replica loads (no per-device cache writes)
-            let mut tables = Vec::new();
-            for ((mc, manifest), devices) in c.models.iter().zip(&manifests).zip(&placements) {
-                let table = config::gemm_table(mc, manifest, &c.gemm_cache, devices[0])?;
-                if devices.len() > 1 {
-                    config::check_replica_table(&manifest.name, table.as_deref(), devices)?;
+            // a layer split covers exactly the model's layers (config.json), before any GEMM table or load
+            for (manifest, placement) in manifests.iter().zip(&placements) {
+                if let Some(split) = placement.split() {
+                    config::check_split_coverage(&manifest.name, split, manifest.config.num_layers)?;
                 }
+            }
+            // one table per model, resolved on its first device; the table of a replica group or a layer split is
+            // checked on every device before anything loads (no per-device cache writes)
+            let mut tables = Vec::new();
+            for ((mc, manifest), placement) in c.models.iter().zip(&manifests).zip(&placements) {
+                let table = config::gemm_table(mc, manifest, &c.gemm_cache, placement.first_device())?;
+                config::check_table_on_devices(&manifest.name, table.as_deref(), placement)?;
                 tables.push(table);
             }
             let mut served = Vec::new();
-            for (((mc, table), dir), devices) in c.models.iter().zip(tables).zip(dirs).zip(placements) {
-                let mut replicas = Vec::with_capacity(devices.len());
-                for device in devices {
+            for (((mc, table), dir), placement) in c.models.iter().zip(tables).zip(dirs).zip(placements) {
+                let instances = placement.instances();
+                let mut replicas = Vec::with_capacity(instances.len());
+                for devices in instances {
                     let mg = GpuArgs {
                         dtype: mc.dtype.clone(),
                         readout: g.readout.clone(),
@@ -973,13 +1084,14 @@ fn run() -> Result<()> {
                         state_cache_mb: mc.state_cache_mb,
                         tree_max_tokens: mc.tree_max_tokens,
                         gemm_table: table.clone(),
-                        device: Some(device),
+                        device: placement.split().is_none().then(|| devices[0]),
+                        layer_split: placement.split().cloned(),
                     };
                     let engine = gpu_engine_at(&dir, &mg)?;
                     if let Some(t) = &table {
                         config::check_gemm_coverage(&engine.manifest.name, &engine.backend.gemm_table_missing(), t)?;
                     }
-                    replicas.push(serve::Replica { engine, device });
+                    replicas.push(serve::Replica { engine, devices });
                 }
                 served.push(serve::ServedModel {
                     replicas,
@@ -1075,14 +1187,24 @@ fn run() -> Result<()> {
                 b => bail!("unknown batching {b:?}"),
             };
             // GPU condition probe before and after: the same GEMM (f16, 480x2048 @ 11008x2048^T). A drop between the
-            // two marks throttling or outside load during the run.
-            let probe = || -> Result<f64> {
-                let r = basal_gpu::gemm_microbench(&[480], &[(2048, 11008)], "f16", 30, g.device())?;
+            // two marks throttling or outside load during the run. A layer split probes every stage's GPU, one after
+            // another (each probe owns its device and operands and returns host values only).
+            let probe = |device: usize| -> Result<f64> {
+                let r = basal_gpu::gemm_microbench(&[480], &[(2048, 11008)], "f16", 30, device)?;
                 Ok(r.iter().filter_map(|x| x["tflops"].as_f64()).fold(0.0, f64::max))
             };
-            let before = probe()?;
+            let devices = g.devices();
+            let before = devices.iter().map(|&d| probe(d)).collect::<Result<Vec<_>>>()?;
             let mut r = bench::bench(&mut engine, &reference, lat_n, batch)?;
-            r["gpu_probe_tflops"] = json!({"before": before, "after": probe()?});
+            let after = devices.iter().map(|&d| probe(d)).collect::<Result<Vec<_>>>()?;
+            r["gpu_probe_tflops"] = json!({"before": before[0], "after": after[0]});
+            if g.layer_split.is_some() {
+                r["gpu_probe_tflops_per_device"] = json!(devices
+                    .iter()
+                    .zip(before.iter().zip(&after))
+                    .map(|(d, (b, a))| json!({"device": d, "before": b, "after": a}))
+                    .collect::<Vec<_>>());
+            }
             r["load_s"] = json!(load_s);
             r["backend"] = engine.backend.describe();
             r["model"] = json!(engine.manifest.name);

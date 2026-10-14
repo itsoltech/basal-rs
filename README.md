@@ -32,7 +32,10 @@ Zdolności decyzyjne i jakość odpowiedzi pochodzą z tych modeli.
 [IT SOL](https://github.com/itsoltech): wykonanie obliczeń na GPU, optymalizacja
 pakowania żądań, kernele i harmonogram serwera. Backend CUDA (NVIDIA,
 sprawdzony na RTX 6000 Ada), Metal (Apple Silicon, sprawdzony na M1 Pro i M2 Max)
-oraz [Intel Arc przez Vulkan](docs/INTEL.md) (Linux, Meteor Lake).
+oraz [Intel Arc przez Vulkan](docs/INTEL.md) (Linux; pomiary wyłącznie na zintegrowanym
+Arc Meteor Lake). Inne karty Arc nie mają jeszcze potwierdzonej poprawności;
+[sprawdzony sprzęt i zakres weryfikacji](docs/INTEL.md#sprawdzony-sprzęt-i-zakres-weryfikacji)
+opisujemy osobno.
 Serwer implementuje istniejący kontrakt API **TypeSafe System One** oraz
 endpoint zgodny z serwerem upstream. Atrybucję portowanych elementów Basala
 i modeli bazowych zawiera [NOTICE](NOTICE).
@@ -322,8 +325,8 @@ aktywacje.
 Na CUDA klucz `device` przypisuje model do GPU (domyślnie 0), np. max na
 jednej karcie, a 4.5B i mini na drugiej. Modele na różnych GPU liczą
 jednocześnie, za tym samym API i z tymi samymi nazwami modeli. Bez
-`replica_devices` model jest ładowany raz, na jednym GPU; podziału jednego
-modelu między karty nie ma. Numer to indeks CUDA widoczny dla procesu.
+`replica_devices` i `layer_split` (opis niżej) model jest ładowany raz, na
+jednym GPU. Numer to indeks CUDA widoczny dla procesu.
 Kolejność wszystkich kart ustala `CUDA_DEVICE_ORDER` (domyślna może różnić się
 od `nvidia-smi`, `PCI_BUS_ID` daje kolejność PCI jak `nvidia-smi`), a
 `CUDA_VISIBLE_DEVICES` wybiera z niej karty, zmienia ich kolejność i numeruje
@@ -349,10 +352,103 @@ błędem. `device` i `replica_devices` razem są błędem, także przy `device: 
 jeden element listy działa jak `device`. Modele bez replik mogą nadal używać
 innych typów kart. Limit `max_inflight` i model domyślny są wspólne. Grupa
 jest gotowa, dopóki ma dostępną replikę; zatrzymany worker repliki widać w
-`/health` i metrykach. To nie jest wykrywanie awarii sprzętu: CUDA nie zgłasza
-utraty urządzenia, a po niektórych błędach CUDA proces wymaga restartu, także
-dla pozostałych kart. Bitowej zgodności i skalowania replik nie deklarujemy bez
-pomiaru na sprzęcie.
+`/health` i metrykach. To nie jest wykrywanie awarii sprzętu: CUDA zgłasza
+`device_lost` tylko wtedy, gdy instancja nie potwierdziła końca własnej pracy
+GPU (dwie nieudane synchronizacje albo wiązania kontekstu), a po niektórych
+błędach CUDA proces wymaga restartu, także dla pozostałych kart. Bitowej
+zgodności i skalowania replik nie deklarujemy bez pomiaru na sprzęcie.
+
+Podział warstw (opcjonalny, CUDA): `layer_split` przy modelu albo
+`--layer-split 0:30,1:30` (`serve --model`, `export`, `decide`, `bench`,
+`bench-requests`, `benchmark`, `profile`, `eval-*`) ładuje jeden model na
+kilka kart jednego procesu: kolejne zakresy warstw dekodera, po jednym na
+kartę, w kolejności warstw. Flaga przyjmuje pary `URZĄDZENIE:LICZBA_WARSTW`,
+a YAML listę `{device, layers}`. Dla 4.5B (60 warstw):
+
+```yaml
+models:
+  - path: .models/basal-1.5-4.5B
+    dtype: f16                    # domyślne; podział wymaga f16
+    layer_split:                  # zamiast device i replica_devices
+      - {device: 0, layers: 30}   # warstwy 0–29 i embedding
+      - {device: 1, layers: 30}   # warstwy 30–59, końcowa norma, lm_head, głowica evidence
+```
+
+Etapy liczą po kolei: po warstwach etapu aktywacje granicy są kopiowane na
+kartę następnego etapu, a odczyt liter i głowica evidence działają na
+ostatnim. To ten sam ciąg obliczeń co na jednym GPU, a nie równoległość
+tensorowa ani operacje zbiorcze między kartami. Podział służy pojemności
+(wagi i cache K/V każdej warstwy leżą na karcie jej etapu), a nie
+przyspieszeniu, i dodaje kopię na każdej granicy. Numery to indeksy CUDA
+procesu po `CUDA_VISIBLE_DEVICES`: z `CUDA_VISIBLE_DEVICES=1,0` etap
+`0:30` trafia na fizyczną kartę 1.
+
+Przed pobraniem modelu serwer i polecenia odrzucają: mniej niż dwa etapy,
+etap bez warstw, powtórzoną kartę, nieznane pole YAML, build inny niż CUDA,
+`dtype` inne niż `f16`, `--kernels candle`, indeks spoza kart procesu oraz
+karty różnych typów (nazwa, compute capability, liczba SM). Błędem jest też
+`layer_split` razem z `device` (także `device: 0`) albo `replica_devices`,
+a `--layer-split` razem z `--device`, `--replica-devices` albo `--config` (w
+pliku konfiguracji `layer_split` ustawia się przy modelu). Po odczytaniu
+`config.json`, przed tabelą GEMM i wagami, suma liczb warstw musi równać się
+liczbie warstw modelu (mini 32, 4.5B 60, max 50). Tabelę GEMM serwer
+rozwiązuje na karcie etapu 0 i sprawdza na każdej karcie podziału;
+`gemm_table: none` działa jak na jednym GPU. `quantization` dotyczy każdego
+etapu, z tymi samymi zastrzeżeniami co wyżej (domyślne `none`, opcjonalne
+`q8_0`, eksperymentalne `q4_k`). `basal doctor` sprawdza te reguły bez
+ładowania modelu i podaje szacunek wag każdego etapu z arytmetyki formatu
+(szacunek, nie pomiar). Bez `layer_split` nic się nie zmienia.
+
+W serwerze model z podziałem jest jedną instancją, bez replik. Korzysta z
+gate'u każdej swojej karty, ale trzyma najwyżej jeden naraz, więc na każdej
+karcie dzieli ją z innymi modelami jak model jednego GPU.
+[Pomiar L1](reports/multigpu-layer-l1-revalidation-2026-10-13/README.md)
+bieżących źródeł (dwie RTX 6000 Ada 48 GB, mini i 4.5B, `none`, `q8_0`,
+`q4_k`): eksporty z podziałem (m.in.
+`0:30,1:30`, `0:1,1:59`, `0:59,1:1`, `1:30,0:30`, `CUDA_VISIBLE_DEVICES=1,0`,
+900 pytań) są bajtowo równe eksportom jednego GPU w tym samym trybie,
+odpowiedzi HTTP są równe referencji jednego GPU, a 38 niepoprawnych
+konfiguracji kończy się błędem przed pobieraniem i ładowaniem (według
+komunikatów; brak alokacji GPU w tych procesach nie został zmierzony). Pod
+sztucznym
+limitem (rezerwacja zostawiająca 7939 MiB wolnej pamięci na każdej karcie)
+4.5B `none` na jednym GPU kończy się czystym OOM, a `0:30,1:30` działa i daje
+bitowo równe wyniki. Bez takiego limitu 4.5B mieści się na jednej karcie
+48 GB. Pomiar nie obejmuje modelu max, innych kart (np. RTX 4090), kart
+mieszanych, fizycznego braku pamięci ani fizycznej trasy kopii (P2P albo
+przez hosta).
+
+Wydajność bieżących źródeł zmierzono dla 4.5B w osobnych sesjach, każda na
+maszynie z dwiema RTX 6000 Ada 48 GB; nie ustalono, czy sesje miały te same
+fizyczne karty ([zestawienie](reports/multigpu-layer-revalidation-2026-10-14/README.md),
+[L2](reports/multigpu-layer-l2-revalidation-2026-10-14/README.md) `none`,
+[L3](reports/multigpu-layer-l3-revalidation-2026-10-14/README.md) `q8_0` i
+`q4_k`). Każdy stosunek niżej pochodzi z jednej sesji; wyniki różnych sesji
+zestawiamy tylko opisowo. Pojedyncze żądanie jest z podziałem wolniejsze: w
+`none` przepustowość HTTP jednego klienta to 0,963–0,973 przepustowości
+jednego GPU, a w `basal bench` mediana stosunku latencji pytania w parach
+wynosi 1,004–1,009 (`none`), 1,128–1,139 (`q8_0`) i 1,183–1,206 (`q4_k`).
+Przy 16 klientach mieszanego ruchu `none` z podziałem miał w tej sesji
+1,17–1,18× przepustowość jednego GPU, ale karta jednego GPU pracowała wtedy
+goręcej i z niższym zegarem; to nie jest obietnica przyspieszenia.
+
+Na torze jednego GPU kandydat ma wobec `d42a400` dwa utrzymane sygnały
+reguły bez progu, bez wskazanej przyczyny w kodzie: `none`
+`mixed-c1 queue_ms.p99` w `basal benchmark` (+1,2 do +11,3 ms; użytkownik
+przyjął ten wynik, [decyzja](reports/multigpu-layer-l2-revalidation-2026-10-14/DECISION.md))
+i `q4_k` `dec_s` w `basal bench` (−0,01 do −0,56%; koordynator przyjął go w
+granicy 1–2% podanej wcześniej przez użytkownika,
+[rozstrzygnięcie](reports/multigpu-layer-l3-revalidation-2026-10-14/DECISION.md)).
+Sygnały pozostają w raportach, a rozstrzygnięcia nie tworzą progu. Pozostałe
+sygnały się nie utrzymały, co nie dowodzi braku narzutu. Wydajności HTTP
+jednego GPU w `q8_0` i `q4_k` dla tego kandydata nie zmierzono. Pomiary
+poprzedniego kandydata ([zestawienie](reports/multigpu-layer-2026-10-13/README.md),
+[poprawka zakresu](reports/multigpu-layer-2026-10-13/SCOPE.md)) pozostają
+historią. Zestawienie oraz raport, rozstrzygnięcie i fakty L3 błędnie
+podają, że `load_s` w `d42a400` obejmował wczytanie głowicy evidence, uchwyt
+cuBLASLt i synchronizację publikacji. W obu wersjach zegar kończy się przed
+głowicą i uchwytem, a synchronizację publikacji ma tylko kandydat, także poza
+`load_s` ([erratum](reports/multigpu-layer-revalidation-2026-10-14/LOAD_S.md)).
 
 Kwantyzacja W8A16 (opcjonalna, CUDA): `quantization: q8_0` przy modelu albo
 `--quantization q8_0` (`serve --model`, `export`, `bench`, `benchmark`,
@@ -512,7 +608,7 @@ Jeden model bez pliku konfiguracji:
 | `POST /v1/systemone` | TypeSafe System One: ścisła walidacja, odpowiedzi i confidence TypeSafe, rozszerzenia basal-1.5 |
 | `POST /v1/basal` | konwencje `Server.decide` upstream v1.5.0: walidacja `to_items`, `confidence = max(p)`, błędy jako 422 `{"error"}` |
 | `GET /v1/models` | lista modeli TypeSafe z polami upstream `mode` i `early_exit` |
-| `GET /health` | gotowość: 200 `{"status":"ok"}`; 503 `{"status":"device_lost"}` z `lost_models`, gdy backend zgłosił trwałą utratę GPU (obecnie Intel Vulkan). Grupy replik: 200 z `degraded_models`, gdy część replik jest niedostępna; 503 `{"status":"engine_stopped"}` z `unavailable_models`, gdy żadna. Wpis: `{"model", "replicas", "available", "unavailable": [{"replica", "device", "reason": "worker_closed" \| "device_lost"}]}` |
+| `GET /health` | gotowość: 200 `{"status":"ok"}`; 503 `{"status":"device_lost"}` z `lost_models`, gdy backend modelu z jedną instancją (także z podziałem warstw) zgłosił trwałą utratę: Intel Vulkan po utracie urządzenia, CUDA gdy nie potwierdził końca własnej pracy GPU (dwie nieudane synchronizacje albo wiązania kontekstu); to nie test sprzętu. Grupy replik: 200 z `degraded_models`, gdy część replik jest niedostępna; 503 `{"status":"engine_stopped"}` z `unavailable_models`, gdy żadna. Wpis: `{"model", "replicas", "available", "unavailable": [{"replica", "device", "reason": "worker_closed" \| "device_lost"}]}` |
 | `GET /metrics` | opcjonalne metryki Prometheus: żądania, opóźnienia, tokeny, kolejka i partie, z podziałem na modele i ich repliki |
 
 Odpowiedzi mają nagłówki `x-basal-queue-ms`, `x-basal-compute-ms` i
@@ -547,6 +643,7 @@ wiersza poleceń, np. `--max-batch-tokens`):
 | `quantization` | `none` | format wag projekcji: `none` (gęste wagi `dtype`), `q8_0` (8-bitowe wagi z aktywacjami f16) albo `q4_k` (4-bitowe wagi z aktywacjami f16, eksperymentalne; K projekcji wielokrotnością 256); tylko CUDA z `dtype: f16`; opis niżej |
 | `device` | 0 | GPU modelu: indeks urządzenia CUDA widoczny dla procesu; modele z tym samym `device` dzielą GPU, z różnymi liczą jednocześnie; Metal i Intel: tylko 0 |
 | `replica_devices` | | CUDA: repliki modelu pod jedną nazwą, po jednej na każdy podany indeks (różne karty jednego typu); zamiast `device`; kilka wymaga tabeli GEMM (`auto` albo ścieżka) |
+| `layer_split` | | CUDA: jeden model na kilku kartach jednego typu, lista `{device, layers}` w kolejności warstw (co najmniej dwa etapy na różnych kartach, suma równa liczbie warstw modelu); wymaga `dtype: f16`; zamiast `device` i `replica_devices`; opis wyżej |
 | `max_batch_tokens` | 8192 | tokeny jednej partii, liczone po współdzieleniu prefiksów |
 | `schedule` | `hrrn` | kolejność przyjmowania żądań: `hrrn` (krótkie przed długimi, bez zagłodzenia) albo `fifo` |
 | `long_tokens` | 4096 | żądania powyżej tej liczby tokenów idą do toru długich żądań, który oddaje GPU krótkim partiom między warstwami; `0` wyłącza |

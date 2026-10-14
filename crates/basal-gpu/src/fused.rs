@@ -334,8 +334,15 @@ pub fn bias_silu_mul(gu: &Tensor, bias: &Tensor) -> Result<Tensor> {
 /// order), with one read of the residual stream instead of two. Returns (x, normed) as views of one [2, M, H] buffer.
 #[cfg(feature = "cuda")]
 pub fn residual_rmsnorm(x: &Tensor, y: &Tensor, b: &Tensor, alpha: &Tensor, eps: f32) -> Result<(Tensor, Tensor)> {
-    let out = x.apply_op3_no_bwd(y, b, &ResidualRmsNorm { alpha: alpha.clone(), eps })?;
+    let out = residual_rmsnorm_buf(x, y, b, alpha, eps)?;
     Ok((out.get(0)?, out.get(1)?))
+}
+
+/// [`residual_rmsnorm`] as its one `[2, M, H]` buffer (x in row 0, normed in row 1), contiguous from offset 0: the
+/// activations a layer split moves to the next GPU in one copy.
+#[cfg(feature = "cuda")]
+pub fn residual_rmsnorm_buf(x: &Tensor, y: &Tensor, b: &Tensor, alpha: &Tensor, eps: f32) -> Result<Tensor> {
+    x.apply_op3_no_bwd(y, b, &ResidualRmsNorm { alpha: alpha.clone(), eps })
 }
 
 #[cfg(feature = "cuda")]
@@ -369,6 +376,7 @@ impl CustomOp3 for ResidualRmsNorm {
         b: &CudaStorage,
         bl: &Layout,
     ) -> Result<(CudaStorage, Shape)> {
+        use candle_core::backend::BackendDevice;
         use candle_core::cuda_backend::{
             cudarc::driver::{LaunchConfig, PushKernelArg},
             WrapErr,
@@ -380,6 +388,14 @@ impl CustomOp3 for ResidualRmsNorm {
         let candle_core::Storage::Cuda(acs) = &*ast else {
             candle_core::bail!("residual-rmsnorm: alpha must be on the CUDA device");
         };
+        // alpha is read through a raw pointer, outside candle's operand device check: it must be on x's GPU
+        if acs.device.location() != dev.location() {
+            candle_core::bail!(
+                "residual-rmsnorm: alpha on {:?}, x on {:?} (one GPU expected)",
+                acs.device.location(),
+                dev.location()
+            );
+        }
         let ao = contiguous(al, "alpha")?;
         let st = by_dtype!(x.dtype(), |T, S| {
             let (xv, yv, bv, av) = (view!(x, T, xo), view!(y, T, yo), view!(b, T, bo), view!(acs, T, ao));

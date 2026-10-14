@@ -5,6 +5,7 @@ use std::os::unix::fs::FileExt;
 use std::path::Path;
 
 use anyhow::{ensure, Context, Result};
+use basal_core::manifest::LlamaConfig;
 use safetensors::tensor::Metadata;
 
 /// Upper bound of the JSON header, as in the `safetensors` crate.
@@ -60,6 +61,38 @@ impl Checkpoint {
 
     pub fn names(&self) -> Vec<String> {
         self.metadata.offset_keys()
+    }
+
+    /// BF16 and resident FP16 have the same width. Exclude matrices accessed only by row;
+    /// rounding each tensor to four bytes also covers the loader's concatenated buffers.
+    pub fn resident_weight_bytes(&self, c: &LlamaConfig) -> Result<u64> {
+        self.bf16("model.embed_tokens.weight", &[c.vocab, c.hidden])?;
+        self.bf16("lm_head.weight", &[c.vocab, c.hidden])?;
+        let mut bytes = 0u64;
+        for (name, info) in self.metadata.tensors() {
+            if matches!(name.as_str(), "model.embed_tokens.weight" | "lm_head.weight") {
+                continue;
+            }
+            ensure!(info.dtype == safetensors::Dtype::BF16, "{name}: expected BF16");
+            let size = (info.data_offsets.1 - info.data_offsets.0) as u64;
+            bytes =
+                size.checked_next_multiple_of(4).and_then(|n| bytes.checked_add(n)).context("weight size overflow")?;
+        }
+        if !c.bias {
+            let q = c
+                .kv_heads
+                .checked_mul(2)
+                .and_then(|n| c.heads.checked_add(n))
+                .and_then(|n| n.checked_mul(c.head_dim))
+                .context("qkv size overflow")?;
+            let gu = c.intermediate.checked_mul(2).context("gate/up size overflow")?;
+            let zero = (q.max(gu) as u64)
+                .checked_mul(2)
+                .and_then(|n| n.checked_next_multiple_of(4))
+                .context("zero bias size overflow")?;
+            bytes = bytes.checked_add(zero).context("weight size overflow")?;
+        }
+        Ok(bytes)
     }
 
     /// Pass the whole tensor to `sink` in consecutive chunks of complete BF16 values, reusing `buffer`.

@@ -17,6 +17,11 @@ Metodyka: [docs/BENCHMARKS.md](../docs/BENCHMARKS.md).
 | [multigpu-isolation-2026-10-11](multigpu-isolation-2026-10-11/README.md) | RTX 6000 Ada: mini bez/z obciążonym 4.5B, stare/nowe single-GPU, identyczny ruch A/B/B/A i pełne odpowiedzi |
 | [multigpu-replicas-2026-10-11](multigpu-replicas-2026-10-11/README.md) | RTX 6000 Ada: jedna i dwie repliki mini, zgodność i routing, single-GPU A/B z obserwowanym spadkiem mediany przepustowości |
 | [multigpu-replicas-control-2026-10-11](multigpu-replicas-control-2026-10-11/README.md) | RTX 6000 Ada: dodatkowa kontrola single-GPU A/B, żądany zegar 1200 MHz, wspólna maska CPU i wszystkie 16 przebiegów |
+| [multigpu-layer-revalidation-2026-10-14](multigpu-layer-revalidation-2026-10-14/README.md) | podział warstw, bieżące źródła (najnowszy pomiar): zestawienie L1–L3 na dwóch RTX 6000 Ada, utrzymane sygnały i ich rozstrzygnięcia; [erratum `load_s`](multigpu-layer-revalidation-2026-10-14/LOAD_S.md) |
+| [multigpu-layer-l1-revalidation-2026-10-13](multigpu-layer-l1-revalidation-2026-10-13/README.md) | podział warstw L1: bitowa zgodność, odmowy, HTTP, pojemność pod sztucznym limitem, profile transferów; [poprawka poleceń](multigpu-layer-l1-revalidation-2026-10-13/COMMANDS.md) |
+| [multigpu-layer-l2-revalidation-2026-10-14](multigpu-layer-l2-revalidation-2026-10-14/README.md) | podział warstw L2: regresja `none` na jednym GPU, kompromis podziału; [decyzja użytkownika](multigpu-layer-l2-revalidation-2026-10-14/DECISION.md) |
+| [multigpu-layer-l3-revalidation-2026-10-14](multigpu-layer-l3-revalidation-2026-10-14/README.md) | podział warstw L3: regresja `q8_0` i `q4_k` na jednym GPU, podział w tych trybach; [rozstrzygnięcie koordynatora](multigpu-layer-l3-revalidation-2026-10-14/DECISION.md) |
+| [multigpu-layer-2026-10-13](multigpu-layer-2026-10-13/README.md) | podział warstw, poprzedni kandydat (historia): zestawienie L1–L3 z [poprawką zakresu](multigpu-layer-2026-10-13/SCOPE.md) |
 
 ## basal-1.5-max
 
@@ -72,6 +77,8 @@ Metodyka: [docs/BENCHMARKS.md](../docs/BENCHMARKS.md).
 | [intel-arc-meteor-lake-2026-10-10](intel-arc-meteor-lake-2026-10-10/README.md) | mini, 4.5B i max: zgodność z FP32, HTTP, dobór GEMM, poprawki ładowania i kolejki oraz ograniczenia pamięci |
 | [intel-arc-meteor-lake-refactor-2026-10-11](intel-arc-meteor-lake-refactor-2026-10-11/README.md) | refaktor bez mapowania checkpointu: bitowa zgodność mini, 4.5B i max (w tym Tree), czas ładowania, odrzucony wariant GEMM |
 | [intel-arc-meteor-lake-fixes-2026-10-11](intel-arc-meteor-lake-fixes-2026-10-11/README.md) | wybór dGPU, `/health` 503 po utracie urządzenia, loader bez kopii tensora, jedno urządzenie w `doctor`: bitowa zgodność mini, 4.5B i max |
+| [intel-arc-meteor-lake-gemm-2026-10-11](intel-arc-meteor-lake-gemm-2026-10-11/README.md) | optymalizacja GEMM: pomiary HTTP przed/po dla mini i 4.5B, projekcje wszystkich modeli i ograniczenie benchmarku max |
+| [intel-arc-meteor-lake-memory-2026-10-11](intel-arc-meteor-lake-memory-2026-10-11/README.md) | szacunek pamięci cgroup i wag Intel, dynamiczny budżet iGPU, pomiary HTTP oraz odmowy po ładowaniu max z powodu swapu |
 
 ## API
 

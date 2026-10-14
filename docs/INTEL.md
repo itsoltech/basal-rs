@@ -7,8 +7,39 @@ Nie wymaga Pythona, CUDA, OpenCL ani oneAPI.
 
 Pomiary na zintegrowanym Arc Meteor Lake i ograniczenia ich zakresu opisuje
 [raport](../reports/intel-arc-meteor-lake-2026-10-10/README.md).
+Nowsze [porównanie GEMM i HTTP przed/po](../reports/intel-arc-meteor-lake-gemm-2026-10-11/README.md)
+obejmuje optymalizację kernela z zachowaniem kolejności akumulacji FP32.
 Inne generacje i osobne karty Arc wymagają własnej weryfikacji. Ten backend
 nie korzysta z XMX; nie jest dowodem maksymalnej wydajności wszystkich kart Intel.
+
+## Sprawdzony sprzęt i zakres weryfikacji
+
+**Na 2026-10-11 jedynym GPU z pomiarami tego backendu jest zintegrowany
+Intel Arc Meteor Lake.** Sprawdzona konfiguracja:
+
+- GPU: Intel Arc Meteor Lake, identyfikator PCI `8086:7d55`.
+- CPU: Intel Core Ultra 9 185H; RAM: 32 GB nominalnie, współdzielony z GPU.
+- System i sterownik: Linux, i915, Mesa 26.2.2-arch1.1; wgpu 30.0.1.
+- Modele: Basal 1.5 mini, 4.5B i max, uruchamiane pojedynczo, z wagami i aktywacjami FP16.
+
+Potwierdzenie dotyczy wyłącznie przypadków, rewizji kodu i warunków opisanych
+w raportach: [zgodność z FP32](../reports/intel-arc-meteor-lake-2026-10-10/README.md),
+[GEMM i HTTP](../reports/intel-arc-meteor-lake-gemm-2026-10-11/README.md) oraz
+[końcowa weryfikacja pamięci i wyników](../reports/intel-arc-meteor-lake-memory-2026-10-11/README.md).
+Nie jest gwarancją poprawności wszystkich wejść ani stabilności przy dowolnym obciążeniu.
+W szczególności dwie końcowe próby benchmarku max z domyślnymi rezerwami
+zatrzymał przyrost globalnego swapu po ładowaniu modelu; udane eksporty
+i wcześniejszy przebieg diagnostyczny nie potwierdzają powtarzalnego startu
+z domyślnymi ustawieniami.
+
+**Nie zweryfikowano osobnych kart Arc A-series, B-series ani Arc Pro,
+innych zintegrowanych GPU Intela ani wyboru między kilkoma GPU.**
+Nie sprawdzono też maksymalnego kontekstu ani długotrwałego obciążenia.
+Spełnienie wymagań Vulkan i poprawne wykrycie przez `basal doctor` nie
+potwierdzają zgodności wyników modelu. Każda nowa konfiguracja sprzętu
+i sterownika wymaga własnych eksportów, porównań z upstream FP32 oraz pomiarów;
+wyniki należy zapisać w nowym raporcie. CI sprawdza kompilację i lint,
+ale nie uruchamia modeli na GPU.
 
 ## Uruchomienie
 
@@ -88,9 +119,14 @@ Nie odejmuj ponownie tych samych wag od obu pomiarów. Max wymaga szczególnej
 uwagi przy długich promptach i kilku modelach w jednym procesie.
 Repozytoryjny `serve.yml` ładuje wszystkie trzy modele naraz; ich wagi
 nie mieszczą się razem w 32 GB RAM. Na takiej maszynie uruchamiaj je osobno.
-W opisanej sesji benchmark max zatrzymał się na kontroli rezerwy RAM przed
-ładowaniem. Udana inferencja max nie oznacza, że zostaje zapas na dowolny
-prompt lub współbieżność; zakres sprawdzonych przebiegów podaje raport.
+Kontrola przed ładowaniem uwzględnia odzyskiwalny nieaktywny cache plików
+w cgroup oraz wagi rzeczywiście przechowywane na GPU. Na iGPU zapas przed
+ładowaniem pochodzi ze wspólnego RAM, a pełna rezerwa GPU jest sprawdzana
+ponownie po ładowaniu i podczas inferencji. Budżet Vulkan może się zmieniać;
+nie traktujemy odczytu sprzed ładowania jako stałej pojemności VRAM.
+[Pomiary pamięci](../reports/intel-arc-meteor-lake-memory-2026-10-11/README.md)
+obejmują również odmowy z powodu faktycznego przyrostu swapu podczas ładowania
+max. Udana inferencja nie oznacza zapasu na dowolny prompt lub współbieżność.
 
 ## Weryfikacja i profilowanie
 

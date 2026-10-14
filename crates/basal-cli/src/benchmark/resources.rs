@@ -49,14 +49,33 @@ impl Guard {
         self.max_swap_growth = self.max_swap_growth.max(swap);
         anyhow::ensure!(!host.pressure, "host memory pressure is elevated");
         anyhow::ensure!(swap < SWAP_GROWTH_LIMIT, "global swap activity grew by at least 64 MiB");
-        let ram_need = self.ram_reserve.saturating_add(if gpu.unified { weights } else { 0 });
+        // A unified Vulkan heap budget is dynamic, not a separate fixed VRAM capacity. Before loading,
+        // require both the weights and the larger reserve to fit shared RAM, and the weights to fit
+        // the current heap budget. Recheck the full GPU reserve against actual usage after loading
+        // (weights = 0) and during inference. Discrete GPUs and Metal keep their existing preflight.
+        let shared_preflight = basal_gpu::INTEL_BACKEND && gpu.unified && weights > 0;
+        let ram_reserve = if shared_preflight { self.ram_reserve.max(self.gpu_reserve) } else { self.ram_reserve };
+        let ram_need = ram_reserve.saturating_add(if gpu.unified { weights } else { 0 });
         anyhow::ensure!(
             host.available_bytes >= ram_need,
-            "available RAM fell below the reserve / estimated weight requirement"
+            "insufficient RAM: {:.2} GiB available, {:.2} GiB required ({:.2} GiB reserve, \
+             {:.2} GiB estimated additional shared weights)",
+            host.available_bytes as f64 / GIB,
+            ram_need as f64 / GIB,
+            ram_reserve as f64 / GIB,
+            if gpu.unified { weights as f64 / GIB } else { 0.0 }
         );
+        let gpu_need =
+            if shared_preflight { self.gpu_reserve.max(weights) } else { self.gpu_reserve.saturating_add(weights) };
         anyhow::ensure!(
-            gpu.available_bytes >= self.gpu_reserve.saturating_add(weights),
-            "GPU / Metal working-set headroom fell below the reserve / estimated weight requirement"
+            gpu.available_bytes >= gpu_need,
+            "insufficient GPU headroom: {:.2} GiB available, {:.2} GiB required ({:.2} GiB reserve, \
+             {:.2} GiB estimated additional weights; {})",
+            gpu.available_bytes as f64 / GIB,
+            gpu_need as f64 / GIB,
+            self.gpu_reserve as f64 / GIB,
+            weights as f64 / GIB,
+            if shared_preflight { "shared-memory preflight checks each separately" } else { "weights plus reserve" }
         );
         Ok(())
     }
@@ -72,7 +91,8 @@ impl Guard {
 struct Sample {
     at: Instant,
     host: HostMemory,
-    gpu: GpuMemory,
+    /// One snapshot per monitored device, in the order given to [`Monitor::start`].
+    gpus: Vec<GpuMemory>,
     cpu_s: f64,
     rss: u64,
 }
@@ -80,6 +100,8 @@ struct Sample {
 pub(super) struct ResourceReport {
     pub summary: serde_json::Value,
     samples: std::collections::VecDeque<Sample>,
+    /// Ordinals of the monitored devices (the first one is the device the top-level fields describe).
+    devices: Vec<usize>,
     pub reason: Option<String>,
 }
 
@@ -90,14 +112,26 @@ impl ResourceReport {
             let wall = (b.at - a.at).as_secs_f64();
             (wall > 0.0).then(|| ((b.cpu_s - a.cpu_s).max(0.0), wall))
         });
-        serde_json::json!({"samples": samples.len(),
+        let mut window = serde_json::json!({"samples": samples.len(),
             "min_available_ram_bytes_sampled": samples.iter().map(|s| s.host.available_bytes).min(),
-            "min_available_gpu_bytes_sampled": samples.iter().map(|s| s.gpu.available_bytes).min(),
-            "max_process_gpu_allocated_bytes_sampled": samples.iter().filter_map(|s| s.gpu.process_allocated_bytes).max(),
+            "min_available_gpu_bytes_sampled": samples.iter().filter_map(|s| s.gpus.first()).map(|g| g.available_bytes).min(),
+            "max_process_gpu_allocated_bytes_sampled": samples.iter().filter_map(|s| s.gpus.first()?.process_allocated_bytes).max(),
             "lifetime_peak_rss_bytes": samples.iter().map(|s| s.rss).max(),
             "mean_process_cpu_cores": cpu.map(|(used, wall)| used / wall),
             "cpu_sample_window_s": cpu.map(|(_, wall)| wall),
-            "scope": "same process HTTP server and load generator; sampled memory, not allocation peaks"})
+            "scope": "same process HTTP server and load generator; sampled memory, not allocation peaks"});
+        // several devices (a layer split): each device's samples; one device keeps the fields above only
+        if self.devices.len() > 1 {
+            window["per_device"] = serde_json::json!(self
+                .devices
+                .iter()
+                .enumerate()
+                .map(|(i, d)| serde_json::json!({"device": d,
+                    "min_available_gpu_bytes_sampled": samples.iter().filter_map(|s| s.gpus.get(i)).map(|g| g.available_bytes).min(),
+                    "max_process_gpu_allocated_bytes_sampled": samples.iter().filter_map(|s| s.gpus.get(i)?.process_allocated_bytes).max()}))
+                .collect::<Vec<_>>());
+        }
+        window
     }
 }
 
@@ -108,7 +142,10 @@ pub(super) struct Monitor {
 }
 
 impl Monitor {
-    pub fn start(mut guard: Guard, probe: GpuMemoryProbe) -> Result<Self> {
+    /// Sample the host and every `(device, guard, probe)` (one per device of the model, the first one described by
+    /// the top-level fields) until stopped; the probes are queried one after another and return host data only.
+    pub fn start(mut devices: Vec<(usize, Guard, GpuMemoryProbe)>) -> Result<Self> {
+        anyhow::ensure!(!devices.is_empty(), "resource monitor without a device");
         let abort = Arc::new(AtomicBool::new(false));
         let flag = abort.clone();
         let (stop, receiver) = std::sync::mpsc::channel();
@@ -120,13 +157,19 @@ impl Monitor {
                 loop {
                     let result = (|| -> Result<()> {
                         let host = host_memory()?;
-                        let gpu = probe.snapshot()?;
+                        let gpus = devices.iter().map(|(_, _, probe)| probe.snapshot()).collect::<Result<Vec<_>>>()?;
                         let (cpu_s, rss) = process_usage()?;
-                        let checked = guard.check(&host, &gpu, 0);
+                        let mut checked = Ok(());
+                        for ((d, guard, _), gpu) in devices.iter_mut().zip(&gpus) {
+                            let c = guard.check(&host, gpu, 0);
+                            if checked.is_ok() {
+                                checked = if gpus.len() > 1 { c.with_context(|| format!("device {d}")) } else { c };
+                            }
+                        }
                         if samples.len() == 20_000 {
                             samples.pop_front();
                         }
-                        samples.push_back(Sample { at: Instant::now(), host, gpu, cpu_s, rss });
+                        samples.push_back(Sample { at: Instant::now(), host, gpus, cpu_s, rss });
                         checked
                     })();
                     if let Err(e) = result {
@@ -139,7 +182,19 @@ impl Monitor {
                         _ => break,
                     }
                 }
-                ResourceReport { summary: guard.report(), samples, reason }
+                let mut summary = devices[0].1.report();
+                if devices.len() > 1 {
+                    summary["per_device"] = serde_json::json!(devices
+                        .iter()
+                        .map(|(d, guard, _)| {
+                            let mut r = guard.report();
+                            r["device"] = serde_json::json!(d);
+                            r
+                        })
+                        .collect::<Vec<_>>());
+                }
+                let devices = devices.iter().map(|(d, _, _)| *d).collect();
+                ResourceReport { summary, samples, devices, reason }
             })
             .context("starting benchmark resource monitor")?;
         Ok(Self { abort, stop: Some(stop), thread: Some(thread) })
@@ -171,11 +226,22 @@ impl Drop for Monitor {
 #[derive(Clone, Debug, Serialize)]
 pub(super) struct HostMemory {
     pub total_bytes: u64,
+    pub system_available_bytes: u64,
     pub available_bytes: u64,
     pub swap_used_bytes: u64,
     pub swap_out_bytes: u64,
     pub pressure: bool,
     pub cgroup_limit_bytes: Option<u64>,
+    pub cgroups: Vec<CgroupMemory>,
+}
+
+/// Finite limits from the current group through its ancestors, without identifying paths.
+#[derive(Clone, Debug, Serialize)]
+pub(super) struct CgroupMemory {
+    limit_bytes: u64,
+    used_bytes: u64,
+    reclaimable_file_bytes: u64,
+    available_bytes: u64,
 }
 
 #[cfg(target_os = "macos")]
@@ -216,14 +282,17 @@ pub(super) fn host_memory() -> Result<HostMemory> {
         };
         let total = command("sysctl", &["-n", "hw.memsize"])?.parse()?;
         let pressure: u32 = command("sysctl", &["-n", "kern.memorystatus_vm_pressure_level"])?.parse()?;
+        // A conservative checkpoint estimate, not macOS's exact allocatable memory.
+        let available = pages("Pages free:")? + pages("Pages inactive:")? + pages("Pages speculative:")?;
         Ok(HostMemory {
             total_bytes: total,
-            // A conservative checkpoint estimate, not macOS's exact allocatable memory.
-            available_bytes: pages("Pages free:")? + pages("Pages inactive:")? + pages("Pages speculative:")?,
+            system_available_bytes: available,
+            available_bytes: available,
             swap_used_bytes: (value.parse::<f64>()? * multiplier) as u64,
             swap_out_bytes: pages("Swapouts:")?,
             pressure: pressure != 1,
             cgroup_limit_bytes: None,
+            cgroups: Vec::new(),
         })
     }
     #[cfg(not(target_os = "macos"))]
@@ -243,13 +312,16 @@ pub(super) fn host_memory() -> Result<HostMemory> {
         // SAFETY: sysconf reads this constant system setting, retaining no pointers or resources.
         let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
         anyhow::ensure!(page_size > 0, "cannot read host page size");
+        let available = bytes("MemAvailable:")?;
         let mut host = HostMemory {
             total_bytes: bytes("MemTotal:")?,
-            available_bytes: bytes("MemAvailable:")?,
+            system_available_bytes: available,
+            available_bytes: available,
             swap_used_bytes: bytes("SwapTotal:")?.saturating_sub(bytes("SwapFree:")?),
             swap_out_bytes: out.saturating_mul(page_size as u64),
             pressure: false,
             cgroup_limit_bytes: None,
+            cgroups: Vec::new(),
         };
         cgroup_memory(&mut host)?;
         Ok(host)
@@ -268,10 +340,22 @@ fn cgroup_memory(host: &mut HostMemory) -> Result<()> {
         fields.next()?.split(',').any(|c| c == "memory").then(|| fields.next()).flatten()
     });
     // A hybrid host lists both; its memory controller is the v1 one, the unified v2 tree then has no memory.max.
-    let (root, relative, limit_key, usage_key) = if let Some(path) = v1 {
-        (Path::new("/sys/fs/cgroup/memory"), path, "memory.limit_in_bytes", "memory.usage_in_bytes")
+    let (root, relative, limit_key, usage_key, stat_keys) = if let Some(path) = v1 {
+        (
+            Path::new("/sys/fs/cgroup/memory"),
+            path,
+            "memory.limit_in_bytes",
+            "memory.usage_in_bytes",
+            ["total_inactive_file", "total_dirty", "total_writeback"],
+        )
     } else if let Some(path) = v2 {
-        (Path::new("/sys/fs/cgroup"), path, "memory.max", "memory.current")
+        (
+            Path::new("/sys/fs/cgroup"),
+            path,
+            "memory.max",
+            "memory.current",
+            ["inactive_file", "file_dirty", "file_writeback"],
+        )
     } else {
         return Ok(());
     };
@@ -293,7 +377,16 @@ fn cgroup_memory(host: &mut HostMemory) -> Result<()> {
                 if limit < host.total_bytes {
                     host.cgroup_limit_bytes = Some(host.cgroup_limit_bytes.unwrap_or(u64::MAX).min(limit));
                 }
-                host.available_bytes = host.available_bytes.min(limit.saturating_sub(used));
+                let stat = std::fs::read_to_string(path.join("memory.stat")).context("reading cgroup memory stats")?;
+                let reclaimable = reclaimable_file_bytes(&stat, stat_keys)?.min(used);
+                let available = limit.saturating_sub(used.saturating_sub(reclaimable));
+                host.available_bytes = host.available_bytes.min(available);
+                host.cgroups.push(CgroupMemory {
+                    limit_bytes: limit,
+                    used_bytes: used,
+                    reclaimable_file_bytes: reclaimable,
+                    available_bytes: available,
+                });
             }
         }
         if path == root || !path.pop() {
@@ -301,6 +394,26 @@ fn cgroup_memory(host: &mut HostMemory) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Estimate only clean inactive file cache. Swap-backed pages are on separate LRU lists;
+/// active cache, slab and swap are not credited. Dirty/writeback may overlap: subtracting both is conservative.
+/// Missing counters (older kernels) mean no reclaim credit; malformed counters remain telemetry errors.
+#[cfg(not(target_os = "macos"))]
+fn reclaimable_file_bytes(stat: &str, keys: [&str; 3]) -> Result<u64> {
+    let read = |key: &str| -> Result<Option<u64>> {
+        stat.lines()
+            .find_map(|line| {
+                let mut fields = line.split_whitespace();
+                (fields.next() == Some(key)).then(|| fields.next().unwrap_or(""))
+            })
+            .map(|value| value.parse().with_context(|| format!("cgroup memory.stat: {key}")))
+            .transpose()
+    };
+    match (read(keys[0])?, read(keys[1])?, read(keys[2])?) {
+        (Some(inactive), Some(dirty), Some(writeback)) => Ok(inactive.saturating_sub(dirty).saturating_sub(writeback)),
+        _ => Ok(0),
+    }
 }
 
 /// Both ends of every loopback connection share this process's descriptor limit; past it the server's accept loop

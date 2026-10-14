@@ -472,6 +472,8 @@ fn load_local(args: &ClientArgs, name: &str) -> Result<basal_core::Engine<crate:
         tree_max_tokens: basal_core::engine::TREE_MAX_TOKENS,
         gemm_table: table.clone(),
         device: Some(args.device),
+        // `basal client --local` runs a model on one GPU
+        layer_split: None,
     };
     let engine = crate::gpu_engine_at(&dir, &gpu)?;
     if let Some(table) = table {
