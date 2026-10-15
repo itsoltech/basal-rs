@@ -1,0 +1,16 @@
+[
+  {
+    "case": "NEGATIVE",
+    "build_rejected": true,
+    "error_codes": [
+      "CS1061"
+    ]
+  },
+  {
+    "case": "ASYNCPREPARE",
+    "build_rejected": true,
+    "error_codes": [
+      "CS0121"
+    ]
+  }
+]

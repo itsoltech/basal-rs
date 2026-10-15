@@ -1,0 +1,31 @@
+{
+  "sdk_version": "0.1.0",
+  "removed": [
+    "Python BasalClient.health / AsyncBasalClient.health / HealthResponse",
+    "TypeScript BasalClient.health / HealthResponse",
+    "C# BasalClient.HealthAsync / HealthResponse",
+    "Rust Client.health / HealthResponse",
+    "SDK OpenAPI /health path and HealthResponse schema"
+  ],
+  "checks": {
+    "rust_fmt": true,
+    "rust_clippy_all_targets_release": true,
+    "rustdoc_warnings_as_errors": true,
+    "rust_sdk_cargo_deny": true,
+    "python_sdist_and_wheel": true,
+    "python_installed_api_inspection": true,
+    "typescript_esm_and_commonjs_pack": true,
+    "typescript_packaged_api_inspection": true,
+    "csharp_pack_and_example": true,
+    "csharp_installed_api_inspection": true,
+    "rust_package_no_verify": true,
+    "all_artifact_checksums": true,
+    "all_distribution_api_scan": true,
+    "openapi_refs_resolve": true
+  },
+  "known_workspace_dependency_failure": "RUSTSEC-2024-0449: unsafe-libyaml in engine, absent from SDK graph",
+  "live_server_inference_run": false,
+  "new_dependencies": false,
+  "publication": false,
+  "server_changes": false
+}

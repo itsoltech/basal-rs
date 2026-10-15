@@ -7,6 +7,13 @@ Rust. Błąd, anulowanie lub pominięcie wymaganego joba oznacza błąd bramki. 
 ## Kontrole automatyczne
 
 - **Formatowanie:** `cargo fmt --all --check` dla całego workspace.
+- **SDK:** osobne joby Python, npm i C#. Wheel Pythona powstaje z sdist przez jeden backend
+  Flit Core przypięty hashem. npm zawiera ESM/CommonJS z deklaracjami typów; kompilator TypeScript
+  jest jedyną zależnością budowania. OSV sprawdza przypięte grafy Python/npm. Restore NuGet działa
+  w locked mode z mapowaniem źródeł. Kontrole obejmują
+  pakowanie NuGet i kompilację przykładu C#. Niezależne wersje manifestów i ich locków oraz format wersji opisu kontraktu są sprawdzane
+  przez `tools/sdk/check-versions.py`. Rust SDK należy do workspace i przechodzi istniejące kontrole Rust.
+  Nie dodajemy testów ani bramek testowych; pakowanie nie sprawdza inferencji.
 - **Linux bez GPU oraz Metal:** Clippy dla wszystkich crate'ów i targetów na Linux oraz Apple Silicon.
 - **Intel Vulkan:** osobny wariant Linux z `--features basal-cli/intel`; Clippy i Rustdoc bez GPU.
   Build parsuje i waliduje wszystkie kernele WGSL przez przypiętą Naga; runtime i numeryka wymagają pomiarów na karcie.

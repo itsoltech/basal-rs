@@ -1,0 +1,54 @@
+{
+  "python": {
+    "tls_verification": "CERTIFICATE_VERIFY_FAILED",
+    "sync_async": true,
+    "slow_body_timeout": true,
+    "task_cancellation": true,
+    "redirect_not_followed": 307,
+    "invalid_json": true,
+    "overload_status": 529,
+    "retry_after": "1",
+    "response_limit": true
+  },
+  "typescript": {
+    "tls_verification": "DEPTH_ZERO_SELF_SIGNED_CERT",
+    "slow_body_deadline": true,
+    "cancellation_before_dispatch_and_during_io": true,
+    "redirect_not_followed": true,
+    "invalid_json": true,
+    "invalid_utf8_cancels_body": true,
+    "overload_status": 529,
+    "retry_after": "1",
+    "response_limit": true
+  },
+  "csharp": {
+    "tls_verification": "AuthenticationException",
+    "slow_body_deadline": true,
+    "cancellation_token": true,
+    "redirect_not_followed": 307,
+    "invalid_json": true,
+    "overload_status": 529,
+    "retry_after": "1",
+    "response_limit": true
+  },
+  "rust": {
+    "tls_verification": "invalid peer certificate: CaUsedAsEndEntity",
+    "slow_body_deadline": true,
+    "dropped_future": true,
+    "redirect_not_followed": 307,
+    "invalid_json": true,
+    "overload_status": 529,
+    "retry_after": "1",
+    "response_limit": true,
+    "safe_error_debug": true,
+    "downstream_untagged_flatten_f64": true
+  },
+  "browser": {
+    "chromium_major": 152,
+    "native_and_injected_fetch": true,
+    "same_origin_proxy": true,
+    "cross_origin_cors_blocked": true,
+    "preabort_without_dispatch": true,
+    "response_limit": true
+  }
+}

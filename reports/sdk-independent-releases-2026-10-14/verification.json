@@ -1,0 +1,36 @@
+{
+  "status": "completed",
+  "version_source": "each SDK package manifest",
+  "supported_release_versions": "stable X.Y.Z",
+  "build_only_default": true,
+  "tag_selects_one_sdk": true,
+  "selected_sdk_and_tag_must_match": true,
+  "contract_version_independent": true,
+  "runtime_dependencies_added": false,
+  "oidc_build_publish_separation_preserved": true,
+  "immutable_artifact_ids_and_sha256_preserved": true,
+  "actionlint_all_workflows": "passed",
+  "python_3_11_helpers": "passed",
+  "python_osv_packages": 8,
+  "npm_osv_packages": 1,
+  "distribution_builds": [
+    "Python sdist/wheel",
+    "npm ESM/CommonJS",
+    "NuGet",
+    "Rust crate --no-verify"
+  ],
+  "artifact_hashes_verified": 5,
+  "review": {
+    "astra_xhigh": "completed, no material findings",
+    "opus55_xhigh": "completed, no blocking/security findings; operational documentation corrected",
+    "post_review_verification": "parent reviewed documentation and reran actionlint, manifest checks, git diff --check"
+  },
+  "unverified": [
+    "live GitHub Actions execution",
+    "GitHub environments/tag rules",
+    "registry permissions and OIDC exchange",
+    "actual publication and job rerun",
+    "automatic recovery of partial PyPI upload"
+  ],
+  "protected_actions_performed": []
+}

@@ -1,0 +1,24 @@
+{
+  "variants": [
+    {
+      "name": "whole",
+      "question_results": 6,
+      "differences": []
+    },
+    {
+      "name": "selected",
+      "question_results": 6,
+      "differences": []
+    },
+    {
+      "name": "positional_record",
+      "question_results": 6,
+      "differences": []
+    }
+  ],
+  "excluded_fields": [
+    "usage.latency_ms"
+  ],
+  "numeric_comparison": "IEEE-754 binary64 bits",
+  "total_question_results": 18
+}
