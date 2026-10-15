@@ -1,0 +1,38 @@
+{
+  "ASYNC": {
+    "exit_code": 1,
+    "errors": [
+      "CS0121"
+    ]
+  },
+  "TASK": {
+    "exit_code": 1,
+    "errors": [
+      "CS0619"
+    ]
+  },
+  "VALUETASK": {
+    "exit_code": 1,
+    "errors": [
+      "CS0619"
+    ]
+  },
+  "TASKVOID": {
+    "exit_code": 1,
+    "errors": [
+      "CS0619"
+    ]
+  },
+  "VALUETASKVOID": {
+    "exit_code": 1,
+    "errors": [
+      "CS0619"
+    ]
+  },
+  "ROGUE": {
+    "exit_code": 1,
+    "errors": [
+      "CS0239"
+    ]
+  }
+}

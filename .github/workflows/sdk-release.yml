@@ -1,0 +1,344 @@
+name: SDK release
+
+on:
+  push:
+    tags: ["sdk-python-v*", "sdk-typescript-v*", "sdk-csharp-v*", "sdk-rust-v*"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish from a matching SDK tag (otherwise build only)
+        type: boolean
+        default: false
+      sdk:
+        description: SDK to build (must match the SDK tag when publishing)
+        type: choice
+        required: true
+        options: [python, typescript, csharp, rust]
+        default: typescript
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sdk-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  metadata:
+    outputs:
+      sdk: ${{ steps.release.outputs.sdk }}
+      version: ${{ steps.release.outputs.version }}
+      publish: ${{ steps.release.outputs.publish }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.11"
+      - name: Select SDK and validate its manifest/lock and publishing tag
+        id: release
+        env:
+          WILL_PUBLISH: ${{ github.event_name == 'push' || inputs.publish }}
+          SELECTED_SDK: ${{ inputs.sdk }}
+        run: |
+          args=()
+          if [ -n "$SELECTED_SDK" ]; then
+            args+=(--sdk "$SELECTED_SDK")
+          fi
+          if [ "$WILL_PUBLISH" = true ]; then
+            [ "$GITHUB_REF_TYPE" = tag ] || { echo "SDK publication requires a tag"; exit 1; }
+            args+=(--tag "$GITHUB_REF_NAME")
+          fi
+          python tools/sdk/check-versions.py "${args[@]}" --github-output "$GITHUB_OUTPUT"
+          echo "publish=$WILL_PUBLISH" >> "$GITHUB_OUTPUT"
+      - name: Audit only the selected Python or npm dependency graph
+        if: steps.release.outputs.sdk == 'python' || steps.release.outputs.sdk == 'typescript'
+        env:
+          SELECTED_SDK: ${{ steps.release.outputs.sdk }}
+        run: python tools/sdk/audit-locks.py --sdk "$SELECTED_SDK"
+
+  build-python:
+    needs: metadata
+    if: needs.metadata.outputs.sdk == 'python'
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.11"
+      - name: Install only the hash-locked backend and build wheel from sdist
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: -r tools/sdk/requirements-build.txt
+          python -m compileall -q sdk/python/src
+          python tools/sdk/build-python.py
+      - name: Collect distributions and SHA-256
+        run: python3 tools/sdk/package-artifact.py python
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        id: upload
+        with:
+          name: sdk-python
+          if-no-files-found: error
+          path: sdk/python/artifact/
+
+  build-typescript:
+    needs: metadata
+    if: needs.metadata.outputs.sdk == 'typescript'
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: "24"
+      - name: Build npm distribution
+        working-directory: sdk/typescript
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm pack --pack-destination dist
+      - name: Collect distributions and SHA-256
+        run: python3 tools/sdk/package-artifact.py typescript
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        id: upload
+        with:
+          name: sdk-typescript
+          if-no-files-found: error
+          path: sdk/typescript/artifact/
+
+  build-csharp:
+    needs: metadata
+    if: needs.metadata.outputs.sdk == 'csharp'
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1
+        with:
+          dotnet-version: "10.0.401"
+      - name: Restore only mapped sources, then build and pack
+        run: |
+          dotnet restore sdk/csharp/examples/Decide/Decide.csproj --locked-mode --configfile sdk/csharp/nuget.config
+          dotnet build sdk/csharp/examples/Decide/Decide.csproj --no-restore --configuration Release -p:ContinuousIntegrationBuild=true
+          dotnet pack sdk/csharp/ITSOL.Basal.Client/ITSOL.Basal.Client.csproj --no-restore --configuration Release -p:ContinuousIntegrationBuild=true --output sdk/csharp/dist
+      - name: Collect distributions and SHA-256
+        run: python3 tools/sdk/package-artifact.py csharp
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        id: upload
+        with:
+          name: sdk-csharp
+          if-no-files-found: error
+          path: sdk/csharp/artifact/
+
+  build-rust:
+    needs: metadata
+    if: needs.metadata.outputs.sdk == 'rust'
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067
+        with:
+          toolchain: "1.95.0"
+          components: rustfmt, clippy
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad
+        with:
+          tool: cargo-deny@0.19.8
+      - name: Compile, verify and audit without publishing permissions
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: |
+          cargo fmt --all --check
+          cargo clippy --locked -p basal-client --all-targets -- -D warnings
+          cargo doc --locked -p basal-client --no-deps --document-private-items
+          cargo package --locked -p basal-client
+          sdk_version=$(python3 tools/sdk/check-versions.py --sdk rust --version-only)
+          cargo deny --manifest-path "target/package/basal-client-$sdk_version/Cargo.toml" --locked check --config sdk/rust/deny.toml --hide-inclusion-graph
+      - name: Collect distributions and SHA-256
+        run: python3 tools/sdk/package-artifact.py rust
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        id: upload
+        with:
+          name: sdk-rust
+          if-no-files-found: error
+          path: sdk/rust/artifact/
+
+  npm:
+    needs: [metadata, build-typescript]
+    if: needs.metadata.outputs.publish == 'true' && needs.metadata.outputs.sdk == 'typescript'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: sdk-npm
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Require the producing job artifact ID
+        env:
+          SDK_ARTIFACT_ID: ${{ needs.build-typescript.outputs.artifact-id }}
+        run: '[[ "$SDK_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]'
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          artifact-ids: ${{ needs.build-typescript.outputs.artifact-id }}
+          path: sdk-artifact
+          merge-multiple: true
+      - name: Verify downloaded artifact
+        run: python3 tools/sdk/verify-artifact.py sdk-artifact
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+      - name: Require npm OIDC support and publish the existing tarball
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          npm_version=$(npm --version)
+          NPM_VERSION="$npm_version" node -e 'const v=process.env.NPM_VERSION.split(".").map(Number); if(v[0]<11 || (v[0]===11 && (v[1]<5 || (v[1]===5 && v[2]<1)))) process.exit(1); console.log("npm " + process.env.NPM_VERSION)'
+          npm publish sdk-artifact/packages/*.tgz --access public --ignore-scripts --provenance
+
+  pypi:
+    needs: [metadata, build-python]
+    if: needs.metadata.outputs.publish == 'true' && needs.metadata.outputs.sdk == 'python'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: sdk-pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Require the producing job artifact ID
+        env:
+          SDK_ARTIFACT_ID: ${{ needs.build-python.outputs.artifact-id }}
+        run: '[[ "$SDK_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]'
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          artifact-ids: ${{ needs.build-python.outputs.artifact-id }}
+          path: sdk-artifact
+          merge-multiple: true
+      - name: Verify downloaded artifact
+        run: python3 tools/sdk/verify-artifact.py sdk-artifact
+      - name: Publish verified distributions with the immutable PyPA publisher image
+        # PyPA gh-action-pypi-publish v1.14.2, pinned OCI manifest digest.
+        uses: docker://ghcr.io/pypa/gh-action-pypi-publish@sha256:5c2f7030fbef8308068eb4cc9080fd3c9e157ccf6d511924d69f8f4b23dc95c1
+        env:
+          INPUT_USER: __token__
+          INPUT_PASSWORD: ""
+          INPUT_REPOSITORY_URL: https://upload.pypi.org/legacy/
+          INPUT_PACKAGES_DIR: sdk-artifact/packages
+          INPUT_VERIFY_METADATA: "true"
+          INPUT_SKIP_EXISTING: "false"
+          INPUT_ATTESTATIONS: "true"
+          INPUT_VERBOSE: "false"
+          INPUT_PRINT_HASH: "true"
+          DEBUG: ""
+
+  nuget:
+    needs: [metadata, build-csharp]
+    if: needs.metadata.outputs.publish == 'true' && needs.metadata.outputs.sdk == 'csharp'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: sdk-nuget
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Require the producing job artifact ID
+        env:
+          SDK_ARTIFACT_ID: ${{ needs.build-csharp.outputs.artifact-id }}
+        run: '[[ "$SDK_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]'
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          artifact-ids: ${{ needs.build-csharp.outputs.artifact-id }}
+          path: sdk-artifact
+          merge-multiple: true
+      - name: Verify downloaded artifact
+        run: python3 tools/sdk/verify-artifact.py sdk-artifact
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1
+        with:
+          dotnet-version: "10.0.401"
+      - uses: NuGet/login@ebc737b6fc418a6ca0073cf116ec8dc156d8b81e
+        id: login
+        with:
+          user: ${{ secrets.NUGET_USER }}
+      - name: Publish the verified NuGet archive
+        env:
+          NUGET_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY }}
+        run: dotnet nuget push "sdk-artifact/packages/*.nupkg" --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json
+
+  crates:
+    needs: [metadata, build-rust]
+    if: needs.metadata.outputs.publish == 'true' && needs.metadata.outputs.sdk == 'rust'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: sdk-crates
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Require the producing job artifact ID
+        env:
+          SDK_ARTIFACT_ID: ${{ needs.build-rust.outputs.artifact-id }}
+        run: '[[ "$SDK_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]'
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          artifact-ids: ${{ needs.build-rust.outputs.artifact-id }}
+          path: sdk-artifact
+          merge-multiple: true
+      - name: Verify downloaded artifact
+        run: python3 tools/sdk/verify-artifact.py sdk-artifact
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067
+        with:
+          toolchain: "1.95.0"
+      # No compilation/procedural macros/build scripts anywhere in this OIDC-enabled job.
+      - name: Repackage without executing dependencies and compare to the verified artifact
+        run: |
+          cargo package --locked --no-verify -p basal-client
+          sdk_version=$(python3 tools/sdk/check-versions.py --sdk rust --version-only)
+          cmp "target/package/basal-client-$sdk_version.crate" "sdk-artifact/packages/basal-client-$sdk_version.crate"
+      - name: Select bootstrap authentication (without exposing the token to other steps)
+        id: bootstrap
+        env:
+          BOOTSTRAP_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -n "$BOOTSTRAP_TOKEN" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: rust-lang/crates-io-auth-action@9c067fc5d5c254b33978fed918cb50c032549d0e
+        if: steps.bootstrap.outputs.present == 'false'
+        id: auth
+      - name: Publish without executing dependency code
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token || secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --locked --no-verify -p basal-client

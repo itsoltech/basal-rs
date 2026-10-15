@@ -6,6 +6,12 @@ __pycache__/
 target/
 .cache/
 target-clippy/
+sdk/**/dist/
+sdk/**/node_modules/
+sdk/**/*.tgz
+sdk/**/bin/
+sdk/**/obj/
+sdk/**/artifact/
 *.nsys-rep
 *.sqlite
 tools/bench/mixed.jsonl

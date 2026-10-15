@@ -442,6 +442,7 @@ payloady własnej aplikacji. Scenariusze, dane i pola JSON:
 | `tools/reference` | eksport referencji z upstream, zestawy żądań |
 | `tools/bench` | pomiary A/B i obciążeniowe, generatory ruchu |
 | `contracts/typesafe` | migawka OpenAPI TypeSafe |
+| `contracts/basal`, `sdk/` | natywny kontrakt `/v1/basal` i SDK Python, TS/JS, C#, Rust |
 | `reports` | pomiary zgodności i wydajności z danymi |
 
 ## Dokumentacja
@@ -450,6 +451,7 @@ payloady własnej aplikacji. Scenariusze, dane i pola JSON:
 - [Architektura](docs/ARCHITECTURE.md): potok żądania, pakowanie, kernele, harmonogram serwera.
 - [Zgodność API](docs/SYSTEM_ONE.md): TypeSafe System One, endpoint upstream, rozszerzenia basal-1.5.
 - [Klient do automatyzacji](docs/CLIENT.md): stdin, JSONL, pytania w CLI, lokalny model i przykłady Bash.
+- [SDK natywnego Basala](docs/SDK.md): paczki Python, npm, NuGet i crates.io dla `/v1/basal`, przykłady i publikacja.
 - [Wydajność](docs/PERFORMANCE.md): karty NVIDIA, Apple Silicon, limit mocy, długie dokumenty, konfiguracja.
 - [Pomiary](docs/BENCHMARKS.md): metodyka, narzędzia, odtwarzanie wyników.
 - [Raporty](reports/README.md).

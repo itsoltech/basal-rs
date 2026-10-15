@@ -1,0 +1,585 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Native Basal HTTP API for basal-rs SDKs",
+    "version": "0.1.0",
+    "description": "Maintained description of canonical native requests, based on the basal-rs handlers, parser and answer builder. Additional native fields are allowed. This file is not generated from TypeSafe System One. Native choice/score accepts 2–10 options. Criterion order is significant. Evidence offsets count Unicode characters. The contract description version is independent of SDK package and engine versions.",
+    "license": {
+      "name": "Apache-2.0"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8000"
+    }
+  ],
+  "paths": {
+    "/v1/basal": {
+      "post": {
+        "operationId": "decide",
+        "summary": "Evaluate independent typed questions over one state",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DecisionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Native answers. confidence=max(p) for choice/noul/score/act; multi uses set_confidence.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DecisionResponse"
+                }
+              }
+            },
+            "headers": {
+              "x-basal-queue-ms": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "x-basal-compute-ms": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "x-basal-batch-requests": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Malformed JSON, invalid native request, unknown model or inference failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "529": {
+            "description": "Server overloaded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds or HTTP date. SDKs expose the raw value and do not automatically retry.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Inference worker stopped.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "HTTP request body exceeds the server limit."
+          }
+        }
+      }
+    },
+    "/v1/models": {
+      "get": {
+        "operationId": "models",
+        "summary": "Discover exact served model names",
+        "responses": {
+          "200": {
+            "description": "Model metadata.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Question": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "description": "Canonical types: choice, noul, score, multi, act. Omitted or unknown types are read as choice by the native parser."
+          },
+          "instructions": {},
+          "criteria": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": {}
+              },
+              {
+                "type": "array",
+                "items": {}
+              }
+            ]
+          },
+          "levels": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": {}
+              },
+              {
+                "type": "array",
+                "items": {}
+              }
+            ]
+          },
+          "option_keys": {
+            "type": "string",
+            "enum": [
+              "show",
+              "hide"
+            ]
+          },
+          "evidence": {
+            "type": "boolean"
+          },
+          "threshold": {
+            "type": "number"
+          },
+          "min": {
+            "type": "number"
+          },
+          "max": {
+            "type": "number"
+          },
+          "base": {
+            "type": "string",
+            "enum": [
+              "noul",
+              "choice",
+              "score"
+            ]
+          },
+          "costs": {
+            "type": "object",
+            "description": "Full action/outcome cost matrix or short wrong/defer form."
+          },
+          "defer_action": {
+            "type": "string"
+          },
+          "max_error": {
+            "type": "number"
+          }
+        },
+        "additionalProperties": true
+      },
+      "DecisionRequest": {
+        "type": "object",
+        "properties": {
+          "state": {
+            "not": {
+              "type": "null"
+            },
+            "description": "Native state rendering is done by the server; do not pre-stringify structured state."
+          },
+          "questions": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/Question"
+            },
+            "minProperties": 1
+          },
+          "model": {
+            "type": "string",
+            "description": "basal-rs routing extension. Omitted: server default. The original upstream server ignores this field."
+          },
+          "facts": {
+            "type": "string",
+            "enum": [
+              "off",
+              "auto"
+            ]
+          }
+        },
+        "required": [
+          "state",
+          "questions"
+        ],
+        "additionalProperties": true
+      },
+      "EvidenceSpan": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "start": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "end": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "probability": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "text",
+          "start",
+          "end",
+          "probability"
+        ],
+        "additionalProperties": true
+      },
+      "Usage": {
+        "type": "object",
+        "properties": {
+          "input_tokens": {
+            "type": "integer"
+          },
+          "output_tokens": {
+            "type": "integer"
+          },
+          "questions": {
+            "type": "integer"
+          },
+          "branches": {
+            "type": "integer"
+          },
+          "latency_ms": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "input_tokens",
+          "output_tokens"
+        ],
+        "additionalProperties": true
+      },
+      "ModelMetadata": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "release_date": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string"
+          },
+          "early_exit": {
+            "type": "array",
+            "items": {}
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": true
+      },
+      "ModelsResponse": {
+        "type": "object",
+        "properties": {
+          "models": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModelMetadata"
+            }
+          }
+        },
+        "required": [
+          "models"
+        ],
+        "additionalProperties": true
+      },
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "detail": {}
+        },
+        "required": [
+          "error"
+        ],
+        "additionalProperties": true
+      },
+      "ChoiceAnswer": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "const": "choice"
+          },
+          "probabilities": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "number"
+            }
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EvidenceSpan"
+            }
+          },
+          "choice": {
+            "type": "string"
+          },
+          "confidence": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "type",
+          "probabilities",
+          "choice",
+          "confidence"
+        ],
+        "additionalProperties": true
+      },
+      "NoulAnswer": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "const": "noul"
+          },
+          "probabilities": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "number"
+            }
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EvidenceSpan"
+            }
+          },
+          "noul": {
+            "type": "number"
+          },
+          "confidence": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "type",
+          "probabilities",
+          "noul",
+          "confidence"
+        ],
+        "additionalProperties": true
+      },
+      "ScoreAnswer": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "const": "score"
+          },
+          "probabilities": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "number"
+            }
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EvidenceSpan"
+            }
+          },
+          "score": {
+            "type": "number"
+          },
+          "legend": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "confidence": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "type",
+          "probabilities",
+          "score",
+          "legend",
+          "confidence"
+        ],
+        "additionalProperties": true
+      },
+      "MultiAnswer": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "const": "multi"
+          },
+          "probabilities": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "number"
+            }
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EvidenceSpan"
+            }
+          },
+          "selected": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "threshold": {
+            "type": "number"
+          },
+          "set_confidence": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "type",
+          "probabilities",
+          "selected",
+          "threshold",
+          "set_confidence"
+        ],
+        "additionalProperties": true
+      },
+      "ActAnswer": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "const": "act"
+          },
+          "probabilities": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "number"
+            }
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EvidenceSpan"
+            }
+          },
+          "action": {
+            "type": "string"
+          },
+          "answer": {
+            "type": "string"
+          },
+          "confidence": {
+            "type": "number"
+          },
+          "expected_costs": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "number"
+            }
+          },
+          "calibration": {
+            "type": "string",
+            "enum": [
+              "validated",
+              "unvalidated"
+            ]
+          },
+          "refused": {
+            "type": "string"
+          },
+          "max_error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "probabilities",
+          "action",
+          "answer",
+          "confidence",
+          "expected_costs",
+          "calibration"
+        ],
+        "additionalProperties": true
+      },
+      "Answer": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ChoiceAnswer"
+          },
+          {
+            "$ref": "#/components/schemas/NoulAnswer"
+          },
+          {
+            "$ref": "#/components/schemas/ScoreAnswer"
+          },
+          {
+            "$ref": "#/components/schemas/MultiAnswer"
+          },
+          {
+            "$ref": "#/components/schemas/ActAnswer"
+          }
+        ],
+        "discriminator": {
+          "propertyName": "type"
+        }
+      },
+      "DecisionResponse": {
+        "type": "object",
+        "properties": {
+          "model": {
+            "type": "string"
+          },
+          "answers": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/Answer"
+            }
+          },
+          "usage": {
+            "$ref": "#/components/schemas/Usage"
+          }
+        },
+        "required": [
+          "model",
+          "answers",
+          "usage"
+        ],
+        "additionalProperties": true
+      }
+    }
+  }
+}

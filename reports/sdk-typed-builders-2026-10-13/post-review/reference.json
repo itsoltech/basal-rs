@@ -1,0 +1,45 @@
+{
+  "model": "basal-1.5-mini",
+  "answers": {
+    "paid": {
+      "type": "noul",
+      "noul": 0.9923854768890686,
+      "probabilities": {
+        "true": 0.9923854768890686,
+        "false": 0.00761452311093125
+      },
+      "confidence": 0.9923854768890686,
+      "evidence": [
+        {
+          "text": "Paid today",
+          "start": 0,
+          "end": 10,
+          "probability": 0.5467116982459225
+        }
+      ]
+    },
+    "decision": {
+      "type": "act",
+      "action": "approve",
+      "expected_costs": {
+        "approve": 0.022844,
+        "reject": 4.961927,
+        "defer": 1.0
+      },
+      "answer": "true",
+      "probabilities": {
+        "true": 0.9923854768890686,
+        "false": 0.00761452311093125
+      },
+      "confidence": 0.9923854768890686,
+      "max_error": "no certified threshold for this target",
+      "calibration": "validated"
+    }
+  },
+  "usage": {
+    "input_tokens": 532,
+    "output_tokens": 0,
+    "questions": 2,
+    "branches": 2
+  }
+}

@@ -1,0 +1,155 @@
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using System.Text.Json.Serialization;
+
+namespace ITSOL.Basal;
+
+/// <summary>Native Basal question. The server validates fields and model capabilities.</summary>
+public sealed class Question
+{
+    /// <summary>choice (default), noul, score, multi or act.</summary>
+    [JsonPropertyName("type")] public string? Type { get; init; }
+    /// <summary>Instruction text or another native JSON value.</summary>
+    [JsonPropertyName("instructions")] public JsonNode? Instructions { get; init; }
+    /// <summary>Ordered criterion object or array. Preserve insertion order.</summary>
+    [JsonPropertyName("criteria")] public JsonNode? Criteria { get; init; }
+    /// <summary>Native alias for score criteria.</summary>
+    [JsonPropertyName("levels")] public JsonNode? Levels { get; init; }
+    /// <summary>show or hide.</summary>
+    [JsonPropertyName("option_keys")] public string? OptionKeys { get; init; }
+    /// <summary>Request supporting spans (unsupported for multi).</summary>
+    [JsonPropertyName("evidence")] public bool? Evidence { get; init; }
+    /// <summary>Multi label selection threshold.</summary>
+    [JsonPropertyName("threshold")] public double? Threshold { get; init; }
+    /// <summary>Minimum selected labels.</summary>
+    [JsonPropertyName("min")] public int? Min { get; init; }
+    /// <summary>Maximum selected labels.</summary>
+    [JsonPropertyName("max")] public int? Max { get; init; }
+    /// <summary>Act base: noul, choice or score.</summary>
+    [JsonPropertyName("base")] public string? Base { get; init; }
+    /// <summary>Act cost matrix or short form with wrong/defer costs.</summary>
+    [JsonPropertyName("costs")] public JsonNode? Costs { get; init; }
+    /// <summary>Act defer action name.</summary>
+    [JsonPropertyName("defer_action")] public string? DeferAction { get; init; }
+    /// <summary>Act certified error target, requiring model calibration.</summary>
+    [JsonPropertyName("max_error")] public double? MaxError { get; init; }
+    /// <summary>Additional native fields. Do not repeat named fields above.</summary>
+    [JsonExtensionData] public Dictionary<string, JsonElement>? Extra { get; init; }
+}
+
+/// <summary>Request to POST /v1/basal.</summary>
+public sealed class DecisionRequest
+{
+    /// <summary>Non-null native JSON state.</summary>
+    [JsonPropertyName("state")] public required JsonNode State { get; init; }
+    /// <summary>Question IDs mapped to native questions.</summary>
+    [JsonPropertyName("questions")] public required Dictionary<string, Question> Questions { get; init; }
+    /// <summary>Exact basal-rs model name; omitted uses the server default.</summary>
+    [JsonPropertyName("model")] public string? Model { get; init; }
+    /// <summary>off or auto (basal-1.5).</summary>
+    [JsonPropertyName("facts")] public string? Facts { get; init; }
+    /// <summary>Additional native fields. Do not repeat named fields above.</summary>
+    [JsonExtensionData] public Dictionary<string, JsonElement>? Extra { get; init; }
+}
+
+/// <summary>Supporting span with offsets in Unicode characters, not UTF-16 code units.</summary>
+public sealed class EvidenceSpan
+{
+    /// <summary>Verbatim span text.</summary>
+    [JsonPropertyName("text")] public required string Text { get; init; }
+    /// <summary>Inclusive start.</summary>
+    [JsonPropertyName("start")] public required int Start { get; init; }
+    /// <summary>Exclusive end.</summary>
+    [JsonPropertyName("end")] public required int End { get; init; }
+    /// <summary>Span probability.</summary>
+    [JsonPropertyName("probability")] public required double Probability { get; init; }
+}
+
+/// <summary>Native answer; fields for other question types are null.</summary>
+public sealed class Answer
+{
+    /// <summary>choice, noul, score, multi or act.</summary>
+    [JsonPropertyName("type")] public required string Type { get; init; }
+    /// <summary>Native probabilities; independent P(yes) values for multi.</summary>
+    [JsonPropertyName("probabilities")] public required Dictionary<string, double> Probabilities { get; init; }
+    /// <summary>Max probability for choice/noul/score/act; multi uses set_confidence.</summary>
+    [JsonPropertyName("confidence")] public double? Confidence { get; init; }
+    /// <summary>Chosen choice key.</summary>
+    [JsonPropertyName("choice")] public string? Choice { get; init; }
+    /// <summary>P(yes) for noul.</summary>
+    [JsonPropertyName("noul")] public double? Noul { get; init; }
+    /// <summary>Weighted zero-based score.</summary>
+    [JsonPropertyName("score")] public double? Score { get; init; }
+    /// <summary>Displayed level texts for score.</summary>
+    [JsonPropertyName("legend")] public Dictionary<string, string>? Legend { get; init; }
+    /// <summary>Selected multi keys.</summary>
+    [JsonPropertyName("selected")] public List<string>? Selected { get; init; }
+    /// <summary>Multi threshold.</summary>
+    [JsonPropertyName("threshold")] public double? Threshold { get; init; }
+    /// <summary>Probability of exactly the selected multi set.</summary>
+    [JsonPropertyName("set_confidence")] public double? SetConfidence { get; init; }
+    /// <summary>Chosen act action.</summary>
+    [JsonPropertyName("action")] public string? Action { get; init; }
+    /// <summary>Most probable act outcome.</summary>
+    [JsonPropertyName("answer")] public string? Outcome { get; init; }
+    /// <summary>Expected cost by act action.</summary>
+    [JsonPropertyName("expected_costs")] public Dictionary<string, double>? ExpectedCosts { get; init; }
+    /// <summary>validated or unvalidated for act.</summary>
+    [JsonPropertyName("calibration")] public string? Calibration { get; init; }
+    /// <summary>Refused automatic act action.</summary>
+    [JsonPropertyName("refused")] public string? Refused { get; init; }
+    /// <summary>Message when the requested certified threshold is unavailable.</summary>
+    [JsonPropertyName("max_error")] public string? MaxError { get; init; }
+    /// <summary>Optional supporting spans.</summary>
+    [JsonPropertyName("evidence")] public List<EvidenceSpan>? Evidence { get; init; }
+    /// <summary>Future answer fields.</summary>
+    [JsonExtensionData] public Dictionary<string, JsonElement>? Extra { get; init; }
+}
+
+/// <summary>Server-reported usage.</summary>
+public sealed class Usage
+{
+    /// <summary>Prompt tokens for option orders.</summary>
+    [JsonPropertyName("input_tokens")] public required long InputTokens { get; init; }
+    /// <summary>Zero: the model does not generate text.</summary>
+    [JsonPropertyName("output_tokens")] public required long OutputTokens { get; init; }
+    /// <summary>Optional question count.</summary>
+    [JsonPropertyName("questions")] public long? Questions { get; init; }
+    /// <summary>Optional branch count.</summary>
+    [JsonPropertyName("branches")] public long? Branches { get; init; }
+    /// <summary>Server-side latency in milliseconds.</summary>
+    [JsonPropertyName("latency_ms")] public double? LatencyMs { get; init; }
+    /// <summary>Future usage fields.</summary>
+    [JsonExtensionData] public Dictionary<string, JsonElement>? Extra { get; init; }
+}
+
+/// <summary>Native inference result.</summary>
+public sealed class DecisionResponse
+{
+    /// <summary>Model actually used.</summary>
+    [JsonPropertyName("model")] public required string Model { get; init; }
+    /// <summary>Native answers keyed by question ID.</summary>
+    [JsonPropertyName("answers")] public required Dictionary<string, Answer> Answers { get; init; }
+    /// <summary>Server-reported usage.</summary>
+    [JsonPropertyName("usage")] public required Usage Usage { get; init; }
+    /// <summary>Future envelope fields.</summary>
+    [JsonExtensionData] public Dictionary<string, JsonElement>? Extra { get; init; }
+}
+
+/// <summary>Model discovery entry.</summary>
+public sealed class ModelMetadata
+{
+    /// <summary>Exact model name.</summary>
+    [JsonPropertyName("name")] public required string Name { get; init; }
+    /// <summary>Native metadata.</summary>
+    [JsonExtensionData] public Dictionary<string, JsonElement>? Extra { get; init; }
+}
+
+/// <summary>Model discovery result.</summary>
+public sealed class ModelsResponse
+{
+    /// <summary>Served models.</summary>
+    [JsonPropertyName("models")] public required List<ModelMetadata> Models { get; init; }
+    /// <summary>Future discovery fields.</summary>
+    [JsonExtensionData] public Dictionary<string, JsonElement>? Extra { get; init; }
+}

@@ -1,0 +1,47 @@
+{
+  "actual_metadata_shell_cases": [
+    {
+      "sdk": "python",
+      "mode": "tag-publish-metadata",
+      "pass": true
+    },
+    {
+      "sdk": "python",
+      "mode": "manual-build-only",
+      "pass": true
+    },
+    {
+      "sdk": "typescript",
+      "mode": "tag-publish-metadata",
+      "pass": true
+    },
+    {
+      "sdk": "typescript",
+      "mode": "manual-build-only",
+      "pass": true
+    },
+    {
+      "sdk": "csharp",
+      "mode": "tag-publish-metadata",
+      "pass": true
+    },
+    {
+      "sdk": "csharp",
+      "mode": "manual-build-only",
+      "pass": true
+    },
+    {
+      "sdk": "rust",
+      "mode": "tag-publish-metadata",
+      "pass": true
+    },
+    {
+      "sdk": "rust",
+      "mode": "manual-build-only",
+      "pass": true
+    }
+  ],
+  "invalid_publish_metadata_rejected_before_outputs": 4,
+  "each_publisher_depends_only_on_selected_build": true,
+  "oidc_only_in_four_publish_jobs": true
+}

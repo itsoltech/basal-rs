@@ -140,7 +140,7 @@ impl ServeConfig {
     }
 
     fn parse(text: &str) -> Result<Self> {
-        let c: Self = serde_yaml::from_str(text)?;
+        let c: Self = serde_saphyr::from_str(text)?;
         ensure!(!c.models.is_empty(), "no models");
         Ok(c)
     }

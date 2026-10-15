@@ -18,7 +18,7 @@ path = "src/main.rs"
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_yaml = "0.9"
+serde-saphyr = { version = "2", default-features = false, features = ["deserialize"] }
 hf-hub = { version = "1", features = ["blocking", "rustls-tls"] }
 clap.workspace = true
 tokio = { workspace = true, features = ["fs", "io-std", "io-util", "time"] }
