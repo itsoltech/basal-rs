@@ -1,0 +1,57 @@
+[
+  {
+    "dockerfile": "docker/Dockerfile",
+    "stage": "planner",
+    "workspace_members": [
+      "basal-cli",
+      "basal-client",
+      "basal-core",
+      "basal-gpu"
+    ],
+    "locked_offline_metadata": "pass"
+  },
+  {
+    "dockerfile": "docker/Dockerfile",
+    "stage": "build",
+    "workspace_members": [
+      "basal-cli",
+      "basal-client",
+      "basal-core",
+      "basal-gpu"
+    ],
+    "locked_offline_metadata": "pass"
+  },
+  {
+    "dockerfile": "tools/release/linux.Dockerfile",
+    "stage": "planner",
+    "workspace_members": [
+      "basal-cli",
+      "basal-client",
+      "basal-core",
+      "basal-gpu"
+    ],
+    "locked_offline_metadata": "pass"
+  },
+  {
+    "dockerfile": "tools/release/linux.Dockerfile",
+    "stage": "build",
+    "workspace_members": [
+      "basal-cli",
+      "basal-client",
+      "basal-core",
+      "basal-gpu"
+    ],
+    "locked_offline_metadata": "pass"
+  },
+  {
+    "dockerfile": "tools/release/linux.Dockerfile",
+    "stage": "dev-build",
+    "workspace_members": [
+      "basal-cli",
+      "basal-client",
+      "basal-core",
+      "basal-gpu"
+    ],
+    "locked_offline_metadata": "pass"
+  }
+]

@@ -20,6 +20,7 @@ WORKDIR /src
 FROM chef AS planner
 COPY Cargo.toml Cargo.lock rustfmt.toml ./
 COPY crates crates
+COPY sdk/rust sdk/rust
 RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS build
@@ -31,6 +32,7 @@ RUN cargo chef cook --profile dist --recipe-path recipe.json \
  && cargo chef cook --profile dist --features basal-cli/cuda --target-dir target/cuda --recipe-path recipe.json
 COPY Cargo.toml Cargo.lock rustfmt.toml ./
 COPY crates crates
+COPY sdk/rust sdk/rust
 ARG BASAL_GIT_SHA=unknown
 ENV BASAL_GIT_SHA=${BASAL_GIT_SHA}
 RUN cargo build --profile dist --locked \
@@ -56,6 +58,7 @@ COPY --from=planner /src/recipe.json recipe.json
 RUN cargo chef cook --release --features basal-cli/cuda --recipe-path recipe.json
 COPY Cargo.toml Cargo.lock rustfmt.toml ./
 COPY crates crates
+COPY sdk/rust sdk/rust
 ARG BASAL_GIT_SHA=unknown
 ENV BASAL_GIT_SHA=${BASAL_GIT_SHA}
 RUN cargo build --release --locked --features basal-cli/cuda && mkdir -p /out && cp target/release/basal /out/basal-cuda
