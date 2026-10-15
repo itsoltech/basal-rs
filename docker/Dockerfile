@@ -31,6 +31,7 @@ WORKDIR /src
 FROM chef AS planner
 COPY Cargo.toml Cargo.lock rustfmt.toml ./
 COPY crates crates
+COPY sdk/rust sdk/rust
 RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS build
@@ -41,6 +42,7 @@ COPY --from=planner /src/recipe.json recipe.json
 RUN cargo chef cook --profile dist --features basal-cli/cuda --recipe-path recipe.json
 COPY Cargo.toml Cargo.lock rustfmt.toml ./
 COPY crates crates
+COPY sdk/rust sdk/rust
 # commit shown by `basal --version` (the build context has no .git); after the dependencies, which it does not change
 ARG BASAL_GIT_SHA=unknown
 ENV BASAL_GIT_SHA=${BASAL_GIT_SHA}

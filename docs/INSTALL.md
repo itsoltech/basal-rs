@@ -150,6 +150,10 @@ i tabelami GEMM), potem `docker image rm ghcr.io/itsoltech/basal-rs:<tag>`.
    `itsoltech/homebrew-tap` (sekret `HOMEBREW_TAP_TOKEN`). Bez udanego builda
    obu paczek nic nie jest publikowane. Obraz wydania można opublikować
    ponownie: workflow `docker`, `workflow_dispatch` z tagiem.
+   Publikacja GitHub Release z tagiem `v*` również uruchamia ten proces.
+   Wydania SDK `sdk-*-v*` pomijają wszystkie joby tego workflow przed
+   przydzieleniem runnerów; samo zdarzenie `release` nadal pojawia się w Actions.
+   Niezależne wydania SDK opisuje [SDK.md](SDK.md).
 3. Bez publikacji: `workflow_dispatch` workflow `release` buduje paczki jako
    artefakty; lokalnie `tools/release/package-macos.sh`,
    `tools/release/package-linux.sh`, a `install.sh` i `basal update`
