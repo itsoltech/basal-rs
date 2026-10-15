@@ -1,0 +1,7 @@
+{
+  "status": "passed",
+  "http_requests": 7,
+  "request_order": "preserved",
+  "raw_identifier_wire_key": "type",
+  "inference": "not executed; synthetic responses only"
+}

@@ -1,4 +1,4 @@
-use basal_client::{choice, noul, Client, Questions};
+use basal_client::{choice, noul, questions, Client};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -8,8 +8,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &[("returns", "Zwroty"), ("support", "Wsparcie techniczne")],
     )?;
     let urgent = noul("Czy sprawa jest pilna?")?;
-    let questions = Questions::new().with("department", &department)?.with("urgent", &urgent)?;
+    let questions = questions! {
+        department: &department,
+        second_department: &department,
+        urgent: &urgent,
+    }?;
     let response = client.decide("Klient prosi o zwrot pieniędzy za uszkodzony telefon.", &questions).await?;
-    println!("Dział: {}, P(tak): {}", response.answer(&department)?.choice, response.answer(&urgent)?.noul);
+    let answers = response.answers()?;
+    println!("Dział: {}, P(tak): {}", answers.department.choice, answers.urgent.noul);
+    println!("Drugie pytanie: {}", answers.second_department.choice);
     Ok(())
 }

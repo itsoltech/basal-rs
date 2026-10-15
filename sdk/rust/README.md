@@ -12,7 +12,7 @@ cargo add tokio --features macros,rt-multi-thread
 ```
 
 ```rust,no_run
-use basal_client::{choice, noul, Client, Questions};
+use basal_client::{choice, noul, questions, Client};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -22,9 +22,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &[("returns", "Zwroty"), ("support", "Wsparcie techniczne")],
     )?;
     let urgent = noul("Czy sprawa jest pilna?")?;
-    let questions = Questions::new().with("department", &department)?.with("urgent", &urgent)?;
+    let questions = questions! {
+        department: &department,
+        second_department: &department,
+        urgent: &urgent,
+    }?;
     let response = client.decide("Klient prosi o zwrot pieniędzy za uszkodzony telefon.", &questions).await?;
-    println!("Dział: {}, P(tak): {}", response.answer(&department)?.choice, response.answer(&urgent)?.noul);
+    let answers = response.answers()?;
+    println!("Dział: {}, P(tak): {}", answers.department.choice, answers.urgent.noul);
+    println!("Drugie pytanie: {}", answers.second_department.choice);
     Ok(())
 }
 ```
@@ -58,12 +64,40 @@ Evidence offsets count Unicode characters, not UTF-8 bytes. The SDK does not exe
 
 Factories return distinct `QuestionSpec<...>` types. Default factories take only their required
 arguments; `choice_with_options`, `noul_with_options`, `score_with_options`, `multi_with_options`,
-`act_with_options` accept type-specific options. The ordered
-`Questions` builder preserves those question identities. `response.answer(&question)?` returns a
-checked view with required fields; `?` propagates an invalid/unrelated question error and does not
-unwrap nullable fields. Views borrow the response without copying probability maps. A clone of a
-question retains its identity. Use `decide_with_options` for model/facts, `response.raw()` for the
-native DTOs, and `decide_request(&request)` for the full raw request (Rust has no method overloading).
+`act_with_options` accept type-specific options.
+
+Starting with **0.2.0**, `questions!` infers the answer kind for each named field. Field names become
+request keys. A definition or its clone can appear under several keys; each field reads its own
+answer. Expressions are evaluated once. `response.answers()?` returns borrowed views with required
+fields, so `answers.department.choice` is `&str` and `answers.urgent.noul` is `f64`, without optional
+fields or casts. Choice keys remain strings in Rust; the SDK validates them against the requested
+criteria at runtime. `?` propagates a validation error, rather than unwrapping a nullable field.
+
+For keys loaded dynamically, use the ordered map builder:
+
+```rust,ignore
+let questions = Questions::new()
+    .with("department", &department)?
+    .with("second_department", &department)?;
+let response = client.decide(state, &questions).await?;
+println!("{}", response.choice("department")?.choice);
+println!("{}", response.choice("second_department")?.choice);
+```
+
+Import `basal_client::Questions` for this variant. `response.answer("department")?` returns the
+`AnswerResult` enum; match its variants for heterogeneous dynamic keys. The `choice`, `noul`,
+`score`, `multi` and `act` accessors return checked views by key and reject a different answer kind.
+`response.answers()?` on a dynamic map returns an ordered map of these enum variants. Unknown keys
+are errors, including extra answers that were not requested. Duplicate request keys are rejected.
+
+**Migrating from 0.1.0:** replace `response.answer(&question)?` with the named fields from
+`questions!`, or a keyed accessor such as `response.choice("department")?`. Question object identity
+no longer determines which answer is returned. This is a breaking API change; other SDK package
+versions are independent.
+
+Views borrow the response without copying probability maps. Use `decide_with_options` for
+model/facts, `response.raw()` for native DTOs, and `decide_request(&request)` for the full raw request
+(Rust has no method overloading).
 
 
 [Full documentation and publication setup](https://github.com/itsoltech/basal-rs/blob/main/docs/SDK.md).
