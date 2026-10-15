@@ -11,6 +11,7 @@ Metodyka: [docs/BENCHMARKS.md](../docs/BENCHMARKS.md).
 
 | Katalog | Zawartość |
 |---|---|
+| [perf-basal2-fivegpu-2026-10-14](perf-basal2-fivegpu-2026-10-14/README.md) | mini/4.5B/max 2.0 na pięciu GPU NVIDIA: HTTP 1/8/32, energia, ruch mieszany i zgodność z FP32; FAIL powtarzalności upstream i przerwane sesje zachowane |
 | [upstream-2.0-refactor-2026-10-14](upstream-2.0-refactor-2026-10-14/README.md) | review Opus 5.5, precyzja nieznanych repozytoriów, wspólne serializery 529/metadanych i bitowe A/B Intel |
 | [upstream-2.0-final-2026-10-14](upstream-2.0-final-2026-10-14/README.md) | końcowe buildy, CUDA/Metal/Intel, rzeczywiste act/certyfikaty i media, kontekst, pamięć i wydajność; niepowodzenia zachowane |
 | [upstream-2.0-metal-context-2026-10-14](upstream-2.0-metal-context-2026-10-14/README.md) | Metal 4.5B, 32768 tokenów: próba przerwana przez kontrolę pamięci; pochodna analiza progu noul z loadtestu |

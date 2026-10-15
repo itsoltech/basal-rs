@@ -88,7 +88,7 @@ Docker: [niżej](#uruchomienie-w-dockerze). Wymagania, ścieżki i szczegóły:
 
 | Model | Status |
 |---|---|
-| `Remek/basal-1.5-max` (11B), rewizja `be1b5ee7` | główny cel, CUDA, Metal ([M2 Max](reports/metal-m2-max-1.5/README.md), [M1 Pro](reports/metal-m1-pro-1.5/README.md)) |
+| `Remek/basal-1.5-max` (11B), rewizja `be1b5ee7` | CUDA, Metal ([M2 Max](reports/metal-m2-max-1.5/README.md), [M1 Pro](reports/metal-m1-pro-1.5/README.md)) |
 | `Remek/basal-1.5-4.5B`, rewizja `784a683b` | CUDA ([zgodność](reports/compat-1.5-small/README.md), [wydajność](reports/perf-1.5-small/README.md)), Metal ([M2 Max](reports/metal-m2-max-1.5/README.md), [M1 Pro](reports/metal-m1-pro-1.5/README.md)) |
 | `Remek/basal-1.5-mini` (1.5B), rewizja `1978d070` | CUDA ([zgodność](reports/compat-1.5-small/README.md), [wydajność](reports/perf-1.5-small/README.md)), Metal ([M2 Max](reports/metal-m2-max-1.5/README.md), [M1 Pro](reports/metal-m1-pro-1.5/README.md)) |
 | `Remek/basal-1.0-4.5B`, rewizja `b9528804` | CUDA, Metal ([M1 Pro](reports/metal-m1-pro/README.md)) |
@@ -133,7 +133,27 @@ Jedyne różnice basal-rs f16 to remisy w FP32 (np. 0,503 / 0,497); trafność
 wobec etykiet jest taka sama jak w FP32. ¹ Upstream BF16 dla 4.5B i mini
 mierzony tylko na RTX 6000 Ada.
 
-### Wydajność na kartach NVIDIA
+### Wydajność na kartach NVIDIA — basal-2.0
+
+Domyślny `basal-2.0-4.5B`, HTTP przy 32 klientach: żądania/s,
+upstream v2.0.0 `fast` BF16 / basal-rs FP16, z tych samych checkpointów BF16.
+Oba silniki na tej samej maszynie; mediana trzech powtórzeń po odrzuceniu pierwszego.
+
+| Karta | upstream / basal-rs |
+|---|---:|
+| H100 PCIe | 135,5 / 228,6 |
+| A100-SXM4-80GB | 83,4 / 146,6 |
+| L40S | 66,8 / 122,8 |
+| RTX 6000 Ada Generation | 34,5 / 87,9 |
+| RTX A6000 | 36,6 / 69,2 |
+
+[Pełne wyniki](docs/PERFORMANCE.md) obejmują
+mini/4.5B/max, 1/8/32 klientów, zakres powtórzeń i opóźnienia. [Raport](reports/perf-basal2-fivegpu-2026-10-14/README.md)
+podaje zgodność z FP32 na małym zestawie 49 argmax i 41 odpowiedzi API,
+słabsze przypadki wydajności, nieudane starty upstream oraz błędy ruchu mieszanego.
+Pomiary historyczne 1.5 pozostają poniżej; warunki obu kampanii różnią się.
+
+### Wydajność na kartach NVIDIA — basal-1.5
 
 Ta sama metodyka na pięciu wynajętych kartach z fabrycznym limitem mocy,
 upstream v1.5.0 `fast` na tej samej karcie
