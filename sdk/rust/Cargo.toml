@@ -24,7 +24,7 @@ http = "1"
 http-body-util = "0.1"
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "http1", "tokio"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "ring", "tls12", "rustls-platform-verifier"] }
-rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
+rustls = { version = "0.23.46", default-features = false, features = ["std", "ring", "tls12"] }
 tokio = { version = "1", default-features = false, features = ["net", "time"] }
 
 [dev-dependencies]
