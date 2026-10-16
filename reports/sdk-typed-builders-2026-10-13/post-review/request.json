@@ -1,0 +1,32 @@
+{
+  "state": "Paid today",
+  "model": "basal-1.5-mini",
+  "facts": "off",
+  "questions": {
+    "paid": {
+      "type": "noul",
+      "instructions": "Was payment made today?",
+      "evidence": true
+    },
+    "decision": {
+      "type": "act",
+      "instructions": "Was payment made today?",
+      "costs": {
+        "approve": {
+          "true": 0,
+          "false": 3
+        },
+        "reject": {
+          "true": 5,
+          "false": 0
+        },
+        "defer": {
+          "true": 1,
+          "false": 1
+        }
+      },
+      "defer_action": "defer",
+      "max_error": 0.1
+    }
+  }
+}

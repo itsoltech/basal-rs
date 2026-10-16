@@ -1,0 +1,208 @@
+{
+  "all-types": {
+    "status": 200,
+    "body": {
+      "model": "basal-1.5-mini",
+      "answers": {
+        "department": {
+          "type": "choice",
+          "probabilities": {
+            "returns": 0.9610039870106616,
+            "support": 0.015989876059927886,
+            "sales": 0.001860799972570375,
+            "other": 0.021145336956840066
+          },
+          "confidence": 0.9610039870106616,
+          "choice": "returns"
+        },
+        "urgent": {
+          "type": "noul",
+          "probabilities": {
+            "true": 0.12898058356787917,
+            "false": 0.8710194164321208
+          },
+          "confidence": 0.8710194164321208,
+          "noul": 0.12898058356787917
+        },
+        "severity": {
+          "type": "score",
+          "probabilities": {
+            "0": 0.03246415263229021,
+            "1": 0.09325341783969938,
+            "2": 0.4230802035416983,
+            "3": 0.4512022259863121
+          },
+          "confidence": 0.4512022259863121,
+          "score": 2.2930205028820323,
+          "legend": {
+            "0": "Brak utrudnień",
+            "1": "Drobne utrudnienia; podstawowe funkcje działają",
+            "2": "Istotne ograniczenia; część podstawowych funkcji nie działa",
+            "3": "Produkt jest całkowicie nieużywalny"
+          }
+        },
+        "tags": {
+          "type": "multi",
+          "probabilities": {
+            "damage": 0.9713566017646733,
+            "refund": 0.9439041233378735,
+            "delivery": 0.9082963739485206
+          },
+          "selected": [
+            "damage",
+            "refund",
+            "delivery"
+          ],
+          "threshold": 0.7,
+          "set_confidence": 0.8327874271282535
+        },
+        "refund_action": {
+          "type": "act",
+          "probabilities": {
+            "true": 0.43339484035358256,
+            "false": 0.5666051596464174
+          },
+          "confidence": 0.5666051596464174,
+          "action": "human",
+          "answer": "false",
+          "expected_costs": {
+            "approve": 5.666052,
+            "reject": 8.667897,
+            "human": 2.0
+          },
+          "calibration": "validated"
+        }
+      },
+      "usage": {
+        "input_tokens": 2780,
+        "output_tokens": 0,
+        "questions": 5,
+        "branches": 7
+      }
+    }
+  },
+  "text-evidence": {
+    "status": 200,
+    "body": {
+      "model": "basal-1.5-mini",
+      "answers": {
+        "damage": {
+          "type": "noul",
+          "probabilities": {
+            "true": 0.9839883022715759,
+            "false": 0.01601169772842421
+          },
+          "confidence": 0.9839883022715759,
+          "noul": 0.9839883022715759,
+          "evidence": [
+            {
+              "text": "nt zgłasza uszkodzenie: pęknięty ekran telefonu.",
+              "start": 4,
+              "end": 52,
+              "probability": 0.23584992809516417
+            },
+            {
+              "text": " Żółw 🐢 jest nadrukowany na pudełku.",
+              "start": 52,
+              "end": 88,
+              "probability": 0.00967567109733957
+            }
+          ]
+        }
+      },
+      "usage": {
+        "input_tokens": 276,
+        "output_tokens": 0,
+        "questions": 1,
+        "branches": 1
+      }
+    }
+  },
+  "facts-auto": {
+    "status": 200,
+    "body": {
+      "model": "basal-1.5-mini",
+      "answers": {
+        "overdue": {
+          "type": "noul",
+          "probabilities": {
+            "true": 0.09971495696801476,
+            "false": 0.9002850430319853
+          },
+          "confidence": 0.9002850430319853,
+          "noul": 0.09971495696801476
+        }
+      },
+      "usage": {
+        "input_tokens": 460,
+        "output_tokens": 0,
+        "questions": 1,
+        "branches": 1
+      }
+    }
+  },
+  "null-instructions": {
+    "status": 200,
+    "body": {
+      "model": "basal-1.5-mini",
+      "answers": {
+        "q": {
+          "type": "choice",
+          "probabilities": {
+            "return": 0.799189323164907,
+            "other": 0.20081067683509293
+          },
+          "confidence": 0.799189323164907,
+          "choice": "return"
+        }
+      },
+      "usage": {
+        "input_tokens": 268,
+        "output_tokens": 0,
+        "questions": 1,
+        "branches": 1
+      }
+    }
+  },
+  "default-model": {
+    "status": 200,
+    "body": {
+      "model": "basal-1.5-max",
+      "answers": {
+        "q": {
+          "type": "noul",
+          "probabilities": {
+            "true": 0.9911124129389417,
+            "false": 0.008887587061058227
+          },
+          "confidence": 0.9911124129389417,
+          "noul": 0.9911124129389417
+        }
+      },
+      "usage": {
+        "input_tokens": 268,
+        "output_tokens": 0,
+        "questions": 1,
+        "branches": 1
+      }
+    }
+  },
+  "unknown-model": {
+    "status": 422,
+    "body": {
+      "error": "Unknown model: sdk-invalid-model"
+    }
+  },
+  "invalid-choice": {
+    "status": 422,
+    "body": {
+      "error": "question \"q\": 1 options (supported: 2..10)"
+    }
+  },
+  "multi-evidence": {
+    "status": 422,
+    "body": {
+      "error": "evidence is not supported for multi"
+    }
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "python_sync_async": {
+    "accept_encoding_identity": true,
+    "reject_compressed_before_decoder": true,
+    "deep_json_wrapped_as_protocol_error": true
+  },
+  "typescript": {
+    "body_explicitly_accessible": true,
+    "body_non_enumerable": true,
+    "default_node_inspection_redacted": true,
+    "json_stringify_redacted": true
+  },
+  "release": {
+    "download_by_producing_job_immutable_artifact_id": true,
+    "artifact_id_required_nonempty_numeric": true,
+    "pypi_image_named_release": "v1.14.2",
+    "pypi_manifest_digest": "sha256:5c2f7030fbef8308068eb4cc9080fd3c9e157ccf6d511924d69f8f4b23dc95c1"
+  },
+  "audit": {
+    "normalized_pypi_names": true,
+    "locked_packages": 9,
+    "known_advisories": 0
+  }
+}

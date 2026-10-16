@@ -1,0 +1,22 @@
+{
+  "python": {
+    "comparisons": 16,
+    "mismatches": 0
+  },
+  "node": {
+    "comparisons": 16,
+    "mismatches": 0
+  },
+  "csharp": {
+    "comparisons": 8,
+    "mismatches": 0
+  },
+  "rust": {
+    "comparisons": 8,
+    "mismatches": 0
+  },
+  "browser": {
+    "comparisons": 16,
+    "mismatches": 0
+  }
+}

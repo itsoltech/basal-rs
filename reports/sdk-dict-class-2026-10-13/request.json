@@ -1,0 +1,68 @@
+{
+  "state": "Klient prosi o zwrot pieniędzy za uszkodzony telefon. Produkt ma pęknięty ekran. 🚀",
+  "questions": {
+    "department": {
+      "type": "choice",
+      "instructions": "Do którego działu skierować zgłoszenie?",
+      "criteria": {
+        "returns": "Zwroty",
+        "support": "Wsparcie techniczne"
+      }
+    },
+    "second_department": {
+      "type": "choice",
+      "instructions": "Do którego działu skierować zgłoszenie?",
+      "criteria": {
+        "returns": "Zwroty",
+        "support": "Wsparcie techniczne"
+      }
+    },
+    "urgent": {
+      "type": "noul",
+      "instructions": "Czy sprawa jest pilna?",
+      "evidence": true
+    },
+    "severity": {
+      "type": "score",
+      "instructions": "Oceń powagę uszkodzenia.",
+      "criteria": [
+        "Niska",
+        "Średnia",
+        "Wysoka"
+      ]
+    },
+    "labels": {
+      "type": "multi",
+      "instructions": "Wskaż cechy zgłoszenia.",
+      "criteria": {
+        "refund": "Zwrot pieniędzy",
+        "damage": "Uszkodzenie",
+        "delivery": "Opóźnienie dostawy"
+      },
+      "threshold": 0.6,
+      "min": 0,
+      "max": 2
+    },
+    "decision": {
+      "type": "act",
+      "instructions": "Czy zgłoszenie dotyczy uszkodzenia?",
+      "costs": {
+        "approve": {
+          "true": 0.0,
+          "false": 3.0
+        },
+        "reject": {
+          "true": 5.0,
+          "false": 0.0
+        },
+        "defer": {
+          "true": 0.4,
+          "false": 0.4
+        }
+      },
+      "defer_action": "defer"
+    }
+  },
+  "model": "basal-1.5-mini",
+  "facts": "off"
+}

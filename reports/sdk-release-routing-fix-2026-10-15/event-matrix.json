@@ -1,0 +1,79 @@
+[
+  {
+    "event": "release",
+    "ref": "refs/tags/sdk-python-v0.1.0",
+    "macos": false,
+    "linux": false,
+    "publish": false
+  },
+  {
+    "event": "release",
+    "ref": "refs/tags/sdk-typescript-v0.1.0",
+    "macos": false,
+    "linux": false,
+    "publish": false
+  },
+  {
+    "event": "release",
+    "ref": "refs/tags/sdk-csharp-v0.1.0",
+    "macos": false,
+    "linux": false,
+    "publish": false
+  },
+  {
+    "event": "release",
+    "ref": "refs/tags/sdk-rust-v0.1.0",
+    "macos": false,
+    "linux": false,
+    "publish": false
+  },
+  {
+    "event": "release",
+    "ref": "refs/tags/v0.1.9",
+    "macos": true,
+    "linux": true,
+    "publish": true
+  },
+  {
+    "event": "release",
+    "ref": "refs/tags/v0.2.0-rc.1",
+    "macos": true,
+    "linux": true,
+    "publish": true
+  },
+  {
+    "event": "push",
+    "ref": "refs/tags/v0.1.9",
+    "macos": true,
+    "linux": true,
+    "publish": true
+  },
+  {
+    "event": "push",
+    "ref": "refs/tags/sdk-rust-v0.1.0",
+    "macos": false,
+    "linux": false,
+    "publish": false
+  },
+  {
+    "event": "workflow_dispatch",
+    "ref": "refs/heads/main",
+    "macos": true,
+    "linux": true,
+    "publish": false
+  },
+  {
+    "event": "workflow_dispatch",
+    "ref": "refs/tags/v0.1.9",
+    "macos": true,
+    "linux": true,
+    "publish": false
+  },
+  {
+    "event": "workflow_dispatch",
+    "ref": "refs/tags/sdk-rust-v0.1.0",
+    "macos": true,
+    "linux": true,
+    "publish": false
+  }
+]

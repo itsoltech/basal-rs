@@ -1,0 +1,14 @@
+{
+  "python": {
+    "comparisons": 16,
+    "mismatches": 0
+  },
+  "node": {
+    "comparisons": 16,
+    "mismatches": 0
+  },
+  "browser": {
+    "comparisons": 16,
+    "mismatches": 0
+  }
+}

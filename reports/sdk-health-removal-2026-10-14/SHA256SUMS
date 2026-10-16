@@ -1,0 +1,5 @@
+ad9a42de2c3a67fe48195f8e69bf917f19d1bf2655b0eaab5d154d2deea38998  sdk/python/dist/basal_client-0.1.0.tar.gz
+8cdad6477b43f6cad438187083694f210ec1cc408bec57d5ec45bb790cbf814b  sdk/python/dist/basal_client-0.1.0-py3-none-any.whl
+c79ff4faf4bf1a1d6b393a98cf8f5ad96025c6b41f9fbc802cc5c502bcb68fbd  sdk/typescript/dist/itsoltech-basal-client-0.1.0.tgz
+e9fcbda7af81e33e45d1732ec91147f0f8153d45b0c68979f12468e43935ce00  sdk/csharp/dist/Itsoltech.Basal.Client.0.1.0.nupkg
+8574b4f620f388ea37cbfe78c9ef3d31e6f4e0196a33536379366a4f674f29fd  target/package/basal-client-0.1.0.crate

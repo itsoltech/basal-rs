@@ -1,0 +1,15 @@
+{
+  "NEGATIVE": {
+    "exit_code": 1,
+    "error_codes": [
+      "CS0200",
+      "CS1061"
+    ]
+  },
+  "ASYNC": {
+    "exit_code": 1,
+    "error_codes": [
+      "CS0121"
+    ]
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "python": {
+    "compared": 2,
+    "question_types": 5,
+    "mismatches": 0
+  },
+  "node": {
+    "compared": 3,
+    "question_types": 5,
+    "mismatches": 0
+  },
+  "csharp": {
+    "compared": 1,
+    "question_types": 5,
+    "mismatches": 0
+  },
+  "rust": {
+    "compared": 1,
+    "question_types": 5,
+    "mismatches": 0
+  },
+  "browser": {
+    "compared": 2,
+    "question_types": 5,
+    "mismatches": 0
+  }
+}

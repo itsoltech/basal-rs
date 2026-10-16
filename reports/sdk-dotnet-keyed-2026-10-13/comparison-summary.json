@@ -1,0 +1,16 @@
+{
+  "sdk_version": "0.1.0",
+  "live_responses": 3,
+  "answers_per_response": 6,
+  "compared_answers": 18,
+  "differences": 0,
+  "excluded_fields": [
+    "usage.latency_ms"
+  ],
+  "comparison": "same keys and values, exact IEEE-754 binary64",
+  "variants": [
+    "anonymous",
+    "named_class",
+    "dictionary"
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "sdk_version": "0.1.0",
+  "library_target": "net8.0",
+  "consumer_runtime": "net10.0",
+  "consumer_language": "C# 12",
+  "nullable": true,
+  "warnings_as_errors": true,
+  "build_warnings": 0,
+  "build_errors": 0,
+  "external_runtime_dependencies": 0,
+  "install_or_build_hooks": false,
+  "packaged_readme_matches": true,
+  "ssh_tunnel_closed": true,
+  "diagnostics": {
+    "prepare_factory_runs_once": true,
+    "built_in_criteria_snapshot": true,
+    "subset_rename_repeat_combine": true,
+    "positional_record": true,
+    "builder_class_anonymous_selection": true,
+    "parallel_independent_responses": 8,
+    "template_never_receives_results": true,
+    "dictionary_and_inline_overloads_preserved": true,
+    "reuse_after_invalid_response": true,
+    "swapping_constructor_rejected_before_http": true,
+    "widened_shape_rejected_before_http": true,
+    "wrong_shapes_rejected_before_http": true,
+    "explicit_id_alias_rejected_before_http": true
+  }
+}

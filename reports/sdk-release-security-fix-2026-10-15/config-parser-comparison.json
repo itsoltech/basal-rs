@@ -1,0 +1,52 @@
+[
+  {
+    "accepted": true,
+    "fixture": "defaults",
+    "same_decoded_values_or_rejection": true
+  },
+  {
+    "accepted": true,
+    "fixture": "example",
+    "same_decoded_values_or_rejection": true
+  },
+  {
+    "accepted": true,
+    "fixture": "all_fields",
+    "same_decoded_values_or_rejection": true
+  },
+  {
+    "accepted": true,
+    "fixture": "alias",
+    "same_decoded_values_or_rejection": true
+  },
+  {
+    "accepted": true,
+    "fixture": "comments",
+    "same_decoded_values_or_rejection": true
+  },
+  {
+    "accepted": false,
+    "fixture": "invalid_unknown",
+    "same_decoded_values_or_rejection": true
+  },
+  {
+    "accepted": false,
+    "fixture": "invalid_duplicate",
+    "same_decoded_values_or_rejection": true
+  },
+  {
+    "accepted": false,
+    "fixture": "invalid_type",
+    "same_decoded_values_or_rejection": true
+  },
+  {
+    "accepted": false,
+    "fixture": "invalid_syntax",
+    "same_decoded_values_or_rejection": true
+  },
+  {
+    "accepted": false,
+    "fixture": "invalid_multi_document",
+    "same_decoded_values_or_rejection": true
+  }
+]

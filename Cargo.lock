@@ -259,6 +259,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "basal-client"
+version = "0.2.0"
+dependencies = [
+ "bytes",
+ "http",
+ "http-body-util",
+ "hyper-rustls",
+ "hyper-util",
+ "indexmap",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "basal-core"
 version = "0.1.9"
 dependencies = [
@@ -2006,6 +2022,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rustls",
+ "rustls-platform-verifier",
  "tokio",
  "tokio-rustls",
  "tower-service",
@@ -2208,6 +2225,8 @@ checksum = "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855"
 dependencies = [
  "equivalent",
  "hashbrown 0.17.1",
+ "serde",
+ "serde_core",
 ]
 
 [[package]]
@@ -3564,6 +3583,7 @@ checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "aws-lc-rs",
  "once_cell",
+ "ring",
  "rustls-pki-types",
  "rustls-webpki",
  "subtle",
