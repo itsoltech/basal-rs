@@ -396,20 +396,24 @@ impl Client {
     }
 
     /// Decide from a JSON state and typed question builder.
-    pub async fn decide(&self, state: impl Into<Value>, questions: &Questions) -> Result<TypedDecisionResponse, Error> {
+    pub async fn decide<Q: QuestionSet>(
+        &self,
+        state: impl Into<Value>,
+        questions: &Q,
+    ) -> Result<TypedDecisionResponse<Q::Schema>, Error> {
         self.decide_with_options(state, questions, DecisionOptions::default()).await
     }
 
     /// Typed decision with explicit model/facts options.
-    pub async fn decide_with_options(
+    pub async fn decide_with_options<Q: QuestionSet>(
         &self,
         state: impl Into<Value>,
-        questions: &Questions,
+        questions: &Q,
         options: DecisionOptions<'_>,
-    ) -> Result<TypedDecisionResponse, Error> {
-        let request = questions.request(state.into(), options)?;
+    ) -> Result<TypedDecisionResponse<Q::Schema>, Error> {
+        let request = questions.as_questions().request(state.into(), options)?;
         let response = self.decide_request(&request).await?;
-        questions.clone().parse(response)
+        questions.as_questions().clone().parse(response, questions.schema())
     }
 
     /// POST `/v1/basal`. Request fields and capability limits are validated by the server.

@@ -183,7 +183,7 @@ Przykład do kompilacji: [Decide](../sdk/csharp/examples/Decide/Program.cs).
 ## Rust
 
 ```rust,no_run
-use basal_client::{choice, noul, Client, Questions};
+use basal_client::{choice, noul, questions, Client};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -193,14 +193,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &[("returns", "Zwroty"), ("support", "Wsparcie techniczne")],
     )?;
     let urgent = noul("Czy sprawa jest pilna?")?;
-    let questions = Questions::new().with("department", &department)?.with("urgent", &urgent)?;
+    let questions = questions! {
+        department: &department,
+        second_department: &department,
+        urgent: &urgent,
+    }?;
     let response = client.decide("Klient prosi o zwrot pieniędzy za uszkodzony telefon.", &questions).await?;
-    println!("Dział: {}, P(tak): {}", response.answer(&department)?.choice, response.answer(&urgent)?.noul);
+    let answers = response.answers()?;
+    println!("Dział: {}, P(tak): {}", answers.department.choice, answers.urgent.noul);
+    println!("Drugie pytanie: {}", answers.second_department.choice);
     Ok(())
 }
 ```
 
-Dodaj runtime: `cargo add tokio --features macros,rt-multi-thread`.
+Ten wariant wymaga Rust SDK **0.2.0**. Dodaj runtime: `cargo add tokio --features macros,rt-multi-thread`.
+Makro `questions!` wyprowadza typy pól odpowiedzi; nazwy pól stają się kluczami requestu.
+Dla dynamicznych kluczy użyj `Questions::new().with("department", &department)?` i
+`response.choice("department")?.choice` albo dopasuj enum z `response.answer("department")?`.
 `Question.criteria` przyjmuje obiekt/tablicę JSON; `Question.extra` i
 `DecisionRequest.extra` obsługują pola rozszerzeń. Nie powtarzaj w `extra`
 pól nazwanych w strukturze. Przykład do kompilacji:
@@ -222,9 +231,11 @@ wywnioskowany jako union kluczy kryteriów, a `response.answers.urgent.noul` jak
 Python obsługuje dwa warianty: klasa `Questions` daje nazwane, dokładnie typowane
 pola w `response.answers`, a słownik daje mapę sprawdzonych odpowiedzi z typem-union.
 C# zachowuje kształt obiektu z fabryki i daje np. `response.Answers.Department.Choice`;
-pola wiążą się z kluczami, nie z tożsamością definicji. Rust używa obiektu pytania
-do `response.answer(&question)`. Wyniki mają wymagane pola bez opcjonalnego choice/noul/score itd. W Rust końcowe `?`
-propaguje błąd użycia pytania z innego requestu; nie jest unwrapem opcjonalnego pola.
+pola wiążą się z kluczami, nie z tożsamością definicji. Rust od 0.2.0 zachowuje nazwane
+pola przez `questions!`: `response.answers()?.department.choice`. Dynamiczna mapa daje enum
+z `response.answer("department")?` lub sprawdzony widok z `response.choice("department")?`.
+Wyniki mają wymagane pola bez opcjonalnego choice/noul/score itd. W Rust końcowe `?`
+propaguje błąd walidacji lub nieznanego klucza; nie jest unwrapem opcjonalnego pola.
 W Python wyniki są dataclass, w C# record, w Rust pożyczonymi widokami.
 Evidence w typowanych wynikach ma pustą kolekcję zamiast null, gdy nie zwrócono spanów.
 Wyniki act w Python/C# udostępniają też opcjonalne `refused`/`max_error`
@@ -235,10 +246,11 @@ TS zachowuje ją w `response.raw`.
 Typowana ścieżka waliduje wymagane odpowiedzi przed ich zwróceniem; pominięty field,
 zły typ pytania albo nieznana choice/akcja daje błąd SDK. Nie zastępuje to walidacji
 capabilities, kalibracji ani jakości decyzji po stronie modelu. Nie zmienia liczb ani
-kolejności kryteriów. Python, TS i C# pozwalają użyć jednej definicji pod kilkoma kluczami;
-odpowiedzi rozróżnia klucz. `answer()` / `Answer()` przyjmuje w nich klucz (zmiana przed
-pierwszym wydaniem; C# udostępnia tę metodę w wariancie słownika). W Rust nadal należy
-tworzyć osobny obiekt pytania dla każdego ID.
+kolejności kryteriów. Wszystkie SDK (Rust od 0.2.0) pozwalają użyć jednej definicji pod
+kilkoma kluczami; odpowiedzi rozróżnia klucz. `answer()` / `Answer()` przyjmuje klucz
+(C# udostępnia tę metodę w wariancie słownika). Rust 0.1.0 odrzucał ponowne użycie
+tej samej definicji; migracja do 0.2.0 wymaga zastąpienia `answer(&question)` odczytem
+po kluczu lub przez nazwane pola z `questions!`.
 Obiekty przechowują kopię wejścia, a mapę pytań utrwala się przed wysłaniem.
 Klas pytań nie należy modyfikować podczas oczekiwania na odpowiedź. Nie dodano zależności.
 

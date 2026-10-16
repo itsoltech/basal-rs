@@ -1,0 +1,50 @@
+[
+  {
+    "case": "old_identity_api",
+    "passed": true,
+    "expected_compile": false,
+    "expected_diagnostic": "E0308"
+  },
+  {
+    "case": "wrong_named_kind",
+    "passed": true,
+    "expected_compile": false,
+    "expected_diagnostic": "E0609"
+  },
+  {
+    "case": "unknown_named_key",
+    "passed": true,
+    "expected_compile": false,
+    "expected_diagnostic": "E0609"
+  },
+  {
+    "case": "borrow_cannot_outlive_response",
+    "passed": true,
+    "expected_compile": false,
+    "expected_diagnostic": "E0597"
+  },
+  {
+    "case": "duplicate_named_field",
+    "passed": true,
+    "expected_compile": false,
+    "expected_diagnostic": "E0403"
+  },
+  {
+    "case": "multiple_macros_same_scope",
+    "passed": true,
+    "expected_compile": true,
+    "expected_diagnostic": null
+  },
+  {
+    "case": "generated_name_collision",
+    "passed": true,
+    "expected_compile": true,
+    "expected_diagnostic": null
+  },
+  {
+    "case": "owned_expression_stays_reusable",
+    "passed": true,
+    "expected_compile": true,
+    "expected_diagnostic": null
+  }
+]
