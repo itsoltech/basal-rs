@@ -73,7 +73,10 @@ Metadane modeli podają format promptu, kolejności, temperatury i włączone me
 Nowe odpowiedzi rozliczają również najdłuższy wykonany prompt. Przed powieleniem
 stanu runtime sprawdza budżet 4096 gałęzi i 32 MiB materiału promptów dla dwóch
 potencjalnych kolejności. Żądania rozszerzające ponad 128 KiB współdzielą limit
-czterech dużych body; przekroczenie budżetu daje 422, przeciążenie 529. Szczegóły mediów:
+`max_large_inflight` dużych body (domyślnie 4); przekroczenie budżetu daje 422,
+przeciążenie 529. `serve --max-large-inflight N` lub pole YAML pozwala dopasować
+ten limit do pamięci hosta i liczby jednocześnie przygotowywanych/kolejkowanych
+promptów. Osobny limit czterech żądań z mediami pozostaje bez zmian. Szczegóły mediów:
 [OMNI.md](OMNI.md); różnice istniejącego API: [SYSTEM_ONE.md](SYSTEM_ONE.md).
 
 Eksporter [export_reference_v2.py](../tools/reference/export_reference_v2.py)

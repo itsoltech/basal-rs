@@ -41,7 +41,7 @@ use anyhow::{bail, Context, Result};
 use basal_core::pack::Packed;
 use basal_core::{Backend, DecideError, Engine, ModelManifest};
 use basal_gpu::RuntimeBackend as GpuBackend;
-use basal_gpu::{Kernels, Readout};
+use basal_gpu::{InferenceMode, Kernels, Readout};
 use clap::{Args, Parser, Subcommand};
 use serde_json::{json, Value};
 
@@ -137,6 +137,9 @@ struct GpuArgs {
     /// Weight/activation precision: auto (Llama f16, Gemma bf16), f16, bf16 or f32 (numerical reference)
     #[arg(long, default_value = "auto")]
     dtype: String,
+    /// Attention arithmetic: auto, accurate (original), or balanced (CUDA f16, FP32 softmax)
+    #[arg(long, default_value = "auto", value_parser = ["auto", "accurate", "balanced"])]
+    inference_mode: String,
     /// Letter logits: f32, or bf16 (f32 rounded to bf16, diagnostic emulation of a bf16 lm_head)
     #[arg(long, default_value = "f32")]
     readout: String,
@@ -416,6 +419,10 @@ enum Cmd {
         /// Waiting + running requests; more are refused with 529 (Retry-After: 1)
         #[arg(long, default_value_t = 1024)]
         max_inflight: usize,
+        /// Large/chunked bodies and expanded input above 128 KiB; more are refused with 529. Increase only with
+        /// enough host memory for their concurrent preparation and queued inputs
+        #[arg(long, default_value_t = serve::DEFAULT_MAX_LARGE_INFLIGHT)]
+        max_large_inflight: usize,
         /// Admission order of waiting requests
         #[arg(long, value_enum, default_value_t = serve::Schedule::Hrrn)]
         schedule: serve::Schedule,
@@ -528,7 +535,17 @@ fn gpu_engine(m: &ModelArgs, g: &GpuArgs) -> Result<Engine<GpuBackend>> {
     gpu_engine_at(&m.dir()?, g)
 }
 
+fn parse_inference_mode(value: &str) -> Result<InferenceMode> {
+    Ok(match value {
+        "auto" => InferenceMode::Auto,
+        "accurate" => InferenceMode::Accurate,
+        "balanced" => InferenceMode::Balanced,
+        value => bail!("unknown inference mode {value:?} (auto, accurate, balanced)"),
+    })
+}
+
 fn gpu_engine_at(dir: &Path, g: &GpuArgs) -> Result<Engine<GpuBackend>> {
+    let inference_mode = parse_inference_mode(&g.inference_mode)?;
     #[cfg(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos")))]
     anyhow::ensure!(g.state_cache_mb == 0, "Intel state cache is not implemented; use --state-cache-mb 0");
     let manifest = ModelManifest::load_with_orders(dir, g.orders.as_deref())?;
@@ -547,6 +564,7 @@ fn gpu_engine_at(dir: &Path, g: &GpuArgs) -> Result<Engine<GpuBackend>> {
     )?;
     crate::done!("{} loaded on the GPU in {:.1}s", manifest.name, backend.load_s());
     let mut backend = backend;
+    backend.configure_inference(inference_mode, &manifest.name)?;
     if let Some(p) = &g.gemm_table {
         let n = backend.load_gemm_table(p)?;
         crate::note!("{n} GEMM classes from {}", crate::term::P(&p));
@@ -670,7 +688,7 @@ fn run() -> Result<()> {
                 &out,
                 parse_batching(&batching)?,
                 if upstream { basal_core::request::Dialect::Upstream } else { basal_core::request::Dialect::TypeSafe },
-                json!({"dtype": g.dtype, "readout": g.readout, "kernels": g.kernels, "prefix_cache": !g.no_prefix_cache, "load_s": load_s}),
+                json!({"dtype": g.dtype, "inference_mode": g.inference_mode, "readout": g.readout, "kernels": g.kernels, "prefix_cache": !g.no_prefix_cache, "load_s": load_s}),
             )?;
         }
         Cmd::BenchRequests { m, g, requests, out, reps, batching } => {
@@ -779,6 +797,7 @@ fn run() -> Result<()> {
             addr,
             max_batch_tokens,
             max_inflight,
+            max_large_inflight,
             schedule,
             long_tokens,
             long_slice_ms,
@@ -814,6 +833,7 @@ fn run() -> Result<()> {
                     if g.dtype != "auto" {
                         m.dtype = g.dtype.clone();
                     }
+                    m.inference_mode = g.inference_mode.clone();
                     m.gemm_table = match &g.gemm_table {
                         Some(t) => t.display().to_string(),
                         None => "auto".into(),
@@ -826,9 +846,11 @@ fn run() -> Result<()> {
                     m.no_prefix_cache = g.no_prefix_cache;
                 }
                 c.max_inflight = max_inflight;
+                c.max_large_inflight = max_large_inflight;
                 c.long_slice_ms = long_slice_ms;
                 c.release_date = release_date;
             }
+            serve::check_admission_limits(c.max_inflight, c.max_large_inflight)?;
             // model files (local or downloaded), then GEMM tables (a search needs no model weights in GPU memory),
             // then the models
             let dirs: Vec<PathBuf> = c.models.iter().map(config::model_dir).collect::<Result<_>>()?;
@@ -843,6 +865,7 @@ fn run() -> Result<()> {
                     media: mc.media || g.media,
                     orders: mc.orders.clone().or_else(|| g.orders.clone()),
                     dtype: mc.dtype.clone(),
+                    inference_mode: mc.inference_mode.clone(),
                     readout: g.readout.clone(),
                     kernels: g.kernels.clone(),
                     no_prefix_cache: mc.no_prefix_cache,
@@ -871,6 +894,7 @@ fn run() -> Result<()> {
                 addr,
                 release_date: c.release_date,
                 max_inflight: c.max_inflight,
+                max_large_inflight: c.max_large_inflight,
                 default_model: c.default_model,
                 long_slice_ms: c.long_slice_ms,
                 access_log: access_log || c.access_log,

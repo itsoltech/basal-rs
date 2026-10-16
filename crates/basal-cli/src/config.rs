@@ -37,9 +37,12 @@ pub const INVARIANT_CLASSES: [usize; 25] = [
 pub struct ServeConfig {
     #[serde(default = "default_addr")]
     pub addr: SocketAddr,
-    /// Waiting + running requests of all models; more are refused with 503.
+    /// Waiting + running requests of all models; more are refused with 529.
     #[serde(default = "default_max_inflight")]
     pub max_inflight: usize,
+    /// Large bodies and requests whose expanded input exceeds 128 KiB; shared across models.
+    #[serde(default = "default_max_large_inflight")]
+    pub max_large_inflight: usize,
     /// `release_date` reported by GET /v1/models.
     #[serde(default = "default_release_date")]
     pub release_date: String,
@@ -78,6 +81,9 @@ pub struct ModelConfig {
     /// auto (Llama f16, Gemma bf16), f16, bf16 or f32.
     #[serde(default = "default_dtype")]
     pub dtype: String,
+    /// auto, accurate (original arithmetic), or balanced (CUDA FP16 Llama, FP32 readout).
+    #[serde(default = "default_dtype")]
+    pub inference_mode: String,
     /// `auto`: the table of this model and GPU from `gemm_cache`, generated when missing or not valid here; `none`:
     /// algorithms timed at first use (results may depend on the batch); otherwise the path of a table.
     #[serde(default = "default_gemm_table")]
@@ -110,6 +116,9 @@ fn default_addr() -> SocketAddr {
 }
 fn default_max_inflight() -> usize {
     1024
+}
+fn default_max_large_inflight() -> usize {
+    crate::serve::DEFAULT_MAX_LARGE_INFLIGHT
 }
 fn default_release_date() -> String {
     "2026-10-05".into()
@@ -148,6 +157,10 @@ impl ServeConfig {
     fn parse(text: &str) -> Result<Self> {
         let c: Self = serde_saphyr::from_str(text)?;
         ensure!(!c.models.is_empty(), "no models");
+        for model in &c.models {
+            crate::parse_inference_mode(&model.inference_mode)?;
+        }
+        crate::serve::check_admission_limits(c.max_inflight, c.max_large_inflight)?;
         Ok(c)
     }
 
@@ -318,6 +331,9 @@ pub fn template(models: &[ModelConfig]) -> String {
         }
         if m.dtype != "auto" && m.dtype != "f16" {
             s += &format!("    dtype: {}\n", m.dtype);
+        }
+        if m.inference_mode != "auto" {
+            s += &format!("    inference_mode: {}\n", m.inference_mode);
         }
         if m.media {
             s += "    media: true\n";

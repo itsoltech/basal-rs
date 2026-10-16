@@ -36,8 +36,10 @@ mod cublaslt;
 mod fused;
 mod gemma;
 mod gemma_encoders;
+mod inference;
 #[cfg(all(feature = "intel", not(target_os = "macos")))]
 pub mod intel;
+pub use inference::{InferenceConfigError, InferenceMode};
 mod memory;
 mod runtime;
 pub use memory::{gpu_memory, GpuMemory, GpuMemoryProbe};
@@ -368,6 +370,8 @@ pub struct GpuBackend {
     precision: Precision,
     readout: Readout,
     kernels: Kernels,
+    /// Fixed before prefix warmup and copied to every execution lane.
+    attention_override: Option<&'static str>,
     embed: Tensor,
     layers: Vec<Layer>,
     norm: Tensor,
@@ -660,6 +664,7 @@ impl GpuBackend {
             precision,
             readout,
             kernels,
+            attention_override: None,
             embed,
             layers,
             norm,
@@ -694,7 +699,11 @@ impl GpuBackend {
     fn attention_kernel(&self) -> &'static str {
         #[cfg(feature = "cuda")]
         if self.dev.is_cuda() {
-            return if self.tc_attention() { fused::tc_kernel() } else { "attn_tree_f32" };
+            return if self.tc_attention() {
+                self.attention_override.unwrap_or_else(fused::tc_kernel)
+            } else {
+                "attn_tree_f32"
+            };
         }
         if self.tree_attention() {
             "attn_tree_f32"
@@ -996,9 +1005,17 @@ impl GpuBackend {
                     let nk = nkv * total * hd;
                     let (khl, vhl) = (hl.narrow(0, 0, 2 * nk)?, hl.narrow(0, 2 * nk, 2 * nk)?);
                     let v_exact = self.precision == Precision::F16;
-                    Some(fused::attention_tree(&_flat, &us, dims, scale, Some((&khl, &vhl, v_exact)), Some(dt))?)
+                    Some(fused::attention_tree(
+                        &_flat,
+                        &us,
+                        dims,
+                        scale,
+                        Some((&khl, &vhl, v_exact)),
+                        Some(dt),
+                        self.attention_kernel(),
+                    )?)
                 } else {
-                    Some(fused::attention_tree(&_flat, &us, dims, scale, None, Some(dt))?)
+                    Some(fused::attention_tree(&_flat, &us, dims, scale, None, Some(dt), self.attention_kernel())?)
                 }
             } else {
                 None
@@ -1114,7 +1131,9 @@ impl GpuBackend {
     /// CUDA attention on tensor cores (f16 / bf16 forwards; `BASAL_ATT=simt` selects the f32 kernel for A/B).
     #[cfg_attr(not(feature = "cuda"), allow(dead_code, reason = "Tensor-core attention is a CUDA-only kernel"))]
     fn tc_attention(&self) -> bool {
-        self.dev.is_cuda() && self.precision != Precision::F32 && std::env::var("BASAL_ATT").as_deref() != Ok("simt")
+        self.dev.is_cuda()
+            && self.precision != Precision::F32
+            && (self.attention_override.is_some() || std::env::var("BASAL_ATT").as_deref() != Ok("simt"))
     }
 
     /// The prefix K / V of every layer split into f16 hi / lo planes, when the tensor-core attention reads them.
@@ -1424,6 +1443,7 @@ impl Backend for GpuBackend {
             precision: self.precision,
             readout: self.readout,
             kernels: self.kernels,
+            attention_override: self.attention_override,
             embed: self.embed.clone(),
             layers: self.layers.clone(),
             norm: self.norm.clone(),

@@ -11,6 +11,7 @@ Metodyka: [docs/BENCHMARKS.md](../docs/BENCHMARKS.md).
 
 | Katalog | Zawartość |
 |---|---|
+| [latency-basal2-ada-2026-10-15](latency-basal2-ada-2026-10-15/README.md) | mini/4.5B/max: jedno pytanie, jeden klient HTTP, 128–32768 tokenów; 25 par upstream fast vs basal-rs oraz osobne profile GPU |
 | [perf-basal2-fivegpu-2026-10-14](perf-basal2-fivegpu-2026-10-14/README.md) | mini/4.5B/max 2.0 na pięciu GPU NVIDIA: HTTP 1/8/32, energia, ruch mieszany i zgodność z FP32; FAIL powtarzalności upstream i przerwane sesje zachowane |
 | [upstream-2.0-refactor-2026-10-14](upstream-2.0-refactor-2026-10-14/README.md) | review Opus 5.5, precyzja nieznanych repozytoriów, wspólne serializery 529/metadanych i bitowe A/B Intel |
 | [upstream-2.0-final-2026-10-14](upstream-2.0-final-2026-10-14/README.md) | końcowe buildy, CUDA/Metal/Intel, rzeczywiste act/certyfikaty i media, kontekst, pamięć i wydajność; niepowodzenia zachowane |
@@ -26,6 +27,8 @@ Metodyka: [docs/BENCHMARKS.md](../docs/BENCHMARKS.md).
 
 | Katalog | Zawartość |
 |---|---|
+| [precision-performance-ada-2026-10-16](precision-performance-ada-2026-10-16/README.md) | accurate/balanced i upstream BF16: 25 punktów latency, 18 QPS, FP32 na rozdzielonych danych, regresje ogona oraz GAP długiej referencji Max |
+| [optimization-basal2-ada-2026-10-15](optimization-basal2-ada-2026-10-15/README.md) | GEMM, budżet partii, admission i rampy obciążenia mini/4.5B/max na Ada; wyniki pozytywne i regresje |
 | [inference-campaign-2026-10-09](inference-campaign-2026-10-09/README.md) | H100 i RTX 6000 Ada: SiLU, RMSNorm, cache stanów, budżet partii i harmonogram; zgodność wyników, latency i throughput |
 | [inference-profile-h100-2026-10-09](inference-profile-h100-2026-10-09/README.md) | H100: Nsight Systems/Compute, SW128 w WGMMA, bitowa zgodność, latency/throughput oraz HTTP A/B/B/A |
 

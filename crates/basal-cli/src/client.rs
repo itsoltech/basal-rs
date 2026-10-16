@@ -108,6 +108,9 @@ pub(super) struct ClientArgs {
     /// Local weight/activation precision
     #[arg(long, default_value = "auto", requires = "local")]
     dtype: String,
+    /// Local attention arithmetic: auto, accurate, or balanced (CUDA f16)
+    #[arg(long, default_value = "auto", requires = "local", value_parser = ["auto", "accurate", "balanced"])]
+    inference_mode: String,
     /// Enable image and audio input on a local omni CUDA model
     #[arg(long, requires = "local")]
     media: bool,
@@ -475,6 +478,7 @@ fn load_local(args: &ClientArgs, name: &str) -> Result<basal_core::Engine<crate:
         media: model.media,
         orders: model.orders.clone(),
         dtype: args.dtype.clone(),
+        inference_mode: args.inference_mode.clone(),
         readout: "f32".into(),
         kernels: "fused".into(),
         no_prefix_cache: false,

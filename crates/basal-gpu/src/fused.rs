@@ -892,6 +892,11 @@ impl CustomOp3 for AttentionTree<'_> {
         // fit on the SMs at once (short prompts), more blocks then share the work; a row computes the same either way
         let rep = nh / nkv;
         let kernel = match self.tc_kernel {
+            // These explicit specializations assume exact f16 V and merged f16 output. Other dtypes
+            // keep the corresponding parent's arithmetic and runtime dtype handling.
+            "attn_tree_tc_static" if !self.v_exact || self.merged != Some(DType::F16) => "attn_tree_tc",
+            "attn_tree_tc_qk1_static" if !self.v_exact || self.merged != Some(DType::F16) => "attn_tree_tc_qk1",
+            "attn_tree_tc_f16_static" if !self.v_exact || self.merged != Some(DType::F16) => "attn_tree_tc_f16",
             "attn_tree_wgp" if std::env::var("BASAL_ATT").as_deref() != Ok("wgp") => {
                 let blocks128: usize = self.units.iter().map(|s| (rep * s.q_len).div_ceil(128)).sum::<usize>() * nkv;
                 if 2 * blocks128 <= cu::sm_count(&dev)? as usize {
@@ -906,6 +911,10 @@ impl CustomOp3 for AttentionTree<'_> {
         let (name, bm, threads, smem) = match kernel {
             _ if !self.tc => ("attn_tree_f32", 16, 128, 0),
             k @ "attn_tree_tc_pipe" => (k, 128, 256, TC_SMEM),
+            // Four warps cover 64 rows; XOR layouts fit in 32 KiB without row padding.
+            k @ "attn_tree_tc64" => (k, 64, 128, TC_SMEM / 2),
+            k @ "attn_tree_tc_sw128" => (k, 128, 256, 4 * 32 * 128 * 2),
+            k @ "attn_tree_tc64_sw128" => (k, 64, 128, 4 * 32 * 128 * 2),
             // Q hi / lo of 128 rows, then the K / V tiles
             k @ "attn_tree_wg" => (k, 128, 256, (2 * 128 * 128 + 4 * 32 * 128) * 2),
             // Q hi / lo, then two stages of K hi / lo and V hi
@@ -1021,12 +1030,22 @@ impl CustomOp3 for AttentionTree<'_> {
 /// products close to f32), on compute capability 9.0 the same with Hopper warpgroup MMAs and the next K / V tile
 /// loading during the current one (`wgp`; `wg` without that overlap; both bitwise the same outputs on H100);
 /// `BASAL_ATT` selects one for A/B: `tc`, `wg`, `wgp`, `tc-pv1` (P rounded to f16), `tc-qk1` (Q·K from the f16 hi
-/// parts only), `tc-f16` (both), `tc-pipe`. Softmax, accumulation and output are f32 in every variant.
+/// parts only), `tc-f16` (both), `tc-pipe`. `tc64`, `tc-sw128` and `tc64-sw128` are opt-in layout/block-size
+/// candidates with the arithmetic of `tc`; their runtime parity and speed must be measured before promotion.
+/// `tc-static`, `tc-qk1-static` and `tc-f16-static` specialize their parent's exact-f16 V/output handling;
+/// other V/output dtypes retain the parent kernel. The per-backend inference policy may override this selector.
+/// Softmax and accumulation stay f32; supported kernels write merged f16/bf16 output when requested.
 #[cfg(feature = "cuda")]
 pub fn tc_kernel() -> &'static str {
     static K: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
     K.get_or_init(|| match std::env::var("BASAL_ATT").as_deref() {
         Ok("tc") => "attn_tree_tc",
+        Ok("tc-static") => "attn_tree_tc_static",
+        Ok("tc-qk1-static") => "attn_tree_tc_qk1_static",
+        Ok("tc-f16-static") => "attn_tree_tc_f16_static",
+        Ok("tc64") => "attn_tree_tc64",
+        Ok("tc-sw128") => "attn_tree_tc_sw128",
+        Ok("tc64-sw128") => "attn_tree_tc64_sw128",
         Ok("tc-pv1") => "attn_tree_tc_pv1",
         Ok("tc-qk1") => "attn_tree_tc_qk1",
         Ok("tc-f16") => "attn_tree_tc_f16",
@@ -1051,10 +1070,11 @@ pub fn attention_tree(
     scale: f32,
     tc: Option<(&Tensor, &Tensor, bool)>,
     merge: Option<DType>,
+    kernel: &'static str,
 ) -> Result<Tensor> {
     // the tensor-core kernels (except tc-pipe) write merged heads themselves, bitwise as merge_heads would
-    let in_kernel = merge
-        .filter(|&dt| tc.is_some() && tc_kernel() != "attn_tree_tc_pipe" && matches!(dt, DType::F16 | DType::BF16));
+    let in_kernel =
+        merge.filter(|&dt| tc.is_some() && kernel != "attn_tree_tc_pipe" && matches!(dt, DType::F16 | DType::BF16));
     let att = std::env::var("BASAL_ATT");
     let op = AttentionTree {
         units,
@@ -1065,7 +1085,7 @@ pub fn attention_tree(
         tc: tc.is_some(),
         // the Hopper kernels are measured for f16 forwards: a bf16 forward (V lo plane) keeps tc unless BASAL_ATT asks
         // for wg / wgp; wgp has no V lo stage, so wg runs instead
-        tc_kernel: match (tc_kernel(), tc.is_some_and(|t| t.2), matches!(att.as_deref(), Ok("wg" | "wgp" | "wgp64"))) {
+        tc_kernel: match (kernel, tc.is_some_and(|t| t.2), matches!(att.as_deref(), Ok("wg" | "wgp" | "wgp64"))) {
             ("attn_tree_wg" | "attn_tree_wgp" | "attn_tree_wgp64", false, false) => "attn_tree_tc",
             ("attn_tree_wgp" | "attn_tree_wgp64", false, true) => "attn_tree_wg",
             (k, _, _) => k,

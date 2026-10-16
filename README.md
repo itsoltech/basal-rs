@@ -395,14 +395,25 @@ wiersza poleceń, np. `--max-batch-tokens`):
 | `path` | | lokalny katalog modelu (zamiast `repo`) |
 | `gemm_table` | `auto` | tabela algorytmów cuBLASLt (opis niżej); `none`: algorytmy dobierane przy pierwszym użyciu, wynik może zależeć od partii; albo ścieżka tabeli |
 | `dtype` | `f16` | `f16`, `bf16` albo `f32` (referencja numeryczna, wolna) |
+| `inference_mode` | `auto` | dobór attention; `accurate`: dotychczasowe obliczenia; `balanced`: CUDA Llama f16, iloczyn Q/K w f16, softmax i akumulacja w f32, prawdopodobieństwa hi/lo |
 | `max_batch_tokens` | 8192 | tokeny jednej partii, liczone po współdzieleniu prefiksów |
 | `schedule` | `hrrn` | kolejność przyjmowania żądań: `hrrn` (krótkie przed długimi, bez zagłodzenia) albo `fifo` |
 | `long_tokens` | 4096 | żądania powyżej tej liczby tokenów idą do toru długich żądań, który oddaje GPU krótkim partiom między warstwami; `0` wyłącza |
 | `state_cache_mb` | 0 | cache K/V stanu między żądaniami |
 
+`inference_mode: auto` wybiera `balanced` dla Basal 2.0 mini/4.5B/max na
+RTX 6000 Ada Generation, przy CUDA f16, fused kernels i odczycie f32.
+Poza tym zakresem zachowuje dotychczasową politykę. `accurate` zachowuje
+pierwotną arytmetykę attention; cały forward FP32 wymaga `dtype: f32`.
+Tryb można ustawić także przez `--inference-mode` w CLI i lokalnym kliencie.
+[Pomiary latency, QPS i jakości FP32](reports/precision-performance-ada-2026-10-16/README.md)
+obejmują również regresje p95 oraz brak bezpośredniej długiej referencji FP32 Max.
+
 Opcje procesu: `addr` (nadpisywany przez zmienną `BASAL_ADDR`; w obrazie
 `0.0.0.0:8000`), `default_model`, `max_inflight` (1024, limit żądań w
-kolejce i w trakcie wszystkich modeli; nadmiar dostaje 529 z `Retry-After`), `long_slice_ms`
+kolejce i w trakcie wszystkich modeli; nadmiar dostaje 529 z `Retry-After`),
+`max_large_inflight` (4, wspólna pula dużych body i rozwiniętych promptów;
+CLI: `--max-large-inflight`), `long_slice_ms`
 (100, minimalny czas pracy toru długich żądań między oddaniami GPU),
 `gemm_cache` (`.cache/gemm`), `metrics` (`false`; zbieranie metryk i endpoint
 Prometheus, włączane także flagą `--metrics`).
@@ -425,7 +436,11 @@ minut). Tabelę wygenerowaną dla karty lub modelu spoza tej listy
 kolejne wydania ją zawierały ([CONTRIBUTING](CONTRIBUTING.pl.md#tabele-gemm)).
 `basal doctor` wypisuje karty z tabelami w binarce. Ręcznie:
 `basal gemm-search --model DIR --invariant --out gemm.json`. Serwer odmawia
-startu z tabelą, która nie obejmuje kształtów wag modelu.
+startu z tabelą, która nie obejmuje kształtów wag modelu. Poprawna tabela już
+zapisana w cache pozostaje bez zmian po aktualizacji binarki. Aby jawnie
+wybrać nową tabelę, podaj `--gemm-table PLIK` lub ścieżkę w YAML.
+Tabela RTX 6000 Ada wspólna dla mini 1.5/2.0 ma nowy wybór trzech algorytmów
+dla klasy M4096; [pomiar i zakres zgodności](reports/optimization-basal2-ada-2026-10-15/README.md).
 
 ## Polecenia
 

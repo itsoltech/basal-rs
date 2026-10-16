@@ -57,6 +57,9 @@ pub(crate) struct Options {
     /// Server waiting + running request limit; excess requests receive 529
     #[arg(long, default_value_t = 1024)]
     max_inflight: usize,
+    /// Server limit for large/chunked bodies and expanded inputs above 128 KiB
+    #[arg(long, default_value_t = crate::serve::DEFAULT_MAX_LARGE_INFLIGHT)]
+    max_large_inflight: usize,
     /// Server queue admission order
     #[arg(long, value_enum, default_value_t = Schedule::Hrrn)]
     schedule: Schedule,
@@ -82,10 +85,8 @@ impl Options {
         );
         ensure!(self.warmup <= 10, "--warmup must be between 0 and 10 per class");
         ensure!((1..=3_600_000).contains(&self.timeout_ms), "--timeout-ms must be between 1 and 3600000");
-        ensure!(
-            self.max_batch_tokens > 0 && self.max_inflight > 0 && self.long_slice_ms > 0,
-            "server budgets / long-slice-ms must be positive"
-        );
+        ensure!(self.max_batch_tokens > 0 && self.long_slice_ms > 0, "server budgets / long-slice-ms must be positive");
+        crate::serve::check_admission_limits(self.max_inflight, self.max_large_inflight)?;
         for (name, value) in [("ram-reserve-gib", self.ram_reserve_gib), ("gpu-reserve-gib", self.gpu_reserve_gib)] {
             ensure!(
                 value.is_finite() && (0.1..=1048576.0).contains(&value),
@@ -125,6 +126,7 @@ impl Server {
             addr,
             release_date: "2026-10-05".into(),
             max_inflight: options.max_inflight,
+            max_large_inflight: options.max_large_inflight,
             default_model: None,
             long_slice_ms: options.long_slice_ms,
             access_log: false,
@@ -260,9 +262,10 @@ fn execute(
     report["backend"] = engine.backend.describe();
     // File name only: an automatic table lives in the user's cache directory, whose path identifies the machine.
     let gemm_table = gpu_settings.gemm_table.as_deref().and_then(Path::file_name).map(|n| n.to_string_lossy());
-    report["settings"] = json!({"dtype": g.dtype, "kernels": g.kernels, "readout": g.readout, "prefix_cache": !g.no_prefix_cache,
+    report["settings"] = json!({"dtype": g.dtype, "inference_mode": g.inference_mode, "kernels": g.kernels, "readout": g.readout, "prefix_cache": !g.no_prefix_cache,
         "state_cache_mb": g.state_cache_mb, "gemm_table": gemm_table, "tree_max_tokens": g.tree_max_tokens,
-        "max_batch_tokens": options.max_batch_tokens, "max_inflight": options.max_inflight, "schedule": format!("{:?}", options.schedule),
+        "max_batch_tokens": options.max_batch_tokens, "max_inflight": options.max_inflight,
+        "max_large_inflight": options.max_large_inflight, "schedule": format!("{:?}", options.schedule),
         "long_tokens": options.long_tokens, "long_slice_ms": options.long_slice_ms});
     let host = host_memory()?;
     let gpu = engine.backend.memory()?;

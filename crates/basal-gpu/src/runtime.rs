@@ -11,7 +11,7 @@ use basal_core::pack::Packed;
 use basal_core::{Backend, DeviceHealth};
 use serde_json::Value;
 
-use crate::{GpuMemory, GpuMemoryProbe, Kernels, Precision, Readout};
+use crate::{GpuMemory, GpuMemoryProbe, InferenceConfigError, InferenceMode, Kernels, Precision, Readout};
 
 pub enum RuntimeBackend {
     Llama(Box<crate::GpuBackend>),
@@ -21,6 +21,20 @@ pub enum RuntimeBackend {
 }
 
 impl RuntimeBackend {
+    /// Select arithmetic before prefix warmup or lane creation. Explicit balanced mode requires a CUDA FP16 Llama.
+    pub fn configure_inference(&mut self, mode: InferenceMode, model_name: &str) -> Result<(), InferenceConfigError> {
+        match self {
+            Self::Llama(b) => b.configure_inference(mode, model_name),
+            _ => {
+                if mode == InferenceMode::Balanced {
+                    Err(InferenceConfigError::UnsupportedBalanced)
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+
     pub fn load(
         dir: &Path,
         cfg: &Architecture,

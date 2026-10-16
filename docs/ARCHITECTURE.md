@@ -62,7 +62,7 @@ bloku i bloków przodków, co jest równoważne osobnym forwardom pełnych
 promptów. Głębokość drzewa jest ograniczona do 8 bloków; poniżej prompty
 dostają osobne bloki.
 
-Wiersz ma do 32768 tokenów, forward do 8192 (wiersze dłuższe liczą się
+Wiersz ma do 32768 tokenów, forward domyślnie do 8192 (wiersze dłuższe liczą się
 osobno). Pytania o ten sam stan trafiają obok siebie.
 
 Stały prefiks promptu (szablon do stanu, 53 tokeny PL i 66 EN) jest liczony
@@ -107,6 +107,20 @@ rozszerza je przed użyciem (dokładny forward FP32, punkt odniesienia).
   f16, a wynik attention od razu jako scalone głowy w dtype forwardu. Metal: `attn_tree_f32` z `kernels.metal`
   na macierzach `simdgroup_float8x8` w f32 (`BASAL_ATT=sdpa`: poprzednie SDPA
   z MLX po całym wierszu z maską, wynik zależny od pakowania).
+- Tryb `inference_mode` jest wybierany dla każdego backendu przed wyliczeniem
+  prefiksów i kopiowany do torów wykonania. Dla CUDA Llama `accurate` używa
+  dotychczasowego attention hi/lo, `balanced` wybiera specjalizację QK1 dla f16
+  z odczytem f32: Q/K w f16, prawdopodobieństwa hi/lo, softmax i akumulacja
+  w f32. Specjalizacja wymaga dokładnego V w f16 i scalonego wyniku f16;
+  przy innych typach kernel wraca do odpowiadającego mu wariantu ogólnego.
+  Na CUDA jawny tryb ma pierwszeństwo przed `BASAL_ATT`; `auto` zachowuje tę zmienną
+  do eksperymentów. Wybór nie modyfikuje środowiska procesu ani gotowych cache K/V.
+  Automatyczny QK1 dotyczy wyłącznie rozpoznanej RTX 6000 Ada Generation,
+  nazw Basal 2.0 mini/4.5B/max oraz CUDA f16 fused z odczytem f32; pozostałe
+  konfiguracje zachowują poprzedni wybór. Nieudany opcjonalny odczyt nazwy GPU
+  również zachowuje poprzednią politykę.
+  [Pomiary i ograniczenia jakości](../reports/precision-performance-ada-2026-10-16/README.md)
+  nie są gwarancją zgodności każdego wejścia z FP32.
 - W ostatniej warstwie o_proj i MLP liczą się tylko dla pozycji odczytu, a
   logity tylko dla wierszy `lm_head` odpowiadających literom, w f32.
 - CUDA GEMM przez cuBLASLt z tabelą algorytmów z pełnego przeszukania
@@ -188,6 +202,23 @@ Partia to pierwsze żądanie z kolejki i każde następne, które mieści się w
 `--max-batch-tokens`; pytania wszystkich żądań partii dzielą forwardy.
 Żądania porzucone przez klienta są pomijane, a ponad `--max-inflight` żądań
 w toku dostaje 529 z `Retry-After: 1` (status TypeSafe dla przeciążenia).
+`--max-large-inflight` / `max_large_inflight` ogranicza pulę rozwiniętych
+promptów powyżej 128 KiB. W serwerze obsługującym media ta sama pula obejmuje
+także body powyżej 2 MiB lub bez Content-Length.
+Domyślnie są to 4 żądania; zwiększenie wymaga pamięci na równoczesne przygotowanie
+i kolejkę. Budżety pojedynczego żądania nadal obowiązują. W pomiarze przepustowości
+limit przyjęcia powinien mieć zapas ponad liczbę klientów; odrzuceń 529 nie wolno
+zaliczać do poprawnych odpowiedzi/s. Osobno porównujemy przepustowość oraz
+czas request→response wraz z oczekiwaniem w kolejce.
+
+Budżet `max_batch_tokens` każdego obsługiwanego modelu ustawia też
+`Engine::forward_max_tokens` przed utworzeniem obu lane'ów. Zwiększenie limitu
+pozwala więc łączyć wiele spakowanych wierszy jednej grupy językowej w większy
+forward. Pojedynczy wiersz przekraczający budżet nadal może zostać wykonany osobno.
+Domyślna wartość obu budżetów wynosi 8192. Większe wartości zmieniają jednoczesne
+użycie pamięci i czas zajęcia GPU; ich ocenę wykonujemy razem z opóźnieniami
+krótkich żądań w ruchu mieszanym.
+
 
 Żądania powyżej `--long-tokens` liczy drugi tor: drugi silnik na tym samym
 GPU, ze wspólnymi wagami, tabelą GEMM i prefiksami szablonu. Oba tory

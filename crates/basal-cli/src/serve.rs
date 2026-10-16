@@ -47,12 +47,16 @@ use tokio::sync::{mpsc, oneshot, Semaphore};
 mod metrics;
 use metrics::{LaneMetrics, Metrics, RequestModel};
 
+pub(crate) const DEFAULT_MAX_LARGE_INFLIGHT: usize = 4;
+
 pub struct ServeOptions {
     pub addr: SocketAddr,
     /// `release_date` of GET /v1/models (TypeSafe ModelMetadata; upstream reports its engine release date)
     pub release_date: String,
     /// Waiting + running requests of all models.
     pub max_inflight: usize,
+    /// Large bodies and requests whose expanded input exceeds 128 KiB, across all models.
+    pub max_large_inflight: usize,
     /// Model of /v1/basal requests without a "model" field (default: the first model).
     pub default_model: Option<String>,
     /// Least work of a long lane between two hand-overs of the GPU.
@@ -523,7 +527,7 @@ async fn models_list(State(app): State<Arc<App>>) -> Json<Value> {
     Json(json!({ "models": models }))
 }
 
-/// Admit at most four large or chunked inference bodies before reading/allocating them.
+/// Admit large or chunked inference bodies before reading/allocating them.
 async fn large_body_admission(State(app): State<Arc<App>>, mut request: Request, next: Next) -> Response {
     let large = request
         .headers()
@@ -631,16 +635,25 @@ fn metadata_for_model<B: Backend>(engine: &Engine<B>) -> Value {
     metadata
 }
 
+pub(crate) fn check_admission_limits(max_inflight: usize, max_large_inflight: usize) -> Result<()> {
+    anyhow::ensure!(
+        max_inflight > 0 && max_inflight <= Semaphore::MAX_PERMITS,
+        "max_inflight must be positive and within the semaphore limit"
+    );
+    anyhow::ensure!(
+        max_large_inflight > 0 && max_large_inflight <= Semaphore::MAX_PERMITS,
+        "max_large_inflight must be positive and within the semaphore limit"
+    );
+    Ok(())
+}
+
 fn serve_inner<B: Backend + Send + 'static>(
     models: Vec<ServedModel<B>>,
     opts: ServeOptions,
     owned: Option<(std::net::TcpListener, oneshot::Receiver<()>)>,
 ) -> Result<()> {
     anyhow::ensure!(!models.is_empty(), "no models to serve");
-    anyhow::ensure!(
-        opts.max_inflight > 0 && opts.max_inflight <= Semaphore::MAX_PERMITS,
-        "max_inflight must be positive and within the semaphore limit"
-    );
+    check_admission_limits(opts.max_inflight, opts.max_large_inflight)?;
     let names: Vec<String> = models.iter().map(|m| m.engine.manifest.name.clone()).collect();
     let supports_media = models.iter().any(|m| !m.engine.backend.media_kinds().is_empty());
     let model_metadata: Vec<Value> = models.iter().map(|m| metadata_for_model(&m.engine)).collect();
@@ -664,6 +677,9 @@ fn serve_inner<B: Backend + Send + 'static>(
         let mut readiness = Vec::new();
         for m in models {
             let ServedModel { mut engine, max_batch_tokens, schedule, long_tokens } = m;
+            // Keep the forward budget aligned with admission, including the forked long lane.
+            // Otherwise a larger server batch is silently split at the engine's default 8192.
+            engine.forward_max_tokens = max_batch_tokens;
             let name = engine.manifest.name.clone();
             let mut devices: Vec<DeviceHealth> = engine.backend.device_health().into_iter().collect();
             let (tx, rx) = mpsc::unbounded_channel();
@@ -706,7 +722,7 @@ fn serve_inner<B: Backend + Send + 'static>(
             routes,
             names,
             model_metadata,
-            large_bodies: Arc::new(Semaphore::new(4)),
+            large_bodies: Arc::new(Semaphore::new(opts.max_large_inflight)),
             jobs: Arc::new(Semaphore::new(opts.max_inflight)),
             media_requests: Arc::new(Semaphore::new(4)),
             health: readiness,
