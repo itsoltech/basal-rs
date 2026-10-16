@@ -109,7 +109,7 @@ pub(super) struct ClientArgs {
     #[arg(long, default_value = "auto", requires = "local")]
     dtype: String,
     /// Local attention arithmetic: auto, accurate, or balanced (CUDA f16)
-    #[arg(long, default_value = "auto", requires = "local", value_parser = ["auto", "accurate", "balanced"])]
+    #[arg(long, default_value = "auto", requires = "local", value_parser = crate::INFERENCE_MODES)]
     inference_mode: String,
     /// Enable image and audio input on a local omni CUDA model
     #[arg(long, requires = "local")]

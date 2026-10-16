@@ -109,7 +109,9 @@ rozszerza je przed użyciem (dokładny forward FP32, punkt odniesienia).
   z MLX po całym wierszu z maską, wynik zależny od pakowania).
 - Tryb `inference_mode` jest wybierany dla każdego backendu przed wyliczeniem
   prefiksów i kopiowany do torów wykonania. Dla CUDA Llama `accurate` używa
-  dotychczasowego attention hi/lo, `balanced` wybiera specjalizację QK1 dla f16
+  attention hi/lo przez przenośny kernel `attn_tree_tc`, również na Hopperze;
+  automatyczny dobór WGMMA na Hopperze pozostaje w `auto`. Jawny `accurate`
+  nie gwarantuje więc wydajności domyślnej ścieżki H100. `balanced` wybiera specjalizację QK1 dla f16
   z odczytem f32: Q/K w f16, prawdopodobieństwa hi/lo, softmax i akumulacja
   w f32. Specjalizacja wymaga dokładnego V w f16 i scalonego wyniku f16;
   przy innych typach kernel wraca do odpowiadającego mu wariantu ogólnego.

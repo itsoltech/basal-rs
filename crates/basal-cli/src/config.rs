@@ -82,7 +82,7 @@ pub struct ModelConfig {
     #[serde(default = "default_dtype")]
     pub dtype: String,
     /// auto, accurate (original arithmetic), or balanced (CUDA FP16 Llama, FP32 readout).
-    #[serde(default = "default_dtype")]
+    #[serde(default = "default_inference_mode")]
     pub inference_mode: String,
     /// `auto`: the table of this model and GPU from `gemm_cache`, generated when missing or not valid here; `none`:
     /// algorithms timed at first use (results may depend on the batch); otherwise the path of a table.
@@ -130,6 +130,9 @@ pub fn default_gemm_cache() -> PathBuf {
     crate::paths::cache_dir().join("gemm")
 }
 fn default_dtype() -> String {
+    "auto".into()
+}
+fn default_inference_mode() -> String {
     "auto".into()
 }
 fn default_gemm_table() -> String {

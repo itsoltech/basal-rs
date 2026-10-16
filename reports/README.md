@@ -27,6 +27,7 @@ Metodyka: [docs/BENCHMARKS.md](../docs/BENCHMARKS.md).
 
 | Katalog | Zawartość |
 |---|---|
+| [inference-mode-review-2026-10-16](inference-mode-review-2026-10-16/README.md) | review Opus 5.5: wspólna walidacja trybów, niezależny default, porównania CLI i jawne ograniczenie accurate na H100 |
 | [precision-performance-ada-2026-10-16](precision-performance-ada-2026-10-16/README.md) | accurate/balanced i upstream BF16: 25 punktów latency, 18 QPS, FP32 na rozdzielonych danych, regresje ogona oraz GAP długiej referencji Max |
 | [optimization-basal2-ada-2026-10-15](optimization-basal2-ada-2026-10-15/README.md) | GEMM, budżet partii, admission i rampy obciążenia mini/4.5B/max na Ada; wyniki pozytywne i regresje |
 | [inference-campaign-2026-10-09](inference-campaign-2026-10-09/README.md) | H100 i RTX 6000 Ada: SiLU, RMSNorm, cache stanów, budżet partii i harmonogram; zgodność wyników, latency i throughput |

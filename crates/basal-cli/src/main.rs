@@ -126,6 +126,8 @@ impl ModelArgs {
     }
 }
 
+const INFERENCE_MODES: [&str; 3] = ["auto", "accurate", "balanced"];
+
 #[derive(Args, Clone)]
 struct GpuArgs {
     /// Enable image/audio processors and native encoders (omni CUDA, bf16 or f32)
@@ -138,7 +140,7 @@ struct GpuArgs {
     #[arg(long, default_value = "auto")]
     dtype: String,
     /// Attention arithmetic: auto, accurate (original), or balanced (CUDA f16, FP32 softmax)
-    #[arg(long, default_value = "auto", value_parser = ["auto", "accurate", "balanced"])]
+    #[arg(long, default_value = "auto", value_parser = INFERENCE_MODES)]
     inference_mode: String,
     /// Letter logits: f32, or bf16 (f32 rounded to bf16, diagnostic emulation of a bf16 lm_head)
     #[arg(long, default_value = "f32")]
@@ -540,7 +542,7 @@ fn parse_inference_mode(value: &str) -> Result<InferenceMode> {
         "auto" => InferenceMode::Auto,
         "accurate" => InferenceMode::Accurate,
         "balanced" => InferenceMode::Balanced,
-        value => bail!("unknown inference mode {value:?} (auto, accurate, balanced)"),
+        value => bail!("unknown inference mode {value:?} ({})", INFERENCE_MODES.join(", ")),
     })
 }
 
