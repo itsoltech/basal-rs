@@ -7,6 +7,7 @@
 addr: 0.0.0.0:8000
 default_model: basal-1.5-max       # default: the first model
 max_inflight: 1024                 # waiting + running requests of all models; more get 529
+max_large_inflight: 4              # shared limit for large/chunked bodies and expanded input above 128 KiB
 long_slice_ms: 100                 # least work of a long-request lane between two hand-overs of the GPU
 access_log: false                  # one log line per request: [POST] 200 /v1/systemone 31 ms (queue, compute, batch)
 metrics: false                     # opt in to Prometheus collection and GET /metrics (also --metrics)
@@ -20,6 +21,7 @@ models:
     # (results may depend on the batch). Otherwise the path of a `basal gemm-search --invariant` table.
     gemm_table: reports/rust-cuda-1.5-max/gemm-equiv/gemm-algos-f16-invariant-groups.json
     dtype: f16                     # f16 (default), bf16, f32
+    inference_mode: auto           # balanced for Basal 2.0 text on RTX 6000 Ada; accurate preserves original attention
     max_batch_tokens: 8192         # packed tokens of one batch
     schedule: hrrn                 # hrrn (default) or fifo
     long_tokens: 4096              # requests above this run in the model's long lane (0: none)

@@ -1,7 +1,8 @@
 # Kontrole jakości Rust w CI
 
 [lint.yml](../.github/workflows/lint.yml) uruchamia się dla każdego PR oraz po zmianach kodu lub konfiguracji CI na
-`main`. Check `lint` jest zbiorczą bramką: wymaga sukcesu wszystkich poniższych jobów, także wszystkich wariantów macierzy
+`main`. Można też uruchomić go ręcznie dla wskazanej gałęzi przez `workflow_dispatch`.
+Check `lint` jest zbiorczą bramką: wymaga sukcesu wszystkich poniższych jobów, także wszystkich wariantów macierzy
 Rust. Błąd, anulowanie lub pominięcie wymaganego joba oznacza błąd bramki. Nowszy commit anuluje poprzedni przebieg.
 
 ## Kontrole automatyczne

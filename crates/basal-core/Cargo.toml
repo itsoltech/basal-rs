@@ -11,6 +11,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+sha2 = "0.10"
 anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true
@@ -18,3 +19,7 @@ serde_json.workspace = true
 indexmap.workspace = true
 regex.workspace = true
 tokenizers.workspace = true
+base64 = "0.22"
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico", "pnm", "tga"] }
+symphonia = { version = "=0.6.1", default-features = false, features = ["wav", "pcm", "flac", "ogg", "vorbis", "mp3"] }
+rustfft = "6"

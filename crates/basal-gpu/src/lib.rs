@@ -34,10 +34,16 @@ use serde_json::{json, Value};
 #[cfg(feature = "cuda")]
 mod cublaslt;
 mod fused;
+mod gemma;
+mod gemma_encoders;
+mod inference;
 #[cfg(all(feature = "intel", not(target_os = "macos")))]
 pub mod intel;
+pub use inference::{InferenceConfigError, InferenceMode};
 mod memory;
+mod runtime;
 pub use memory::{gpu_memory, GpuMemory, GpuMemoryProbe};
+pub use runtime::RuntimeBackend;
 #[cfg(target_os = "macos")]
 pub mod gemm;
 use fused::HeadDims;
@@ -73,6 +79,18 @@ pub enum Precision {
     Bf16,
     F16,
     F32,
+}
+
+/// Preserve the Llama default while using the published BF16 serving dtype for a Gemma checkpoint.
+pub fn model_precision(value: &str, cfg: &basal_core::architecture::Architecture) -> Result<Precision> {
+    if value == "auto" {
+        Ok(match cfg {
+            basal_core::architecture::Architecture::Llama(_) => Precision::F16,
+            basal_core::architecture::Architecture::Gemma4(_) => Precision::Bf16,
+        })
+    } else {
+        Precision::parse(value)
+    }
 }
 
 impl Precision {
@@ -256,6 +274,30 @@ pub fn projection_shapes(c: &LlamaConfig) -> Vec<(usize, usize)> {
     vec![(qd + 2 * kvd, h), (h, qd), (2 * i, h), (h, i)]
 }
 
+/// Decoder projection shapes (N, K), including Gemma's per-layer embeddings and separate Q/K/V.
+pub fn architecture_projection_shapes(cfg: &basal_core::architecture::Architecture) -> Result<Vec<(usize, usize)>> {
+    use basal_core::architecture::Architecture;
+    let Architecture::Gemma4(c) = cfg else {
+        return Ok(projection_shapes(cfg.llama()?));
+    };
+    c.validate()?;
+    let h = c.hidden;
+    let mut shapes = std::collections::BTreeSet::new();
+    for layer in &c.layers {
+        let q = layer.heads.checked_mul(layer.head_dim).context("Gemma query shape overflow")?;
+        let kv = layer.kv_heads.checked_mul(layer.head_dim).context("Gemma KV shape overflow")?;
+        shapes.extend([(q, h), (h, q), (layer.intermediate, h), (h, layer.intermediate)]);
+        if !layer.shared_kv {
+            shapes.insert((kv, h));
+        }
+    }
+    if c.per_layer_input > 0 {
+        let packed = c.layers.len().checked_mul(c.per_layer_input).context("Gemma per-layer shape overflow")?;
+        shapes.extend([(packed, h), (c.per_layer_input, h), (h, c.per_layer_input)]);
+    }
+    Ok(shapes.into_iter().collect())
+}
+
 /// Name of the GPU (CUDA device 0), as recorded in GEMM tables.
 pub fn gpu_name() -> Result<String> {
     #[cfg(feature = "cuda")]
@@ -352,6 +394,8 @@ pub struct GpuBackend {
     precision: Precision,
     readout: Readout,
     kernels: Kernels,
+    /// Fixed before prefix warmup and copied to every execution lane.
+    attention_override: Option<&'static str>,
     embed: Tensor,
     layers: Vec<Layer>,
     norm: Tensor,
@@ -644,6 +688,7 @@ impl GpuBackend {
             precision,
             readout,
             kernels,
+            attention_override: None,
             embed,
             layers,
             norm,
@@ -678,7 +723,11 @@ impl GpuBackend {
     fn attention_kernel(&self) -> &'static str {
         #[cfg(feature = "cuda")]
         if self.dev.is_cuda() {
-            return if self.tc_attention() { fused::tc_kernel() } else { "attn_tree_f32" };
+            return if self.tc_attention() {
+                self.attention_override.unwrap_or_else(fused::tc_kernel)
+            } else {
+                "attn_tree_f32"
+            };
         }
         if self.tree_attention() {
             "attn_tree_f32"
@@ -980,9 +1029,17 @@ impl GpuBackend {
                     let nk = nkv * total * hd;
                     let (khl, vhl) = (hl.narrow(0, 0, 2 * nk)?, hl.narrow(0, 2 * nk, 2 * nk)?);
                     let v_exact = self.precision == Precision::F16;
-                    Some(fused::attention_tree(&_flat, &us, dims, scale, Some((&khl, &vhl, v_exact)), Some(dt))?)
+                    Some(fused::attention_tree(
+                        &_flat,
+                        &us,
+                        dims,
+                        scale,
+                        Some((&khl, &vhl, v_exact)),
+                        Some(dt),
+                        self.attention_kernel(),
+                    )?)
                 } else {
-                    Some(fused::attention_tree(&_flat, &us, dims, scale, None, Some(dt))?)
+                    Some(fused::attention_tree(&_flat, &us, dims, scale, None, Some(dt), self.attention_kernel())?)
                 }
             } else {
                 None
@@ -1098,7 +1155,9 @@ impl GpuBackend {
     /// CUDA attention on tensor cores (f16 / bf16 forwards; `BASAL_ATT=simt` selects the f32 kernel for A/B).
     #[cfg_attr(not(feature = "cuda"), allow(dead_code, reason = "Tensor-core attention is a CUDA-only kernel"))]
     fn tc_attention(&self) -> bool {
-        self.dev.is_cuda() && self.precision != Precision::F32 && std::env::var("BASAL_ATT").as_deref() != Ok("simt")
+        self.dev.is_cuda()
+            && self.precision != Precision::F32
+            && (self.attention_override.is_some() || std::env::var("BASAL_ATT").as_deref() != Ok("simt"))
     }
 
     /// The prefix K / V of every layer split into f16 hi / lo planes, when the tensor-core attention reads them.
@@ -1408,6 +1467,7 @@ impl Backend for GpuBackend {
             precision: self.precision,
             readout: self.readout,
             kernels: self.kernels,
+            attention_override: self.attention_override,
             embed: self.embed.clone(),
             layers: self.layers.clone(),
             norm: self.norm.clone(),

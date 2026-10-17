@@ -37,7 +37,8 @@ Opis projektu: [README.md](README.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.
   bramek testowych do CI.
 - Poprawność sprawdzamy porównaniem wyników modelu z referencją upstream
   (`basal export`, `basal compare`, [docs/BENCHMARKS.md](docs/BENCHMARKS.md)),
-  a wydajność pomiarami. Zapisuj ich dane i ograniczenia w `reports/`.
+  a wydajność pomiarami. Opis wyników i ograniczeń zapisuj w `reports/`;
+  dane pomiarowe przechowuj według zasad poniżej.
 - Można korzystać z kompilatora, `cargo fmt`, `cargo clippy` i przeglądu kodu.
   Brak testów nie uprawnia do deklarowania niezmierzonej zgodności, zachowania
   jakości ani przyspieszenia.
@@ -53,3 +54,44 @@ Opis projektu: [README.md](README.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.
 - Pomiary na wynajętym GPU: [docs/CLOUD.md](docs/CLOUD.md). Przed każdą sesją
   zapytaj użytkownika o budżet i kartę; kwot ani kosztów sesji nie zapisuj w
   repozytorium. Po pomiarze usuń maszynę i pilnuj jej w trakcie pracy.
+
+## Artefakty pomiarowe — Hugging Face
+
+- Przed przygotowaniem lub publikacją wyników przeczytaj
+  [docs/MEASUREMENT_ARTIFACTS.md](docs/MEASUREMENT_ARTIFACTS.md).
+  To wspólna procedura archiwizacji, wysyłania, pobierania i weryfikacji.
+- W Gicie przechowuj szczegółowe podsumowania Markdown w `reports/`.
+  Opisuj prostym, precyzyjnym językiem: cel, wersje i wejścia, sprzęt,
+  metodę, wyniki, ograniczenia oraz decyzje. Zachowuj regresje, różnice
+  jakości i statusy FAIL/GAP/SIGNAL; nie wyciągaj niezmierzonych wniosków.
+- Nowe dane wynikowe (JSON, JSONL, CSV, logi, profile i eksporty binarne)
+  zapisuj lokalnie poza Gitem, w `.cache/measurement-artifacts/<nazwa>-<data>/`.
+  W archiwum zachowuj logiczne ścieżki `reports/<katalog>/<plik>`.
+- Tabele GEMM w `crates/basal-cli/gemm-tables`, referencje upstream i inne
+  istniejące wejścia wymagane przez kod lub narzędzia pozostają w Gicie.
+  Rozróżniaj wynik pomiaru od potrzebnego zasobu; rozszerzenie JSON samo
+  w sobie nie jest powodem do usunięcia pliku ani ignorowania go w Git.
+- Docelowy magazyn to publiczny HF Storage Bucket
+  [itsoltech/basal-rs](https://huggingface.co/buckets/itsoltech/basal-rs),
+  URI `hf://buckets/itsoltech/basal-rs/`. Korzystaj z globalnego `hf` CLI;
+  jeśli istnieje `~/.local/bin/hf`, wywołuj tę binarkę bezpośrednio.
+  Sprawdź dostęp przez `hf auth whoami`. Przy braku logowania poproś
+  użytkownika o `hf auth login` w tym samym środowisku, bez tokenów w czacie.
+- Do publicznego bucketa wysyłaj tylko dane przeznaczone do publikacji:
+  bez sekretów, identyfikatorów
+  maszyn, adresów, nazw hostów, lokalnych ścieżek, kwot i kosztów.
+  Prywatne surowe dane sesji zachowuj lokalnie.
+- Utwórz `SHA256SUMS` plików i archiwum `tar.gz`; policz SHA-256 archiwum.
+  Publikuj przez `hf buckets cp` pod nowym, pustym prefiksem
+  `measurements/<nazwa>-<data>/<sha256 archiwum>/`.
+  Bucket nie ma historii wersji: zakończonych prefiksów nie nadpisuj ani
+  nie usuwaj. Korekta danych wymaga nowego archiwum i prefiksu.
+- Po wysłaniu pobierz archiwum do osobnego katalogu i sprawdź jego SHA-256
+  oraz wszystkie wpisy `SHA256SUMS`; dla publicznych danych potwierdź też
+  pobranie bez autoryzacji. Dopiero wtedy usuń zbędne kopie wyników z Git
+  i opisz publikację jako potwierdzoną. Zachowaj lokalną kopię archiwum.
+- Raport Markdown musi podawać URI, SHA-256 archiwum, ścieżki danych w nim
+  i sposób ich odtworzenia. Nowe lub migrowane runnery, które czytają takie
+  dane, mają przyjmować ich katalog przez `--measurement-artifacts`.
+  To konwencja dla tych runnerów, nie istniejąca opcja CLI basal.
+  Szczegóły są w procedurze.

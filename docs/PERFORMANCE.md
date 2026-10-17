@@ -7,7 +7,45 @@ wynik w różnych konfiguracjach. Każda liczba pochodzi z raportu w
 karcie. W ścieżkach serwowanych upstream liczy w BF16, a basal-rs w f16; na
 Apple Silicon porównanie obejmuje także upstream w f16.
 
-## Karty NVIDIA
+## basal-2.0 — bieżąca kampania NVIDIA
+
+[Raport 2026-10-14](../reports/perf-basal2-fivegpu-2026-10-14/README.md)
+obejmuje trzy tekstowe modele 2.0 z checkpointów BF16. Basal-rs oblicza w FP16,
+upstream v2.0.0 `fast` w BF16, na tej samej maszynie dla każdej pary.
+HTTP: jedno pytanie, jedna kolejność opcji, 32 klientów. Mediana trzech
+powtórzeń po odrzuceniu pierwszego przebiegu; rotacja ABBAABBA.
+
+Żądania/s: upstream / basal-rs (stosunek basal-rs/upstream).
+
+| Karta | mini | 4.5B | max |
+|---|---:|---:|---:|
+| H100 PCIe | 382,5 / 314,8 (0,82×) | 135,5 / 228,6 (1,69×) | 62,6 / 114,0 (1,82×) |
+| A100-SXM4-80GB | 241,9 / 353,8 (1,46×) | 83,4 / 146,6 (1,76×) | 40,8 / 73,5 (1,80×) |
+| L40S | 187,9 / 327,1 (1,74×) | 66,8 / 122,8 (1,84×) | 32,0 / 57,4 (1,79×) |
+| RTX 6000 Ada Generation | 120,6 / 256,1 (2,12×) | 34,5 / 87,9 (2,55×) | 15,3 / 39,3 (2,57×) |
+| RTX A6000 | 117,6 / 195,1 (1,66×) | 36,6 / 69,2 (1,89×) | 17,6 / 34,8 (1,97×) |
+
+SIGNAL: mini na H100 ma niższą przepustowość basal-rs niż upstream.
+Raport podaje również 1/8 klientów, zakres powtórzeń, p50/p99, energię GPU,
+ruch mieszany, niepowodzenia i osobne wyniki bez HTTP. Te ostatnie mają różny
+zakres czasu: native obejmuje przygotowanie promptu, upstream backend po tokenizacji.
+
+Basal-rs porównano z zachowaną referencją FP32: 49 argmax i 41 odpowiedzi API
+na model/kartę. To mały zestaw zgodności, bez nowego porównania act z FP32.
+Pełne liczniki i statusy są w raporcie. FAIL powtarzalności upstream fast 4.5B:
+32/3952 obserwacje na A100 i 33/3952 na RTX 6000 Ada zmieniły choice dla jednego
+pytania pod obciążeniem. Status ten jest odrębny od zgodności basal-rs z FP32.
+FAIL: w ruchu mieszanym większych modeli przy 32 klientach wystąpiły błędy HTTP.
+Podana przepustowość i percentyle tego ruchu dotyczą poprawnych odpowiedzi;
+raport zachowuje liczniki błędów i osobną diagnostykę.
+
+H100 pracował z limitem 350 W, A100 z 500 W. Są to inne warunki niż w kampanii 1.5
+(odpowiednio 700 W i 400 W); zmieniły się też przydziały CPU i liczba kolejności HTTP.
+Nie wyprowadzamy przyspieszenia między kampaniami z tych tabel. Model max obu RTX-ów
+pochodzi z pełnych nowych sesji po przerwaniu pierwszych przez limit czasu;
+raport zachowuje obie próby i sprzęt wybrany osobno dla modelu.
+
+## Karty NVIDIA — historyczne modele basal-1.5
 
 Maszyny wynajęte, fabryczne limity mocy, konfiguracja domyślna basal-rs,
 upstream v1.5.0 `fast` (BF16, torch.compile, CUDA graphs)
@@ -66,7 +104,7 @@ ze starszym sterownikiem działa pakiet zgodności NVIDIA (H100 na 535).
 
 Niższy limit kosztuje ~20% przepustowości przy tej samej energii na decyzję.
 
-## Długie dokumenty
+## Długie dokumenty — basal-1.5
 
 Stan ~16,5k tokenów, 5 pytań, RTX 6000 Ada 300 W: upstream 112 s, basal-rs
 5,3 s ([rust-cuda-1.5-max](../reports/rust-cuda-1.5-max/README.md)).
@@ -74,7 +112,7 @@ basal-rs liczy wspólny stan raz dla wszystkich pytań (drzewo prefiksów), a
 żądania powyżej 4096 tokenów idą do osobnego toru, który oddaje GPU krótkim
 żądaniom między warstwami.
 
-## Długość kontekstu (H100)
+## Długość kontekstu (H100, basal-1.5)
 
 H100 PCIe 350 W, całe żądanie, jedno pytanie, upstream / basal-rs
 ([context-h100](../reports/context-h100/README.md)):
@@ -95,7 +133,7 @@ H100 o 17–27% (4.5B, 1792 tokenów: 103 → 84 ms, upstream 84 ms) przy tej sa
 niezależności od partii; na RTX 6000 Ada bez zmian. Od ~4k
 tokenów basal-rs jest szybszy 1,75–2,4 raza, przy pięciu pytaniach 10–15 razy.
 
-## Apple Silicon (Metal)
+## Apple Silicon (Metal, basal-1.5)
 
 Pojedyncza decyzja (mediana), upstream z MLX w bf16 (ścieżka serwowana) i f16
 wobec basal-rs f16 ([M2 Max](../reports/metal-m2-max-1.5/README.md),
@@ -110,7 +148,7 @@ wobec basal-rs f16 ([M2 Max](../reports/metal-m2-max-1.5/README.md),
 Na M2 Max 1,9–2,0 raza więcej decyzji na sekundę niż MLX f16. Laptop mierzony
 na zasilaczu; na baterii i po przegrzaniu czasy rosną.
 
-## Konfiguracja
+## Konfiguracja — pomiary basal-1.5
 
 | Ustawienie | Wpływ | Pomiar |
 |---|---|---|
@@ -122,7 +160,7 @@ na zasilaczu; na baterii i po przegrzaniu czasy rosną.
 | `BASAL_CUDA_SYNC=blocking` | zwalnia ~0,7 rdzenia CPU przy pracy GPU, +2,5% czasu pytania | [choice-sets](../reports/choice-sets/README.md#czekanie-na-gpu-cuda) |
 | `max_batch_tokens`, `long_tokens`, `schedule` | rozmiar partii, próg toru długich żądań, kolejność (HRRN, FIFO) | [mixed-load](../reports/rust-cuda-1.5-max/mixed-load/README.md) |
 
-## Dobór karty
+## Dobór karty — basal-1.5
 
 basal-1.5-max potrzebuje ok. 22 GB na wagi f16; mierzony był na kartach z 48 i
 80 GB pamięci, mniejsze nie były sprawdzane. Na kartach do 300 W

@@ -24,6 +24,25 @@ W trybie lokalnym jeden `Engine` przetwarza rekordy kolejno; ładowanie i infere
 Tokio, bez serwera i jego harmonogramu. Wybór tabel GEMM używa konfiguracji `serve`. Kontrakt promptu i odpowiedzi
 pozostaje w `basal-core`. Interfejs i przykłady: [CLIENT.md](CLIENT.md).
 
+Nowe rodziny, format 2, wybór kolejności i kalibracja: [UPSTREAM_2.0.md](UPSTREAM_2.0.md).
+Natywne architektury i lifecycle mediów omni: [OMNI.md](OMNI.md).
+
+Gemma grupuje krótkie teksty w kubełki 32 tokenów (do 32 promptów / 8192 tokenów).
+Projekcje współdzielą GEMM wyłącznie dla kształtów objętych tabelą z bitowo zgodnymi
+redukcjami między klasami M; pozostałe zachowują osobne GEMM. Attention każdego
+promptu wykonuje się oddzielnie. CUDA wylicza maskę pozycyjną w softmaxie FP32,
+zamiast przesyłać gęstą maskę CPU dla każdej warstwy. Kafel wyniku scores ma limit
+128 MiB; nie jest to limit całej pamięci roboczej. Długie prompty zachowują unikalne
+K/V GQA. Prefill ma kroki 2048 tokenów i respektuje granice bloków obrazu.
+
+Stałe obroty pozycyjne obrazu i indeksy głów są współdzielone w swoim zakresie
+użycia. Pooling obrazu zachowuje kolejność 3×3 i redukcję FP32. Procesor CPU
+współdzieli amplitudy FFT między filtrami mel oraz zaokrąglone poziome wiersze
+skalowania obrazu; ten drugi cache ma limit 32 MiB i zachowuje poprzednią ścieżkę
+po jego przekroczeniu. Te zmiany nie wprowadzają cache żądań ani mediów między
+żądaniami. Numeryczne zmiany attention, RMSNorm i Conformera wymagają osobnego
+porównania z upstream FP32, opisanego w raportach.
+
 ## Kontrakt promptu
 
 Prompt, szablon czatu, heurystyka języka (polskie znaki), serializacja stanu,
@@ -37,7 +56,8 @@ Runtime stosuje `"first"` jak upstream i wyłącza obcinanie oraz padding z
 `tokenizer.json` (obcinanie do 1536 tokenów zmieniałoby prompty długich
 stanów).
 
-Każde pytanie to dwa prompty z opcjami w dwóch porządkach. Z logitów liter
+W format 1 pytanie domyślnie ma dwa prompty z opcjami w dwóch porządkach.
+Format 2 domyślnie wykonuje jeden; `--orders` może zmienić tę politykę. Z logitów liter
 liczymy softmax osobno dla każdego porządku, odwracamy permutację, uśredniamy
 i stosujemy temperaturę typu pytania:
 
@@ -58,7 +78,7 @@ bloku i bloków przodków, co jest równoważne osobnym forwardom pełnych
 promptów. Głębokość drzewa jest ograniczona do 8 bloków; poniżej prompty
 dostają osobne bloki.
 
-Wiersz ma do 32768 tokenów, forward do 8192 (wiersze dłuższe liczą się
+Wiersz ma do 32768 tokenów, forward domyślnie do 8192 (wiersze dłuższe liczą się
 osobno). Pytania o ten sam stan trafiają obok siebie.
 
 Stały prefiks promptu (szablon do stanu, 53 tokeny PL i 66 EN) jest liczony
@@ -103,6 +123,22 @@ rozszerza je przed użyciem (dokładny forward FP32, punkt odniesienia).
   f16, a wynik attention od razu jako scalone głowy w dtype forwardu. Metal: `attn_tree_f32` z `kernels.metal`
   na macierzach `simdgroup_float8x8` w f32 (`BASAL_ATT=sdpa`: poprzednie SDPA
   z MLX po całym wierszu z maską, wynik zależny od pakowania).
+- Tryb `inference_mode` jest wybierany dla każdego backendu przed wyliczeniem
+  prefiksów i kopiowany do torów wykonania. Dla CUDA Llama `accurate` używa
+  attention hi/lo przez przenośny kernel `attn_tree_tc`, również na Hopperze;
+  automatyczny dobór WGMMA na Hopperze pozostaje w `auto`. Jawny `accurate`
+  nie gwarantuje więc wydajności domyślnej ścieżki H100. `balanced` wybiera specjalizację QK1 dla f16
+  z odczytem f32: Q/K w f16, prawdopodobieństwa hi/lo, softmax i akumulacja
+  w f32. Specjalizacja wymaga dokładnego V w f16 i scalonego wyniku f16;
+  przy innych typach kernel wraca do odpowiadającego mu wariantu ogólnego.
+  Na CUDA jawny tryb ma pierwszeństwo przed `BASAL_ATT`; `auto` zachowuje tę zmienną
+  do eksperymentów. Wybór nie modyfikuje środowiska procesu ani gotowych cache K/V.
+  Automatyczny QK1 dotyczy wyłącznie rozpoznanej RTX 6000 Ada Generation,
+  nazw Basal 2.0 mini/4.5B/max oraz CUDA f16 fused z odczytem f32; pozostałe
+  konfiguracje zachowują poprzedni wybór. Nieudany opcjonalny odczyt nazwy GPU
+  również zachowuje poprzednią politykę.
+  [Pomiary i ograniczenia jakości](../reports/precision-performance-ada-2026-10-16/README.md)
+  nie są gwarancją zgodności każdego wejścia z FP32.
 - W ostatniej warstwie o_proj i MLP liczą się tylko dla pozycji odczytu, a
   logity tylko dla wierszy `lm_head` odpowiadających literom, w f32.
 - CUDA GEMM przez cuBLASLt z tabelą algorytmów z pełnego przeszukania
@@ -184,6 +220,23 @@ Partia to pierwsze żądanie z kolejki i każde następne, które mieści się w
 `--max-batch-tokens`; pytania wszystkich żądań partii dzielą forwardy.
 Żądania porzucone przez klienta są pomijane, a ponad `--max-inflight` żądań
 w toku dostaje 529 z `Retry-After: 1` (status TypeSafe dla przeciążenia).
+`--max-large-inflight` / `max_large_inflight` ogranicza pulę rozwiniętych
+promptów powyżej 128 KiB. W serwerze obsługującym media ta sama pula obejmuje
+także body powyżej 2 MiB lub bez Content-Length.
+Domyślnie są to 4 żądania; zwiększenie wymaga pamięci na równoczesne przygotowanie
+i kolejkę. Budżety pojedynczego żądania nadal obowiązują. W pomiarze przepustowości
+limit przyjęcia powinien mieć zapas ponad liczbę klientów; odrzuceń 529 nie wolno
+zaliczać do poprawnych odpowiedzi/s. Osobno porównujemy przepustowość oraz
+czas request→response wraz z oczekiwaniem w kolejce.
+
+Budżet `max_batch_tokens` każdego obsługiwanego modelu ustawia też
+`Engine::forward_max_tokens` przed utworzeniem obu lane'ów. Zwiększenie limitu
+pozwala więc łączyć wiele spakowanych wierszy jednej grupy językowej w większy
+forward. Pojedynczy wiersz przekraczający budżet nadal może zostać wykonany osobno.
+Domyślna wartość obu budżetów wynosi 8192. Większe wartości zmieniają jednoczesne
+użycie pamięci i czas zajęcia GPU; ich ocenę wykonujemy razem z opóźnieniami
+krótkich żądań w ruchu mieszanym.
+
 
 Żądania powyżej `--long-tokens` liczy drugi tor: drugi silnik na tym samym
 GPU, ze wspólnymi wagami, tabelą GEMM i prefiksami szablonu. Oba tory

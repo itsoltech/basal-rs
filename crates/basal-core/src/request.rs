@@ -6,7 +6,7 @@ use indexmap::IndexMap;
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use crate::prompt::{lang_of, Lang, MAX_OPTIONS};
+use crate::prompt::{lang_of, Lang, PromptFormat, MAX_OPTIONS};
 use crate::pyjson::text;
 
 /// System One documents up to 255 choice options.
@@ -22,6 +22,8 @@ pub enum QType {
     Multi,
     /// basal-1.5 extension: a choice or yes/no readout followed by the minimum expected cost action.
     Act,
+    /// Upstream tool definitions read as a choice or a set of yes/no branches.
+    Tool,
 }
 
 impl QType {
@@ -32,6 +34,7 @@ impl QType {
             QType::Score => "score",
             QType::Multi => "multi",
             QType::Act => "act",
+            QType::Tool => "tool",
         }
     }
 
@@ -42,6 +45,7 @@ impl QType {
             "score" => Some(QType::Score),
             "multi" => Some(QType::Multi),
             "act" => Some(QType::Act),
+            "tool" => Some(QType::Tool),
             _ => None,
         }
     }
@@ -54,6 +58,7 @@ pub struct MultiSpec {
     pub threshold: f64,
     pub max: Option<i64>,
     pub min: Option<i64>,
+    pub rules: crate::sets::Rules,
 }
 
 /// `act`: cost matrix `costs[action][outcome]` (actions in request order, outcomes in key order), the defer action
@@ -78,6 +83,7 @@ pub enum Ext {
     None,
     Multi(MultiSpec),
     Act(ActSpec),
+    Tool(crate::tools::ToolSpec),
 }
 
 /// Request and answer conventions of an endpoint.
@@ -206,14 +212,31 @@ pub struct Item {
     /// Upstream dialect: the question type has no calibration temperature (an unknown type read as choice).
     #[serde(skip)]
     pub uncalibrated: bool,
+    #[serde(skip)]
+    pub prompt_format: PromptFormat,
 }
 
 impl Item {
+    pub fn multi_spec(&self) -> Option<&MultiSpec> {
+        match &self.ext {
+            Ext::Multi(m) => Some(m),
+            Ext::Tool(t) => t.multi.as_ref(),
+            _ => None,
+        }
+    }
+    pub fn multi_spec_mut(&mut self) -> Option<&mut MultiSpec> {
+        match &mut self.ext {
+            Ext::Multi(m) => Some(m),
+            Ext::Tool(t) => t.multi.as_mut(),
+            _ => None,
+        }
+    }
     /// Calibration key of the item's readout: `act` uses its base type, a `multi` branch is a yes/no question.
     pub fn temp_kind(&self) -> QType {
         match &self.ext {
             Ext::Act(a) => a.base,
             Ext::Multi(_) => QType::Noul,
+            Ext::Tool(t) => crate::tools::calibration_kind(t),
             Ext::None => self.kind,
         }
     }
@@ -248,7 +271,7 @@ fn err(path: &[&str], msg: impl Into<String>, kind: &str) -> FieldError {
     FieldError::new(loc(path), msg, kind)
 }
 
-fn qerr(name: &str, rest: &[&str], msg: impl Into<String>, kind: &str) -> FieldError {
+pub(crate) fn qerr(name: &str, rest: &[&str], msg: impl Into<String>, kind: &str) -> FieldError {
     let path: Vec<&str> = ["questions", name].into_iter().chain(rest.iter().copied()).collect();
     err(&path, msg, kind)
 }
@@ -331,6 +354,11 @@ fn to_map(m: &serde_json::Map<String, Value>) -> IndexMap<String, Value> {
     m.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
 }
 
+/// Estimated prompt expansion, checked before state/branch cloning. Servers can use it for admission.
+pub fn prepared_input_bytes(body: &Value) -> Result<usize, DecideError> {
+    crate::budget::prepared_input_bytes(body)
+}
+
 /// Validate a System One request body and build readout items. All schema errors are collected.
 pub fn parse_request(body: &Value) -> Result<ParsedRequest, DecideError> {
     parse_request_as(body, Dialect::TypeSafe)
@@ -338,6 +366,15 @@ pub fn parse_request(body: &Value) -> Result<ParsedRequest, DecideError> {
 
 /// [`parse_request`] for an endpoint dialect.
 pub fn parse_request_as(body: &Value, dialect: Dialect) -> Result<ParsedRequest, DecideError> {
+    parse_request_for_format(body, dialect, PromptFormat::One)
+}
+
+pub fn parse_request_for_format(
+    body: &Value,
+    dialect: Dialect,
+    fmt: PromptFormat,
+) -> Result<ParsedRequest, DecideError> {
+    prepared_input_bytes(body)?;
     let mut errs = Vec::new();
     let Some(obj) = body.as_object() else {
         return Err(DecideError::Validation(vec![FieldError::new(
@@ -387,6 +424,15 @@ pub fn parse_request_as(body: &Value, dialect: Dialect) -> Result<ParsedRequest,
             None
         }
     };
+    let force_lang = match obj.get("lang") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) if s == "pl" => Some(Lang::Pl),
+        Some(Value::String(s)) if s == "en" => Some(Lang::En),
+        Some(_) => {
+            errs.push(err(&["lang"], "lang must be pl or en", "literal_error"));
+            None
+        }
+    };
     // basal-1.5 `facts: "auto"`: computed calendar and amount facts appended to the state (upstream facts.inject,
     // before the language of the questions is detected)
     let mut state = state;
@@ -418,11 +464,19 @@ pub fn parse_request_as(body: &Value, dialect: Dialect) -> Result<ParsedRequest,
     if let (Some(state), Some(questions)) = (state, questions) {
         for (name, q) in questions {
             let built = match dialect {
-                Dialect::TypeSafe => question(name, q, &state),
-                Dialect::Upstream => question_upstream(name, q, &state),
+                Dialect::TypeSafe => question(name, q, &state, fmt.max_options(), force_lang),
+                Dialect::Upstream => question_upstream(name, q, &state, fmt.max_options(), force_lang),
             };
             match built {
-                Ok(it) => items.push(it),
+                Ok(mut it) => {
+                    it.prompt_format = fmt;
+                    if fmt == PromptFormat::Two {
+                        if let Ext::Act(a) = &mut it.ext {
+                            a.max_error = q.get("max_error").and_then(Value::as_f64).map(crate::pyjson::float_repr);
+                        }
+                    }
+                    items.push(it);
+                }
                 Err(mut e) => errs.append(&mut e),
             }
         }
@@ -438,7 +492,13 @@ pub fn parse_request_as(body: &Value, dialect: Dialect) -> Result<ParsedRequest,
     }
 }
 
-fn question(name: &str, qv: &Value, state: &str) -> Result<Item, Vec<FieldError>> {
+fn question(
+    name: &str,
+    qv: &Value,
+    state: &str,
+    max_opts: usize,
+    force_lang: Option<Lang>,
+) -> Result<Item, Vec<FieldError>> {
     let Some(q) = qv.as_object() else {
         return Err(vec![FieldError::new(
             qloc(name, &[]),
@@ -447,6 +507,9 @@ fn question(name: &str, qv: &Value, state: &str) -> Result<Item, Vec<FieldError>
         )
         .input(qv)]);
     };
+    if q.get("type").and_then(Value::as_str) == Some("tool") {
+        return tool_item(name, q, state, max_opts, force_lang);
+    }
     let mut errs = Vec::new();
     let kind = match q.get("type") {
         Some(Value::String(s)) => match QType::parse(s) {
@@ -516,12 +579,13 @@ fn question(name: &str, qv: &Value, state: &str) -> Result<Item, Vec<FieldError>
         return Err(vec![usage(format!("Noul question must have criteria or instructions: {name}").into())]);
     }
     let mut errs = errs;
-    let lang = lang_of(&format!("{state}{instructions}"));
+    let lang = force_lang.unwrap_or_else(|| lang_of(&format!("{state}{instructions}")));
     let mut ext = Ext::None;
     let built = match kind {
+        QType::Tool => return tool_item(name, q, state, max_opts, force_lang),
         QType::Noul => noul(q, lang, name),
         QType::Choice => choice(q, hide, name),
-        QType::Score => score(q, hide, name),
+        QType::Score => score(q, hide, name, max_opts),
         QType::Multi => multi(q, lang, name).map(|(b, m)| {
             ext = Ext::Multi(m);
             b
@@ -544,6 +608,7 @@ fn question(name: &str, qv: &Value, state: &str) -> Result<Item, Vec<FieldError>
             ext,
             evidence: truthy(q.get("evidence")),
             uncalibrated: false,
+            prompt_format: PromptFormat::One,
         }),
         Ok(_) => Err(errs),
         Err(e) => {
@@ -561,7 +626,13 @@ type Built = Result<Parts, Vec<FieldError>>;
 /// calibration), `instructions` is any JSON (null renders as "null"), falsy noul descriptions fall back to Tak/Nie,
 /// criteria values may be any JSON, a score legend holds the shown option texts, and every type but multi needs
 /// 2..10 options.
-fn question_upstream(name: &str, q: &Value, state: &str) -> Result<Item, Vec<FieldError>> {
+fn question_upstream(
+    name: &str,
+    q: &Value,
+    state: &str,
+    max_opts: usize,
+    force_lang: Option<Lang>,
+) -> Result<Item, Vec<FieldError>> {
     let Some(q) = q.as_object() else {
         return Err(vec![qerr(name, &[], "question must be an object", "model_type")]);
     };
@@ -571,7 +642,7 @@ fn question_upstream(name: &str, q: &Value, state: &str) -> Result<Item, Vec<Fie
         None => (QType::Choice, true),
     };
     let instructions = q.get("instructions").map(text).unwrap_or_default();
-    let lang = lang_of(&format!("{state}{instructions}"));
+    let lang = force_lang.unwrap_or_else(|| lang_of(&format!("{state}{instructions}")));
     let hide = match q.get("option_keys") {
         None => false,
         Some(Value::String(s)) if s == "show" => false,
@@ -605,6 +676,7 @@ fn question_upstream(name: &str, q: &Value, state: &str) -> Result<Item, Vec<Fie
     let (yes, no) = if lang == Lang::Pl { ("Tak", "Nie") } else { ("Yes", "No") };
     let mut ext = Ext::None;
     let (keys, options, legend) = match kind {
+        QType::Tool => return tool_item(name, q, state, max_opts, force_lang),
         QType::Multi => {
             let (b, m) = multi(q, lang, name)?;
             ext = Ext::Multi(m);
@@ -648,11 +720,11 @@ fn question_upstream(name: &str, q: &Value, state: &str) -> Result<Item, Vec<Fie
             (k, o, vec![])
         }
     };
-    if kind != QType::Multi && !(2..=MAX_OPTIONS).contains(&options.len()) {
+    if kind != QType::Multi && !(2..=max_opts).contains(&options.len()) {
         return Err(vec![qerr(
             name,
             &["criteria"],
-            format!("question {name:?}: {} options (supported: 2..{MAX_OPTIONS})", options.len()),
+            format!("question {name:?}: {} options (supported: 2..{max_opts})", options.len()),
             "value_error",
         )]);
     }
@@ -668,6 +740,41 @@ fn question_upstream(name: &str, q: &Value, state: &str) -> Result<Item, Vec<Fie
         ext,
         evidence: truthy(q.get("evidence")),
         uncalibrated,
+        prompt_format: PromptFormat::One,
+    })
+}
+
+fn tool_item(
+    name: &str,
+    q: &serde_json::Map<String, Value>,
+    state: &str,
+    max_opts: usize,
+    force_lang: Option<Lang>,
+) -> Result<Item, Vec<FieldError>> {
+    let instructions = q.get("instructions").map(text).unwrap_or_default();
+    let lang = force_lang.unwrap_or_else(|| lang_of(&format!("{state}{instructions}")));
+    let tool = crate::tools::parse(q, lang, name)?;
+    if tool.spec.multi.is_none() && !(2..=max_opts).contains(&tool.options.len()) {
+        return Err(vec![qerr(
+            name,
+            &["tools"],
+            format!("{} options (tools and extras; supported 2..{max_opts})", tool.options.len()),
+            "value_error",
+        )]);
+    }
+    Ok(Item {
+        name: name.into(),
+        kind: QType::Tool,
+        keys: tool.keys,
+        options: tool.options,
+        legend: vec![],
+        state: state.into(),
+        question: tool.question,
+        lang,
+        ext: Ext::Tool(tool.spec),
+        evidence: truthy(q.get("evidence")),
+        uncalibrated: false,
+        prompt_format: PromptFormat::One,
     })
 }
 
@@ -682,7 +789,11 @@ fn py_str(v: &Value) -> Option<String> {
 
 /// `multi`: criteria `{key: description}` or `[keys]`, any number of labels; options of every branch are the default
 /// yes/no texts. Keys: the label keys; options: the yes/no texts.
-fn multi(q: &serde_json::Map<String, Value>, lang: Lang, name: &str) -> Result<(Parts, MultiSpec), Vec<FieldError>> {
+pub(crate) fn multi(
+    q: &serde_json::Map<String, Value>,
+    lang: Lang,
+    name: &str,
+) -> Result<(Parts, MultiSpec), Vec<FieldError>> {
     let crit: IndexMap<String, Value> = match q.get("criteria") {
         Some(Value::Object(m)) => to_map(m),
         Some(Value::Array(xs)) => {
@@ -719,7 +830,74 @@ fn multi(q: &serde_json::Map<String, Value>, lang: Lang, name: &str) -> Result<(
     let int = |k: &str| -> Result<Option<i64>, Vec<FieldError>> { Ok(num(k)?.map(|v| v.trunc() as i64)) };
     let labels: Vec<String> = crit.iter().map(|(k, v)| if v.is_null() { k.clone() } else { text(v) }).collect();
     let (yes, no) = if lang == Lang::Pl { ("Tak", "Nie") } else { ("Yes", "No") };
-    let spec = MultiSpec { labels, threshold, max: int("max")?, min: int("min")? };
+    let objective = match q.get("objective") {
+        None => crate::sets::Objective::Threshold,
+        Some(Value::String(s)) => crate::sets::Objective::parse(s).ok_or_else(|| {
+            vec![qerr(name, &["objective"], "objective must be threshold, exact, iou or f1", "literal_error")]
+        })?,
+        Some(_) => return Err(vec![qerr(name, &["objective"], "objective must be a string", "string_type")]),
+    };
+    let mut rules = crate::sets::Rules { objective, ..Default::default() };
+    let keys: Vec<String> = crit.keys().cloned().collect();
+    let index = |value: &Value, field: &str| -> Result<usize, Vec<FieldError>> {
+        let key =
+            value.as_str().ok_or_else(|| vec![qerr(name, &[field], "label key must be a string", "string_type")])?;
+        keys.iter()
+            .position(|k| k == key)
+            .ok_or_else(|| vec![qerr(name, &[field], format!("unknown label {key:?}"), "value_error")])
+    };
+    if let Some(value) = q.get("exclusive").filter(|v| !v.is_null()) {
+        for value in value
+            .as_array()
+            .ok_or_else(|| vec![qerr(name, &["exclusive"], "exclusive must be a list of label keys", "list_type")])?
+        {
+            let i = index(value, "exclusive")?;
+            if !rules.exclusive.contains(&i) {
+                rules.exclusive.push(i);
+            }
+        }
+    }
+    if let Some(value) = q.get("fallback").filter(|v| !v.is_null()) {
+        rules.fallback = Some(index(value, "fallback")?);
+    }
+    if let Some(value) = q.get("fallback_threshold").filter(|v| !v.is_null()) {
+        let threshold = value.as_f64().filter(|v| v.is_finite() && (0.0..=1.0).contains(v)).ok_or_else(|| {
+            vec![qerr(name, &["fallback_threshold"], "fallback_threshold must be a number in 0..1", "value_error")]
+        })?;
+        if rules.fallback.is_none() {
+            return Err(vec![qerr(
+                name,
+                &["fallback_threshold"],
+                "fallback_threshold needs a fallback label",
+                "value_error",
+            )]);
+        }
+        rules.fallback_threshold = Some(threshold);
+        rules.fallback_threshold_source = Some("request");
+    }
+    let (max, min) = (int("max")?, int("min")?);
+    if objective != crate::sets::Objective::Threshold {
+        if q.get("threshold").is_some_and(|v| !v.is_null()) {
+            return Err(vec![qerr(
+                name,
+                &["threshold"],
+                "threshold applies only to objective threshold",
+                "value_error",
+            )]);
+        }
+        for k in ["min", "max"] {
+            if q.get(k).is_some_and(|v| !v.is_null() && v.as_u64().is_none()) {
+                return Err(vec![qerr(name, &[k], format!("{k} must be a non-negative integer"), "value_error")]);
+            }
+        }
+        if min.is_some_and(|n| n as usize > keys.len()) || min.zip(max).is_some_and(|(a, b)| a > b) {
+            return Err(vec![qerr(name, &["min"], "min exceeds the label count or max", "value_error")]);
+        }
+        if matches!(objective, crate::sets::Objective::Iou | crate::sets::Objective::F1) && keys.len() > 256 {
+            return Err(vec![qerr(name, &["criteria"], "IoU/F1 supports at most 256 labels", "value_error")]);
+        }
+    }
+    let spec = MultiSpec { labels, threshold, max, min, rules };
     Ok(((crit.keys().cloned().collect(), vec![yes.into(), no.into()], vec![]), spec))
 }
 
@@ -895,14 +1073,14 @@ fn choice(q: &serde_json::Map<String, Value>, hide: bool, name: &str) -> Built {
     Ok((keys, opts, vec![]))
 }
 
-fn score(q: &serde_json::Map<String, Value>, hide: bool, name: &str) -> Built {
+fn score(q: &serde_json::Map<String, Value>, hide: bool, name: &str, max_opts: usize) -> Built {
     // `levels` is accepted as an alias of `criteria` (upstream Basal extension).
     let (field, crit) = match (q.get("criteria"), q.get("levels")) {
         (Some(c), _) if !c.is_null() => ("criteria", c),
         (_, Some(l)) if !l.is_null() => ("levels", l),
         _ => return Err(vec![missing(qloc(name, &["criteria".into()]), &Value::Object(q.clone()))]),
     };
-    let too_many = || usage(format!("Too many score levels. Must have at most {MAX_OPTIONS} levels.").into());
+    let too_many = || usage(format!("Too many score levels. Must have at most {max_opts} levels.").into());
     match crit {
         Value::Array(xs) => {
             if xs.is_empty() {
@@ -917,7 +1095,7 @@ fn score(q: &serde_json::Map<String, Value>, hide: bool, name: &str) -> Built {
             if !bad.is_empty() {
                 return Err(bad);
             }
-            if xs.len() > MAX_OPTIONS {
+            if xs.len() > max_opts {
                 return Err(vec![too_many()]);
             }
             let keys = (0..xs.len()).map(|i| i.to_string()).collect();
@@ -928,7 +1106,7 @@ fn score(q: &serde_json::Map<String, Value>, hide: bool, name: &str) -> Built {
             if m.is_empty() {
                 return Err(vec![too_short(qloc(name, &[field.into()]), crit)]);
             }
-            if m.len() > MAX_OPTIONS {
+            if m.len() > max_opts {
                 return Err(vec![too_many()]);
             }
             let map = to_map(m);
@@ -948,6 +1126,15 @@ fn score(q: &serde_json::Map<String, Value>, hide: bool, name: &str) -> Built {
 /// `single_option`: choice and score questions with one option are answered without the model (probability 1, as the
 /// TypeSafe API does); without it they are an error too.
 pub fn check_capability(items: &[Item], large_choice: bool, single_option: bool) -> Result<(), DecideError> {
+    check_capability_with_limit(items, MAX_OPTIONS, large_choice, single_option)
+}
+
+pub fn check_capability_with_limit(
+    items: &[Item],
+    max_opts: usize,
+    large_choice: bool,
+    single_option: bool,
+) -> Result<(), DecideError> {
     let mut errs = Vec::new();
     for it in items {
         let n = it.options.len();
@@ -962,8 +1149,8 @@ pub fn check_capability(items: &[Item], large_choice: bool, single_option: bool)
                 ),
                 "unsupported_single_option",
             ));
-        } else if n > MAX_OPTIONS && !(large_choice && it.kind == QType::Choice) {
-            errs.push(err(&path, format!("{n} options: the letter readout of the model reads 2..{MAX_OPTIONS}; only choice questions take more (the grouped 11..255 strategy)"), "unsupported_option_count"));
+        } else if n > max_opts && !(large_choice && it.kind == QType::Choice) {
+            errs.push(err(&path, format!("{n} options: the letter readout of the model reads 2..{max_opts}; only choice questions take more (the grouped 11..255 strategy)"), "unsupported_option_count"));
         }
     }
     if errs.is_empty() {

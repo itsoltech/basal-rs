@@ -34,7 +34,7 @@ pub fn bench<B: Backend>(engine: &mut Engine<B>, reference: &Path, lat_n: usize,
     let mut with_gold = 0;
     let t_all = Instant::now();
     for (c, rc) in items.chunks(32).zip(recs.chunks(32)) {
-        let prep: Vec<Prepared> = c.iter().cloned().map(|it| engine.prepare(it)).collect::<Result<_>>()?;
+        let prep: Vec<Prepared> = c.iter().cloned().map(|it| engine.prepare_orders(it, 2)).collect::<Result<_>>()?;
         for (res, rec) in engine.run(&prep, Batching::Budget)?.iter().zip(rc) {
             if let Some(g) = rec.get("gold").and_then(Value::as_u64) {
                 with_gold += 1;
@@ -49,17 +49,17 @@ pub fn bench<B: Backend>(engine: &mut Engine<B>, reference: &Path, lat_n: usize,
     let mut per_item = Vec::new();
     for (idx, it) in items.iter().enumerate().take(lat_n + 5) {
         // warm-up of the shapes, as upstream
-        let p = engine.prepare(it.clone())?;
+        let p = engine.prepare_orders(it.clone(), 2)?;
         engine.run(&[single_order(p.clone())], Batching::Single)?;
         engine.run(&[p], Batching::Single)?;
 
         let t = Instant::now();
-        let p1 = single_order(engine.prepare(it.clone())?);
+        let p1 = single_order(engine.prepare_orders(it.clone(), 2)?);
         engine.run(&[p1], Batching::Single)?;
         one.push(t.elapsed().as_secs_f64() * 1e3);
 
         let t = Instant::now();
-        let p = engine.prepare(it.clone())?;
+        let p = engine.prepare_orders(it.clone(), 2)?;
         let t_mid = Instant::now();
         engine.run(std::slice::from_ref(&p), Batching::Single)?;
         let t_end = Instant::now();
@@ -81,14 +81,16 @@ pub fn bench<B: Backend>(engine: &mut Engine<B>, reference: &Path, lat_n: usize,
         (skip(&mut one), skip(&mut two), skip(&mut prep_ms), skip(&mut fwd_ms), skip(&mut tokens));
 
     let chunk: Vec<Item> = items.iter().take(16 * 8).cloned().collect();
-    let warm: Vec<Prepared> = chunk.iter().take(16).cloned().map(|it| engine.prepare(it)).collect::<Result<_>>()?;
+    let warm: Vec<Prepared> =
+        chunk.iter().take(16).cloned().map(|it| engine.prepare_orders(it, 2)).collect::<Result<_>>()?;
     engine.run(&warm, batch)?;
     // The throughput phase is repeated: single runs varied by about 10 %.
     let mut dec_s_runs = Vec::new();
     for _ in 0..3 {
         let t = Instant::now();
         for c in chunk.chunks(16) {
-            let prep: Vec<Prepared> = c.iter().cloned().map(|it| engine.prepare(it)).collect::<Result<_>>()?;
+            let prep: Vec<Prepared> =
+                c.iter().cloned().map(|it| engine.prepare_orders(it, 2)).collect::<Result<_>>()?;
             engine.run(&prep, batch)?;
         }
         dec_s_runs.push(chunk.len() as f64 / t.elapsed().as_secs_f64());

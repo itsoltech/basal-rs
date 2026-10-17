@@ -1,0 +1,189 @@
+"""Audit one frozen Omni HTTP run locally and summarize retained repetitions.
+
+Confirmation excludes each engine's first repetition. Screens remain SIGNAL.
+Every scheduled measured phase is checked against the SHA-verified inputs;
+answers, HTTP validity, counts, token lengths and native bit invariance are
+recomputed from observations. Quality against FP32 is a separate gate.
+"""
+import argparse
+import collections
+import hashlib
+import importlib.util
+import json
+import math
+from pathlib import Path
+import statistics
+
+spec = importlib.util.spec_from_file_location('omni_runner', Path(__file__).with_name('omni-optimize.py'))
+runner = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(runner)
+
+
+def read_rows(path):
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def latency_metrics(rows):
+    values = sorted(row['elapsed_ms'] for row in rows)
+    return dict(median_ms=statistics.median(values),
+                p95_ms=values[min(len(values)-1, int(.95*len(values)))])
+
+
+def summarize_groups(groups, labels):
+    return [dict(zip(labels, key), repetitions=len(values),
+                 metrics={metric: dict(median=statistics.median(v[metric] for v in values),
+                                       min=min(v[metric] for v in values), max=max(v[metric] for v in values))
+                          for metric in values[0]}) for key, values in sorted(groups.items())]
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--measurement-artifacts', type=Path, required=True, help='one screen/confirm result directory')
+    p.add_argument('--inputs', type=Path, required=True, help='restored frozen corpus used by that run')
+    p.add_argument('--out', type=Path, required=True)
+    a = p.parse_args()
+    if a.out.exists():
+        p.error('output must be new')
+    root = a.measurement_artifacts
+    method = json.loads((root / 'method.json').read_text())
+    complete = json.loads((root / 'complete.json').read_text())
+    provenance = json.loads((a.inputs / 'provenance.json').read_text())
+    if provenance != method['inputs']:
+        p.error('frozen input manifest differs from the run')
+    for rel, expected in provenance['files'].items():
+        path = (a.inputs / rel).resolve()
+        if not path.is_relative_to(a.inputs.resolve()) or runner.digest(path) != expected:
+            p.error('input checksum mismatch: ' + rel)
+    ladder = read_rows(a.inputs / 'text-ladder.jsonl')
+    short = read_rows(a.inputs / 'benchmark-short.jsonl')
+    media = read_rows(a.inputs / 'cases-real-media.jsonl')
+    events = read_rows(root / 'progress.jsonl')
+    issues = [dict(kind='run_failure', **x) for x in complete['failures']]
+    if not complete.get('execution_finished'):
+        issues.append(dict(kind='execution_incomplete'))
+    seen, phases, aggregated = {}, [], collections.defaultdict(list)
+    token_counts = {}
+    class_groups, case_groups = collections.defaultdict(list), collections.defaultdict(list)
+    confirmed = method['phase'] == 'confirm'
+    for suffix in method['models']:
+        model = 'basal-omni-1.0-' + suffix
+        for surface in method['surfaces']:
+            counts = collections.Counter()
+            for variant in method['schedule']:
+                if surface == 'media' and variant == 'upstream-fast':
+                    continue
+                counts[variant] += 1
+                repetition = counts[variant]
+                tag = f'{model}-{surface}-{variant}-r{repetition}'
+                path = root / (tag + '-observations.jsonl')
+                if not path.exists():
+                    issues.append(dict(kind='missing_observations', tag=tag))
+                    continue
+                rows = read_rows(path)
+                selected_ladder = [r for r in ladder if r['model'] == model and r['target_tokens'] <= method['text_limit']]
+                expected = {}
+                if surface == 'text':
+                    for row in selected_ladder:
+                        expected[('ladder', 1, row['id'])] = ([row], method.get('latency_samples', 10 if confirmed else 4))
+                    repeats = max(1, math.ceil((method.get('requested_load_samples') or (512 if confirmed else 64)) / len(short)))
+                    for clients in [1, 8, 32]:
+                        expected[('short', clients, 'all')] = (short, repeats)
+                    if method.get('mixed'):
+                        longs = [r for r in ladder if r['model'] == model and r['target_tokens'] == 8192]
+                        mixed = []
+                        for i, row in enumerate(short):
+                            mixed.append(row)
+                            if (i + 1) % 16 == 0:
+                                mixed.append(longs[(i // 16) % len(longs)])
+                        if len(short) < 16:
+                            mixed.append(longs[0])
+                        for clients in [8, 32]:
+                            expected[('mixed', clients, 'all')] = (mixed, 2 if confirmed else 1)
+                else:
+                    expected[('media-sequential', 1, 'all')] = (media, 3 if confirmed else 1)
+                    expected[('media-load', 4, 'all')] = (media, 8 if confirmed else 2)
+                definitions = {r['id']: r for r in selected_ladder + short + media +
+                               [r for r in ladder if r['model'] == model and r['target_tokens'] == 8192]}
+                for row in rows:
+                    source = definitions.get(row['id'])
+                    response = row.get('response', {})
+                    valid = (source is not None and row.get('http_status') == 200 and runner.finite(response)
+                             and runner.valid_answers(response, source['request']['questions'])
+                             and not response.get('usage', {}).get('truncated'))
+                    if source and 'target_tokens' in source:
+                        valid = valid and response.get('usage', {}).get('input_tokens') == source['target_tokens']
+                    if not valid or not row.get('valid') or not math.isfinite(row.get('elapsed_ms', math.nan)):
+                        issues.append(dict(kind='invalid_response', tag=tag, id=row['id'], phase=row['phase']))
+                        continue
+                    token_key = (model, row['id'])
+                    tokens = response.get('usage', {}).get('input_tokens')
+                    if not isinstance(tokens, int) or tokens <= 0 or (token_key in token_counts and token_counts[token_key] != tokens):
+                        issues.append(dict(kind='input_token_count_mismatch', tag=tag, id=row['id']))
+                    token_counts.setdefault(token_key, tokens)
+                    key = (model, variant, row['id'])
+                    answer = runner.bits(response['answers'])
+                    if key in seen and seen[key] != answer and not variant.startswith('upstream-'):
+                        issues.append(dict(kind='native_answer_changed', tag=tag, id=row['id'], phase=row['phase']))
+                    seen.setdefault(key, answer)
+                for key, (corpus, repeats) in expected.items():
+                    name, clients, scope = key
+                    observed = [r for r in rows if r['phase'] == name and r['clients'] == clients
+                                and (scope == 'all' or r['id'] == scope)]
+                    matching = [e for e in events if e['stage'] == 'phase_finished' and e['tag'] == tag
+                                and e['phase'] == name and e['clients'] == clients
+                                and (scope == 'all' or e['ids'] == [scope])]
+                    wanted = [r['id'] for r in corpus] * repeats
+                    if (len(matching) != 1 or [r['id'] for r in observed] != wanted
+                            or [r['index'] for r in observed] != list(range(len(wanted)))):
+                        issues.append(dict(kind='phase_coverage', tag=tag, phase=key))
+                        continue
+                    event = matching[0]
+                    if event['invalid'] or len(observed) != event['samples'] or event['wall_s'] <= 0:
+                        issues.append(dict(kind='phase_invalid', tag=tag, phase=key))
+                        continue
+                    latencies = sorted(r['elapsed_ms'] for r in observed if r.get('valid'))
+                    metrics = dict(median_ms=statistics.median(latencies),
+                                   p95_ms=latencies[min(len(latencies)-1, int(.95*len(latencies)))],
+                                   successful_requests_per_s=len(latencies)/event['wall_s'])
+                    if any(not math.isclose(metrics[k], event[k], rel_tol=1e-10, abs_tol=1e-10) for k in metrics):
+                        issues.append(dict(kind='phase_metric_mismatch', tag=tag, phase=key))
+                    classes = collections.defaultdict(list)
+                    for row in observed:
+                        classes[row['workload_class']].append(row)
+                    for label, members in classes.items():
+                        recorded = event.get('classes', {}).get(label)
+                        if recorded is not None and (recorded['samples'] != len(members)
+                                or any(not math.isclose(value, recorded[metric], rel_tol=1e-10, abs_tol=1e-10)
+                                       for metric, value in latency_metrics(members).items())):
+                            issues.append(dict(kind='class_metric_mismatch', tag=tag, phase=key, label=label))
+                    retained = repetition not in method.get('excluded_repetitions', [])
+                    phases.append(dict(tag=tag, phase=name, clients=clients, scope=scope, retained=retained,
+                                       samples=len(observed), **metrics))
+                    if retained:
+                        aggregated[(model, surface, name, clients, scope, variant)].append(metrics)
+                        if name == 'mixed':
+                            short_members = [row for row in observed if row['workload_class'].startswith('distinct-short-')]
+                            if short_members:
+                                classes['short-all-languages'] = short_members
+                            for label, members in classes.items():
+                                class_groups[(model, name, clients, label, variant)].append(latency_metrics(members))
+                        if name == 'media-sequential':
+                            for case in corpus:
+                                members = [row for row in observed if row['id'] == case['id']]
+                                case_groups[(model, case['id'], variant)].append(latency_metrics(members))
+    summaries = summarize_groups(aggregated, ['model', 'surface', 'phase', 'clients', 'scope', 'variant'])
+    result = dict(status='FAIL' if issues else 'AUDITED' if confirmed else 'SIGNAL',
+                  quality_gate='separate upstream FP32 audit required', issues=issues, phases=phases, summary=summaries,
+                  checked_input_token_counts=len(token_counts),
+                  class_summary=summarize_groups(class_groups, ['model', 'phase', 'clients', 'workload_class', 'variant']),
+                  media_case_summary=summarize_groups(case_groups, ['model', 'id', 'variant']),
+                  summary_method='median of retained repetition metrics; ranges retain between-run variation',
+                  inputs_sha256=hashlib.sha256((a.inputs/'provenance.json').read_bytes()).hexdigest())
+    a.out.write_text(json.dumps(result, indent=2) + '\n')
+    print(json.dumps(dict(status=result['status'], issues=len(issues), summarized_phases=len(summaries))))
+    if issues:
+        raise SystemExit(2)
+
+
+if __name__ == '__main__':
+    main()

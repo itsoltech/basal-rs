@@ -253,3 +253,17 @@ stdin/requesty; lokalny proces podlega zwykłej obsłudze sygnałów systemowych
 
 Formatowanie, Clippy, Rustdoc i lint przykładów sprawdzają kod oraz składnię. Nie potwierdzają odpowiedzi modelu,
 zgodności lokalnie/HTTP ani wydajności. E2E i inferencja wymagają osobnej, uprzedniej zgody zgodnie z zasadami repozytorium.
+
+## Nowe modele i media
+
+Aliasami format 2 są `2.0-mini`, `2.0-4.5B`, `2.0-max`, `omni-mini`, `omni-max`.
+Lokalny klient domyślnie wybiera `basal-2.0-4.5B`. Stare aliasy wskazują modele basal-1.5.
+Lokalny klient przyjmuje
+`--orders 1|2|auto|2leN` i `--media` na omni CUDA. `--dtype auto` wybiera
+FP16 dla Llamy, BF16 dla Gemmy. Dla dużych pełnych żądań z mediami zwiększ
+`--max-input-bytes`, np. do 67108864 (limit klienta: 64 MiB na rekord).
+Większy rekord wymaga bezpośredniego żądania HTTP w limicie serwera opisanym w
+[media](OMNI.md). [Kontrakt v2](UPSTREAM_2.0.md).
+
+`--value` obsługuje również `tool`: nazwę wybranego narzędzia, `null` przy odroczeniu
+i tablicę narzędzi dla `multi: true`.

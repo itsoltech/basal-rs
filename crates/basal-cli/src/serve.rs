@@ -4,7 +4,8 @@
 //! One thread owns the GPU engine; HTTP handlers (tokio) send jobs to it over a channel. The scheduler plans arriving
 //! requests (validation errors are answered at once), orders the waiting ones (`--schedule`: highest response ratio
 //! next by default, or arrival order) and admits the first one and every other waiting request that fits
-//! `max_batch_tokens` packed tokens (no extra wait, as upstream's adaptive batching with `--wait-ms 0`). They run
+//! `max_batch_tokens` packed tokens. Idle requests start immediately; after a concurrent validated Omni Max batch a bounded
+//! 10 ms collection window coalesces returning clients. They run
 //! together with `Engine::run_plans`: the questions of all admitted requests share the forwards of each round (the
 //! budget counts a state shared by several requests once). A request larger than the budget runs alone; requests
 //! whose client disconnected while waiting are dropped. More than `max_inflight` waiting or running requests are
@@ -42,10 +43,12 @@ use basal_core::pack::TrieSize;
 use basal_core::request::Dialect;
 use basal_core::{Backend, DecideError, DeviceHealth, Engine};
 use serde_json::{json, Value};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Semaphore};
 
 mod metrics;
 use metrics::{LaneMetrics, Metrics, RequestModel};
+
+pub(crate) const DEFAULT_MAX_LARGE_INFLIGHT: usize = 4;
 
 pub struct ServeOptions {
     pub addr: SocketAddr,
@@ -53,6 +56,8 @@ pub struct ServeOptions {
     pub release_date: String,
     /// Waiting + running requests of all models.
     pub max_inflight: usize,
+    /// Large bodies and requests whose expanded input exceeds 128 KiB, across all models.
+    pub max_large_inflight: usize,
     /// Model of /v1/basal requests without a "model" field (default: the first model).
     pub default_model: Option<String>,
     /// Least work of a long lane between two hand-overs of the GPU.
@@ -78,6 +83,8 @@ struct Timing {
     batch: usize,
 }
 
+type LargeBodyPermit = Arc<tokio::sync::OwnedSemaphorePermit>;
+
 type Reply = (std::result::Result<Value, DecideError>, Option<Timing>);
 
 struct Job {
@@ -85,6 +92,11 @@ struct Job {
     dialect: Dialect,
     arrived: Instant,
     reply: oneshot::Sender<Reply>,
+    /// Lives with queued/processed media even if the HTTP handler is cancelled.
+    _media_permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    _large_body_permit: Option<LargeBodyPermit>,
+    /// Bound queued/running jobs even after the HTTP handler disconnects.
+    _job_permit: tokio::sync::OwnedSemaphorePermit,
 }
 
 struct App {
@@ -92,6 +104,10 @@ struct App {
     /// Job queue of every served model, by name.
     routes: HashMap<String, mpsc::UnboundedSender<Job>>,
     names: Vec<String>,
+    model_metadata: Vec<Value>,
+    large_bodies: Arc<Semaphore>,
+    jobs: Arc<Semaphore>,
+    media_requests: Arc<Semaphore>,
     /// Device readiness reported by each model's engines (none when its backend does not report it).
     health: Vec<(String, Vec<DeviceHealth>)>,
     default_model: String,
@@ -210,8 +226,18 @@ fn scheduler<B: Backend>(
     mut lane: Lane,
     long: Option<(std::sync::mpsc::Sender<Waiting>, usize)>,
 ) {
+    // A model idle for at least 100 ms still starts immediately. After a concurrent validated Omni Max batch, collect
+    // its returning clients for at most 10 ms, avoiding repeated 1+(N-1) forwards.
+    // This runs on the dedicated GPU thread, never on a Tokio executor worker.
+    let coalesce = matches!(&engine.manifest.config, basal_core::architecture::Architecture::Gemma4(_))
+        && engine.manifest.name == "basal-omni-1.0-max"
+        && engine.backend.describe()["attention_products"].as_str() == Some("F16");
+    let window = std::time::Duration::from_millis(10);
+    let mut last_batch = 1;
     loop {
         let mut arrived: Vec<Job> = Vec::new();
+        let wait_start = Instant::now();
+        let had_backlog = !lane.waiting.is_empty();
         if lane.waiting.is_empty() {
             match rx.blocking_recv() {
                 Some(j) => arrived.push(j),
@@ -221,7 +247,24 @@ fn scheduler<B: Backend>(
         while let Ok(j) = rx.try_recv() {
             arrived.push(j);
         }
+        if coalesce && last_batch > 1 && !had_backlog && wait_start.elapsed() < std::time::Duration::from_millis(100) {
+            let until = Instant::now() + window;
+            while Instant::now() < until {
+                match rx.try_recv() {
+                    Ok(job) => arrived.push(job),
+                    Err(mpsc::error::TryRecvError::Disconnected) => break,
+                    Err(mpsc::error::TryRecvError::Empty) => {
+                        std::thread::sleep(
+                            until.saturating_duration_since(Instant::now()).min(std::time::Duration::from_micros(100)),
+                        );
+                    }
+                }
+            }
+        }
         for job in arrived {
+            if job.reply.is_closed() {
+                continue;
+            }
             match engine.plan_request_as(&job.body, job.dialect) {
                 Ok(plan) => {
                     let mut size = TrieSize::default();
@@ -243,6 +286,7 @@ fn scheduler<B: Backend>(
         }
         let start = Instant::now();
         let (batch, tokens) = lane.admit(start);
+        last_batch = batch.len().max(1);
         if !batch.is_empty() {
             lane.run(&mut engine, batch, tokens, start);
         }
@@ -279,12 +323,18 @@ fn error_response(status: StatusCode, body: Value) -> Response {
 async fn systemone(
     State(app): State<Arc<App>>,
     label: Option<Extension<RequestModel>>,
+    large: Option<Extension<LargeBodyPermit>>,
     body: axum::body::Bytes,
 ) -> Response {
     let arrived = Instant::now();
-    match serde_json::from_slice::<Value>(&body) {
-        Ok(v) => decide(app, v, Dialect::TypeSafe, arrived, label.map(|Extension(l)| l)).await,
-        Err(e) => error_response(StatusCode::UNPROCESSABLE_ENTITY, json_invalid(&body, &e)),
+    let large = large.map(|Extension(permit)| permit);
+    match decode_body(body, Dialect::TypeSafe, large.clone()).await {
+        Ok(Ok(v)) => decide(app, v, Dialect::TypeSafe, arrived, label.map(|Extension(l)| l), large).await,
+        Ok(Err(e)) => error_response(StatusCode::UNPROCESSABLE_ENTITY, e),
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            json!({"error":"JSON decode worker failed","detail":e.to_string()}),
+        ),
     }
 }
 
@@ -312,15 +362,44 @@ fn json_invalid(body: &[u8], e: &serde_json::Error) -> Value {
 async fn basal(
     State(app): State<Arc<App>>,
     label: Option<Extension<RequestModel>>,
+    large: Option<Extension<LargeBodyPermit>>,
     body: axum::body::Bytes,
 ) -> Response {
     let arrived = Instant::now();
-    match serde_json::from_slice::<Value>(&body) {
-        Ok(v) if v.is_object() => decide(app, v, Dialect::Upstream, arrived, label.map(|Extension(l)| l)).await,
-        Ok(_) => {
+    let large = large.map(|Extension(permit)| permit);
+    match decode_body(body, Dialect::Upstream, large.clone()).await {
+        Ok(Ok(v)) if v.is_object() => {
+            decide(app, v, Dialect::Upstream, arrived, label.map(|Extension(l)| l), large).await
+        }
+        Ok(Ok(_)) => {
             error_response(StatusCode::UNPROCESSABLE_ENTITY, json!({"error": "request body must be a JSON object"}))
         }
-        Err(e) => error_response(StatusCode::UNPROCESSABLE_ENTITY, json!({"error": e.to_string()})),
+        Ok(Err(e)) => error_response(StatusCode::UNPROCESSABLE_ENTITY, e),
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            json!({"error":format!("JSON decode worker failed: {e}")}),
+        ),
+    }
+}
+
+async fn decode_body(
+    body: axum::body::Bytes,
+    dialect: Dialect,
+    permit: Option<LargeBodyPermit>,
+) -> Result<std::result::Result<Value, Value>, tokio::task::JoinError> {
+    let large = body.len() > 2 * 1024 * 1024;
+    let parse = move || {
+        // A blocking decoder continues after handler cancellation; retain its allocation permit until it exits.
+        let _permit = permit;
+        serde_json::from_slice::<Value>(&body).map_err(|e| match dialect {
+            Dialect::TypeSafe => json_invalid(&body, &e),
+            Dialect::Upstream => json!({"error":e.to_string()}),
+        })
+    };
+    if large {
+        tokio::task::spawn_blocking(parse).await
+    } else {
+        Ok(parse())
     }
 }
 
@@ -339,6 +418,7 @@ async fn decide(
     dialect: Dialect,
     arrived: Instant,
     label: Option<RequestModel>,
+    mut large: Option<LargeBodyPermit>,
 ) -> Response {
     // The request's model, or the default one when the field is missing or not a string (/v1/systemone then
     // answers the schema error of the field). Resolved before admission so a 529 also carries the model label;
@@ -354,22 +434,67 @@ async fn decide(
     let slot = Inflight(&app.inflight);
     if app.inflight.fetch_add(1, Ordering::SeqCst) >= app.max_inflight {
         // 529 as the TypeSafe API when it is overloaded; its SDKs (and most HTTP clients) retry 5xx with backoff
-        let body = match dialect {
-            Dialect::TypeSafe => json!({"detail": {"error_type": "overloaded_error",
-                                                   "message": "Too many requests in flight. Retry after a short delay."}}),
-            Dialect::Upstream => json!({"error": "overloaded: too many requests in flight"}),
-        };
-        let mut r = error_response(StatusCode::from_u16(529).unwrap(), body);
-        r.headers_mut().insert(axum::http::header::RETRY_AFTER, HeaderValue::from_static("1"));
-        return r;
+        return overloaded(
+            dialect,
+            "Too many requests in flight. Retry after a short delay.",
+            "overloaded: too many requests in flight",
+        );
     }
     let model = match model {
         Ok(m) => m,
         Err(m) => return error_body(dialect, basal_core::request::api_usage_error(format!("Unknown model: {m}"))),
     };
+    let job_permit = match app.jobs.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return overloaded(
+                dialect,
+                "Too many queued or running requests. Retry after a short delay.",
+                "overloaded: too many queued or running requests",
+            );
+        }
+    };
+    let expanded = match basal_core::request::prepared_input_bytes(&body) {
+        Ok(n) => n,
+        Err(e) => return error_body(dialect, e),
+    };
+    if large.is_none() && expanded > 128 * 1024 {
+        match app.large_bodies.clone().try_acquire_owned() {
+            Ok(permit) => large = Some(Arc::new(permit)),
+            Err(_) => {
+                return overloaded(
+                    dialect,
+                    "Too many expanded requests in flight. Retry after a short delay.",
+                    "overloaded: too many expanded requests in flight",
+                );
+            }
+        }
+    }
     let (tx, rx) = oneshot::channel();
+    let media_permit = if body.get("media").is_some_and(|v| !v.is_null()) {
+        match app.media_requests.clone().try_acquire_owned() {
+            Ok(permit) => Some(permit),
+            Err(_) => {
+                return overloaded(
+                    dialect,
+                    "Too many media requests in flight. Retry after a short delay.",
+                    "overloaded: too many media requests in flight",
+                );
+            }
+        }
+    } else {
+        None
+    };
     let admitted = app.metrics.as_ref().map(|metrics| metrics.admitted(model));
-    let sent = app.routes[model].send(Job { body, dialect, arrived, reply: tx });
+    let sent = app.routes[model].send(Job {
+        body,
+        dialect,
+        arrived,
+        reply: tx,
+        _media_permit: media_permit,
+        _large_body_permit: large,
+        _job_permit: job_permit,
+    });
     let reply = match sent {
         Ok(()) => rx.await.ok(),
         Err(_) => None,
@@ -421,16 +546,40 @@ fn error_body(dialect: Dialect, e: DecideError) -> Response {
 /// TypeSafe `ModelMetadataList` (name, description, release_date) plus the upstream fields `mode` and `early_exit`
 /// (no early-exit policies in this runtime).
 async fn models_list(State(app): State<Arc<App>>) -> Json<Value> {
-    let models: Vec<Value> = app
-        .names
-        .iter()
-        .map(|name| {
-            json!({"name": name, "release_date": app.release_date,
-                "description": "basal typed-decision model (choice / noul / score / act / multi), Polish and English",
-                "mode": "basal-rs", "early_exit": []})
-        })
-        .collect();
+    let mut models = app.model_metadata.clone();
+    for model in &mut models {
+        model["release_date"] = app.release_date.clone().into();
+    }
     Json(json!({ "models": models }))
+}
+
+/// Admit large or chunked inference bodies before reading/allocating them.
+async fn large_body_admission(State(app): State<Arc<App>>, mut request: Request, next: Next) -> Response {
+    let large = request
+        .headers()
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        .is_none_or(|n| n > 2 * 1024 * 1024);
+    let _permit = if large {
+        match app.large_bodies.clone().try_acquire_owned() {
+            Ok(permit) => Some(Arc::new(permit)),
+            Err(_) => {
+                let dialect = if request.uri().path() == "/v1/basal" { Dialect::Upstream } else { Dialect::TypeSafe };
+                return overloaded(
+                    dialect,
+                    "Too many large requests in flight. Retry after a short delay.",
+                    "overloaded: too many large requests in flight",
+                );
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(permit) = &_permit {
+        request.extensions_mut().insert(permit.clone());
+    }
+    next.run(request).await
 }
 
 /// Ctrl-C, or SIGTERM (`docker stop`) on Unix.
@@ -481,13 +630,59 @@ pub(crate) fn serve_benchmark<B: Backend + Send + 'static>(
     serve_inner(models, opts, Some((listener, stop)))
 }
 
+/// Preserve the dialect's overload body and the retry contract at every admission boundary.
+fn overloaded(dialect: Dialect, typesafe: &str, upstream: &str) -> Response {
+    let body = match dialect {
+        Dialect::TypeSafe => json!({"detail": {"error_type": "overloaded_error", "message": typesafe}}),
+        Dialect::Upstream => json!({"error": upstream}),
+    };
+    let mut response = error_response(StatusCode::from_u16(529).expect("529 is a valid HTTP status"), body);
+    response.headers_mut().insert(axum::http::header::RETRY_AFTER, HeaderValue::from_static("1"));
+    response
+}
+
+fn metadata_for_model<B: Backend>(engine: &Engine<B>) -> Value {
+    let manifest = &engine.manifest;
+    let temperatures: serde_json::Map<String, Value> =
+        manifest.temperatures.iter().map(|(k, v)| (k.as_str().into(), json!(v))).collect();
+    let mut metadata = json!({
+        "name": manifest.name,
+        "description": "basal typed-decision model (choice / noul / score / act / multi / tool), Polish and English",
+        "mode": "basal-rs",
+        "early_exit": [],
+        "prompt_format": manifest.prompt_format,
+        "orders": manifest.orders.metadata(),
+        "temperature_per_prim": temperatures
+    });
+    let media = engine.backend.media_kinds();
+    if !media.is_empty() {
+        metadata["media"] = json!(media.iter().map(|kind| kind.as_str()).collect::<Vec<_>>());
+    }
+    metadata
+}
+
+pub(crate) fn check_admission_limits(max_inflight: usize, max_large_inflight: usize) -> Result<()> {
+    anyhow::ensure!(
+        max_inflight > 0 && max_inflight <= Semaphore::MAX_PERMITS,
+        "max_inflight must be positive and within the semaphore limit"
+    );
+    anyhow::ensure!(
+        max_large_inflight > 0 && max_large_inflight <= Semaphore::MAX_PERMITS,
+        "max_large_inflight must be positive and within the semaphore limit"
+    );
+    Ok(())
+}
+
 fn serve_inner<B: Backend + Send + 'static>(
     models: Vec<ServedModel<B>>,
     opts: ServeOptions,
     owned: Option<(std::net::TcpListener, oneshot::Receiver<()>)>,
 ) -> Result<()> {
     anyhow::ensure!(!models.is_empty(), "no models to serve");
+    check_admission_limits(opts.max_inflight, opts.max_large_inflight)?;
     let names: Vec<String> = models.iter().map(|m| m.engine.manifest.name.clone()).collect();
+    let supports_media = models.iter().any(|m| !m.engine.backend.media_kinds().is_empty());
+    let model_metadata: Vec<Value> = models.iter().map(|m| metadata_for_model(&m.engine)).collect();
     for (i, n) in names.iter().enumerate() {
         anyhow::ensure!(!names[..i].contains(n), "model {n} configured twice");
     }
@@ -508,6 +703,9 @@ fn serve_inner<B: Backend + Send + 'static>(
         let mut readiness = Vec::new();
         for m in models {
             let ServedModel { mut engine, max_batch_tokens, schedule, long_tokens } = m;
+            // Keep the forward budget aligned with admission, including the forked long lane.
+            // Otherwise a larger server batch is silently split at the engine's default 8192.
+            engine.forward_max_tokens = max_batch_tokens;
             let name = engine.manifest.name.clone();
             let mut devices: Vec<DeviceHealth> = engine.backend.device_health().into_iter().collect();
             let (tx, rx) = mpsc::unbounded_channel();
@@ -549,6 +747,10 @@ fn serve_inner<B: Backend + Send + 'static>(
             metrics,
             routes,
             names,
+            model_metadata,
+            large_bodies: Arc::new(Semaphore::new(opts.max_large_inflight)),
+            jobs: Arc::new(Semaphore::new(opts.max_inflight)),
+            media_requests: Arc::new(Semaphore::new(4)),
             health: readiness,
             default_model,
             inflight: AtomicUsize::new(0),
@@ -556,6 +758,13 @@ fn serve_inner<B: Backend + Send + 'static>(
             release_date: opts.release_date.clone(),
         });
         let router = Router::new().route("/v1/systemone", post(systemone)).route("/v1/basal", post(basal));
+        let router = if supports_media {
+            router
+                .layer(axum::extract::DefaultBodyLimit::max(256 * 1024 * 1024))
+                .route_layer(axum::middleware::from_fn_with_state(app.clone(), large_body_admission))
+        } else {
+            router
+        };
         let router = if opts.metrics {
             router
                 .route_layer(axum::middleware::from_fn_with_state(app.clone(), metrics::observe))

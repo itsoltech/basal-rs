@@ -38,6 +38,7 @@ pub fn export<B: Backend>(
     inputs: &Path,
     out: &Path,
     batching: Batching,
+    dialect: basal_core::request::Dialect,
     extra: Value,
 ) -> Result<()> {
     std::fs::create_dir(out).with_context(|| format!("creating {} (must not exist)", out.display()))?;
@@ -61,9 +62,17 @@ pub fn export<B: Backend>(
     let mut f = std::fs::File::create(out.join("systemone.jsonl"))?;
     for case in read_jsonl(&inputs.join("systemone.jsonl"))? {
         let mut line = json!({"id": case["id"], "source": case["source"], "request": case["request"]});
-        match engine.prepare_request(&case["request"]) {
-            Ok(prep) => {
-                let res = engine.run(&prep, Batching::Single)?;
+        let prepared = if dialect == basal_core::request::Dialect::TypeSafe
+            && engine.manifest.prompt_format == basal_core::prompt::PromptFormat::One
+        {
+            // Retain the legacy raw-export contract, including its capability errors and unexpanded multi item.
+            engine.prepare_request(&case["request"]).map(|p| (p, None))
+        } else {
+            engine.plan_request_as(&case["request"], dialect).map(|p| (p.prepared, p.media))
+        };
+        match prepared {
+            Ok((prep, media)) => {
+                let res = engine.run_prepared(&prep, media.as_deref(), Batching::Single)?;
                 let items: Vec<Value> = prep
                     .iter()
                     .zip(&res)
@@ -77,7 +86,7 @@ pub fn export<B: Backend>(
                 line["items"] = json!(items);
                 // The served answer: questions of the request in one shared-prefix row (Engine::request_batching).
                 // Its distributions are compared with the per-question forwards above.
-                let answer = match engine.decide(&case["request"]) {
+                let answer = match engine.decide_as(&case["request"], dialect) {
                     Ok(a) => a,
                     Err(e) => e.to_json(),
                 };
@@ -100,7 +109,8 @@ pub fn export<B: Backend>(
             Err(DecideError::Internal(e)) => return Err(e),
             Err(e) => {
                 line["items"] = json!([]);
-                line["error"] = e.to_json();
+                line["error"] =
+                    if dialect == basal_core::request::Dialect::Upstream { e.to_upstream_json() } else { e.to_json() };
             }
         }
         // The answer of the upstream-compatible endpoint (/v1/basal) for the same request.
@@ -116,8 +126,11 @@ pub fn export<B: Backend>(
         "tool": "basal export", "inputs": inputs.display().to_string(),
         "model": engine.manifest.name, "model_dir": engine.manifest.dir.display().to_string(),
         "backend": engine.backend.describe(), "bench_batching": format!("{batching:?}"),
-        "host_math": "softmax, order average and calibration in f64",
+        "host_math": if engine.manifest.prompt_format == basal_core::prompt::PromptFormat::Two { "softmax, order average and calibration in f32" } else { "softmax, order average and calibration in f64" },
+        "prompt_format": engine.manifest.prompt_format,
+        "orders": engine.manifest.orders.to_string(),
         "calibration": {"temperatures": engine.manifest.temperatures.iter().map(|(k, v)| (k.as_str().to_string(), json!(v))).collect::<serde_json::Map<_, _>>()},
+        "dialect": format!("{dialect:?}"),
         "request_batching": format!("{:?}", engine.request_batching),
         "bench_s": bench_s, "total_s": t0.elapsed().as_secs_f64(), "run": extra,
     });

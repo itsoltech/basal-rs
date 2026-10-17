@@ -37,9 +37,12 @@ pub const INVARIANT_CLASSES: [usize; 25] = [
 pub struct ServeConfig {
     #[serde(default = "default_addr")]
     pub addr: SocketAddr,
-    /// Waiting + running requests of all models; more are refused with 503.
+    /// Waiting + running requests of all models; more are refused with 529.
     #[serde(default = "default_max_inflight")]
     pub max_inflight: usize,
+    /// Large bodies and requests whose expanded input exceeds 128 KiB; shared across models.
+    #[serde(default = "default_max_large_inflight")]
+    pub max_large_inflight: usize,
     /// `release_date` reported by GET /v1/models.
     #[serde(default = "default_release_date")]
     pub release_date: String,
@@ -75,9 +78,12 @@ pub struct ModelConfig {
     /// Branch, tag or commit of `repo` (default: main). A commit pins the weights.
     #[serde(default)]
     pub revision: Option<String>,
-    /// f16 (default), bf16 or f32.
+    /// auto (Llama f16; validated Omni on Ada f16, other Gemma bf16), f16, bf16 or f32.
     #[serde(default = "default_dtype")]
     pub dtype: String,
+    /// auto, accurate (Llama original, Gemma FP32 attention), or balanced (CUDA FP16 Llama).
+    #[serde(default = "default_inference_mode")]
+    pub inference_mode: String,
     /// `auto`: the table of this model and GPU from `gemm_cache`, generated when missing or not valid here; `none`:
     /// algorithms timed at first use (results may depend on the batch); otherwise the path of a table.
     #[serde(default = "default_gemm_table")]
@@ -97,6 +103,12 @@ pub struct ModelConfig {
     pub tree_max_tokens: usize,
     #[serde(default)]
     pub no_prefix_cache: bool,
+    /// Upstream option orders: 1, 2, auto or `2le<N>`; absent uses the trained format's default.
+    #[serde(default)]
+    pub orders: Option<String>,
+    /// Enable native image/audio processing for an omni model on CUDA.
+    #[serde(default)]
+    pub media: bool,
 }
 
 fn default_addr() -> SocketAddr {
@@ -104,6 +116,9 @@ fn default_addr() -> SocketAddr {
 }
 fn default_max_inflight() -> usize {
     1024
+}
+fn default_max_large_inflight() -> usize {
+    crate::serve::DEFAULT_MAX_LARGE_INFLIGHT
 }
 fn default_release_date() -> String {
     "2026-10-05".into()
@@ -115,7 +130,10 @@ pub fn default_gemm_cache() -> PathBuf {
     crate::paths::cache_dir().join("gemm")
 }
 fn default_dtype() -> String {
-    "f16".into()
+    "auto".into()
+}
+fn default_inference_mode() -> String {
+    "auto".into()
 }
 fn default_gemm_table() -> String {
     "auto".into()
@@ -142,6 +160,10 @@ impl ServeConfig {
     fn parse(text: &str) -> Result<Self> {
         let c: Self = serde_saphyr::from_str(text)?;
         ensure!(!c.models.is_empty(), "no models");
+        for model in &c.models {
+            crate::parse_inference_mode(&model.inference_mode)?;
+        }
+        crate::serve::check_admission_limits(c.max_inflight, c.max_large_inflight)?;
         Ok(c)
     }
 
@@ -153,7 +175,7 @@ impl ServeConfig {
     }
 }
 
-/// A basal model published by its author, with the revision this runtime was checked with.
+/// A published basal model pinned to a metadata revision. Runtime verification is recorded separately in reports.
 pub struct KnownModel {
     /// short name for `basal init --model`
     pub short: &'static str,
@@ -163,7 +185,7 @@ pub struct KnownModel {
     pub size_gb: f64,
 }
 
-pub const KNOWN_MODELS: [KnownModel; 3] = [
+pub const KNOWN_MODELS: [KnownModel; 8] = [
     KnownModel {
         short: "mini",
         repo: "Remek/basal-1.5-mini",
@@ -182,19 +204,51 @@ pub const KNOWN_MODELS: [KnownModel; 3] = [
         revision: "be1b5ee7e7a9755a931262fa7fab4f59be0fd03c",
         size_gb: 22.3,
     },
+    KnownModel {
+        short: "2.0-mini",
+        repo: "Remek/basal-2.0-mini",
+        revision: "cb81b32ce89b0b87e62fcdad28f0435e25c953f3",
+        size_gb: 3.1,
+    },
+    KnownModel {
+        short: "2.0-4.5B",
+        repo: "Remek/basal-2.0-4.5B",
+        revision: "e5ba9149760d99b73b1963d8e0ccf948b58afacb",
+        size_gb: 9.1,
+    },
+    KnownModel {
+        short: "2.0-max",
+        repo: "Remek/basal-2.0-max",
+        revision: "2fffc5cc41e5cf7a2f752f38f17e7b4d9a4a8252",
+        size_gb: 22.3,
+    },
+    KnownModel {
+        short: "omni-mini",
+        repo: "Remek/basal-omni-1.0-mini",
+        revision: "73c993dc3d9ab3cb8887ac0b1ee1cf1c92783240",
+        size_gb: 15.9,
+    },
+    KnownModel {
+        short: "omni-max",
+        repo: "Remek/basal-omni-1.0-max",
+        revision: "e538228c4f3ffd96dde298a073ed10247da0d637",
+        size_gb: 23.9,
+    },
 ];
 
-/// Model of the built-in configuration: the main basal-1.5 model (fits a 16 GB Mac and a 12 GB GPU).
-pub const DEFAULT_MODEL: &KnownModel = &KNOWN_MODELS[1];
+/// Model of the built-in configuration: the pinned basal-2.0-4.5B checkpoint.
+/// Keep index 4 assigned to basal-2.0-4.5B when changing [`KNOWN_MODELS`].
+pub const DEFAULT_MODEL: &KnownModel = &KNOWN_MODELS[4];
 
 /// Owner of a repository given without one (`--model basal-1.5-max` is `Remek/basal-1.5-max`).
 pub const DEFAULT_OWNER: &str = "Remek";
 
 /// A model on the command line (`basal serve --model`, `basal init --model`, the `--model` of the other commands):
 /// a local model directory (an existing path, or one starting with `/`, `.` or `~`), else a Hugging Face repository
-/// `owner/name` or `name` (owner Remek; mini, 4.5B and max for the basal-1.5 models), each with an optional
+/// `owner/name` or `name` (owner Remek; 2.0-mini/2.0-4.5B/2.0-max and omni-mini/omni-max;
+/// mini/4.5B/max for basal-1.5), each with an optional
 /// `@revision` (branch, tag or commit). Without a revision a model of [`KNOWN_MODELS`] is the revision this runtime
-/// was checked with, any other repository its main branch.
+/// pins, any other repository its main branch.
 pub fn model_ref(s: &str) -> Result<ModelConfig> {
     let s = s.trim();
     ensure!(!s.is_empty(), "empty model");
@@ -224,7 +278,14 @@ pub fn model_ref(s: &str) -> Result<ModelConfig> {
         };
         ensure!(repo.split('/').count() == 2, "model {s:?}: expected name, owner/name or a local directory");
         let rev = rev.map(str::to_string).or_else(|| known.map(|k| k.revision.to_string()));
-        serde_json::json!({ "repo": repo, "revision": rev })
+        // Unknown repositories need architecture-aware precision after their metadata is loaded.
+        // Known Omni checkpoints also resolve precision after the GPU is known.
+        let dtype = match known {
+            Some(m) if m.short.starts_with("omni-") => "auto",
+            Some(_) => "f16",
+            None => "auto",
+        };
+        serde_json::json!({ "repo": repo, "revision": rev, "dtype": dtype })
     };
     Ok(serde_json::from_value(entry)?)
 }
@@ -255,7 +316,7 @@ pub fn template(models: &[ModelConfig]) -> String {
          # `basal serve --config FILE` (every option: serve.example.yml in the basal-rs repository).\n\
          # Models are downloaded from Hugging Face at the first start (HF_HOME, HF_TOKEN for private ones).\n\n\
          addr: 127.0.0.1:8000             # 0.0.0.0:8000 to serve other machines\n\
-         # default_model: basal-1.5-4.5B  # /v1/basal requests without \"model\" (default: the first model)\n\
+         # default_model: basal-2.0-4.5B  # /v1/basal requests without \"model\" (default: the first model)\n\
          # access_log: true               # one log line per request\n\
          # metrics: true                  # enable Prometheus at /metrics (default: false)\n\n\
          models:\n",
@@ -271,12 +332,24 @@ pub fn template(models: &[ModelConfig]) -> String {
             (None, Some(p)) => s += &format!("  - path: {}\n", p.display()),
             _ => {}
         }
+        if m.dtype != "auto" && m.dtype != "f16" {
+            s += &format!("    dtype: {}\n", m.dtype);
+        }
+        if m.inference_mode != "auto" {
+            s += &format!("    inference_mode: {}\n", m.inference_mode);
+        }
+        if m.media {
+            s += "    media: true\n";
+        }
+        if let Some(orders) = &m.orders {
+            s += &format!("    orders: {orders:?}\n");
+        }
     }
     s
 }
 
 /// Files of a model directory the runtime reads (`evidence_head.pt` is optional: without it `evidence` is refused).
-const MODEL_FILES: [&str; 8] = [
+const MODEL_FILES: [&str; 14] = [
     "config.json",
     "basal.json",
     "tokenizer.json",
@@ -285,6 +358,12 @@ const MODEL_FILES: [&str; 8] = [
     "CALIBRATION.json",
     "model.safetensors",
     "evidence_head.pt",
+    "CALIBRATION.o*.json",
+    "model.safetensors.index.json",
+    "model-*.safetensors",
+    "processor_config.json",
+    "preprocessor_config.json",
+    "audio_preprocessor_config.json",
 ];
 
 /// Where the configuration of `basal serve` (and `basal doctor`) comes from.
@@ -374,9 +453,13 @@ fn download(repo: &str, revision: Option<&str>) -> Result<PathBuf> {
                 .with_context(|| format!("{repo}@{at}: download failed ({e}) and no cached copy"))?
         }
     };
-    for f in &MODEL_FILES[..7] {
+    for f in &MODEL_FILES[..6] {
         ensure!(dir.join(f).exists(), "{repo}@{at}: {f} missing in {}", crate::term::P(&dir));
     }
+    ensure!(
+        dir.join("model.safetensors").exists() || dir.join("model.safetensors.index.json").exists(),
+        "{repo}@{at}: model checkpoint missing"
+    );
     let s = t.elapsed().as_secs_f64();
     let bytes = progress.state.lock().unwrap().0;
     if bytes > 0 {
@@ -449,20 +532,46 @@ impl hf_hub::progress::ProgressHandler for DownloadLog {
     }
 }
 
+/// CLI auto precision: use the validated FP16 decoder for the two measured Omni
+/// model names on RTX 6000 Ada. Explicit precision always wins; media towers stay BF16.
+/// Other Gemma devices keep the published BF16 default.
+pub fn model_precision(value: &str, manifest: &ModelManifest) -> Result<basal_gpu::Precision> {
+    if value == "auto"
+        && matches!(&manifest.config, basal_core::architecture::Architecture::Gemma4(_))
+        && matches!(manifest.name.as_str(), "basal-omni-1.0-mini" | "basal-omni-1.0-max")
+        && basal_gpu::gpu_name().is_ok_and(|name| name == "NVIDIA RTX 6000 Ada Generation")
+    {
+        return Ok(basal_gpu::Precision::F16);
+    }
+    basal_gpu::model_precision(value, &manifest.config)
+}
+
 /// GEMM table of a model: `None` for `gemm_table: none` and on builds without CUDA; for `auto` the cached table of
-/// this model, dtype, GPU and cuBLASLt version, generated (one-time, minutes to an hour) when it is missing, was made
-/// on another GPU or cuBLASLt, or does not cover the model's weight shapes.
+/// this model, dtype, GPU and cuBLASLt version. Llama searches once when needed; Gemma
+/// falls back to fixed per-prompt GEMMs when no matching cached or bundled table is available.
 pub fn gemm_table(m: &ModelConfig, manifest: &ModelManifest, cache: &Path) -> Result<Option<PathBuf>> {
+    let mut resolved = m.clone();
+    resolved.dtype = match model_precision(&m.dtype, manifest)? {
+        basal_gpu::Precision::F16 => "f16",
+        basal_gpu::Precision::Bf16 => "bf16",
+        basal_gpu::Precision::F32 => "f32",
+    }
+    .into();
+    let m = &resolved;
     match m.gemm_table.as_str() {
         "none" => return Ok(None),
         "auto" => {}
         p => return Ok(Some(PathBuf::from(p))),
     }
+    // The algorithm search supports half precision only; FP32 uses the reference matmul path.
+    if m.dtype == "f32" {
+        return Ok(None);
+    }
     let Some(version) = basal_gpu::cublaslt_version() else {
         return Ok(None); // Metal: no cuBLASLt tables
     };
     let gpu = basal_gpu::gpu_name()?;
-    let shapes = basal_gpu::projection_shapes(&manifest.config);
+    let shapes = basal_gpu::architecture_projection_shapes(&manifest.config)?;
     let path = cache.join(format!("{}-{}.json", manifest.name, m.dtype));
     let problem = match std::fs::read_to_string(&path) {
         Err(_) => Some("no table".to_string()),
@@ -490,6 +599,13 @@ pub fn gemm_table(m: &ModelConfig, manifest: &ModelManifest, cache: &Path) -> Re
                 Err(e) => crate::warn!("{}: GEMM table {file} of this build rejected ({e:#})", manifest.name),
             }
         }
+    }
+    if matches!(manifest.config, basal_core::architecture::Architecture::Gemma4(_)) && problem.is_some() {
+        crate::note!(
+            "{}: using fixed per-prompt GEMMs; an invariant Gemma table for this GPU can be generated with gemm-search",
+            manifest.name
+        );
+        return Ok(None);
     }
     if let Some(why) = problem {
         crate::progress!(
