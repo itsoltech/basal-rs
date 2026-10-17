@@ -54,6 +54,10 @@ If a combined run stops after one surface completes, the summarizer's explicit
 `--surfaces text` or `--surfaces media` audits only that surface, including all
 scheduled phases and server stops. It preserves the incomplete parent status;
 it does not mark missing phases on other surfaces as completed.
+For finite GPU budgets, `omni-optimize.py` accepts explicit
+`--latency-warmup-samples` and `--load-warmup-samples`. They change discarded
+warmup work only and are recorded in `method.json`; defaults retain the older
+protocol. Report these settings together with retained sample counts.
 
 `restore-inputs.py` reconstructs one archived frozen input directory using separately
 downloaded media. It accepts the campaign through `--measurement-artifacts`, a

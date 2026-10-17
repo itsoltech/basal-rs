@@ -85,6 +85,8 @@ def main():
     p.add_argument('--native-long-slice-ms', type=int, default=100, help='minimum background GPU slice before handing over to short requests')
     p.add_argument('--native-schedule', choices=['hrrn', 'fifo'], default='hrrn', help='native request scheduling policy')
     p.add_argument('--latency-samples', type=int, help='measured N=1 samples per ladder point and engine repetition')
+    p.add_argument('--latency-warmup-samples', type=int, default=2, help='discarded N=1 requests before each ladder point')
+    p.add_argument('--load-warmup-samples', type=int, help='short warmup requests, capped at one corpus pass; default: two complete passes')
     p.add_argument('--mixed', action='store_true', help='also interleave one 8192-token document per 16 short documents at N=8/32')
     p.add_argument('--load-samples', type=int, help='minimum requests per load phase, rounded up to complete corpus repetitions')
     p.add_argument('--startup-timeout', type=int, default=1200)
@@ -109,6 +111,8 @@ def main():
         p.error('load samples must be positive')
     if a.latency_samples is not None and a.latency_samples <= 0:
         p.error('latency samples must be positive')
+    if a.latency_warmup_samples <= 0 or (a.load_warmup_samples is not None and a.load_warmup_samples <= 0):
+        p.error('warmup sample counts must be positive')
     if a.warmup_seconds is not None and (not math.isfinite(a.warmup_seconds) or a.warmup_seconds < 0):
         p.error('warmup seconds must be finite and nonnegative')
     initial_warmup_s = a.warmup_seconds if a.warmup_seconds is not None else (10 if a.phase == 'confirm' else 0)
@@ -152,6 +156,8 @@ def main():
                   upstream_commit=upstream_commit, inputs=provenance, text_limit=a.max_text_tokens,
                   distinct_short_documents=len(short), requested_load_samples=a.load_samples, initial_warmup_s=initial_warmup_s,
                   latency_samples=a.latency_samples or (4 if a.phase == 'screen' else 10),
+                  latency_warmup_samples=a.latency_warmup_samples,
+                  load_warmup_samples=min(a.load_warmup_samples, len(short)) if a.load_warmup_samples else 2 * len(short),
                   timing='before JSON serialization through complete HTTP body read; parse after timing',
                   excluded_repetitions=[1] if a.phase == 'confirm' else [],
                   media_engine='upstream-eager; fast rejects media',
@@ -334,9 +340,12 @@ def main():
                                 phase(tag, variant, model, short, 1, 1, 'engine-warmup')
                             for row in ladder:
                                 if row['model'] == model and row['target_tokens'] <= a.max_text_tokens:
-                                    phase(tag, variant, model, [row], 1, 2, 'ladder-warmup')
+                                    phase(tag, variant, model, [row], 1, a.latency_warmup_samples, 'ladder-warmup')
                                     phase(tag, variant, model, [row], 1, a.latency_samples or (4 if a.phase == 'screen' else 10), 'ladder')
-                            phase(tag, variant, model, short, 1, 2, 'short-warmup')
+                            if a.load_warmup_samples is None:
+                                phase(tag, variant, model, short, 1, 2, 'short-warmup')
+                            else:
+                                phase(tag, variant, model, short[:a.load_warmup_samples], 1, 1, 'short-warmup')
                             for clients in [1, 8, 32]:
                                 phase(tag, variant, model, short, clients,
                                       max(1, math.ceil((a.load_samples or (64 if a.phase == 'screen' else 512)) / len(short))), 'short')
