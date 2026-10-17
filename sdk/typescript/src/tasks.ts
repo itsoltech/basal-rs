@@ -98,7 +98,7 @@ export class CompressQuestion extends TaskQuestion<CompressAnswer> {
   constructor(text='',options:CompressOptions={}) {
     if(options.unit!==undefined&&!['sentence','line','paragraph'].includes(options.unit))throw new TypeError('invalid unit');
     if(options.keep_ratio!==undefined){probability(options.keep_ratio);if(options.keep_ratio===0)throw new TypeError('keep_ratio must be positive');}
-    if(options.threshold!==undefined){probability(options.threshold);if(options.objective!==undefined&&options.objective!=='threshold')throw new TypeError('threshold requires threshold objective');}
+    if(options.threshold!==undefined)probability(options.threshold);
     if(options.min_keep!==undefined)offset(options.min_keep);
     super('compress',text,options);
   }

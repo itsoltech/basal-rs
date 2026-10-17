@@ -3,6 +3,7 @@ import argparse
 p=argparse.ArgumentParser(description='Generate host-only task expansion/assembly observations with supplied primitive payloads; no model execution.')
 p.add_argument('--upstream',type=pathlib.Path,required=True)
 p.add_argument('--measurement-artifacts',type=pathlib.Path,required=True)
+p.add_argument('--max-options',type=int,choices=range(2,256),default=255)
 a=p.parse_args()
 up=a.upstream;pkg=types.ModuleType('basal');pkg.__path__=[str(up/'basal')];sys.modules['basal']=pkg
 for name in ['prompt','tasks']:
@@ -20,8 +21,8 @@ def answers(request):
    pr={k:.9 if k==winner else .1/max(1,len(keys)-1) for k in keys};result[key]={'type':'choice','choice':winner,'probabilities':pr,'confidence':pr[winner]}
  return {'model':'host-only','answers':result,'usage':{'questions':len(result),'input_tokens':0,'branches':len(result)}}
 def add(name,state,questions,lang='en'):
- body={'model':'host-only','state':state,'lang':lang,'questions':questions};expanded,plans=t.expand(body,255);first=answers(expanded);second_req=t.second_round(first,body,plans,255);second=answers(second_req) if second_req else None
- row={'id':name,'request':body,'first':first,'calibration':{'task_thresholds':{'classify':{'0.05':.8},'verify':{'0.05':.9}}}}
+ body={'model':'host-only','state':state,'lang':lang,'questions':questions};expanded,plans=t.expand(body,a.max_options);first=answers(expanded);second_req=t.second_round(first,body,plans,a.max_options);second=answers(second_req) if second_req else None
+ row={'max_options':a.max_options,'id':name,'request':body,'first':first,'calibration':{'task_thresholds':{'classify':{'0.05':.8},'verify':{'0.05':.9}}}}
  if second:row['second']=second
  rows.append(row)
 for labels in [{'a':'Payment','b':'Weather'},['a','b'],[{'name':'a','rubric':'Payment'},{'name':'b','description':'Weather'}]]:

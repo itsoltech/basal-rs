@@ -15,3 +15,35 @@ python3 tools/reference/tasks-v21/audit.py --measurement-artifacts ARTIFACTS --c
 The auditor requires exact IDs and compares numeric values as binary64, including signed zero.
 Keep failed attempts. Live SDK comparisons use `tools/sdk/live-basal2-omni/` with task inputs.
 Publish sanitized observations using `docs/MEASUREMENT_ARTIFACTS.md`.
+
+Pass `--max-options 10` to the generator to exercise the format-1 task candidate limit;
+its limit is saved in each input row and used by both exporters. The default is 255.
+
+`run-gpu.py` runs finite baseline/candidate exports and current upstream FP32/BF16 exports
+inside a separately supervised session. It never rents hardware, downloads models or
+changes cooling. Supply `--measurement-artifacts` with `primitives/` and `tasks/` inputs,
+`--model-dir`, explicit binaries, a new `--run-name`, and optionally the pinned upstream
+checkout and its Python environment. Native and reference stages can run separately.
+`method.json` reports execution status; inspect A/B and numerical/task comparisons before
+making a quality or performance claim. Retain failed exports and private process logs.
+
+Use `--fp32-device cpu --reference-dtypes float32 --reference-cpu-threads N` for a
+checkpoint whose full upstream FP32 weights and activations exceed device memory.
+This changes the quality reference's device; HTTP timing still compares GPU BF16.
+`--native-library-path` affects only the native process. `--half-gemm-table` freezes
+f16 GEMMs in auto/f16 A/B exports; without a fixed Llama table, autotuning can pick
+different reductions. The reference exporter uses exactly the frozen API cases and
+retains the supplied benchmark rows, without adding its default corpora.
+
+`prepare-http.py` freezes PL/EN text ladders using each model's pinned tokenizer,
+32 distinct task documents and checksum-verified real media. Pass the resulting
+catalogue to `tools/perf/omni-optimize.py --model-names FULL_NAME ...`; use
+`tools/perf/summarize-omni.py` to audit complete runs. Task extraction may perform
+different continuation work when engines choose different source regions; all
+response token/branch counts are retained. Finite corpus timing is separate from
+FP32 answer quality and cannot establish a general performance advantage.
+
+`probe-http.py` records task answers on both endpoints, intentional admission
+rejections at `max_inflight=4`, and replica reservation drain after disconnected
+clients. It needs a separately supervised server with `--metrics`, and a new output
+directory. Its intentional 529 series is separate from capacity measurements.

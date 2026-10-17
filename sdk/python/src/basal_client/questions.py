@@ -423,12 +423,14 @@ def schema_questions(schema: type[Questions]) -> dict[str, QuestionSpec[Any]]:
 
 
 def build_questions(questions: QuestionSet) -> dict[str, WireQuestion]:
+    from .tasks import ClassifyQuestion, VerifyQuestion, CompressQuestion, ExtractQuestion
     if not questions:
         raise ValueError("questions must not be empty")
     result: dict[str, WireQuestion] = {}
     for key, question in questions.items():
         _text(key, "question ID")
-        if not isinstance(question, (ChoiceQuestion, NoulQuestion, ScoreQuestion, MultiQuestion, ActQuestion, ToolQuestion)):
+        if not isinstance(question, (ChoiceQuestion, NoulQuestion, ScoreQuestion, MultiQuestion, ActQuestion, ToolQuestion,
+                                     ClassifyQuestion, VerifyQuestion, CompressQuestion, ExtractQuestion)):
             raise TypeError("questions must contain typed question specs")
         result[key] = question.to_dict()
     return result

@@ -102,14 +102,14 @@ async def export(srv, args, out):
                 data.setdefault("type", "choice")
                 data.setdefault("id", None)
                 data.setdefault("gold", None)
-                rec = dict(index=index, source=source, line=line, **data, **readout(srv, q))
+                rec = {**data, "index": index, "source": source, "line": line, **readout(srv, q)}
                 rec.update(argmax_avg=int(np.argmax(rec["p_avg"])), argmax_cal=int(np.argmax(rec["p_cal"])))
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
                 print(f"bench {index}: {k} options", flush=True)
         with (out / "systemone.jsonl").open("w") as f:
             cases = ([json.loads(line.replace('"MODEL"', json.dumps(srv.name)))
                       for line in Path(args.cases).read_text().splitlines() if line.strip()]
-                     if args.cases_only else system_one_cases(args.cases, srv.name))
+                     if args.cases_only or args.exact_cases else system_one_cases(args.cases, srv.name))
             for case in cases:
                 req = case["request"]
                 req["model"] = srv.name
@@ -155,11 +155,12 @@ def main():
     ap.add_argument("--media", action="store_true")
     ap.add_argument("--questions")
     ap.add_argument("--cases")
+    ap.add_argument("--exact-cases", action="store_true", help="Use exactly --cases without adding built-in API cases; retain bench inputs")
     ap.add_argument("--cases-only", action="store_true", help="Export only --cases, without the default corpora")
     ap.add_argument("--n", type=int, default=44)
     a = ap.parse_args()
-    if a.cases_only and not a.cases:
-        ap.error("--cases-only requires --cases")
+    if (a.cases_only or a.exact_cases) and not a.cases:
+        ap.error("--cases-only/--exact-cases requires --cases")
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=False)
     start = time.monotonic()
@@ -171,7 +172,7 @@ def main():
     capture_codes(srv.backend)
     asyncio.run(export(srv, a, out))
     import subprocess
-    manifest = dict(tool=Path(__file__).name, upstream_revision=subprocess.check_output(
+    manifest = dict(tool=Path(__file__).name, exporter_sha256=sha256(__file__), upstream_revision=subprocess.check_output(
         ["git", "-C", str(UPSTREAM), "rev-parse", "HEAD"], text=True).strip(),
         model=srv.name, dtype=a.dtype, prompt_format=srv.fmt, orders=srv.orders, media=a.media,
         calibration=srv.cal, versions=versions(), elapsed_s=time.monotonic() - start,

@@ -65,8 +65,7 @@ def main():
     token_counts = {}
     class_groups, case_groups = collections.defaultdict(list), collections.defaultdict(list)
     confirmed = method['phase'] == 'confirm'
-    for suffix in method['models']:
-        model = 'basal-omni-1.0-' + suffix
+    for model in method.get('model_names', ['basal-omni-1.0-' + suffix for suffix in method['models']]):
         for surface in method['surfaces']:
             counts = collections.Counter()
             for variant in method['schedule']:
@@ -117,7 +116,11 @@ def main():
                         continue
                     token_key = (model, row['id'])
                     tokens = response.get('usage', {}).get('input_tokens')
-                    if not isinstance(tokens, int) or tokens <= 0 or (token_key in token_counts and token_counts[token_key] != tokens):
+                    task = any(q.get('type') in ('classify','verify','compress','extract') for q in source['request']['questions'].values())
+                    # A task's dependent extraction prompt is chosen by the model. Keep the response's work
+                    # accounting; compare HTTP requests rather than requiring identical internal work across engines.
+                    allow_task_work = task and method.get('task_accounting') is not None
+                    if not isinstance(tokens, int) or tokens <= 0 or (not allow_task_work and token_key in token_counts and token_counts[token_key] != tokens):
                         issues.append(dict(kind='input_token_count_mismatch', tag=tag, id=row['id']))
                     token_counts.setdefault(token_key, tokens)
                     key = (model, variant, row['id'])

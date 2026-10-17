@@ -64,6 +64,7 @@ def main():
     p.add_argument('--measurement-artifacts', type=Path, required=True)
     p.add_argument('--out', type=Path, required=True)
     p.add_argument('--binary', type=Path, required=True)
+    p.add_argument('--native-library-path', help='CUDA libraries for native servers only')
     p.add_argument('--candidate', type=Path)
     p.add_argument('--candidate-gemm-table', help='auto, none, or invariant table path; supports {model} and {dtype}')
     p.add_argument('--cpu-threads', type=int, help='OMP, MKL and Rayon thread budget for both engines')
@@ -73,6 +74,7 @@ def main():
     p.add_argument('--upstream', type=Path, required=True)
     p.add_argument('--models-root', type=Path, required=True)
     p.add_argument('--models', nargs='+', choices=['mini', 'max'], default=['mini', 'max'])
+    p.add_argument('--model-names', nargs='+', help='Full local model directory names; overrides legacy --models suffixes')
     p.add_argument('--variants', nargs='+', choices=['baseline', 'candidate', 'upstream-fast', 'upstream-eager'],
                    default=['baseline', 'upstream-fast', 'upstream-eager'])
     p.add_argument('--surfaces', nargs='+', choices=['text', 'media'], default=['text', 'media'])
@@ -110,6 +112,9 @@ def main():
     if a.warmup_seconds is not None and (not math.isfinite(a.warmup_seconds) or a.warmup_seconds < 0):
         p.error('warmup seconds must be finite and nonnegative')
     initial_warmup_s = a.warmup_seconds if a.warmup_seconds is not None else (10 if a.phase == 'confirm' else 0)
+    selected_models = a.model_names or ['basal-omni-1.0-' + suffix for suffix in a.models]
+    if len(set(selected_models)) != len(selected_models) or any(Path(m).name != m or m in ('.', '..') for m in selected_models):
+        p.error('model names must be unique plain directory names')
     root = a.measurement_artifacts
     provenance = json.loads((root / 'provenance.json').read_text())
     for name, expected in provenance['files'].items():
@@ -123,7 +128,7 @@ def main():
         raise ValueError('upstream commit differs from frozen manifest')
     table_template = a.candidate_gemm_table if a.candidate_gemm_table not in [None, 'auto', 'none'] else None
     gemm_policy = 'explicit' if table_template else a.candidate_gemm_table or 'none'
-    candidate_tables = ({'basal-omni-1.0-' + suffix: Path(table_template.format(model='basal-omni-1.0-' + suffix, dtype=a.candidate_dtype)) for suffix in a.models} if table_template else {})
+    candidate_tables = ({model: Path(table_template.format(model=model, dtype=a.candidate_dtype)) for model in selected_models} if table_template else {})
     a.out.mkdir(parents=True, exist_ok=False)
     ladder = [json.loads(x) for x in (root / 'text-ladder.jsonl').read_text().splitlines()]
     media = [json.loads(x) for x in (root / 'cases-real-media.jsonl').read_text().splitlines()]
@@ -133,16 +138,16 @@ def main():
     for rows in [ladder, media, short]:
         if len({row['id'] for row in rows}) != len(rows):
             raise ValueError('input corpus has duplicate IDs')
-    for suffix in a.models:
-        if not any(row['model'] == 'basal-omni-1.0-' + suffix
+    for model in selected_models:
+        if not any(row['model'] == model
                    and row['target_tokens'] <= a.max_text_tokens for row in ladder):
             raise ValueError('no ladder input in the requested model/token range')
-    if a.mixed and any(not any(row['model'] == 'basal-omni-1.0-' + suffix and row['target_tokens'] == 8192
-                               for row in ladder) for suffix in a.models):
+    if a.mixed and any(not any(row['model'] == model and row['target_tokens'] == 8192
+                               for row in ladder) for model in selected_models):
         raise ValueError('mixed phase needs frozen 8192-token documents for each selected model')
     schedule = (a.variants if a.phase == 'screen' else [a.variants[i] for i in [0, 1, 1, 0, 0, 1, 1, 0]])
-    method = dict(phase=a.phase, schedule=schedule, models=a.models, surfaces=a.surfaces, runner_sha256=digest(Path(__file__)),
-                  candidate_dtype=a.candidate_dtype, candidate_gemm_tables={m: digest(p) for m, p in candidate_tables.items()}, cpu_threads=a.cpu_threads, candidate_cpu_threads=a.candidate_cpu_threads, binaries={'baseline': digest(a.binary), **({'candidate': digest(a.candidate)} if a.candidate else {})},
+    method = dict(phase=a.phase, schedule=schedule, models=a.models, model_names=selected_models, surfaces=a.surfaces, runner_sha256=digest(Path(__file__)),
+                  candidate_dtype=a.candidate_dtype, native_library_path_explicit=bool(a.native_library_path), candidate_gemm_tables={m: digest(p) for m, p in candidate_tables.items()}, cpu_threads=a.cpu_threads, candidate_cpu_threads=a.candidate_cpu_threads, binaries={'baseline': digest(a.binary), **({'candidate': digest(a.candidate)} if a.candidate else {})},
                   candidate_gemm_policy=gemm_policy,
                   upstream_commit=upstream_commit, inputs=provenance, text_limit=a.max_text_tokens,
                   distinct_short_documents=len(short), requested_load_samples=a.load_samples, initial_warmup_s=initial_warmup_s,
@@ -154,6 +159,7 @@ def main():
                   native_long_tokens=a.native_long_tokens, native_long_slice_ms=a.native_long_slice_ms,
                   native_schedule=a.native_schedule, mixed=a.mixed,
                   native_media_admission=4, native_max_large_inflight=128,
+                  task_accounting='Same HTTP requests; extraction continuation depends on model choices. Retain per-response tokens/branches; task token counts may differ between engines or upstream batches.',
                   native_timing_headers=['x-basal-batch-requests', 'x-basal-queue-ms', 'x-basal-compute-ms'],
                   startup_timeout_s=a.startup_timeout, request_timeout_s=a.request_timeout,
                   screen_is_signal=a.phase == 'screen')
@@ -205,8 +211,10 @@ def main():
                 cmd += ['--media']
         event('server_start', tag=tag, command=cmd)
         server_env = env
+        if not variant.startswith('upstream-') and a.native_library_path:
+            server_env = env | {'LD_LIBRARY_PATH': a.native_library_path + (':' + env['LD_LIBRARY_PATH'] if env.get('LD_LIBRARY_PATH') else '')}
         if variant == 'candidate' and gemm_policy == 'auto':
-            server_env = env | {'XDG_CACHE_HOME': str(a.out.resolve() / 'native-cache')}
+            server_env = server_env | {'XDG_CACHE_HOME': str(a.out.resolve() / 'native-cache')}
         if variant == 'candidate' and a.candidate_cpu_threads is not None:
             server_env = server_env | {key: str(a.candidate_cpu_threads)
                                       for key in ['OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'RAYON_NUM_THREADS']}
@@ -307,8 +315,7 @@ def main():
         if invalid or (changes and not variant.startswith('upstream-')):
             raise RuntimeError('invalid response or native bitwise invariance failure')
 
-    for suffix in a.models:
-        model = 'basal-omni-1.0-' + suffix
+    for model in selected_models:
         for surface in a.surfaces:
             with_media = surface == 'media'
             counts = {}

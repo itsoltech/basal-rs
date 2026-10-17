@@ -447,6 +447,11 @@ fn probability(value: &Value) -> Result<f64> {
 fn chosen(a: &Value) -> Result<&str> {
     a.get("choice").and_then(Value::as_str).context("missing task choice")
 }
+fn choice_probability(a: &Value) -> Result<f64> {
+    // Tasks use the selected probability on both endpoints. TypeSafe primitive choice confidence
+    // is normalized against a uniform distribution and is not the probability needed by tasks.
+    probability(&a["probabilities"][chosen(a)?])
+}
 fn automated(cal: &Map<String, Value>, task: &str, confidence: f64, risks: &[f64]) -> Value {
     risks
         .iter()
@@ -525,7 +530,7 @@ impl TaskPlan {
                     if *multi {
                         json!({"type":"classify","labels":a["selected"],"scores":a["probabilities"],"set_confidence":a["set_confidence"]})
                     } else {
-                        let confidence = probability(&a["confidence"])?;
+                        let confidence = choice_probability(a)?;
                         json!({"type":"classify","label":a["choice"],"top_label":a["choice"],"scores":a["probabilities"],"confidence":confidence,"automated":automated(cal,"classify",confidence,risks)})
                     }
                 }
@@ -625,11 +630,13 @@ impl TaskPlan {
                                 } else {
                                     value(chosen(a)?)?
                                 };
-                                json!({"value":result,"probabilities":a["probabilities"],"confidence":a[if multi {"set_confidence"} else {"confidence"}],"source":"choice"})
+                                let confidence =
+                                    if multi { probability(&a["set_confidence"])? } else { choice_probability(a)? };
+                                json!({"value":result,"probabilities":a["probabilities"],"confidence":confidence,"source":"choice"})
                             }
                             Kind::Boolean => {
                                 let c = chosen(a)?;
-                                json!({"value":if c=="__missing__" {Value::Null} else {Value::Bool(c=="true")},"probabilities":a["probabilities"],"confidence":a["confidence"],"source":"choice"})
+                                json!({"value":if c=="__missing__" {Value::Null} else {Value::Bool(c=="true")},"probabilities":a["probabilities"],"confidence":choice_probability(a)?,"source":"choice"})
                             }
                             _ => {
                                 let missing = probability(&a["probabilities"]["__missing__"])?;
@@ -652,13 +659,13 @@ impl TaskPlan {
                                                     .and_then(|s| s.parse::<usize>().ok())
                                                     .context("invalid span choice")?,
                                             ),
-                                            probability(&b["confidence"])?,
+                                            choice_probability(b)?,
                                         ),
                                     };
                                     if let Some(i) = candidate {
                                         let s = field.candidates.get(i).context("unknown span candidate")?;
                                         let text = self.text.slice(*s);
-                                        let line_p = probability(&a["confidence"])?;
+                                        let line_p = choice_probability(a)?;
                                         f["text"] = text.into();
                                         f["start"] = s.start.into();
                                         f["end"] = s.end.into();

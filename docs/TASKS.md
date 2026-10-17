@@ -33,6 +33,9 @@ zwraca supported/not_supported.
 
 ## Interpretacja wyników
 
+Dla zadań `confidence` wynika z prawdopodobieństw wybranych odpowiedzi na obu
+endpointach. Ekstrakcja fragmentu mnoży prawdopodobieństwa linii i fragmentu.
+
 `automated` ma klucze żądanych błędów, domyślnie `0.01` i `0.05`. Wartość
 `null` oznacza brak certyfikowanego progu dla tego zadania. Nie zastępuj jej
 `true` na podstawie zwykłej kalibracji `choice`/`noul`. basal-rs używa osobnego

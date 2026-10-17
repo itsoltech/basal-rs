@@ -20,8 +20,8 @@ tasks=sys.modules['basal.tasks']
 for line in (a.measurement_artifacts/'host-inputs.jsonl').read_text().splitlines():
  item=json.loads(line)
  try:
-  body,plans=tasks.expand(item['request'],255)
-  second=tasks.second_round(item['first'],item['request'],plans,255)
+  body,plans=tasks.expand(item['request'],item.get('max_options',255))
+  second=tasks.second_round(item['first'],item['request'],plans,item.get('max_options',255))
   response=tasks.finish(item['first'],item['request'],plans,item.get('calibration',{}),item.get('second',{}).get('answers'))
   result={'id':item['id'],'expanded':body,'second_request':second,'response':response}
  except (ValueError,TypeError,KeyError) as error:result={'id':item['id'],'error':str(error)}
