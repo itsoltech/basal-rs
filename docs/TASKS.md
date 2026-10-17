@@ -95,6 +95,9 @@ Model obsługuje tekst i obraz; obecność konfiguracji procesora audio nie
 ustanawia obsługi audio bez wag audio. Gemma korzysta z placement/replik,
 nie z podziału warstw ani kwantyzacji Llama. 48 GiB VRAM nie pomieści pełnego Ultra.
 Wariant ModelOpt FP8 wymaga odrębnej implementacji i jest jawnie odrzucany.
+Na H100 PCIe `dtype: auto` dla Ultra wybiera decoder FP16. Inne karty pozostają
+przy BF16, o ile użytkownik nie wybierze jawnej precyzji. Profil FP16 porównujemy
+z upstream FP32 niezależnie od pomiarów szybkości względem upstream BF16.
 
 Opis implementacji nie stanowi potwierdzenia poprawności ani przewagi GPU.
 Wyniki porównań i ograniczenia kampanii są zapisywane osobno w `reports/`.

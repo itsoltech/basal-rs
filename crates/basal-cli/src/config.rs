@@ -87,7 +87,7 @@ pub struct ModelConfig {
     /// Branch, tag or commit of `repo` (default: main). A commit pins the weights.
     #[serde(default)]
     pub revision: Option<String>,
-    /// auto (Llama f16; validated Omni on Ada f16, other Gemma bf16), f16, bf16 or f32.
+    /// auto (Llama f16; measured Omni/GPU pairs f16, other Gemma bf16), f16, bf16 or f32.
     #[serde(default = "default_dtype")]
     pub dtype: String,
     /// Format of the projection weights: `none` (default, dense weights of `dtype`), `q8_0` (GGML Q8_0 blocks) or
@@ -817,14 +817,19 @@ impl hf_hub::progress::ProgressHandler for DownloadLog {
     }
 }
 
-/// CLI auto precision: use the validated FP16 decoder for the measured Omni
-/// model names on RTX 6000 Ada (GPU `device`; replicas run on GPUs of one type). Explicit precision always wins;
+/// CLI auto precision: use the validated FP16 decoder for measured Omni/GPU pairs
+/// (GPU `device`; replicas run on GPUs of one type). Explicit precision always wins;
 /// media towers stay BF16. Other Gemma devices keep the published BF16 default.
 pub fn model_precision(value: &str, manifest: &ModelManifest, device: usize) -> Result<basal_gpu::Precision> {
     if value == "auto"
         && matches!(&manifest.config, basal_core::architecture::Architecture::Gemma4(_))
-        && matches!(manifest.name.as_str(), "basal-omni-1.0-mini" | "basal-omni-1.0-max" | "basal-omni-1.1-max")
-        && basal_gpu::gpu_name(device).is_ok_and(|name| name == "NVIDIA RTX 6000 Ada Generation")
+        && basal_gpu::gpu_name(device).is_ok_and(|name| match name.as_str() {
+            "NVIDIA RTX 6000 Ada Generation" => {
+                matches!(manifest.name.as_str(), "basal-omni-1.0-mini" | "basal-omni-1.0-max" | "basal-omni-1.1-max")
+            }
+            "NVIDIA H100 PCIe" => manifest.name == "basal-omni-1.0-ultra",
+            _ => false,
+        })
     {
         return Ok(basal_gpu::Precision::F16);
     }

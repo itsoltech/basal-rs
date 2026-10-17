@@ -676,7 +676,7 @@ wiersza poleceń, np. `--max-batch-tokens`):
 | `repo`, `revision` | | repozytorium Hugging Face `owner/name` i gałąź, tag albo commit (domyślnie `main`); pobierane do cache Hugging Face (`HF_HOME`, w obrazie `/data/hf`), przy braku dostępu do Hub z cache |
 | `path` | | lokalny katalog modelu (zamiast `repo`) |
 | `gemm_table` | `auto` | tabela algorytmów cuBLASLt (opis niżej); `none`: Llama dobiera algorytmy przy pierwszym użyciu, Gemma wykonuje osobne GEMM dla promptów; albo ścieżka tabeli |
-| `dtype` | `auto` | Llama: `f16`; Omni na rozpoznanej RTX 6000 Ada: `f16`, pozostałe Gemma: `bf16`; jawne `f16`, `bf16` lub `f32` mają pierwszeństwo |
+| `dtype` | `auto` | Llama: `f16`; zmierzone Omni mini/max/1.1 max na RTX 6000 Ada oraz Ultra na H100 PCIe: `f16`, pozostałe Gemma: `bf16`; jawne `f16`, `bf16` lub `f32` mają pierwszeństwo |
 | `inference_mode` | `auto` | dobór attention; `accurate`: pierwotne attention Llamy lub iloczyny FP32 Gemmy; `balanced`: CUDA Llama f16, softmax i akumulacja f32, prawdopodobieństwa hi/lo |
 | `quantization` | `none` | format wag projekcji modeli Llama (basal-1.5, Basal 2.0 mini/4.5B/max): `none` (gęste wagi `dtype`), `q8_0` (8-bitowe wagi z aktywacjami f16) albo `q4_k` (4-bitowe wagi z aktywacjami f16, eksperymentalne; K projekcji wielokrotnością 256); tylko CUDA z `dtype` f16 (`auto` dla Llamy to f16); Omni (Gemma) odrzuca inne wartości niż `none` po odczytaniu `config.json`, przed ładowaniem; opis niżej |
 | `device` | 0 | GPU modelu: indeks urządzenia CUDA widoczny dla procesu; modele z tym samym `device` dzielą GPU, z różnymi liczą jednocześnie; Metal i Intel: tylko 0 |
