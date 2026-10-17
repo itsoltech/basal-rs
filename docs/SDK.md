@@ -528,3 +528,9 @@ odrzucone z powodu już istniejącego pliku. Nie włączaj pomijania istniejący
 plików bez sprawdzenia zgodności ich hashów z pierwotnym artefaktem. Najpierw
 ustal stan publikacji; do rejestru należy przesłać tylko brakujące pliki
 z tego samego zweryfikowanego artefaktu. Ten przypadek wymaga obsługi operatora.
+
+## Weryfikacja Basal 2.0 i Omni
+
+[Raport SDK z 2026-10-17](../reports/sdk-basal2-omni-2026-10-17/README.md)
+obejmuje rzeczywiste wywołania czterech SDK na GPU, zgodność pól odpowiedzi
+z bezpośrednim API oraz archiwum danych i instrukcje odtworzenia.

@@ -3,7 +3,7 @@
 These finite runners exercise the real Python, TypeScript, .NET and Rust SDKs.
 They are measurement tools, never CI gates or a test framework. They do not
 provision, start or stop a server. Use a separately supervised, loopback-only
-server with one model loaded, order 1, prefix/state caches disabled and no GEMM
+server with one model loaded, order 1 (plus an explicit auto-order series), prefix/state caches disabled and no GEMM
 autotuning. Run one client at a time. This is contract and decoding verification,
 not a latency benchmark or a new model-quality evaluation.
 
@@ -45,7 +45,7 @@ python tools/sdk/live-basal2-omni/run.py \
 
 For Omni, select its exact discovery name and append `--media`. New run names
 must be unused; retain failed attempts. The auditor requires all SDK modes,
-named APIs, discovery metadata and native case references. It compares decoded
+named APIs, discovery metadata, HTTP 422 handling, empty-media rejection and native case references. It compares decoded
 answer fields and usage numerically by IEEE-754 binary64 bits, including signed
 zero. It does not compare raw JSON text, unknown response fields, timing fields
 or transport framing. Rust records typed projections and usage rather than a
