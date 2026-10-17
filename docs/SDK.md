@@ -35,6 +35,8 @@ cele multi `threshold`/`exact`/`iou`/`f1` i ograniczenia `exclusive`/`fallback`.
 Przy celach innych niż threshold odpowiedź nie wymaga `threshold`; zwraca
 `objective`, `expected_score` i diagnostykę ograniczeń. Tool zwraca decyzję,
 ranking albo zbiór narzędzi i odroczenie; SDK nie wykonuje narzędzi.
+Pominięte `extra` zostawia domyślne opcje serwera: `answer_directly`, `ask_user`
+i `none` dla jednego narzędzia, brak w trybie multi. Pusta lista je wyłącza.
 
 Opcje żądania obejmują `lang`, `media` i `detail`. Pomocniki kodują bajty do
 base64; nie czytają plików ani nie pobierają URL. Obraz i audio wymagają serwera
@@ -238,7 +240,8 @@ pól nazwanych w strukturze. Przykład do kompilacji:
 
 Fabryki mają wspólny schemat: instrukcja, wymagane kryteria/poziomy/koszty oraz opcje
 konkretnego typu. Odpowiadają im klasy/typy ChoiceQuestion, NoulQuestion, ScoreQuestion,
-MultiQuestion, ActQuestion. Choice/score wymaga 2–10 opcji; multi co najmniej jednej.
+MultiQuestion, ActQuestion, ToolQuestion. Choice/score wymaga 2–255 opcji (limity starszych
+modeli sprawdza serwer); multi co najmniej jednej.
 Opcje multi nie zawierają evidence. Act przyjmuje pełną macierz kosztów z wierszem
 na każdą akcję i kosztem dla każdego outcome; bez criteria używa true/false.
 TypeScript wyprowadza klucze outcomes z criteria (domyślnie true/false), wymaga
@@ -293,8 +296,9 @@ aktualizuj kontrakt i DTO we wszystkich czterech SDK.
 - `model` jest opcjonalny. W basal-rs wybiera model po dokładnej nazwie z `/v1/models`;
   bez niego działa `default_model`. Oryginalny serwer upstream ignoruje to pole.
 - SDK wysyła stan jako JSON; renderowanie stanu, kalibracja i decyzje należą do serwera.
-- Typy pytań: `choice`, `noul`, `score`, `multi`, `act`; obsługiwane są `facts` i `evidence`.
-  Natywne choice/score ma limit 2–10 opcji. Multi nie obsługuje evidence.
+- Typy pytań: `choice`, `noul`, `score`, `multi`, `act`, `tool`; obsługiwane są `facts` i `evidence`.
+  Natywne choice/score przyjmuje 2–255 opcji w formacie 2; limity starszych modeli sprawdza
+  serwer. Multi nie obsługuje evidence.
 - SDK zachowuje natywne prawdopodobieństwa i confidence. Dla choice/noul/score/act
   `confidence = max(p)`. Multi ma niezależne P(tak) i `set_confidence`.
 - Kolejność kryteriów wpływa na obliczenia. Nie sortuj kluczy. W JS numeryczne klucze

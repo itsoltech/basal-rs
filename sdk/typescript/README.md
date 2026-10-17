@@ -57,8 +57,8 @@ in `cause`. `BasalHTTPError.body` remains directly accessible but is non-enumera
 inspection and JSON.stringify do not log it. There are no automatic retries or redirects. Types describe the native contract; successful
 responses are checked to be JSON objects without full schema validation. Unknown JSON fields are preserved.
 
-Supports `choice`, `noul`, `score`, `multi`, `act` and `tool`, with model-dependent `facts` and `evidence` capabilities. Native choice/score accepts 2–10
-options. Criterion insertion order matters; JavaScript enumerates integer-like object keys numerically,
+Supports `choice`, `noul`, `score`, `multi`, `act` and `tool`, with model-dependent `facts` and `evidence` capabilities. Native choice/score accepts 2–255
+options for format-2 models (older model limits are checked by the server). Criterion insertion order matters; JavaScript enumerates integer-like object keys numerically,
 so use textual keys (e.g. `low`, `high`) or an ordered score array. Evidence offsets count Unicode code
 points; use the returned text, or `Array.from(state).slice(start, end).join("")` for textual states.
 

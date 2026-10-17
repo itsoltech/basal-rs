@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.3.0 — 2026-10-17
 
 - Align typed APIs with Basal 2.0 and Omni: up to 255 choice/score/act outcomes,
@@ -9,8 +11,6 @@
 - Multi result threshold is now optional; use objective and expected score for
   exact/IoU/F1 results. Older model capabilities remain server-validated.
 - Registry publication is separate from this source update.
-
-## Unreleased
 
 ## 0.2.0 — 2026-10-16
 
