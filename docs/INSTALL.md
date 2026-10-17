@@ -10,7 +10,7 @@ hoście: obraz Docker ([README](../README.md#uruchomienie-w-dockerze)).
 ```sh
 brew install itsoltech/tap/basal-rs
 basal doctor                    # sprawdzenie maszyny
-basal serve                     # http://127.0.0.1:8000, basal-1.5-4.5B pobierany przy pierwszym starcie
+basal serve                     # http://127.0.0.1:8000, basal-2.0-4.5B pobierany przy pierwszym starcie
 basal serve --model mini        # inny model (patrz Modele)
 brew services start basal-rs    # albo jako usługa w tle (log: $(brew --prefix)/var/log/basal.log)
 ```
@@ -91,7 +91,10 @@ sprawdza modele. Metal i Intel przyjmują tylko 0.
 
 Bez `--model` model wskazuje plik konfiguracji, szukany w tej kolejności:
 `--config PLIK`, `BASAL_CONFIG`, `basal-serve.yml` w bieżącym katalogu. Bez
-pliku `basal serve` serwuje basal-1.5-4.5B. `basal init [--model ...]`
+pliku `basal serve` serwuje basal-2.0-4.5B. Dotyczy to także istniejących usług uruchamianych bez konfiguracji i `--model`.
+Pierwszy start może pobrać około 9.1 GB nowych wag. Aby zachować basal-1.5, użyj
+`basal serve --model 4.5B` lub utwórz konfigurację przez `basal init --model 4.5B`.
+Jawna konfiguracja zachowuje swój wybór. `basal init [--model ...]`
 zapisuje `basal-serve.yml` w bieżącym katalogu; pełny opis opcji:
 [serve.example.yml](../serve.example.yml). Obraz Docker domyślnie czyta
 `/config/serve.yml`, a argumenty po nazwie obrazu (np. `--model mini`)
@@ -167,6 +170,10 @@ i tabelami GEMM), potem `docker image rm ghcr.io/itsoltech/basal-rs:<tag>`.
    `itsoltech/homebrew-tap` (sekret `HOMEBREW_TAP_TOKEN`). Bez udanego builda
    obu paczek nic nie jest publikowane. Obraz wydania można opublikować
    ponownie: workflow `docker`, `workflow_dispatch` z tagiem.
+   Publikacja GitHub Release z tagiem `v*` również uruchamia ten proces.
+   Wydania SDK `sdk-*-v*` pomijają wszystkie joby tego workflow przed
+   przydzieleniem runnerów; samo zdarzenie `release` nadal pojawia się w Actions.
+   Niezależne wydania SDK opisuje [SDK.md](SDK.md).
 3. Bez publikacji: `workflow_dispatch` workflow `release` buduje paczki jako
    artefakty; lokalnie `tools/release/package-macos.sh`,
    `tools/release/package-linux.sh`, a `install.sh` i `basal update`

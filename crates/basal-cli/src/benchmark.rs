@@ -58,6 +58,9 @@ pub(crate) struct Options {
     /// Server waiting + running request limit; excess requests receive 529
     #[arg(long, default_value_t = 1024)]
     max_inflight: usize,
+    /// Server limit for large/chunked bodies and expanded inputs above 128 KiB
+    #[arg(long, default_value_t = crate::serve::DEFAULT_MAX_LARGE_INFLIGHT)]
+    max_large_inflight: usize,
     /// Server queue admission order
     #[arg(long, value_enum, default_value_t = Schedule::Hrrn)]
     schedule: Schedule,
@@ -83,10 +86,8 @@ impl Options {
         );
         ensure!(self.warmup <= 10, "--warmup must be between 0 and 10 per class");
         ensure!((1..=3_600_000).contains(&self.timeout_ms), "--timeout-ms must be between 1 and 3600000");
-        ensure!(
-            self.max_batch_tokens > 0 && self.max_inflight > 0 && self.long_slice_ms > 0,
-            "server budgets / long-slice-ms must be positive"
-        );
+        ensure!(self.max_batch_tokens > 0 && self.long_slice_ms > 0, "server budgets / long-slice-ms must be positive");
+        crate::serve::check_admission_limits(self.max_inflight, self.max_large_inflight)?;
         for (name, value) in [("ram-reserve-gib", self.ram_reserve_gib), ("gpu-reserve-gib", self.gpu_reserve_gib)] {
             ensure!(
                 value.is_finite() && (0.1..=1048576.0).contains(&value),
@@ -126,6 +127,7 @@ impl Server {
             addr,
             release_date: "2026-10-05".into(),
             max_inflight: options.max_inflight,
+            max_large_inflight: options.max_large_inflight,
             default_model: None,
             long_slice_ms: options.long_slice_ms,
             access_log: false,
@@ -298,7 +300,9 @@ fn execute(
         .as_ref()
         .map(|split| {
             let files = model_files(model, report)?;
-            crate::config::check_split_coverage(&files.2.name, split, files.2.config.num_layers)?;
+            // layer split exists for Llama only: an Omni (Gemma) model is refused before the preflight
+            crate::config::check_architecture(&files.2, quantization, true)?;
+            crate::config::check_split_coverage(&files.2.name, split, files.2.config.llama()?.num_layers)?;
             anyhow::Ok(files)
         })
         .transpose()?;
@@ -337,13 +341,19 @@ fn execute(
         Some(files) => files,
         None => model_files(model, report)?,
     };
+    // quantization exists for Llama only: an Omni (Gemma) model is refused before the preflight
+    crate::config::check_architecture(&manifest, quantization, g.layer_split.is_some())?;
     // none: the checkpoint size, as before; q8_0 / q4_k: the same with the projections at the format's block size;
     // Intel (always none): the resident weight buffers from the validated checkpoint header
     #[cfg(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos")))]
     let (weight_bytes, method) = (GpuBackend::estimated_weight_bytes(&dir, &manifest.config)?,
         "Intel: resident FP16 weight buffers estimated from the validated checkpoint header (embedding and lm_head rows are read on demand and excluded), not a measurement");
     #[cfg(not(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos"))))]
-    let (weight_bytes, method) = (basal_gpu::estimated_weight_bytes(&manifest.config, checkpoint_bytes, quantization)?,
+    let (weight_bytes, method) = (match &manifest.config {
+            basal_core::architecture::Architecture::Llama(c) => basal_gpu::estimated_weight_bytes(c, checkpoint_bytes, quantization)?,
+            // dense weights only (checked above)
+            basal_core::architecture::Architecture::Gemma4(_) => checkpoint_bytes,
+        },
         "estimate from format arithmetic (checkpoint size; q8_0 / q4_k: projection matrices at Q8_0 / Q4_K block size with padding), not a measurement");
     report["model"]["estimated_weight_bytes"] =
         json!({"bytes": weight_bytes, "quantization": quantization.as_str(), "method": method});
@@ -363,7 +373,7 @@ fn execute(
             let mut checks = Vec::with_capacity(stages.len());
             for (i, stage) in stages.iter().enumerate() {
                 let bytes = basal_gpu::estimated_stage_weight_bytes(
-                    &manifest.config,
+                    manifest.config.llama()?,
                     checkpoint_bytes,
                     quantization,
                     stage.layers,
@@ -399,7 +409,7 @@ fn execute(
         crate::config::gemm_table(&config, &manifest, &crate::config::default_gemm_cache(), devices[0])?;
     if let Some(split) = &g.layer_split {
         crate::config::check_table_on_devices(
-            &manifest.name,
+            &manifest,
             gpu_settings.gemm_table.as_deref(),
             &crate::config::Placement::Split(split.clone()),
         )?;
@@ -425,18 +435,19 @@ fn execute(
         crate::config::check_gemm_coverage(&engine.manifest.name, &engine.backend.gemm_table_missing(), table)?;
     }
     report["model"]["name"] = json!(engine.manifest.name);
-    report["model"]["load_s"] = json!(engine.backend.load_s);
+    report["model"]["load_s"] = json!(engine.backend.load_s());
     report["backend"] = engine.backend.describe();
     // File name only: an automatic table lives in the user's cache directory, whose path identifies the machine.
     let gemm_table = gpu_settings.gemm_table.as_deref().and_then(Path::file_name).map(|n| n.to_string_lossy());
-    report["settings"] = json!({"dtype": g.dtype, "quantization": quantization.as_str(), "kernels": g.kernels, "readout": g.readout, "prefix_cache": !g.no_prefix_cache,
+    report["settings"] = json!({"dtype": g.dtype, "inference_mode": g.inference_mode, "quantization": quantization.as_str(), "kernels": g.kernels, "readout": g.readout, "prefix_cache": !g.no_prefix_cache,
         "state_cache_mb": g.state_cache_mb, "gemm_table": gemm_table, "tree_max_tokens": g.tree_max_tokens,
-        "max_batch_tokens": options.max_batch_tokens, "max_inflight": options.max_inflight, "schedule": format!("{:?}", options.schedule),
+        "max_batch_tokens": options.max_batch_tokens, "max_inflight": options.max_inflight,
+        "max_large_inflight": options.max_large_inflight, "schedule": format!("{:?}", options.schedule),
         "long_tokens": options.long_tokens, "long_slice_ms": options.long_slice_ms});
     if let Some(split) = &g.layer_split {
         report["settings"]["layer_split"] = json!(split.stages());
     }
-    let probes = crate::split_backend::memory_probes(&engine.backend);
+    let probes = engine.backend.memory_probes();
     let host = host_memory()?;
     let gpu = engine.backend.memory()?;
     report["memory_after_load"] = json!({"host": host, "gpu": gpu});
@@ -456,7 +467,7 @@ fn execute(
         pool.reset("reset before the workloads");
     }
     // layer split: transfers of the workloads (warm-up requests included), from here through the shutdown
-    let transfers = crate::split_backend::transfers(&engine.backend);
+    let transfers = engine.backend.stage_transfers();
     if let Some(t) = &transfers {
         t.reset();
     }

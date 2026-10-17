@@ -41,6 +41,8 @@ i sterownika wymaga własnych eksportów, porównań z upstream FP32 oraz pomiar
 wyniki należy zapisać w nowym raporcie. CI sprawdza kompilację i lint,
 ale nie uruchamia modeli na GPU.
 
+Nowa [kampania basal-2.0 z 2026-10-14](../reports/upstream-2.0-final-2026-10-14/README.md): mini i 4.5B zachowały po 49/49 wyborów benchmarku oraz po 41/41 odpowiedzi i klasyfikacji pomocniczych względem FP32, a także po 20/20 decyzji act. Kontekst 1024 zakończył się zgodnym wyborem; 8192 przekroczyło 240 s. Max odmówił benchmarku przed ładowaniem z powodu dostępnej RAM; jego jakość pozostaje niepotwierdzona. Omni wymaga CUDA.
+
 ## Uruchomienie
 
 Potrzebny jest loader Vulkan, sterownik Intel z `shaderFloat16` i subgroupami

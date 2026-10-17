@@ -13,8 +13,8 @@ use serde_json::{json, Value};
 use crate::decision::{self, answer, calibrate, canonical_average, softmax};
 use crate::manifest::ModelManifest;
 use crate::pack::{chunks, pack, pack_tree, Packed, TrieSize};
-use crate::prompt::render;
-use crate::request::{check_capability, parse_request, DecideError, Item};
+use crate::prompt::{render_model, ChatStyle, OptionOrders, PromptFormat};
+use crate::request::{check_capability_with_limit, DecideError, Item};
 use crate::tokenize::BasalTokenizer;
 
 /// A forward implementation: packed rows in, letter logits (float32, before softmax) of every readout out.
@@ -61,6 +61,21 @@ pub trait Backend {
     fn device_health(&self) -> Option<DeviceHealth> {
         None
     }
+    fn media_kinds(&self) -> Vec<crate::media::Kind> {
+        Vec::new()
+    }
+    /// Decode/prepare on the model worker, outside the Tokio executor; no GPU state mutation.
+    fn prepare_media(&self, _entries: &Value, _detail: &str) -> Result<Arc<crate::media::ProcessedMedia>> {
+        bail!("this backend does not take media")
+    }
+    /// Request-scoped encoder outputs, retained only until end_media. Forks must own independent slots.
+    fn begin_media(&mut self, _media: &crate::media::ProcessedMedia) -> Result<()> {
+        bail!("this backend does not take media")
+    }
+    fn media_logits(&mut self, _prompts: &[&[u32]], _codes: &[&[u32]]) -> Result<Vec<Vec<f32>>> {
+        bail!("this backend does not take media")
+    }
+    fn end_media(&mut self) {}
 }
 
 /// Readiness flag shared by a backend and its observers. Once marked lost, the device cannot run requests until
@@ -146,7 +161,7 @@ pub struct Engine<B: Backend> {
 
 impl<B: Backend> Engine<B> {
     pub fn new(manifest: ModelManifest, backend: B) -> Result<Self> {
-        let tok = BasalTokenizer::load(&manifest.dir.join("tokenizer.json"))?;
+        let tok = BasalTokenizer::load_for(&manifest.dir.join("tokenizer.json"), manifest.chat_style)?;
         if tok.token_id(&manifest.bos_token).is_none() {
             bail!("bos token {} is not in the vocabulary", manifest.bos_token);
         }
@@ -182,8 +197,24 @@ impl<B: Backend> Engine<B> {
     pub fn warm_static_prefixes(&mut self) -> Result<Vec<usize>> {
         let mut lens = Vec::new();
         for lang in [crate::prompt::Lang::Pl, crate::prompt::Lang::En] {
-            let a = self.tok.encode(&render(&self.manifest.bos_token, "a", "q", &["x", "y"], lang))?;
-            let b = self.tok.encode(&render(&self.manifest.bos_token, "b", "q", &["x", "y"], lang))?;
+            let a = self.tok.encode(&render_model(
+                self.manifest.chat_style,
+                self.manifest.prompt_format,
+                &self.manifest.bos_token,
+                "a",
+                "q",
+                &["x", "y"],
+                lang,
+            )?)?;
+            let b = self.tok.encode(&render_model(
+                self.manifest.chat_style,
+                self.manifest.prompt_format,
+                &self.manifest.bos_token,
+                "b",
+                "q",
+                &["x", "y"],
+                lang,
+            )?)?;
             let n = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
             self.backend.add_prefix(&a[..n])?;
             lens.push(n);
@@ -192,13 +223,30 @@ impl<B: Backend> Engine<B> {
     }
 
     pub fn prepare(&self, item: Item) -> Result<Prepared> {
-        self.prepare_orders(item, 2)
+        let orders = self.manifest.orders.count(item.options.len());
+        self.prepare_orders(item, orders)
     }
 
     /// [`Engine::prepare`] with the first `orders` option orders only (1: as written; a screening group of a large
     /// choice).
     pub fn prepare_orders(&self, item: Item, orders: usize) -> Result<Prepared> {
-        let mut p = prepare(&self.tok, &self.manifest.bos_token, item)?;
+        self.prepare_orders_for(item, orders, None)
+    }
+
+    fn prepare_orders_for(
+        &self,
+        item: Item,
+        orders: usize,
+        media: Option<&crate::media::ProcessedMedia>,
+    ) -> Result<Prepared> {
+        let mut p = prepare_protocol(
+            &self.tok,
+            &self.manifest.bos_token,
+            item,
+            self.manifest.prompt_format,
+            self.manifest.chat_style,
+            media,
+        )?;
         if orders < p.orders.len() {
             p.orders.truncate(orders);
             p.packed = pack(&p.orders.iter().map(|o| o.input_ids.clone()).collect::<Vec<_>>());
@@ -214,7 +262,32 @@ impl<B: Backend> Engine<B> {
     /// prompts that keep the state and change the question.
     fn state_len(&self, p: &Prepared) -> Result<usize> {
         let it = &p.item;
-        let probe = |q: &str| self.tok.encode(&render(&self.manifest.bos_token, &it.state, q, &["x", "y"], it.lang));
+        if self.manifest.prompt_format == PromptFormat::Two {
+            if it.state.is_empty() {
+                return Ok(0);
+            }
+            let label = match it.lang {
+                crate::prompt::Lang::Pl => "Stan:\n",
+                crate::prompt::Lang::En => "State:\n",
+            };
+            let needle = format!("{label}{}", it.state);
+            let prompt = &p.orders[0].prompt;
+            let start = prompt.find(&needle).ok_or_else(|| anyhow::anyhow!("state not found in rendered prompt"))?;
+            let prefix = self.tok.encode(&prompt[..start + needle.len()])?;
+            return Ok(prefix.iter().zip(&p.orders[0].input_ids).take_while(|(a, b)| a == b).count());
+        }
+
+        let probe = |q: &str| {
+            self.tok.encode(&render_model(
+                self.manifest.chat_style,
+                self.manifest.prompt_format,
+                &self.manifest.bos_token,
+                &it.state,
+                q,
+                &["x", "y"],
+                it.lang,
+            )?)
+        };
         let (a, b) = (probe("A")?, probe("B")?);
         let ids = &p.orders[0].input_ids;
         Ok(a.iter().zip(&b).zip(ids).take_while(|((x, y), z)| x == y && x == z).count())
@@ -296,22 +369,41 @@ impl<B: Backend> Engine<B> {
     }
 
     fn finish(&self, p: &Prepared, letter_logits: Vec<Vec<f32>>) -> ItemResult {
-        let probs: Vec<Vec<f64>> =
-            letter_logits.iter().map(|l| softmax(&l.iter().map(|v| *v as f64).collect::<Vec<_>>())).collect();
         let perms: Vec<Vec<usize>> = p.orders.iter().map(|o| o.perm.clone()).collect();
-        let p_avg = canonical_average(&perms, &probs);
-        let temperature = if p.item.uncalibrated { 1.0 } else { self.manifest.temperature(p.item.temp_kind()) };
-        let p_cal = calibrate(&p_avg, temperature);
+        let temperature = if p.item.uncalibrated {
+            1.0
+        } else {
+            self.manifest.temperature_for(p.item.temp_kind(), p.item.options.len())
+        };
+        let (probs, p_avg, p_cal) = if self.manifest.prompt_format == PromptFormat::Two {
+            let probs: Vec<Vec<f64>> = letter_logits.iter().map(|l| decision::softmax32(l)).collect();
+            let p_avg = decision::canonical_average32(&perms, &probs);
+            let p_cal = decision::calibrate32(&p_avg, temperature);
+            (probs, p_avg, p_cal)
+        } else {
+            let probs: Vec<Vec<f64>> =
+                letter_logits.iter().map(|l| softmax(&l.iter().map(|v| *v as f64).collect::<Vec<_>>())).collect();
+            let p_avg = canonical_average(&perms, &probs);
+            let p_cal = calibrate(&p_avg, temperature);
+            (probs, p_avg, p_cal)
+        };
         ItemResult { letter_logits, probs, p_avg, temperature, p_cal }
     }
 
     /// Parse, validate and prepare a System One request without running the model.
     pub fn prepare_request(&self, body: &Value) -> Result<Vec<Prepared>, DecideError> {
-        let req = parse_request(body)?;
+        if self.manifest.prompt_format == PromptFormat::Two || body.get("media").is_some_and(|v| !v.is_null()) {
+            return self.plan_request(body).map(|p| p.prepared);
+        }
+        let req = crate::request::parse_request_for_format(
+            body,
+            crate::request::Dialect::TypeSafe,
+            self.manifest.prompt_format,
+        )?;
         if req.model != self.manifest.name {
             return Err(crate::request::api_usage_error(format!("Unknown model: {}", req.model)));
         }
-        check_capability(&req.items, false, false)?;
+        check_capability_with_limit(&req.items, self.manifest.prompt_format.max_options(), false, false)?;
         Ok(req.items.into_iter().map(|it| self.prepare(it)).collect::<Result<Vec<_>>>()?)
     }
 
@@ -323,12 +415,53 @@ impl<B: Backend> Engine<B> {
 
     /// [`Engine::plan_request`] for an endpoint dialect (upstream: no model check, 2..10 options only).
     pub fn plan_request_as(&self, body: &Value, dialect: crate::request::Dialect) -> Result<RequestPlan, DecideError> {
-        let req = crate::request::parse_request_as(body, dialect)?;
+        for field in ["early_exit", "thinking"] {
+            if body.get(field).is_some_and(|v| !v.is_null()) {
+                return Err(DecideError::Unsupported(vec![crate::request::FieldError::new(
+                    vec!["body".into(), field.into()],
+                    format!("{field} is not available in this runtime"),
+                    "unsupported_feature",
+                )]));
+            }
+        }
+        let media = if let Some(entries) = body.get("media").filter(|v| !v.is_null()) {
+            if self.backend.media_kinds().is_empty() {
+                return Err(DecideError::Unsupported(vec![crate::request::FieldError::new(
+                    vec!["body".into(), "media".into()],
+                    "this model/backend does not take media; enable media on an omni CUDA model",
+                    "unsupported_feature",
+                )]));
+            }
+            let detail = body.get("detail").map_or(Some("default"), Value::as_str).ok_or_else(|| {
+                DecideError::Validation(vec![crate::request::FieldError::new(
+                    vec!["body".into(), "detail".into()],
+                    "detail must be default or high",
+                    "value_error",
+                )])
+            })?;
+            Some(self.backend.prepare_media(entries, detail).map_err(|e| {
+                DecideError::Validation(vec![crate::request::FieldError::new(
+                    vec!["body".into(), "media".into()],
+                    format!("{e:#}"),
+                    "value_error",
+                )])
+            })?)
+        } else {
+            None
+        };
+        let req = crate::request::parse_request_for_format(body, dialect, self.manifest.prompt_format)?;
         if dialect == crate::request::Dialect::TypeSafe && req.model != self.manifest.name {
             return Err(crate::request::api_usage_error(format!("Unknown model: {}", req.model)));
         }
-        check_capability(&req.items, self.large_choice, true)?;
+        check_capability_with_limit(&req.items, self.manifest.prompt_format.max_options(), self.large_choice, true)?;
         let ev: Vec<&Item> = req.items.iter().filter(|it| it.evidence).collect();
+        if media.is_some() && !ev.is_empty() {
+            return Err(DecideError::Unsupported(vec![crate::request::FieldError::new(
+                vec!["body".into(), "evidence".into()],
+                "evidence is not available with media",
+                "unsupported_feature",
+            )]));
+        }
         if !ev.is_empty() {
             let mut errs = Vec::new();
             for it in ev {
@@ -351,7 +484,34 @@ impl<B: Backend> Engine<B> {
                 return Err(DecideError::Unsupported(errs));
             }
         }
-        let mut plan = self.plan_items(req.items)?;
+        let mut plan = self.plan_items_with_media(req.items, media)?;
+        if let (Some(media), crate::architecture::Architecture::Gemma4(cfg)) = (&plan.media, &self.manifest.config) {
+            let image_tokens: usize = media
+                .items
+                .iter()
+                .filter(|x| x.kind() == crate::media::Kind::Image)
+                .map(crate::media::Input::soft_tokens)
+                .sum();
+            let audio_tokens: usize = media
+                .items
+                .iter()
+                .filter(|x| x.kind() == crate::media::Kind::Audio)
+                .map(crate::media::Input::soft_tokens)
+                .sum();
+            for p in &plan.prepared {
+                for order in &p.orders {
+                    if order.input_ids.iter().filter(|id| **id == cfg.image_token).count() != image_tokens
+                        || order.input_ids.iter().filter(|id| **id == cfg.audio_token).count() != audio_tokens
+                    {
+                        return Err(DecideError::Validation(vec![crate::request::FieldError::new(
+                            vec!["body".into(), "questions".into(), p.item.name.clone().into()],
+                            "extra media placeholders in state, question or options",
+                            "value_error",
+                        )]));
+                    }
+                }
+            }
+        }
         self.check_context(&plan)?;
         plan.evidence_limit = req.facts_limit;
         plan.dialect = dialect;
@@ -361,10 +521,22 @@ impl<B: Backend> Engine<B> {
     /// Prompts longer than the model's position limit are refused before the forward (422, "maximum context length",
     /// the marker benchmark runners read as a capacity limit), not left to fail inside the backend (500).
     fn check_context(&self, plan: &RequestPlan) -> Result<(), DecideError> {
-        let limit = self.manifest.config.max_positions;
+        let limit = self.manifest.config.max_positions();
         let mut errs = Vec::new();
         for p in &plan.prepared {
-            let longest = p.orders.iter().map(|o| o.input_ids.len()).max().unwrap_or(0);
+            let possible = if self.manifest.orders == OptionOrders::Auto {
+                Some(prepare_protocol(
+                    &self.tok,
+                    &self.manifest.bos_token,
+                    p.item.clone(),
+                    self.manifest.prompt_format,
+                    self.manifest.chat_style,
+                    plan.media.as_deref(),
+                )?)
+            } else {
+                None
+            };
+            let longest = possible.as_ref().unwrap_or(p).orders.iter().map(|o| o.input_ids.len()).max().unwrap_or(0);
             if longest > limit {
                 let name = p.item.name.split('#').next().unwrap_or(&p.item.name).to_string();
                 if errs.iter().any(|e: &crate::request::FieldError| e.loc.get(2) == Some(&Value::from(name.clone()))) {
@@ -390,20 +562,53 @@ impl<B: Backend> Engine<B> {
 
     /// Plan validated items (see [`Engine::plan_request`]).
     pub fn plan_items(&self, items: Vec<Item>) -> Result<RequestPlan> {
+        self.plan_items_with_media(items, None)
+    }
+
+    fn plan_items_with_media(
+        &self,
+        items: Vec<Item>,
+        media: Option<Arc<crate::media::ProcessedMedia>>,
+    ) -> Result<RequestPlan> {
         let mut plan = RequestPlan {
             prepared: Vec::new(),
             questions: Vec::new(),
             evidence_limit: None,
             dialect: Default::default(),
+            calibration_unvalidated: self.manifest.calibration_unvalidated.is_some(),
+            media,
         };
         for mut it in items {
+            it.prompt_format = self.manifest.prompt_format;
             if let crate::request::Ext::Act(a) = &mut it.ext {
-                a.calibrated = !self.manifest.temperatures.is_empty();
-                a.threshold = a.max_error.as_ref().and_then(|k| {
-                    self.manifest.thresholds.get(k).and_then(|t| t.get("confidence")).and_then(Value::as_f64)
-                });
+                a.calibrated = self.manifest.has_calibration() && self.manifest.calibration_unvalidated.is_none();
+                a.threshold = a.max_error.as_ref().and_then(|k| self.manifest.certified(k, a.base));
             }
-            if let crate::request::Ext::Multi(m) = &it.ext {
+            if let crate::request::Ext::Tool(t) = &mut it.ext {
+                t.threshold =
+                    t.max_error.as_deref().and_then(|k| self.manifest.certified(k, crate::request::QType::Choice));
+            }
+            let keys = it.keys.clone();
+            if let Some(m) = it.multi_spec_mut() {
+                if let Some(fallback) = m.rules.fallback.filter(|_| m.rules.fallback_threshold.is_none()) {
+                    let id = crate::sets::label_set_id(&keys, &m.labels, &keys[fallback])?;
+                    if let Some(threshold) = self
+                        .manifest
+                        .multi_calibration
+                        .get(&id)
+                        .and_then(|v| v.get("fallback_threshold"))
+                        .and_then(Value::as_f64)
+                    {
+                        anyhow::ensure!(
+                            threshold.is_finite() && (0.0..=1.0).contains(&threshold),
+                            "calibration: invalid fallback threshold"
+                        );
+                        m.rules.fallback_threshold = Some(threshold);
+                        m.rules.fallback_threshold_source = Some("calibration");
+                    }
+                }
+            }
+            if let Some(m) = it.multi_spec() {
                 // one yes/no branch per label, each an ordinary noul readout
                 let mut parts = Vec::with_capacity(m.labels.len());
                 for (k, label) in m.labels.iter().enumerate() {
@@ -414,7 +619,8 @@ impl<B: Backend> Engine<B> {
                     sub.question = crate::request::multi_question(it.lang, &it.question, label);
                     sub.ext = crate::request::Ext::None;
                     parts.push(plan.prepared.len());
-                    plan.prepared.push(self.prepare(sub)?);
+                    let orders = self.manifest.orders.count(sub.options.len());
+                    plan.prepared.push(self.prepare_orders_for(sub, orders, plan.media.as_deref())?);
                 }
                 plan.questions.push(QuestionPlan::Multi { item: it, parts });
                 continue;
@@ -422,9 +628,10 @@ impl<B: Backend> Engine<B> {
             if it.options.len() == 1 {
                 // one option or level (choice, score): probability 1 without the model, as the TypeSafe API answers
                 plan.questions.push(QuestionPlan::Fixed(it));
-            } else if it.options.len() <= crate::prompt::MAX_OPTIONS {
+            } else if it.options.len() <= self.manifest.prompt_format.max_options() {
                 plan.questions.push(QuestionPlan::Direct(plan.prepared.len()));
-                plan.prepared.push(self.prepare(it)?);
+                let orders = self.manifest.orders.count(it.options.len());
+                plan.prepared.push(self.prepare_orders_for(it, orders, plan.media.as_deref())?);
             } else {
                 let groups = crate::large_choice::groups(it.options.len(), self.large_choice_strategy.partitions);
                 let mut parts = Vec::with_capacity(groups.len());
@@ -446,7 +653,9 @@ impl<B: Backend> Engine<B> {
     /// Evidence spans of one question (upstream `Evidence.spans`): a separate forward of its prompt in the original
     /// option order; empty when no token lies inside the state.
     fn evidence_for(&mut self, item: &Item, limit: Option<usize>) -> Result<Value> {
-        let Some(inp) = crate::evidence::input(&self.tok, &self.manifest.bos_token, item)? else {
+        let Some(inp) =
+            crate::evidence::input_format(&self.tok, &self.manifest.bos_token, item, self.manifest.prompt_format)?
+        else {
             return Ok(Value::Array(vec![]));
         };
         let (ls, le) = self.backend.evidence_scores(&inp.ids, inp.t0, inp.t1)?;
@@ -457,16 +666,96 @@ impl<B: Backend> Engine<B> {
         Ok(self.run_plans(&[plan])?.remove(0))
     }
 
+    /// Diagnostic/export readouts for the already prepared orders. Media encodings are request-scoped;
+    /// adaptive orders are executed by `run_plan`, not added to this fixed-order export.
+    pub fn run_prepared(
+        &mut self,
+        prepared: &[Prepared],
+        media: Option<&crate::media::ProcessedMedia>,
+        batching: Batching,
+    ) -> Result<Vec<ItemResult>> {
+        let Some(media) = media else {
+            return self.run(prepared, batching);
+        };
+        self.backend.begin_media(media)?;
+        let result = (|| {
+            let prompts: Vec<_> =
+                prepared.iter().flat_map(|p| p.orders.iter().map(|o| o.input_ids.as_slice())).collect();
+            let codes: Vec<_> =
+                prepared.iter().flat_map(|p| p.orders.iter().map(|o| o.letter_ids.as_slice())).collect();
+            let logits = self.backend.media_logits(&prompts, &codes)?;
+            anyhow::ensure!(logits.len() == prompts.len(), "media readout count mismatch");
+            let mut logits = logits.into_iter();
+            Ok(prepared.iter().map(|p| self.finish(p, logits.by_ref().take(p.orders.len()).collect())).collect())
+        })();
+        self.backend.end_media();
+        result
+    }
+
     /// Run the plans of several requests together: the questions of all plans share the forwards of each round
     /// (first round, then the final round of grouped large choices), as a server batches waiting requests.
     pub fn run_plans(&mut self, plans: &[&RequestPlan]) -> Result<Vec<PlanOutput>> {
+        if plans.iter().any(|p| p.media.is_some()) {
+            let mut results = Vec::with_capacity(plans.len());
+            for plan in plans {
+                results.push(if plan.media.is_some() {
+                    self.run_media_plan(plan)?
+                } else {
+                    self.run_plans(&[plan])?.remove(0)
+                });
+            }
+            return Ok(results);
+        }
         let mut offs = Vec::with_capacity(plans.len());
         let mut all = Vec::new();
         for p in plans {
             offs.push(all.len());
             all.extend(p.prepared.iter().cloned());
         }
-        let results = self.run(&all, self.request_batching)?;
+        let mut results = self.run(&all, self.request_batching)?;
+        let mut second_tokens = vec![0usize; all.len()];
+        if self.manifest.orders == OptionOrders::Auto {
+            let mut reverse = Vec::new();
+            let mut owners = Vec::new();
+            for (i, p) in all.iter().enumerate() {
+                if p.orders.len() != 1 {
+                    continue;
+                }
+                let probabilities = &results[i].p_cal;
+                let uncertain = if p.item.temp_kind() == crate::request::QType::Noul {
+                    (0.2..=0.8).contains(&probabilities[0])
+                } else {
+                    probabilities.iter().copied().fold(f64::NEG_INFINITY, f64::max) < 0.6
+                };
+                if uncertain {
+                    let mut redo = prepare_protocol(
+                        &self.tok,
+                        &self.manifest.bos_token,
+                        p.item.clone(),
+                        self.manifest.prompt_format,
+                        self.manifest.chat_style,
+                        None,
+                    )?;
+                    redo.orders.remove(0);
+                    redo.packed = pack(&redo.orders.iter().map(|o| o.input_ids.clone()).collect::<Vec<_>>());
+                    if self.mark_state {
+                        redo.state_len = self.state_len(&redo)?;
+                        redo.packed.state_len = redo.state_len.min(redo.packed.prefix_len);
+                    }
+                    owners.push(i);
+                    reverse.push(redo);
+                }
+            }
+            let rerun = self.run(&reverse, self.request_batching)?;
+            for ((i, p2), r2) in owners.into_iter().zip(&reverse).zip(rerun) {
+                second_tokens[i] = p2.orders[0].input_ids.len();
+                let mut both = all[i].clone();
+                both.orders.extend(p2.orders.clone());
+                let mut logits = results[i].letter_logits.clone();
+                logits.extend(r2.letter_logits);
+                results[i] = self.finish(&both, logits);
+            }
+        }
         // grouped large choices: further rounds until each has asked its final group; the questions of all plans
         // share the forwards of a round
         let strategy = self.large_choice_strategy;
@@ -538,7 +827,10 @@ impl<B: Backend> Engine<B> {
         let mut outs = Vec::with_capacity(plans.len());
         for (plan, &off) in plans.iter().zip(&offs) {
             let mut finals = Vec::with_capacity(plan.questions.len());
-            let mut final_round_tokens = 0;
+            let end = off + plan.prepared.len();
+            let second_order_branches = (self.manifest.orders == OptionOrders::Auto)
+                .then(|| second_tokens[off..end].iter().filter(|n| **n > 0).count());
+            let mut final_round_tokens = second_tokens[off..end].iter().sum();
             let mut extra_prompts = 0;
             let mut finalists = Vec::with_capacity(plan.questions.len());
             let mut first_round = Vec::with_capacity(plan.questions.len());
@@ -581,9 +873,108 @@ impl<B: Backend> Engine<B> {
             for (item, _) in &finals {
                 evidence.push(if item.evidence { Some(self.evidence_for(item, plan.evidence_limit)?) } else { None });
             }
-            outs.push(PlanOutput { finals, final_round_tokens, extra_prompts, finalists, first_round, evidence });
+            let longest_prompt_tokens = plan
+                .prepared
+                .iter()
+                .flat_map(|p| &p.orders)
+                .map(|o| o.input_ids.len())
+                .chain(second_tokens[off..end].iter().copied())
+                .max()
+                .unwrap_or(0);
+            outs.push(PlanOutput {
+                longest_prompt_tokens,
+                finals,
+                final_round_tokens,
+                extra_prompts,
+                finalists,
+                first_round,
+                evidence,
+                second_order_branches,
+            });
         }
         Ok(outs)
+    }
+
+    fn run_media_plan(&mut self, plan: &RequestPlan) -> Result<PlanOutput> {
+        let media = plan.media.as_deref().ok_or_else(|| anyhow::anyhow!("missing media plan"))?;
+        self.backend.begin_media(media)?;
+        let result = (|| -> Result<PlanOutput> {
+            let prompts: Vec<&[u32]> =
+                plan.prepared.iter().flat_map(|p| p.orders.iter().map(|o| o.input_ids.as_slice())).collect();
+            let codes: Vec<&[u32]> =
+                plan.prepared.iter().flat_map(|p| p.orders.iter().map(|o| o.letter_ids.as_slice())).collect();
+            let logits = self.backend.media_logits(&prompts, &codes)?;
+            anyhow::ensure!(logits.len() == prompts.len(), "media backend readout count mismatch");
+            let mut logits = logits.into_iter();
+            let mut results: Vec<ItemResult> =
+                plan.prepared.iter().map(|p| self.finish(p, logits.by_ref().take(p.orders.len()).collect())).collect();
+            let mut longest_prompt_tokens = prompts.iter().map(|p| p.len()).max().unwrap_or(0);
+            let mut extra_tokens = 0;
+            let mut second = 0;
+            if self.manifest.orders == OptionOrders::Auto {
+                let mut redo = Vec::new();
+                let mut owners = Vec::new();
+                for (i, p) in plan.prepared.iter().enumerate() {
+                    let values = &results[i].p_cal;
+                    let uncertain = if p.item.temp_kind() == crate::request::QType::Noul {
+                        (0.2..=0.8).contains(&values[0])
+                    } else {
+                        values.iter().copied().fold(f64::NEG_INFINITY, f64::max) < 0.6
+                    };
+                    if uncertain {
+                        let mut reverse = prepare_protocol(
+                            &self.tok,
+                            &self.manifest.bos_token,
+                            p.item.clone(),
+                            self.manifest.prompt_format,
+                            self.manifest.chat_style,
+                            Some(media),
+                        )?;
+                        reverse.orders.remove(0);
+                        owners.push(i);
+                        redo.push(reverse);
+                    }
+                }
+                let prompts: Vec<&[u32]> = redo.iter().map(|p| p.orders[0].input_ids.as_slice()).collect();
+                let codes: Vec<&[u32]> = redo.iter().map(|p| p.orders[0].letter_ids.as_slice()).collect();
+                longest_prompt_tokens = longest_prompt_tokens.max(prompts.iter().map(|p| p.len()).max().unwrap_or(0));
+                let logits = self.backend.media_logits(&prompts, &codes)?;
+                anyhow::ensure!(logits.len() == redo.len(), "media backend reverse readout count mismatch");
+                for ((i, p2), logits) in owners.into_iter().zip(&redo).zip(logits) {
+                    extra_tokens += p2.orders[0].input_ids.len();
+                    second += 1;
+                    let mut both = plan.prepared[i].clone();
+                    both.orders.extend(p2.orders.clone());
+                    let mut all = results[i].letter_logits.clone();
+                    all.push(logits);
+                    results[i] = self.finish(&both, all);
+                }
+            }
+            let mut finals = Vec::with_capacity(plan.questions.len());
+            for question in &plan.questions {
+                match question {
+                    QuestionPlan::Direct(i) => finals.push((plan.prepared[*i].item.clone(), results[*i].p_cal.clone())),
+                    QuestionPlan::Multi { item, parts } => {
+                        finals.push((item.clone(), parts.iter().map(|&i| results[i].p_cal[0]).collect()))
+                    }
+                    QuestionPlan::Fixed(item) => finals.push((item.clone(), vec![1.0])),
+                    QuestionPlan::Groups { .. } => anyhow::bail!("grouped large choices are not supported with media"),
+                }
+            }
+            let n = finals.len();
+            Ok(PlanOutput {
+                longest_prompt_tokens,
+                finals,
+                final_round_tokens: extra_tokens,
+                extra_prompts: second,
+                finalists: vec![None; n],
+                first_round: vec![None; n],
+                evidence: vec![None; n],
+                second_order_branches: (self.manifest.orders == OptionOrders::Auto).then_some(second),
+            })
+        })();
+        self.backend.end_media();
+        result
     }
 
     /// Prompts of the final rounds are not known before the first round; `usage.input_tokens` counts the first round.
@@ -649,13 +1040,34 @@ impl Prepared {
 }
 
 pub fn prepare(tok: &BasalTokenizer, bos: &str, item: Item) -> Result<Prepared> {
+    prepare_format(tok, bos, item, PromptFormat::One)
+}
+
+pub fn prepare_format(tok: &BasalTokenizer, bos: &str, item: Item, fmt: PromptFormat) -> Result<Prepared> {
+    prepare_protocol(tok, bos, item, fmt, ChatStyle::Llama, None)
+}
+
+fn prepare_protocol(
+    tok: &BasalTokenizer,
+    bos: &str,
+    mut item: Item,
+    fmt: PromptFormat,
+    chat: ChatStyle,
+    media: Option<&crate::media::ProcessedMedia>,
+) -> Result<Prepared> {
+    item.prompt_format = fmt;
     let k = item.options.len();
     let mut orders = Vec::new();
     for perm in decision::orders(k) {
         let opts: Vec<&str> = perm.iter().map(|&j| item.options[j].as_str()).collect();
-        let prompt = render(bos, &item.state, &item.question, &opts, item.lang);
+        let prompt = match media {
+            Some(media) => {
+                crate::prompt::render_media(chat, fmt, bos, &item.state, &item.question, &opts, item.lang, media)?
+            }
+            None => render_model(chat, fmt, bos, &item.state, &item.question, &opts, item.lang)?,
+        };
         let input_ids = tok.encode(&prompt)?;
-        let Some(letter_ids) = tok.letter_ids(&prompt, &input_ids, k)? else {
+        let Some(letter_ids) = tok.code_ids(fmt, &prompt, &input_ids, k)? else {
             bail!("option letters are not single tokens for this tokenizer ({k} options)");
         };
         orders.push(OrderJob { perm, prompt, input_ids, letter_ids });
@@ -683,6 +1095,9 @@ struct Large {
 /// first of grouped large choices (counted in `usage.input_tokens`).
 pub struct PlanOutput {
     pub finals: Vec<(Item, Vec<f64>)>,
+    pub second_order_branches: Option<usize>,
+    /// Longest executed prompt, including an adaptive reversed order.
+    pub longest_prompt_tokens: usize,
     pub final_round_tokens: usize,
     /// Prompts of the rounds after the first (grouped large choices).
     pub extra_prompts: usize,
@@ -715,6 +1130,8 @@ pub struct RequestPlan {
     pub evidence_limit: Option<usize>,
     /// Answer conventions of the endpoint.
     pub dialect: crate::request::Dialect,
+    pub calibration_unvalidated: bool,
+    pub media: Option<Arc<crate::media::ProcessedMedia>>,
 }
 
 pub fn plan_response(model: &str, plan: &RequestPlan, out: &PlanOutput) -> Result<Value, DecideError> {
@@ -731,6 +1148,9 @@ pub fn plan_response(model: &str, plan: &RequestPlan, out: &PlanOutput) -> Resul
         if let (Some(ev), Some(obj)) = (ev, a.as_object_mut()) {
             obj.insert("evidence".into(), ev.clone());
         }
+        if plan.calibration_unvalidated {
+            a["calibration"] = "unvalidated".into();
+        }
         answers.insert(it.name.clone(), a);
     }
     let branches: usize = plan
@@ -744,8 +1164,22 @@ pub fn plan_response(model: &str, plan: &RequestPlan, out: &PlanOutput) -> Resul
         .sum();
     let input_tokens: usize =
         plan.prepared.iter().flat_map(|p| &p.orders).map(|o| o.input_ids.len()).sum::<usize>() + out.final_round_tokens;
-    Ok(json!({"model": model, "answers": answers, "usage": {"input_tokens": input_tokens, "output_tokens": 0,
-                                                             "questions": plan.questions.len(), "branches": branches}}))
+    let mut response = json!({"model": model, "answers": answers, "usage": {"input_tokens": input_tokens, "output_tokens": 0,
+                                                             "questions": plan.questions.len(), "branches": branches}});
+    if out.finals.first().is_some_and(|(it, _)| it.prompt_format == PromptFormat::Two) {
+        response["usage"]["longest_prompt_tokens"] = out.longest_prompt_tokens.into();
+    }
+    if let Some(n) = out.second_order_branches {
+        response["usage"]["second_order_branches"] = n.into();
+    }
+    if let Some(media) = &plan.media {
+        for answer in response["answers"].as_object_mut().into_iter().flat_map(|m| m.values_mut()) {
+            answer["calibration"] = if plan.calibration_unvalidated { "unvalidated" } else { "text" }.into();
+        }
+        let prompts = plan.prepared.iter().map(|p| p.orders.len()).sum::<usize>() + out.extra_prompts;
+        response["usage"]["media"] = json!({"images":media.image_count(),"audio":media.audio_count(),"media_tokens":media.items.iter().map(crate::media::Input::soft_tokens).sum::<usize>()*prompts,"detail":if media.high_detail {"high"} else {"default"}});
+    }
+    Ok(response)
 }
 
 pub fn response(model: &str, prepared: &[Prepared], results: &[ItemResult]) -> Value {

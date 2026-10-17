@@ -5,7 +5,7 @@ konwencjach żądań oraz odpowiedzi:
 
 - `POST /v1/systemone`: kontrakt TypeSafe System One. Na nim opiera się
   integracja z aplikacjami.
-- `POST /v1/basal`: konwencje `Server.decide` upstream basal v1.5.0, dla
+- `POST /v1/basal`: konwencje `Server.decide` upstream basal v2.0.0, dla
   klientów napisanych pod serwer upstream.
 
 `GET /v1/models` zwraca listę TypeSafe `ModelMetadataList` (`name`,
@@ -123,7 +123,9 @@ Nie są częścią TypeSafe System One; odpowiedzi mają format upstream.
 
 ## /v1/basal
 
-Odczyt jak `to_items` upstream: pole `model` ignorowane, brak lub nieznany
+Odczyt jak `to_items` upstream: parser pytań ignoruje pole `model`, ale
+router HTTP basal-rs używa go do wyboru modelu (bez niego: `default_model`;
+nieznana nazwa: 422). Oryginalny serwer upstream ignoruje to pole. Brak lub nieznany
 `type` to `choice` (nieznany typ bez kalibracji), `instructions: null` jako
 tekst `"null"`, puste opisy noul zastąpione Tak/Nie, 2–10 opcji. Odpowiedzi
 jak upstream: `probabilities` i `confidence = max(p)` dla każdego typu,
@@ -136,6 +138,9 @@ co w upstream, a 55/55 pytań ma te same pola i decyzje (maks. różnica
 liczbowa 0,0016, FP16 wobec FP32 upstream). `basal export` zapisuje odpowiedź
 tego endpointu jako `answer_upstream`, a `basal compare` zestawia ją z
 odpowiedzią upstream.
+
+SDK tego endpointu dla Python, TypeScript/JavaScript, C# i Rust:
+[SDK natywnego API](SDK.md).
 
 ## Źródła
 

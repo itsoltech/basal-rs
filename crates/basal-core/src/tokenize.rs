@@ -7,11 +7,13 @@ use std::sync::Mutex;
 use anyhow::{anyhow, ensure, Context, Result};
 use std::str::FromStr;
 
-use crate::prompt::LETTERS;
+use crate::prompt::{ChatStyle, PromptFormat};
+
+type CodeCache = HashMap<(PromptFormat, usize), Option<Vec<u32>>>;
 
 pub struct BasalTokenizer {
     inner: tokenizers::Tokenizer,
-    letters: Mutex<HashMap<usize, Option<Vec<u32>>>>,
+    letters: Mutex<CodeCache>,
 }
 
 /// Character offsets (start, end) of every token.
@@ -23,19 +25,38 @@ impl BasalTokenizer {
     /// stores `"always"`; vocabulary, merges, normalizer and the rest are taken from the file unchanged (checked
     /// against transformers 5.17.0). Any other pre-tokenizer is rejected rather than guessed.
     pub fn load(path: &Path) -> Result<Self> {
+        Self::load_for(path, ChatStyle::Llama)
+    }
+
+    pub fn load_for(path: &Path, style: ChatStyle) -> Result<Self> {
         let raw = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let mut json: serde_json::Value = serde_json::from_str(&raw)?;
-        // basal-1.0 ships "always" and transformers 5 runs it as "first"; basal-1.5 ships "first".
-        let pre = json.get_mut("pre_tokenizer").context("tokenizer.json: pre_tokenizer missing")?;
-        let scheme = pre.get("prepend_scheme").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let mut want = serde_json::json!({"type": "Metaspace", "replacement": "\u{2581}", "prepend_scheme": "first", "split": false});
-        want["prepend_scheme"] = scheme.clone().into();
-        ensure!(
-            *pre == want && (scheme == "always" || scheme == "first"),
-            "tokenizer.json: unsupported pre_tokenizer {pre}"
-        );
-        pre["prepend_scheme"] = "first".into();
-        ensure!(json.get("normalizer").is_none_or(|n| n.is_null()), "tokenizer.json: unexpected normalizer");
+        if matches!(style, ChatStyle::Gemma4 | ChatStyle::Gemma4Unified) {
+            ensure!(
+                json.get("pre_tokenizer")
+                    == Some(
+                        &serde_json::json!({"type":"Split", "pattern":{"String":" "}, "behavior":"MergedWithPrevious", "invert":false})
+                    ),
+                "unsupported Gemma pre-tokenizer"
+            );
+            ensure!(
+                json.get("normalizer")
+                    == Some(&serde_json::json!({"type":"Replace", "pattern":{"String":" "}, "content":"▁"})),
+                "unsupported Gemma normalizer"
+            );
+        } else {
+            // basal-1.0 ships "always" and transformers 5 runs it as "first"; basal-1.5 ships "first".
+            let pre = json.get_mut("pre_tokenizer").context("tokenizer.json: pre_tokenizer missing")?;
+            let scheme = pre.get("prepend_scheme").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let mut want = serde_json::json!({"type": "Metaspace", "replacement": "\u{2581}", "prepend_scheme": "first", "split": false});
+            want["prepend_scheme"] = scheme.clone().into();
+            ensure!(
+                *pre == want && (scheme == "always" || scheme == "first"),
+                "tokenizer.json: unsupported pre_tokenizer {pre}"
+            );
+            pre["prepend_scheme"] = "first".into();
+            ensure!(json.get("normalizer").is_none_or(|n| n.is_null()), "tokenizer.json: unexpected normalizer");
+        }
         let mut inner =
             tokenizers::Tokenizer::from_str(&json.to_string()).map_err(|e| anyhow!("{}: {e}", path.display()))?;
         // basal-1.0's tokenizer.json carries truncation at 1536 tokens; upstream encodes without truncation
@@ -69,12 +90,18 @@ impl BasalTokenizer {
     /// token there or two letters share an id. Cached per `k` like upstream `Server.jobs_for`: the answer position
     /// always follows the same prefill, so the first prompt with `k` options decides for all.
     pub fn letter_ids(&self, prompt: &str, base: &[u32], k: usize) -> Result<Option<Vec<u32>>> {
-        if let Some(hit) = self.letters.lock().unwrap().get(&k) {
+        self.code_ids(PromptFormat::One, prompt, base, k)
+    }
+
+    /// Model-format option code ids, checked in the full answer context and cached separately by format.
+    pub fn code_ids(&self, fmt: PromptFormat, prompt: &str, base: &[u32], k: usize) -> Result<Option<Vec<u32>>> {
+        ensure!((2..=fmt.max_options()).contains(&k), "unsupported option count {k}");
+        if let Some(hit) = self.letters.lock().map_err(|_| anyhow!("tokenizer code cache poisoned"))?.get(&(fmt, k)) {
             return Ok(hit.clone());
         }
         let mut ids = Vec::with_capacity(k);
         let mut ok = true;
-        for l in LETTERS.chars().take(k) {
+        for l in fmt.codes().iter().take(k) {
             let full = self.encode(&format!("{prompt}{l}"))?;
             if full.len() != base.len() + 1 || full[..base.len()] != *base {
                 ok = false;
@@ -86,7 +113,7 @@ impl BasalTokenizer {
         uniq.sort_unstable();
         uniq.dedup();
         let res = (ok && uniq.len() == k).then_some(ids);
-        self.letters.lock().unwrap().insert(k, res.clone());
+        self.letters.lock().map_err(|_| anyhow!("tokenizer code cache poisoned"))?.insert((fmt, k), res.clone());
         Ok(res)
     }
 }

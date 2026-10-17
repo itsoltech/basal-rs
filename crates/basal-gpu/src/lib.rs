@@ -36,14 +36,20 @@ use serde_json::{json, Value};
 #[cfg(feature = "cuda")]
 mod cublaslt;
 mod fused;
+mod gemma;
+mod gemma_encoders;
+mod inference;
 #[cfg(all(feature = "intel", not(target_os = "macos")))]
 pub mod intel;
+pub use inference::{InferenceConfigError, InferenceMode};
 mod memory;
 mod quant;
+mod runtime;
 mod split;
 pub use memory::{gpu_memory, pool_probe, GpuMemory, GpuMemoryProbe, PoolProbe, PoolUsage};
 pub use quant::{estimated_stage_weight_bytes, estimated_weight_bytes, ParseQuantizationError, Quantization};
 use quant::{ProjWeight, Projection};
+pub use runtime::RuntimeBackend;
 pub use split::{LayerSplit, LayerSplitError, StageSpec};
 #[cfg(target_os = "macos")]
 pub mod gemm;
@@ -80,6 +86,18 @@ pub enum Precision {
     Bf16,
     F16,
     F32,
+}
+
+/// Preserve the Llama default while using the published BF16 serving dtype for a Gemma checkpoint.
+pub fn model_precision(value: &str, cfg: &basal_core::architecture::Architecture) -> Result<Precision> {
+    if value == "auto" {
+        Ok(match cfg {
+            basal_core::architecture::Architecture::Llama(_) => Precision::F16,
+            basal_core::architecture::Architecture::Gemma4(_) => Precision::Bf16,
+        })
+    } else {
+        Precision::parse(value)
+    }
 }
 
 impl Precision {
@@ -275,6 +293,30 @@ pub fn projection_shapes(c: &LlamaConfig) -> Vec<(usize, usize)> {
     vec![(qd + 2 * kvd, h), (h, qd), (2 * i, h), (h, i)]
 }
 
+/// Decoder projection shapes (N, K), including Gemma's per-layer embeddings and separate Q/K/V.
+pub fn architecture_projection_shapes(cfg: &basal_core::architecture::Architecture) -> Result<Vec<(usize, usize)>> {
+    use basal_core::architecture::Architecture;
+    let Architecture::Gemma4(c) = cfg else {
+        return Ok(projection_shapes(cfg.llama()?));
+    };
+    c.validate()?;
+    let h = c.hidden;
+    let mut shapes = std::collections::BTreeSet::new();
+    for layer in &c.layers {
+        let q = layer.heads.checked_mul(layer.head_dim).context("Gemma query shape overflow")?;
+        let kv = layer.kv_heads.checked_mul(layer.head_dim).context("Gemma KV shape overflow")?;
+        shapes.extend([(q, h), (h, q), (layer.intermediate, h), (h, layer.intermediate)]);
+        if !layer.shared_kv {
+            shapes.insert((kv, h));
+        }
+    }
+    if c.per_layer_input > 0 {
+        let packed = c.layers.len().checked_mul(c.per_layer_input).context("Gemma per-layer shape overflow")?;
+        shapes.extend([(packed, h), (c.per_layer_input, h), (h, c.per_layer_input)]);
+    }
+    Ok(shapes.into_iter().collect())
+}
+
 /// Name of CUDA device `device` ([`gpu_device`]), as recorded in GEMM tables.
 pub fn gpu_name(device: usize) -> Result<String> {
     #[cfg(feature = "cuda")]
@@ -464,6 +506,8 @@ pub struct GpuBackend {
     precision: Precision,
     readout: Readout,
     kernels: Kernels,
+    /// Fixed before prefix warmup and copied to every execution lane.
+    attention_override: Option<&'static str>,
     inv_freq: Vec<f64>,
     /// RoPE cos and sin of every position below `cfg.max_positions` (`rope_row`), `[pos][cos: hd/2 | sin: hd/2]`:
     /// computed once instead of per token and forward; host memory shared by the stages
@@ -1706,6 +1750,7 @@ impl GpuBackend {
             precision,
             readout,
             kernels,
+            attention_override: None,
             inv_freq,
             rope: rope.into(),
             load_s,
@@ -1727,7 +1772,14 @@ impl GpuBackend {
     fn attention_kernel(&self) -> Result<&'static str> {
         #[cfg(feature = "cuda")]
         if let Device::Cuda(d) = &self.stages[0].dev {
-            return if self.tc_attention() { Ok(fused::tc_kernel(d)?) } else { Ok("attn_tree_f32") };
+            return if self.tc_attention() {
+                Ok(match self.attention_override {
+                    Some(k) => k,
+                    None => fused::tc_kernel(d)?,
+                })
+            } else {
+                Ok("attn_tree_f32")
+            };
         }
         Ok(if self.tree_attention() { "attn_tree_f32" } else { "sdpa" })
     }
@@ -2198,9 +2250,17 @@ impl GpuBackend {
                     let nk = c.kv_heads * total * hd;
                     let (khl, vhl) = (hl.narrow(0, 0, 2 * nk)?, hl.narrow(0, 2 * nk, 2 * nk)?);
                     let v_exact = self.precision == Precision::F16;
-                    Some(fused::attention_tree(&_flat, &us, f.dims, scale, Some((&khl, &vhl, v_exact)), Some(dt))?)
+                    Some(fused::attention_tree(
+                        &_flat,
+                        &us,
+                        f.dims,
+                        scale,
+                        Some((&khl, &vhl, v_exact)),
+                        Some(dt),
+                        self.attention_override,
+                    )?)
                 } else {
-                    Some(fused::attention_tree(&_flat, &us, f.dims, scale, None, Some(dt))?)
+                    Some(fused::attention_tree(&_flat, &us, f.dims, scale, None, Some(dt), self.attention_override)?)
                 }
             } else {
                 None
@@ -2492,7 +2552,9 @@ impl GpuBackend {
     /// CUDA attention on tensor cores (f16 / bf16 forwards; `BASAL_ATT=simt` selects the f32 kernel for A/B).
     #[cfg_attr(not(feature = "cuda"), allow(dead_code, reason = "Tensor-core attention is a CUDA-only kernel"))]
     fn tc_attention(&self) -> bool {
-        self.is_cuda() && self.precision != Precision::F32 && std::env::var("BASAL_ATT").as_deref() != Ok("simt")
+        self.is_cuda()
+            && self.precision != Precision::F32
+            && (self.attention_override.is_some() || std::env::var("BASAL_ATT").as_deref() != Ok("simt"))
     }
 
     /// The prefix K / V of every layer (of one stage) split into f16 hi / lo planes, when the tensor-core attention
@@ -3065,6 +3127,7 @@ impl Backend for GpuBackend {
             precision: self.precision,
             readout: self.readout,
             kernels: self.kernels,
+            attention_override: self.attention_override,
             inv_freq: self.inv_freq.clone(),
             rope: self.rope.clone(),
             load_s: 0.0,

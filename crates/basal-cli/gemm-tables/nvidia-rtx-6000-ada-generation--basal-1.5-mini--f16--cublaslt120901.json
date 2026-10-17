@@ -429,19 +429,15 @@
       "k": 1536,
       "dtype": "f16",
       "algo": [
-        85899345941,
-        4294967306,
+        98784247813,
+        4294967303,
         0,
         0,
         519265841053697,
         8589934594,
         292057907202,
         0
-      ],
-      "ms": 0.1608954,
-      "best_candidate_ms": 0.1608954,
-      "configurations": 62,
-      "tflops": 160.16495049578796
+      ]
     },
     {
       "m_class": 6144,
@@ -1429,19 +1425,15 @@
       "k": 1536,
       "dtype": "f16",
       "algo": [
-        73014444038,
-        4294967308,
-        4294967296,
+        98784247829,
+        4294967305,
+        0,
         0,
         519265841053697,
         8589934594,
         292057907202,
         0
-      ],
-      "ms": 1.7110679999999998,
-      "best_candidate_ms": 1.7110679999999998,
-      "configurations": 53,
-      "tflops": 131.78072586244383
+      ]
     },
     {
       "m_class": 6144,
@@ -1930,18 +1922,14 @@
       "dtype": "f16",
       "algo": [
         85899345926,
-        4294967307,
-        0,
+        4294967311,
+        4294967296,
         0,
         519265841053697,
         8589934594,
         292057907202,
         0
-      ],
-      "ms": 0.8985245,
-      "best_candidate_ms": 0.8985245,
-      "configurations": 46,
-      "tflops": 125.47558972515496
+      ]
     },
     {
       "m_class": 6144,
@@ -2025,7 +2013,8 @@
     }
   ],
   "timing": "each configuration timed on rotating copies of the weight larger than L2 (cold weights, as in a forward)",
-  "note": "algorithms are opaque cuBLASLt configurations, valid for this GPU and cuBLASLt version",
+  "note": "algorithms are opaque cuBLASLt configurations, valid for this GPU and cuBLASLt version; shared by basal-1.5-mini and basal-2.0-mini. Three M4096 configurations replaced after HTTP ABBA, full-record model parity and 792 matrix-prefix bit comparisons; those entries omit old timings. Other entries retain their original source and timings.",
   "model": "basal-1.5-mini",
-  "source": "reports/gemm-tables-2026-10-10/nvidia-rtx-6000-ada-generation"
+  "source": "reports/gemm-tables-2026-10-10/nvidia-rtx-6000-ada-generation",
+  "optimization_source": "reports/optimization-basal2-ada-2026-10-15"
 }

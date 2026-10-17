@@ -483,9 +483,15 @@ wagi pobiera do cache. Tabela GEMM jest wybierana automatycznie jak w
 `serve` (na CUDA może wymagać wygenerowania i zapisania w cache), chyba że
 podano `--gemm-table`. Ustawienia GPU i cache stanu są zapisane w JSON;
 tabela GEMM tylko nazwą pliku, bez ścieżki katalogu użytkownika.
-Opcje `--max-batch-tokens`, `--max-inflight`, `--schedule`, `--long-tokens`
+Opcje `--max-batch-tokens`, `--max-inflight`, `--max-large-inflight`, `--schedule`, `--long-tokens`
 i `--long-slice-ms` mają takie same domyślne wartości jak `serve`.
 Benchmark nie czyta ambientowej konfiguracji `basal-serve.yml`.
+Dla izolowanego pomiaru nasycenia dobierz `--max-inflight` i
+`--max-large-inflight` z zapasem względem liczby klientów i pamięci hosta.
+Domyślny limit dużych żądań wynosi 4 i może zatrzymać rampę wcześniej niż GPU.
+Raportuj 529 osobno; szybko odrzuconych żądań nie licz jako przepustowość inferencji.
+Rosnące opóźnienie przy kolejnych klientach oceniaj razem z poprawnymi
+odpowiedziami/s: kolejka może rosnąć po osiągnięciu nasycenia.
 
 Domyślne rezerwy to 2 GiB RAM (`--ram-reserve-gib`) i 1 GiB VRAM / Metal
 working set / budżetu Vulkan (`--gpu-reserve-gib`). Przed ładowaniem dochodzi
@@ -633,3 +639,5 @@ CUDA graphs), czyli w trybie, w którym serwuje.
 Zestawy odniesienia (44 przykłady autora, 34 żądania System One dla
 basal-1.5) wystarczają do sprawdzenia zgodności z upstream, ale nie do oceny
 jakości na danych konkretnej aplikacji.
+
+Nowe dane wynikowe zapisujemy poza Gitem i archiwizujemy według [MEASUREMENT_ARTIFACTS.md](MEASUREMENT_ARTIFACTS.md). W `reports/` pozostają precyzyjne podsumowania Markdown.

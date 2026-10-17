@@ -44,7 +44,7 @@ Rozwijamy ten silnik, by ułatwiać korzystanie z polskich modeli na NVIDIA,
 Apple Silicon i Intel Arc oraz wspierać rozwój polskiego AI.
 
 Runtime odtwarza protokół decyzyjny upstream: ten sam prompt, te same
-token IDs, oba porządki opcji, uśrednienie i kalibracja z `CALIBRATION.json`.
+token IDs, skonfigurowane porządki opcji, uśrednienie i kalibracja z `CALIBRATION.json`.
 Różni się sposobem wykonania: pakowaniem promptów w drzewo wspólnych
 prefiksów, własnymi kernelami i harmonogramem serwera. Zgodność decyzji
 z referencją FP32 oraz różnice numeryczne opisują [pomiary poniżej](#wyniki).
@@ -66,7 +66,7 @@ brew install itsoltech/tap/basal-rs
 curl -fsSL https://raw.githubusercontent.com/itsoltech/basal-rs/main/install.sh | sh
 
 basal doctor                # co jest na maszynie, czego brakuje i jak to naprawić
-basal serve                 # http://127.0.0.1:8000; przy pierwszym starcie pobiera basal-1.5-4.5B
+basal serve                 # http://127.0.0.1:8000; przy pierwszym starcie pobiera basal-2.0-4.5B
 basal serve --model mini    # inny model: mini, 4.5B, max, owner/nazwa@rewizja albo katalog
 ```
 
@@ -88,12 +88,21 @@ Docker: [niżej](#uruchomienie-w-dockerze). Wymagania, ścieżki i szczegóły:
 
 | Model | Status |
 |---|---|
-| `Remek/basal-1.5-max` (11B), rewizja `be1b5ee7` | główny cel, CUDA, Metal ([M2 Max](reports/metal-m2-max-1.5/README.md), [M1 Pro](reports/metal-m1-pro-1.5/README.md)) |
+| `Remek/basal-1.5-max` (11B), rewizja `be1b5ee7` | CUDA, Metal ([M2 Max](reports/metal-m2-max-1.5/README.md), [M1 Pro](reports/metal-m1-pro-1.5/README.md)) |
 | `Remek/basal-1.5-4.5B`, rewizja `784a683b` | CUDA ([zgodność](reports/compat-1.5-small/README.md), [wydajność](reports/perf-1.5-small/README.md)), Metal ([M2 Max](reports/metal-m2-max-1.5/README.md), [M1 Pro](reports/metal-m1-pro-1.5/README.md)) |
 | `Remek/basal-1.5-mini` (1.5B), rewizja `1978d070` | CUDA ([zgodność](reports/compat-1.5-small/README.md), [wydajność](reports/perf-1.5-small/README.md)), Metal ([M2 Max](reports/metal-m2-max-1.5/README.md), [M1 Pro](reports/metal-m1-pro-1.5/README.md)) |
 | `Remek/basal-1.0-4.5B`, rewizja `b9528804` | CUDA, Metal ([M1 Pro](reports/metal-m1-pro/README.md)) |
+| basal-2.0 mini / 4.5B / max, podstawowe BF16 | format 2, CUDA H100 i Metal M2 Max; Intel mini/4.5B, max niepotwierdzony; [wyniki i ograniczenia](reports/upstream-2.0-final-2026-10-14/README.md); [kontrakt i aliasy](docs/UPSTREAM_2.0.md) |
+| basal-omni mini / max, podstawowe BF16 | natywne Gemma 4 / Unified, CUDA; [realne media, kontekst i wydajność](reports/upstream-2.0-final-2026-10-14/README.md); [obraz i audio](docs/OMNI.md) |
 
-Typy pytań: `choice` (2–10 opcji oraz 11–255 przybliżoną strategią grupową), `noul`,
+Modele format 2 mają natywny odczyt 2–255 opcji oraz typ `tool`.
+Domyślnie serwujemy `basal-2.0-4.5B`. Aliasy `mini`, `4.5B` i `max` nadal wskazują modele basal-1.5.
+Instalacje i usługi bez pliku konfiguracji oraz bez `--model` przechodzą na nowy model.
+Pierwszy start pobiera około 9.1 GB wag, jeśli nie ma ich w cache.
+Aby zachować basal-1.5, użyj `basal serve --model 4.5B` lub `basal init --model 4.5B`.
+Jawna konfiguracja zachowuje swój wybór modeli.
+
+Typy pytań format 1: `choice` (2–10 opcji oraz 11–255 przybliżoną strategią grupową), `noul`,
 `score`, a z basal-1.5 także `multi`, `act`, `facts: "auto"` i `evidence`.
 Strategia dla ponad 10 opcji jest rozszerzeniem runtime'u, ocenianym osobno od
 zgodności z upstream: na zbiorach intencji z 59–150 opcjami basal-1.5-max
@@ -124,7 +133,27 @@ Jedyne różnice basal-rs f16 to remisy w FP32 (np. 0,503 / 0,497); trafność
 wobec etykiet jest taka sama jak w FP32. ¹ Upstream BF16 dla 4.5B i mini
 mierzony tylko na RTX 6000 Ada.
 
-### Wydajność na kartach NVIDIA
+### Wydajność na kartach NVIDIA — basal-2.0
+
+Domyślny `basal-2.0-4.5B`, HTTP przy 32 klientach: żądania/s,
+upstream v2.0.0 `fast` BF16 / basal-rs FP16, z tych samych checkpointów BF16.
+Oba silniki na tej samej maszynie; mediana trzech powtórzeń po odrzuceniu pierwszego.
+
+| Karta | upstream / basal-rs |
+|---|---:|
+| H100 PCIe | 135,5 / 228,6 |
+| A100-SXM4-80GB | 83,4 / 146,6 |
+| L40S | 66,8 / 122,8 |
+| RTX 6000 Ada Generation | 34,5 / 87,9 |
+| RTX A6000 | 36,6 / 69,2 |
+
+[Pełne wyniki](docs/PERFORMANCE.md) obejmują
+mini/4.5B/max, 1/8/32 klientów, zakres powtórzeń i opóźnienia. [Raport](reports/perf-basal2-fivegpu-2026-10-14/README.md)
+podaje zgodność z FP32 na małym zestawie 49 argmax i 41 odpowiedzi API,
+słabsze przypadki wydajności, nieudane starty upstream oraz błędy ruchu mieszanego.
+Pomiary historyczne 1.5 pozostają poniżej; warunki obu kampanii różnią się.
+
+### Wydajność na kartach NVIDIA — basal-1.5
 
 Ta sama metodyka na pięciu wynajętych kartach z fabrycznym limitem mocy,
 upstream v1.5.0 `fast` na tej samej karcie
@@ -327,6 +356,10 @@ jednej karcie, a 4.5B i mini na drugiej. Modele na różnych GPU liczą
 jednocześnie, za tym samym API i z tymi samymi nazwami modeli. Bez
 `replica_devices` i `layer_split` (opis niżej) model jest ładowany raz, na
 jednym GPU. Numer to indeks CUDA widoczny dla procesu.
+`device` i `replica_devices` obsługują wszystkie modele (basal-1.5, Basal 2.0,
+Omni); `layer_split` i `quantization` tylko modele Llama (basal-1.5 i Basal 2.0),
+a dla Omni są odrzucane przed ładowaniem
+([macierz](docs/ARCHITECTURE.md#ograniczenia)).
 Kolejność wszystkich kart ustala `CUDA_DEVICE_ORDER` (domyślna może różnić się
 od `nvidia-smi`, `PCI_BUS_ID` daje kolejność PCI jak `nvidia-smi`), a
 `CUDA_VISIBLE_DEVICES` wybiera z niej karty, zmienia ich kolejność i numeruje
@@ -638,20 +671,36 @@ wiersza poleceń, np. `--max-batch-tokens`):
 |---|---|---|
 | `repo`, `revision` | | repozytorium Hugging Face `owner/name` i gałąź, tag albo commit (domyślnie `main`); pobierane do cache Hugging Face (`HF_HOME`, w obrazie `/data/hf`), przy braku dostępu do Hub z cache |
 | `path` | | lokalny katalog modelu (zamiast `repo`) |
-| `gemm_table` | `auto` | tabela algorytmów cuBLASLt (opis niżej); `none`: algorytmy dobierane przy pierwszym użyciu, wynik może zależeć od partii; albo ścieżka tabeli |
-| `dtype` | `f16` | `f16`, `bf16` albo `f32` (referencja numeryczna, wolna) |
-| `quantization` | `none` | format wag projekcji: `none` (gęste wagi `dtype`), `q8_0` (8-bitowe wagi z aktywacjami f16) albo `q4_k` (4-bitowe wagi z aktywacjami f16, eksperymentalne; K projekcji wielokrotnością 256); tylko CUDA z `dtype: f16`; opis niżej |
+| `gemm_table` | `auto` | tabela algorytmów cuBLASLt (opis niżej); `none`: Llama dobiera algorytmy przy pierwszym użyciu, Gemma wykonuje osobne GEMM dla promptów; albo ścieżka tabeli |
+| `dtype` | `auto` | Llama: `f16`; Omni na rozpoznanej RTX 6000 Ada: `f16`, pozostałe Gemma: `bf16`; jawne `f16`, `bf16` lub `f32` mają pierwszeństwo |
+| `inference_mode` | `auto` | dobór attention; `accurate`: pierwotne attention Llamy lub iloczyny FP32 Gemmy; `balanced`: CUDA Llama f16, softmax i akumulacja f32, prawdopodobieństwa hi/lo |
+| `quantization` | `none` | format wag projekcji modeli Llama (basal-1.5, Basal 2.0 mini/4.5B/max): `none` (gęste wagi `dtype`), `q8_0` (8-bitowe wagi z aktywacjami f16) albo `q4_k` (4-bitowe wagi z aktywacjami f16, eksperymentalne; K projekcji wielokrotnością 256); tylko CUDA z `dtype` f16 (`auto` dla Llamy to f16); Omni (Gemma) odrzuca inne wartości niż `none` po odczytaniu `config.json`, przed ładowaniem; opis niżej |
 | `device` | 0 | GPU modelu: indeks urządzenia CUDA widoczny dla procesu; modele z tym samym `device` dzielą GPU, z różnymi liczą jednocześnie; Metal i Intel: tylko 0 |
-| `replica_devices` | | CUDA: repliki modelu pod jedną nazwą, po jednej na każdy podany indeks (różne karty jednego typu); zamiast `device`; kilka wymaga tabeli GEMM (`auto` albo ścieżka) |
-| `layer_split` | | CUDA: jeden model na kilku kartach jednego typu, lista `{device, layers}` w kolejności warstw (co najmniej dwa etapy na różnych kartach, suma równa liczbie warstw modelu); wymaga `dtype: f16`; zamiast `device` i `replica_devices`; opis wyżej |
+| `replica_devices` | | CUDA: repliki modelu pod jedną nazwą, po jednej na każdy podany indeks (różne karty jednego typu); zamiast `device`; kilka wymaga `gemm_table` `auto` albo ścieżki: Llama wspólnej tabeli niezależnej od partii, Omni bez pasującej tabeli używa stałych GEMM per prompt |
+| `layer_split` | | CUDA, tylko modele Llama: jeden model na kilku kartach jednego typu, lista `{device, layers}` w kolejności warstw (co najmniej dwa etapy na różnych kartach, suma równa liczbie warstw modelu); wymaga `dtype` f16 (`auto` dla Llamy to f16); zamiast `device` i `replica_devices`; Omni odrzuca po odczytaniu `config.json`; opis wyżej |
 | `max_batch_tokens` | 8192 | tokeny jednej partii, liczone po współdzieleniu prefiksów |
 | `schedule` | `hrrn` | kolejność przyjmowania żądań: `hrrn` (krótkie przed długimi, bez zagłodzenia) albo `fifo` |
 | `long_tokens` | 4096 | żądania powyżej tej liczby tokenów idą do toru długich żądań, który oddaje GPU krótkim partiom między warstwami; `0` wyłącza |
 | `state_cache_mb` | 0 | cache K/V stanu między żądaniami |
 
+`inference_mode: auto` wybiera `balanced` dla Basal 2.0 mini/4.5B/max na
+RTX 6000 Ada Generation, przy CUDA f16, fused kernels i odczycie f32.
+Poza tym zakresem Llama zachowuje dotychczasową politykę. Omni mini/max z dekoderem
+FP16 na tej karcie wybierają iloczyny attention FP16 z softmaxem i akumulacją FP32;
+`accurate` wybiera iloczyny FP32. Jawne BF16/FP32 oraz pozostałe urządzenia Gemma
+również używają iloczynów FP32. Cały forward FP32 wymaga `dtype: f32`.
+Tryb można ustawić także przez `--inference-mode` w CLI i lokalnym kliencie.
+[Pomiary latency, QPS i jakości FP32](reports/precision-performance-ada-2026-10-16/README.md)
+obejmują również regresje p95 oraz brak bezpośredniej długiej referencji FP32 Max.
+Osobna [kampania Omni](reports/omni-performance-ada-2026-10-16/README.md) porównuje
+oba modele z upstream eager BF16 i opisuje jakość względem FP32. Szczegóły precyzji
+encoderów i tabel GEMM są w [OMNI.md](docs/OMNI.md).
+
 Opcje procesu: `addr` (nadpisywany przez zmienną `BASAL_ADDR`; w obrazie
 `0.0.0.0:8000`), `default_model`, `max_inflight` (1024, limit żądań w
-kolejce i w trakcie wszystkich modeli; nadmiar dostaje 529 z `Retry-After`), `long_slice_ms`
+kolejce i w trakcie wszystkich modeli; nadmiar dostaje 529 z `Retry-After`),
+`max_large_inflight` (4, wspólna pula dużych body i rozwiniętych promptów;
+CLI: `--max-large-inflight`), `long_slice_ms`
 (100, minimalny czas pracy toru długich żądań między oddaniami GPU),
 `gemm_cache` (`.cache/gemm`), `metrics` (`false`; zbieranie metryk i endpoint
 Prometheus, włączane także flagą `--metrics`).
@@ -674,7 +723,11 @@ minut). Tabelę wygenerowaną dla karty lub modelu spoza tej listy
 kolejne wydania ją zawierały ([CONTRIBUTING](CONTRIBUTING.pl.md#tabele-gemm)).
 `basal doctor` wypisuje karty z tabelami w binarce. Ręcznie:
 `basal gemm-search --model DIR --invariant --out gemm.json`. Serwer odmawia
-startu z tabelą, która nie obejmuje kształtów wag modelu.
+startu z tabelą, która nie obejmuje kształtów wag modelu. Poprawna tabela już
+zapisana w cache pozostaje bez zmian po aktualizacji binarki. Aby jawnie
+wybrać nową tabelę, podaj `--gemm-table PLIK` lub ścieżkę w YAML.
+Tabela RTX 6000 Ada wspólna dla mini 1.5/2.0 ma nowy wybór trzech algorytmów
+dla klasy M4096; [pomiar i zakres zgodności](reports/optimization-basal2-ada-2026-10-15/README.md).
 
 ## Polecenia
 
@@ -720,6 +773,7 @@ payloady własnej aplikacji. Scenariusze, dane i pola JSON:
 | `tools/reference` | eksport referencji z upstream, zestawy żądań |
 | `tools/bench` | pomiary A/B i obciążeniowe, generatory ruchu |
 | `contracts/typesafe` | migawka OpenAPI TypeSafe |
+| `contracts/basal`, `sdk/` | natywny kontrakt `/v1/basal` i SDK Python, TS/JS, C#, Rust |
 | `reports` | pomiary zgodności i wydajności z danymi |
 
 ## Dokumentacja
@@ -728,6 +782,7 @@ payloady własnej aplikacji. Scenariusze, dane i pola JSON:
 - [Architektura](docs/ARCHITECTURE.md): potok żądania, pakowanie, kernele, harmonogram serwera.
 - [Zgodność API](docs/SYSTEM_ONE.md): TypeSafe System One, endpoint upstream, rozszerzenia basal-1.5.
 - [Klient do automatyzacji](docs/CLIENT.md): stdin, JSONL, pytania w CLI, lokalny model i przykłady Bash.
+- [SDK natywnego Basala](docs/SDK.md): paczki Python, npm, NuGet i crates.io dla `/v1/basal`, przykłady i publikacja.
 - [Wydajność](docs/PERFORMANCE.md): karty NVIDIA, Apple Silicon, limit mocy, długie dokumenty, konfiguracja.
 - [Pomiary](docs/BENCHMARKS.md): metodyka, narzędzia, odtwarzanie wyników.
 - [Raporty](reports/README.md).

@@ -1,0 +1,22 @@
+{
+  "sdk_version": "0.1.0",
+  "live_responses": 9,
+  "answers_per_response": 6,
+  "compared_answers": 54,
+  "differences": 0,
+  "excluded_fields": [
+    "usage.latency_ms"
+  ],
+  "comparison": "same keys and values, exact IEEE-754 binary64",
+  "variants": [
+    "python.class_sync",
+    "python.dict_sync",
+    "python.class_async",
+    "python.dict_async",
+    "node.esm",
+    "node.adapter",
+    "node.cjs",
+    "browser.adapter",
+    "browser.native"
+  ]
+}

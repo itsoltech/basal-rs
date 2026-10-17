@@ -7,6 +7,12 @@ target/
 .cache/
 .itsol/
 target-clippy/
+sdk/**/dist/
+sdk/**/node_modules/
+sdk/**/*.tgz
+sdk/**/bin/
+sdk/**/obj/
+sdk/**/artifact/
 *.nsys-rep
 *.sqlite
 tools/bench/mixed.jsonl
@@ -16,3 +22,10 @@ tools/bench/mixed.jsonl
 /reports/multigpu-*/*.json
 /reports/w4a16-*/*.json
 /reports/w8a16-*/*.json
+
+# Nowe wyniki tej kampanii są w HF Storage Bucket (docs/MEASUREMENT_ARTIFACTS.md).
+# Dotychczasowe dane wejściowe i tabele GEMM pozostają śledzone.
+/reports/upstream-2.0-*/*.json
+/reports/upstream-2.0-*/*.jsonl
+/reports/upstream-2.0-*/*.csv
+/reports/upstream-2.0-*/*.log

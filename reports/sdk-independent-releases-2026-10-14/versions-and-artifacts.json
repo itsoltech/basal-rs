@@ -1,0 +1,33 @@
+{
+  "independent_versions": [
+    {
+      "sdk": "python",
+      "version": "2.3.4",
+      "matching_tag": true,
+      "metadata_outputs": true
+    },
+    {
+      "sdk": "typescript",
+      "version": "0.1.1",
+      "matching_tag": true,
+      "metadata_outputs": true
+    },
+    {
+      "sdk": "csharp",
+      "version": "4.0.2",
+      "matching_tag": true,
+      "metadata_outputs": true
+    },
+    {
+      "sdk": "rust",
+      "version": "0.6.0",
+      "matching_tag": true,
+      "metadata_outputs": true
+    }
+  ],
+  "contract_version_independent": true,
+  "invalid_tags_or_mismatches_rejected": 8,
+  "selected_archives_from_own_manifest": true,
+  "unselected_manifest_isolation": true,
+  "npm_lock_mismatch_rejected": true
+}

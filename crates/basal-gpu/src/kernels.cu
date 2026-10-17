@@ -530,20 +530,29 @@ __device__ __forceinline__ unsigned pack2(__half a, __half b) {
 
 // QK3: S = Qh·Kh + Qh·Kl + Ql·Kh (f16 hi/lo split, ~f32 products) or only Qh·Kh. PL: P·V with P split into
 // hi/lo (two MMAs) or P rounded to f16 (one MMA). Softmax, accumulation and output stay f32 in every variant.
-template <bool QK3, bool PL>
+// XOR the 16-byte chunks of each group of eight rows. ldmatrix receives the address of each
+// row's contiguous eight-half segment, so only shared-memory placement changes. Global
+// operands, key tiles, MMA order and softmax reductions stay identical to the padded layout.
+template <bool SW128>
+__device__ __forceinline__ unsigned tc_at(unsigned row, unsigned col) {
+    return row * (SW128 ? ATT_HD : TC_LD) + (SW128 ? col ^ ((row & 7u) * 8u) : col);
+}
+
+template <bool QK3, bool PL, unsigned WARPS = 8, bool SW128 = false, bool F16 = false>
 __device__ __forceinline__ void attn_tree_tc_body(const float *qkv, const __half *khl, const __half *vhl, void *out,
                                                   const TreeTable &tab, unsigned T, unsigned NH, unsigned NKV,
                                                   float scale, unsigned v_exact, unsigned out_mode) {
+    constexpr unsigned BM = WARPS * 16, THREADS = WARPS * 32, LD = SW128 ? ATT_HD : TC_LD;
     // Shared memory holds one Q plane (hi, then lo) until each warp has its Q fragments in registers, then the K / V
     // tiles: 34 KiB per block.
     extern __shared__ __align__(16) unsigned char smraw[];
     __half *Qs = reinterpret_cast<__half *>(smraw);
-    __half *Kh = reinterpret_cast<__half *>(smraw), *Kl = Kh + TC_BN * TC_LD;
-    __half *Vh = Kl + TC_BN * TC_LD, *Vl = Vh + TC_BN * TC_LD;  // V row-major [key][dim]
+    __half *Kh = reinterpret_cast<__half *>(smraw), *Kl = Kh + TC_BN * LD;
+    __half *Vh = Kl + TC_BN * LD, *Vl = Vh + TC_BN * LD;  // V row-major [key][dim]
     const unsigned tid = threadIdx.x, w = tid / 32, lane = tid % 32, g = lane >> 2, t4 = lane & 3;
     const unsigned kvh = blockIdx.y, rep = NH / NKV;
     const TreeUnit &U = tab.u[tree_unit_of(tab, blockIdx.x)];
-    const unsigned rows = rep * U.q_len, r0 = (blockIdx.x - U.tile0) * TC_BM;
+    const unsigned rows = rep * U.q_len, r0 = (blockIdx.x - U.tile0) * BM;
     unsigned lk = U.np;
     for (unsigned i = 0; i < U.nr; i++) lk += U.r_len[i];
     const unsigned base_own = lk - U.r_len[U.nr - 1];
@@ -554,17 +563,17 @@ __device__ __forceinline__ void attn_tree_tc_body(const float *qkv, const __half
     unsigned qh[ATT_HD / 16][4], ql[ATT_HD / 16][4];
 #pragma unroll
     for (int plane = 0; plane < (QK3 ? 2 : 1); plane++) {
-        for (unsigned i = tid; i < TC_BM * ATT_HD; i += TC_THREADS) {
+        for (unsigned i = tid; i < BM * ATT_HD; i += THREADS) {
             unsigned rr = i / ATT_HD, d = i % ATT_HD, r = r0 + rr;
             float x =
                 r < rows ? q[((size_t)(kvh * rep + r / U.q_len) * T + U.q_off + r % U.q_len) * ATT_HD + d] : 0.f;
             __half h = __float2half_rn(x);
-            Qs[rr * TC_LD + d] = plane == 0 ? h : __float2half_rn(x - __half2float(h));
+            Qs[tc_at<SW128>(rr, d)] = plane == 0 ? h : __float2half_rn(x - __half2float(h));
         }
         __syncthreads();
 #pragma unroll
         for (int ks = 0; ks < ATT_HD / 16; ks++) {
-            const unsigned qo = (w * 16 + (lane % 16)) * TC_LD + ks * 16 + (lane / 16) * 8;
+            const unsigned qo = tc_at<SW128>(w * 16 + (lane % 16), ks * 16 + (lane / 16) * 8);
             ldsm4(plane == 0 ? qh[ks] : ql[ks], Qs + qo);
         }
         __syncthreads();  // the next plane / the K / V tiles reuse this memory
@@ -581,13 +590,13 @@ __device__ __forceinline__ void attn_tree_tc_body(const float *qkv, const __half
 #pragma unroll
     for (int i = 0; i < ATT_HD / 8; i++) o[i][0] = o[i][1] = o[i][2] = o[i][3] = 0.f;
     float m[2] = {-INFINITY, -INFINITY}, l[2] = {0.f, 0.f};
-    const unsigned planes = v_exact ? 1 : 2;
+    const unsigned planes = F16 ? 1 : (v_exact ? 1 : 2);
     const float scale2 = scale * 1.4426950408889634f;  // log2(e)
     for (unsigned j0 = 0; j0 < lk; j0 += TC_BN) {
         bool vis = (ok[0] && j0 <= lim[0]) || (ok[1] && j0 <= lim[1]);
         if (!__syncthreads_or(vis)) break;  // tiles are ordered: none after this one is visible either
         // 32 keys x 128 dims = 32 x 16 chunks of 8 halves (uint4) per plane
-        for (unsigned i = tid; i < TC_BN * (ATT_HD / 8); i += TC_THREADS) {
+        for (unsigned i = tid; i < TC_BN * (ATT_HD / 8); i += THREADS) {
             unsigned jj = i / (ATT_HD / 8), c8 = (i % (ATT_HD / 8)) * 8, j = j0 + jj;
             uint4 kh = make_uint4(0, 0, 0, 0), kl = kh, vh = kh, vl = kh;
             const __half *ks = nullptr, *vs = nullptr;
@@ -611,10 +620,10 @@ __device__ __forceinline__ void attn_tree_tc_body(const float *qkv, const __half
                 vh = *reinterpret_cast<const uint4 *>(vs);
                 if (planes == 2) vl = *reinterpret_cast<const uint4 *>(vs + plane_k);
             }
-            *reinterpret_cast<uint4 *>(Kh + jj * TC_LD + c8) = kh;
-            if (QK3) *reinterpret_cast<uint4 *>(Kl + jj * TC_LD + c8) = kl;
-            *reinterpret_cast<uint4 *>(Vh + jj * TC_LD + c8) = vh;
-            if (planes == 2) *reinterpret_cast<uint4 *>(Vl + jj * TC_LD + c8) = vl;
+            *reinterpret_cast<uint4 *>(Kh + tc_at<SW128>(jj, c8)) = kh;
+            if (QK3) *reinterpret_cast<uint4 *>(Kl + tc_at<SW128>(jj, c8)) = kl;
+            *reinterpret_cast<uint4 *>(Vh + tc_at<SW128>(jj, c8)) = vh;
+            if (planes == 2) *reinterpret_cast<uint4 *>(Vl + tc_at<SW128>(jj, c8)) = vl;
         }
         __syncthreads();
         // S = Q K^T: the warp's 16 rows x 32 keys (4 n8 tiles), dims in 8 steps of 16
@@ -627,7 +636,7 @@ __device__ __forceinline__ void attn_tree_tc_body(const float *qkv, const __half
 #pragma unroll
             for (int np2 = 0; np2 < TC_BN / 16; np2++) {
                 // two n8 key tiles (2*np2, 2*np2+1) x two dim halves
-                const unsigned ko = (np2 * 16 + (lane % 8) + (lane / 16) * 8) * TC_LD + ks * 16 + ((lane / 8) % 2) * 8;
+                const unsigned ko = tc_at<SW128>(np2 * 16 + (lane % 8) + (lane / 16) * 8, ks * 16 + ((lane / 8) % 2) * 8);
                 unsigned bh[4], bl[4];
                 ldsm4(bh, Kh + ko);
                 if (QK3) ldsm4(bl, Kl + ko);
@@ -698,7 +707,7 @@ __device__ __forceinline__ void attn_tree_tc_body(const float *qkv, const __half
 #pragma unroll
             for (int dp = 0; dp < ATT_HD / 16; dp++) {
                 // two n8 dim tiles (2*dp, 2*dp+1) x two key halves
-                const unsigned vo = (kk * 16 + (lane % 8) + ((lane / 8) % 2) * 8) * TC_LD + dp * 16 + (lane / 16) * 8;
+                const unsigned vo = tc_at<SW128>(kk * 16 + (lane % 8) + ((lane / 8) % 2) * 8, dp * 16 + (lane / 16) * 8);
                 unsigned bh[4];
                 ldsm4t(bh, Vh + vo);
 #pragma unroll
@@ -721,7 +730,7 @@ __device__ __forceinline__ void attn_tree_tc_body(const float *qkv, const __half
         if (r >= rows) continue;
         float inv = 1.0f / l[a];
         const unsigned head = kvh * rep + r / U.q_len, tok = U.q_off + r % U.q_len;
-        if (out_mode == ATT_OUT_F32) {
+        if (!F16 && out_mode == ATT_OUT_F32) {
             float *dst = (float *)out + ((size_t)head * T + tok) * ATT_HD;
 #pragma unroll
             for (int dt = 0; dt < ATT_HD / 8; dt++)
@@ -733,7 +742,7 @@ __device__ __forceinline__ void attn_tree_tc_body(const float *qkv, const __half
 #pragma unroll
             for (int dt = 0; dt < ATT_HD / 8; dt++) {
                 const float x0 = o[dt][2 * a] * inv, x1 = o[dt][2 * a + 1] * inv;
-                if (out_mode == ATT_OUT_F16) {
+                if (F16 || out_mode == ATT_OUT_F16) {
                     __half *dst = (__half *)out + at + dt * 8 + 2 * t4;
                     dst[0] = from_f<__half>(x0);
                     dst[1] = from_f<__half>(x1);
@@ -1465,6 +1474,18 @@ ATTN_TC_ENTRY(attn_tree_tc_pv1, true, false)
 ATTN_TC_ENTRY(attn_tree_tc_qk1, false, true)
 ATTN_TC_ENTRY(attn_tree_tc_f16, false, false)
 
+// Explicit A/B candidates: no arithmetic shortcuts and no change to the default dispatch.
+#define ATTN_TC_LAYOUT_ENTRY(name, warps, sw128)                                                                    \
+    extern "C" __global__ void __launch_bounds__(warps * 32)                                                         \
+        name(const float *qkv, const __half *khl, const __half *vhl, void *out, TreeTable tab, unsigned T,            \
+             unsigned NH, unsigned NKV, float scale, unsigned v_exact, unsigned out_mode) {                          \
+        attn_tree_tc_body<true, true, warps, sw128>(qkv, khl, vhl, out, tab, T, NH, NKV, scale, v_exact, out_mode);  \
+    }
+ATTN_TC_LAYOUT_ENTRY(attn_tree_tc64, 4, false)
+ATTN_TC_LAYOUT_ENTRY(attn_tree_tc_sw128, 8, true)
+ATTN_TC_LAYOUT_ENTRY(attn_tree_tc64_sw128, 4, true)
+
+
 #define ATTN_TC_PIPE_ENTRY(name, qk3, pl)                                                                            \
     extern "C" __global__ void __launch_bounds__(TC_THREADS)                                                       \
         name(const float *qkv, const __half *khl, const __half *vhl, float *out, TreeTable tab, unsigned T,          \
@@ -1472,3 +1493,108 @@ ATTN_TC_ENTRY(attn_tree_tc_f16, false, false)
         attn_tree_tc_pipe_body<qk3, pl>(qkv, khl, vhl, out, tab, T, NH, NKV, scale, v_exact);                      \
     }
 ATTN_TC_PIPE_ENTRY(attn_tree_tc_pipe, true, true)
+
+// F16 forward specialization: V has no low plane and the output is f16. All products, reductions and rounding
+// match the corresponding parent kernel; eliminating unreachable dtype branches shortens register live ranges.
+#define ATTN_TC_STATIC_ENTRY(name, qk3, pl)                                                                        \
+    extern "C" __global__ void __launch_bounds__(TC_THREADS)                                                       \
+        name(const float *qkv, const __half *khl, const __half *vhl, void *out, TreeTable tab, unsigned T,           \
+             unsigned NH, unsigned NKV, float scale, unsigned v_exact, unsigned out_mode) {                         \
+        attn_tree_tc_body<qk3, pl, 8, false, true>(qkv, khl, vhl, out, tab, T, NH, NKV, scale, v_exact, out_mode);   \
+    }
+ATTN_TC_STATIC_ENTRY(attn_tree_tc_static, true, true)
+ATTN_TC_STATIC_ENTRY(attn_tree_tc_qk1_static, false, true)
+ATTN_TC_STATIC_ENTRY(attn_tree_tc_f16_static, false, false)
+
+// Gemma mini Conformer: one warp computes one frame/head over at most 12 causal frames.
+// Q, K, V and relative-position operands, both dot products, softmax and output stay FP32.
+// This changes the reduction tree relative to separate cuBLAS calls and requires an FP32 quality gate.
+extern "C" __global__ void gemma_audio_attention_f32(const float *q, const float *k, const float *v,
+                                                    const float *relative, const unsigned *valid, float *out,
+                                                    unsigned n) {
+    const unsigned warp = threadIdx.x / 32;
+    const unsigned lane = threadIdx.x % 32;
+    const unsigned job = blockIdx.x * 4 + warp;
+    if (job >= n * 8) return;  // Uniform within each full warp.
+    const unsigned frame = job / 8, head = job % 8;
+    const unsigned first = frame > 11 ? frame - 11 : 0;
+    const unsigned len = frame - first + 1;
+    __shared__ float probabilities[4][12];
+    float query[4];
+#pragma unroll
+    for (unsigned part = 0; part < 4; ++part) query[part] = q[job * 128 + lane + part * 32];
+    for (unsigned j = 0; j < len; ++j) {
+        const unsigned key_frame = first + j;
+        const unsigned rel = 12 - (frame - key_frame);
+        float content = 0.0f, position = 0.0f;
+#pragma unroll
+        for (unsigned part = 0; part < 4; ++part) {
+            const unsigned d = lane + part * 32;
+            content = fmaf(query[part], k[(key_frame * 8 + head) * 128 + d], content);
+            position = fmaf(query[part], relative[(rel * 8 + head) * 128 + d], position);
+        }
+#pragma unroll
+        for (unsigned delta = 16; delta > 0; delta /= 2) {
+            content += __shfl_down_sync(0xffffffff, content, delta);
+            position += __shfl_down_sync(0xffffffff, position, delta);
+        }
+        if (lane == 0) {
+            const float score = 50.0f * tanhf((content + position) / 50.0f);
+            probabilities[warp][j] = score + (valid[key_frame] ? 0.0f : -1e9f);
+        }
+    }
+    __syncwarp();
+    if (lane == 0) {
+        float maximum = -INFINITY;
+        for (unsigned j = 0; j < len; ++j) maximum = fmaxf(maximum, probabilities[warp][j]);
+        float total = 0.0f;
+        for (unsigned j = 0; j < len; ++j) {
+            probabilities[warp][j] = expf(probabilities[warp][j] - maximum);
+            total += probabilities[warp][j];
+        }
+        for (unsigned j = 0; j < len; ++j) probabilities[warp][j] /= total;
+    }
+    __syncwarp();
+#pragma unroll
+    for (unsigned part = 0; part < 4; ++part) {
+        const unsigned d = lane + part * 32;
+        float value = 0.0f;
+        for (unsigned j = 0; j < len; ++j)
+            value = fmaf(probabilities[warp][j], v[((first + j) * 8 + head) * 128 + d], value);
+        out[job * 128 + d] = value;
+    }
+}
+
+// Gemma: derive causal/sliding/image-group masks from absolute positions, then FP32 softmax.
+// One independent block per (head, query) keeps the arithmetic independent of other prompts.
+__device__ __forceinline__ float gemma_mask_value(const float *row, const unsigned *groups,
+                                                 unsigned column, unsigned query, unsigned key_start,
+                                                 unsigned window, unsigned group) {
+    const unsigned key = key_start + column;
+    const bool vision = group != 0xffffffffu && groups[key] == group;
+    const bool allowed = (key <= query || vision) && (!window || query < window || key > query - window);
+    return row[column] + (allowed ? 0.0f : -INFINITY);
+}
+extern "C" __global__ void gemma_masked_softmax_f32(const float *scores, const unsigned *groups, float *out,
+                                                   unsigned queries, unsigned keys, unsigned query_start,
+                                                   unsigned key_start, unsigned window, unsigned use_groups) {
+    __shared__ float reduction[32];
+    const size_t row = blockIdx.x;
+    const unsigned query = query_start + row % queries;
+    const unsigned group = use_groups && window ? groups[query] : 0xffffffffu;
+    const float *x = scores + row * keys;
+    float *y = out + row * keys;
+    float maximum = -INFINITY;
+    for (unsigned j = threadIdx.x; j < keys; j += blockDim.x)
+        maximum = fmaxf(maximum, gemma_mask_value(x, groups, j, query, key_start, window, group));
+    maximum = block_reduce<true>(maximum, reduction);
+    float sum = 0.0f;
+    for (unsigned j = threadIdx.x; j < keys; j += blockDim.x) {
+        const float value = expf(gemma_mask_value(x, groups, j, query, key_start, window, group) - maximum);
+        y[j] = value;
+        sum += value;
+    }
+    sum = block_reduce<false>(sum, reduction);
+    const float inverse = 1.0f / sum;
+    for (unsigned j = threadIdx.x; j < keys; j += blockDim.x) y[j] *= inverse;
+}

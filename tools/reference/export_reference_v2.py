@@ -1,0 +1,179 @@
+"""Export pinned upstream v2 eager readouts, including Gemma image/audio processors.
+
+BASAL_UPSTREAM must point to the immutable v2 checkout. --out must be new.
+Uses the upstream backend and server for forwards, calibration and answers; no training.
+Bench input is the upstream default decision corpus, or --questions. --cases adds requests (including media).
+Large raw exports belong in .cache, with a summary and their hashes in a new reports directory.
+"""
+import argparse
+import asyncio
+import hashlib
+import json
+import os
+from pathlib import Path
+import sys
+import time
+
+UPSTREAM = Path(os.environ["BASAL_UPSTREAM"]).resolve()
+sys.path.insert(0, str(UPSTREAM))
+import numpy as np
+import torch
+from basal.prompt import media_messages, lang_of, PREFILL
+from basal.server import Server, parser, to_items, temperature
+from export_reference import bench_items, system_one_cases, sha256, versions, _prefix_len
+
+
+def pack_meta(ids):
+    prefix = _prefix_len(ids)
+    lengths = [len(x) - prefix for x in ids]
+    return dict(prefix_len=prefix, packed_len=prefix + sum(lengths),
+                readout_cols=[prefix + sum(lengths[:i + 1]) - 1 for i in range(len(ids))])
+
+
+def capture_codes(backend):
+    original = backend._codes
+    backend.export_logits = []
+
+    def captured(h, ids_list):
+        for i, codes in enumerate(ids_list):
+            indices = torch.tensor(codes, device=h.device)
+            z = h[i] @ backend.head.weight.index_select(0, indices).float().T
+            if backend.head.bias is not None:
+                z = z + backend.head.bias.index_select(0, indices).float()
+            if backend.softcap:
+                z = torch.tanh(z / backend.softcap) * backend.softcap
+            backend.export_logits.append(z.detach().float().cpu().tolist())
+        return original(h, ids_list)
+    backend._codes = captured
+
+
+def readout(srv, q, branch=0, media=None):
+    b = srv.branch(0, branch, q)
+    _, _, perms, prompts, codes = b
+    be = srv.backend
+    be.export_logits.clear()
+    processor_meta = []
+    if media is None:
+        ids = be.encode(prompts)
+        probs = be.run(prompts, codes)
+    else:
+        question, options = q["branches"][branch]
+        messages = [media_messages(q["state"], question, [options[i] for i in perm],
+                                  media["kinds"], q["lang"], srv.fmt) for perm in perms]
+        prompts, ids = [], []
+        for msgs in messages:
+            text = srv.tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True,
+                                              enable_thinking=False) + PREFILL
+            kw = dict(text=[text], return_tensors="pt")
+            if media["images"]:
+                kw.update(images=[media["images"]], images_kwargs=dict(max_soft_tokens=media["max_soft_tokens"]))
+            if media["audio"]:
+                kw.update(audio=media["audio"])
+            enc = be.proc(**kw)
+            ids.append(enc["input_ids"][0].tolist())
+            # Decode the expanded special tokens for exact comparison with the native prepared prompt.
+            prompts.append(srv.tok.decode(ids[-1], skip_special_tokens=False, clean_up_tokenization_spaces=False))
+            processor_meta.append({k: dict(shape=list(v.shape), dtype=str(v.dtype),
+                                           sha256=hashlib.sha256(v.contiguous().numpy().tobytes()).hexdigest())
+                                   for k, v in enc.items() if isinstance(v, torch.Tensor)})
+        probs = [p for p, _, _ in be.run_media(messages, codes, media["images"], media["audio"],
+                                              media["max_soft_tokens"])]
+    orders = [dict(perm=perm, prompt=prompt, input_ids=tok, letter_ids=code, letter_logits=z, probs=p)
+              for perm, prompt, tok, code, z, p in zip(perms, prompts, ids, codes, be.export_logits, probs)]
+    canonical = np.zeros(len(perms[0]), dtype=np.float64)
+    for perm, p in zip(perms, probs):
+        canonical[perm] += np.asarray(p) / len(perms)
+    avg = canonical.astype(np.float32).tolist()
+    kind = "noul" if q["type"] == "multi" or q.get("multi") else q.get("base", q["type"])
+    return dict(orders=orders, pack=pack_meta(ids), p_avg=avg, temperature=temperature(srv.cal, kind, len(avg)),
+                p_cal=srv.canonical(kind, perms, probs), processor=processor_meta)
+
+
+async def export(srv, args, out):
+    worker = asyncio.create_task(srv.worker())
+    try:
+        with (out / "bench.jsonl").open("w") as f:
+            for index, (source, line, item) in enumerate([] if args.cases_only else bench_items(args.n, args.questions)):
+                k = len(item["options"])
+                q = dict(name=str(index), type=item.get("type", "choice"), state=item["state"], question=item["question"],
+                         options=item["options"], lang=item.get("lang") or lang_of(item["state"] + item["question"]),
+                         branches=[(item["question"], item["options"])])
+                data = dict(item)
+                data.setdefault("type", "choice")
+                data.setdefault("id", None)
+                data.setdefault("gold", None)
+                rec = dict(index=index, source=source, line=line, **data, **readout(srv, q))
+                rec.update(argmax_avg=int(np.argmax(rec["p_avg"])), argmax_cal=int(np.argmax(rec["p_cal"])))
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                print(f"bench {index}: {k} options", flush=True)
+        with (out / "systemone.jsonl").open("w") as f:
+            cases = ([json.loads(line.replace('"MODEL"', json.dumps(srv.name)))
+                      for line in Path(args.cases).read_text().splitlines() if line.strip()]
+                     if args.cases_only else system_one_cases(args.cases, srv.name))
+            for case in cases:
+                req = case["request"]
+                req["model"] = srv.name
+                rec = dict(id=case["id"], source=case.get("source"), request=req)
+                try:
+                    state = req.get("state")
+                    if req.get("facts") == "auto":
+                        from basal.facts import inject
+                        state = inject(state if isinstance(state, str) else json.dumps(state, ensure_ascii=False))
+                    qs = to_items(state, req["questions"], srv.max_options, force_lang=req.get("lang"))
+                    media = srv.media_of(req, None)
+                    items = []
+                    for q in qs:
+                        for bi, (question, options) in enumerate(q["branches"]):
+                            multi = q["type"] == "multi" or q.get("multi")
+                            items.append(dict(name=f"{q['name']}#{bi}" if multi else q["name"],
+                                              type="noul" if multi else q["type"], keys=["true", "false"] if multi else q["keys"],
+                                              options=options, lang=q["lang"], state_text=q["state"], question_text=question,
+                                              **readout(srv, q, bi, media)))
+                    rec["items"] = items
+                    rec["upstream_answer"] = await srv.decide(req)
+                except ValueError as e:
+                    rec.update(items=[], upstream_error=f"ValueError: {e}")
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                print(f"systemone {case['id']}", flush=True)
+    finally:
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--model", required=True)
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--dtype", choices=["float32", "bfloat16"], default="float32")
+    ap.add_argument("--device", default="cuda")
+    ap.add_argument("--orders", default="1", choices=["1", "2"])
+    ap.add_argument("--media", action="store_true")
+    ap.add_argument("--questions")
+    ap.add_argument("--cases")
+    ap.add_argument("--cases-only", action="store_true", help="Export only --cases, without the default corpora")
+    ap.add_argument("--n", type=int, default=44)
+    a = ap.parse_args()
+    if a.cases_only and not a.cases:
+        ap.error("--cases-only requires --cases")
+    out = Path(a.out)
+    out.mkdir(parents=True, exist_ok=False)
+    start = time.monotonic()
+    md = Path(a.model)
+    argv = ["--model", str(md), "--mode", "eager", "--device", a.device, "--dtype", a.dtype, "--orders", a.orders]
+    if a.media:
+        argv += ["--media", "on"]
+    srv = Server(parser().parse_args(argv))
+    capture_codes(srv.backend)
+    asyncio.run(export(srv, a, out))
+    import subprocess
+    manifest = dict(tool=Path(__file__).name, upstream_revision=subprocess.check_output(
+        ["git", "-C", str(UPSTREAM), "rev-parse", "HEAD"], text=True).strip(),
+        model=srv.name, dtype=a.dtype, prompt_format=srv.fmt, orders=srv.orders, media=a.media,
+        calibration=srv.cal, versions=versions(), elapsed_s=time.monotonic() - start,
+        files={p.name: sha256(p) for p in md.iterdir() if p.name in (
+            "config.json", "basal.json", "tokenizer.json", "CALIBRATION.json", "CALIBRATION.o2.json", "processor_config.json")})
+    (out / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+
+
+if __name__ == "__main__":
+    main()

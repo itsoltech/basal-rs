@@ -1,0 +1,293 @@
+{
+  "anonymous": {
+    "model": "basal-1.5-mini",
+    "answers": {
+      "department": {
+        "type": "choice",
+        "probabilities": {
+          "returns": 0.8688957729302161,
+          "support": 0.13110422706978397
+        },
+        "confidence": 0.8688957729302161,
+        "choice": "returns"
+      },
+      "second_department": {
+        "type": "choice",
+        "probabilities": {
+          "returns": 0.8688957729302161,
+          "support": 0.13110422706978397
+        },
+        "confidence": 0.8688957729302161,
+        "choice": "returns"
+      },
+      "urgent": {
+        "type": "noul",
+        "probabilities": {
+          "true": 0.3777590432558102,
+          "false": 0.6222409567441898
+        },
+        "confidence": 0.6222409567441898,
+        "noul": 0.3777590432558102,
+        "evidence": [
+          {
+            "text": "nt prosi o zwrot pieniędzy za uszkodzony telefon.",
+            "start": 4,
+            "end": 53,
+            "probability": 0.17146931261224424
+          },
+          {
+            "text": "kt ma pęknięty ekran.",
+            "start": 59,
+            "end": 80,
+            "probability": 0.05283986827972643
+          }
+        ]
+      },
+      "severity": {
+        "type": "score",
+        "probabilities": {
+          "0": 0.051800334455131894,
+          "1": 0.12992749148029356,
+          "2": 0.8182721740645745
+        },
+        "confidence": 0.8182721740645745,
+        "score": 1.7664718396094425,
+        "legend": {
+          "0": "Niska",
+          "1": "Średnia",
+          "2": "Wysoka"
+        }
+      },
+      "labels": {
+        "type": "multi",
+        "probabilities": {
+          "refund": 0.9938781927404501,
+          "damage": 0.9930833924470622,
+          "delivery": 0.012159028335431034
+        },
+        "selected": [
+          "refund",
+          "damage"
+        ],
+        "threshold": 0.6,
+        "set_confidence": 0.9750029186063047
+      },
+      "decision": {
+        "type": "act",
+        "probabilities": {
+          "true": 0.9946788947591292,
+          "false": 0.00532110524087084
+        },
+        "confidence": 0.9946788947591292,
+        "action": "approve",
+        "answer": "true",
+        "expected_costs": {
+          "approve": 0.015963,
+          "reject": 4.973394,
+          "defer": 0.4
+        },
+        "calibration": "validated"
+      }
+    },
+    "usage": {
+      "input_tokens": 2308,
+      "output_tokens": 0,
+      "questions": 6,
+      "branches": 8
+    }
+  },
+  "named_class": {
+    "model": "basal-1.5-mini",
+    "answers": {
+      "department": {
+        "type": "choice",
+        "probabilities": {
+          "returns": 0.8688957729302161,
+          "support": 0.13110422706978397
+        },
+        "confidence": 0.8688957729302161,
+        "choice": "returns"
+      },
+      "second_department": {
+        "type": "choice",
+        "probabilities": {
+          "returns": 0.8688957729302161,
+          "support": 0.13110422706978397
+        },
+        "confidence": 0.8688957729302161,
+        "choice": "returns"
+      },
+      "urgent": {
+        "type": "noul",
+        "probabilities": {
+          "true": 0.3777590432558102,
+          "false": 0.6222409567441898
+        },
+        "confidence": 0.6222409567441898,
+        "noul": 0.3777590432558102,
+        "evidence": [
+          {
+            "text": "nt prosi o zwrot pieniędzy za uszkodzony telefon.",
+            "start": 4,
+            "end": 53,
+            "probability": 0.17146931261224424
+          },
+          {
+            "text": "kt ma pęknięty ekran.",
+            "start": 59,
+            "end": 80,
+            "probability": 0.05283986827972643
+          }
+        ]
+      },
+      "severity": {
+        "type": "score",
+        "probabilities": {
+          "0": 0.051800334455131894,
+          "1": 0.12992749148029356,
+          "2": 0.8182721740645745
+        },
+        "confidence": 0.8182721740645745,
+        "score": 1.7664718396094425,
+        "legend": {
+          "0": "Niska",
+          "1": "Średnia",
+          "2": "Wysoka"
+        }
+      },
+      "labels": {
+        "type": "multi",
+        "probabilities": {
+          "refund": 0.9938781927404501,
+          "damage": 0.9930833924470622,
+          "delivery": 0.012159028335431034
+        },
+        "selected": [
+          "refund",
+          "damage"
+        ],
+        "threshold": 0.6,
+        "set_confidence": 0.9750029186063047
+      },
+      "decision": {
+        "type": "act",
+        "probabilities": {
+          "true": 0.9946788947591292,
+          "false": 0.00532110524087084
+        },
+        "confidence": 0.9946788947591292,
+        "action": "approve",
+        "answer": "true",
+        "expected_costs": {
+          "approve": 0.015963,
+          "reject": 4.973394,
+          "defer": 0.4
+        },
+        "calibration": "validated"
+      }
+    },
+    "usage": {
+      "input_tokens": 2308,
+      "output_tokens": 0,
+      "questions": 6,
+      "branches": 8
+    }
+  },
+  "dictionary": {
+    "model": "basal-1.5-mini",
+    "answers": {
+      "department": {
+        "type": "choice",
+        "probabilities": {
+          "returns": 0.8688957729302161,
+          "support": 0.13110422706978397
+        },
+        "confidence": 0.8688957729302161,
+        "choice": "returns"
+      },
+      "second_department": {
+        "type": "choice",
+        "probabilities": {
+          "returns": 0.8688957729302161,
+          "support": 0.13110422706978397
+        },
+        "confidence": 0.8688957729302161,
+        "choice": "returns"
+      },
+      "urgent": {
+        "type": "noul",
+        "probabilities": {
+          "true": 0.3777590432558102,
+          "false": 0.6222409567441898
+        },
+        "confidence": 0.6222409567441898,
+        "noul": 0.3777590432558102,
+        "evidence": [
+          {
+            "text": "nt prosi o zwrot pieniędzy za uszkodzony telefon.",
+            "start": 4,
+            "end": 53,
+            "probability": 0.17146931261224424
+          },
+          {
+            "text": "kt ma pęknięty ekran.",
+            "start": 59,
+            "end": 80,
+            "probability": 0.05283986827972643
+          }
+        ]
+      },
+      "severity": {
+        "type": "score",
+        "probabilities": {
+          "0": 0.051800334455131894,
+          "1": 0.12992749148029356,
+          "2": 0.8182721740645745
+        },
+        "confidence": 0.8182721740645745,
+        "score": 1.7664718396094425,
+        "legend": {
+          "0": "Niska",
+          "1": "Średnia",
+          "2": "Wysoka"
+        }
+      },
+      "labels": {
+        "type": "multi",
+        "probabilities": {
+          "refund": 0.9938781927404501,
+          "damage": 0.9930833924470622,
+          "delivery": 0.012159028335431034
+        },
+        "selected": [
+          "refund",
+          "damage"
+        ],
+        "threshold": 0.6,
+        "set_confidence": 0.9750029186063047
+      },
+      "decision": {
+        "type": "act",
+        "probabilities": {
+          "true": 0.9946788947591292,
+          "false": 0.00532110524087084
+        },
+        "confidence": 0.9946788947591292,
+        "action": "approve",
+        "answer": "true",
+        "expected_costs": {
+          "approve": 0.015963,
+          "reject": 4.973394,
+          "defer": 0.4
+        },
+        "calibration": "validated"
+      }
+    },
+    "usage": {
+      "input_tokens": 2308,
+      "output_tokens": 0,
+      "questions": 6,
+      "branches": 8
+    }
+  }
+}

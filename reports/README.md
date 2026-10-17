@@ -3,7 +3,7 @@
 Nowe raporty zapisują tylko: co sprawdzono, wynik, zmierzoną poprawę lub
 regresję oraz zakres weryfikacji. Warunki i ograniczenia podajemy krótko,
 gdy są potrzebne do interpretacji liczb. Hipotezy i plany nie trafiają do
-raportów; surowe dane przechowujemy poza Gitem. Starsze katalogi mogą
+raportów; nowe dane wynikowe przechowujemy w [HF Storage Bucket](../docs/MEASUREMENT_ARTIFACTS.md), poza Gitem. Starsze katalogi mogą
 zawierać dane pomiarowe.
 Metodyka: [docs/BENCHMARKS.md](../docs/BENCHMARKS.md).
 
@@ -15,13 +15,32 @@ raportów wiele GPU, W8A16 i W4A16 z 2026-10-11 – 2026-10-14.
 Odsyłacze starszych raportów do lokalnego katalogu `.itsol/` mają
 [publiczne odpowiedniki](multigpu-link-corrections-2026-10-14/README.md).
 
+## Basal v2 i Omni
+
+| Katalog | Zawartość |
+|---|---|
+| [latency-basal2-ada-2026-10-15](latency-basal2-ada-2026-10-15/README.md) | mini/4.5B/max: jedno pytanie, jeden klient HTTP, 128–32768 tokenów; 25 par upstream fast vs basal-rs oraz osobne profile GPU |
+| [perf-basal2-fivegpu-2026-10-14](perf-basal2-fivegpu-2026-10-14/README.md) | mini/4.5B/max 2.0 na pięciu GPU NVIDIA: HTTP 1/8/32, energia, ruch mieszany i zgodność z FP32; FAIL powtarzalności upstream i przerwane sesje zachowane |
+| [upstream-2.0-refactor-2026-10-14](upstream-2.0-refactor-2026-10-14/README.md) | review Opus 5.5, precyzja nieznanych repozytoriów, wspólne serializery 529/metadanych i bitowe A/B Intel |
+| [upstream-2.0-final-2026-10-14](upstream-2.0-final-2026-10-14/README.md) | końcowe buildy, CUDA/Metal/Intel, rzeczywiste act/certyfikaty i media, kontekst, pamięć i wydajność; niepowodzenia zachowane |
+| [upstream-2.0-metal-context-2026-10-14](upstream-2.0-metal-context-2026-10-14/README.md) | Metal 4.5B, 32768 tokenów: próba przerwana przez kontrolę pamięci; pochodna analiza progu noul z loadtestu |
+| [upstream-2.0-review-2026-10-14](upstream-2.0-review-2026-10-14/README.md) | niezależny przegląd, model domyślny 2.0, korekty opisów i budżetu levels, kontrole końcowych źródeł |
+| [upstream-2.0-decisions-2026-10-14](upstream-2.0-decisions-2026-10-14/README.md) | ponowna analiza choice/noul/score/multi/tool względem FP32, z klasyfikacjami pomocniczymi, bez act i bez wymogu identycznego confidence/score |
+| [upstream-2.0-h100-2026-10-14](upstream-2.0-h100-2026-10-14/README.md) | pięć BF16 checkpointów: FP32/FP16/BF16 readout, tekst i media obu omni, API/usage/kolejki, bitowe A/B basal-1.5, ograniczenia numeryczne |
+| [upstream-2.0-cpu-2026-10-14](upstream-2.0-cpu-2026-10-14/README.md) | prompty/tokeny, procesory obrazu/audio, reguły decyzji i błędy wejścia |
+| [upstream-2.0-boundaries-2026-10-14](upstream-2.0-boundaries-2026-10-14/README.md) | per-type certificates, pliki o2/mismatch, duże koszty act i budżet promptów |
+| [upstream-2.0-discovery-2026-10-14](upstream-2.0-discovery-2026-10-14/README.md) | pierwotny audyt przypiętych modeli, sprzed implementacji |
+
 ## Wiele GPU i kwantyzacja wag
 
-Bieżący stan funkcji, wyników, sygnałów i ograniczeń:
+Bieżąca integracja z Basal 2.0 i Omni:
+[stan z 2026-10-17](multigpu-main-integration-2026-10-17/README.md).
+Historyczne wyniki, sygnały i ograniczenia pomiarów:
 [zestawienie z 2026-10-14](multigpu-results-2026-10-14/README.md).
 
 | Katalog | Zawartość |
 |---|---|
+| [multigpu-main-integration-2026-10-17](multigpu-main-integration-2026-10-17/README.md) | integracja z Basal 2.0, Omni, nowymi GEMM i profilami inferencji; kontrole statyczne i review, pomiary po mergu |
 | [multigpu-results-2026-10-14](multigpu-results-2026-10-14/README.md) | zestawienie: placement, repliki, podział warstw, `q8_0` i `q4_k`; zgodność, jakość, pamięć, czas, sygnały i rozstrzygnięcia |
 | [multigpu-placement-2026-10-11](multigpu-placement-2026-10-11/README.md) | 4.5B i mini na dwóch RTX 6000 Ada: bitowa zgodność, przypisanie modeli do GPU, ruch równoległy i widoczność CUDA |
 | [multigpu-isolation-2026-10-11](multigpu-isolation-2026-10-11/README.md) | RTX 6000 Ada: mini bez/z obciążonym 4.5B, stare/nowe single-GPU, identyczny ruch A/B/B/A i pełne odpowiedzi |
@@ -47,6 +66,9 @@ Bieżący stan funkcji, wyników, sygnałów i ograniczeń:
 
 | Katalog | Zawartość |
 |---|---|
+| [inference-mode-review-2026-10-16](inference-mode-review-2026-10-16/README.md) | review Opus 5.5: wspólna walidacja trybów, niezależny default, porównania CLI i jawne ograniczenie accurate na H100 |
+| [precision-performance-ada-2026-10-16](precision-performance-ada-2026-10-16/README.md) | accurate/balanced i upstream BF16: 25 punktów latency, 18 QPS, FP32 na rozdzielonych danych, regresje ogona oraz GAP długiej referencji Max |
+| [optimization-basal2-ada-2026-10-15](optimization-basal2-ada-2026-10-15/README.md) | GEMM, budżet partii, admission i rampy obciążenia mini/4.5B/max na Ada; wyniki pozytywne i regresje |
 | [inference-campaign-2026-10-09](inference-campaign-2026-10-09/README.md) | H100 i RTX 6000 Ada: SiLU, RMSNorm, cache stanów, budżet partii i harmonogram; zgodność wyników, latency i throughput |
 | [inference-profile-h100-2026-10-09](inference-profile-h100-2026-10-09/README.md) | H100: Nsight Systems/Compute, SW128 w WGMMA, bitowa zgodność, latency/throughput oraz HTTP A/B/B/A |
 

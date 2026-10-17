@@ -268,8 +268,8 @@ def cmd_build(args):
     dirty = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True, cwd=ROOT).stdout.strip()
     sha = (sha or "unknown") + ("-dirty" if dirty else "")
     remote = "/tmp/basal-cloud-build"
-    subprocess.run(["rsync", "-az", "--delete", "--exclude", "target", "Cargo.toml", "Cargo.lock", "rustfmt.toml",
-                    "crates", "tools", "LICENSE", "NOTICE", f"{host}:{remote}/"], check=True, cwd=ROOT)
+    subprocess.run(["rsync", "-az", "--relative", "--delete", "--exclude", "target", "Cargo.toml", "Cargo.lock", "rustfmt.toml",
+                    "crates", "tools", "vendor", "sdk/rust", "LICENSE", "NOTICE", f"{host}:{remote}/"], check=True, cwd=ROOT)
     build = (f"cd {remote} && nice docker buildx build -f tools/release/linux.Dockerfile --target dev "
              f"--build-arg CUDA_COMPUTE_CAPS={caps} --build-arg BASAL_GIT_SHA={sha} "
              f"--output type=local,dest={remote}/out .")

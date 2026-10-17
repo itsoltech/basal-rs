@@ -1,28 +1,102 @@
 # Dane pomiarowe poza Gitem
 
-Raporty w [reports](../reports/README.md) opisują wyniki w Markdown. Pełne dane maszynowe nowych pomiarów (pliki
-JSON z faktami, parami A/B, rozkładami i sumami kontrolnymi) nie są przechowywane w Gicie. Trzymamy je jako
-archiwa w publicznym Hugging Face Storage Bucket
-[itsoltech/basal-rs](https://huggingface.co/buckets/itsoltech/basal-rs).
+W `reports/` przechowujemy precyzyjne podsumowania Markdown: cel, wersje i wejścia,
+sprzęt, metodę, wyniki, różnice, ograniczenia oraz decyzje. Nowe pliki wynikowe JSON,
+JSONL, CSV, logi, profile i eksporty binarne zapisujemy poza Gitem. Tabele GEMM,
+referencje upstream i istniejące wejścia wymagane przez kod lub narzędzia zostają w Gicie.
+Rozszerzenie pliku samo w sobie nie rozstrzyga, czy jest wynikiem, czy potrzebnym zasobem.
 
-Ta zasada dotyczy plików wyników. Dane, z których korzysta kod lub które są wejściem pomiarów, zostają w Gicie bez
-zmian: tabele GEMM w `crates/basal-cli/gemm-tables`, referencje upstream `reports/reference-*` i dane starszych
-raportów.
+Wspólne zasady są w [AGENTS.md](../AGENTS.md). Dane kampanii wiele GPU, W8A16 i W4A16 opisuje sekcja
+[archiwum `multigpu-2026-10-14`](#archiwum-multigpu-2026-10-14).
 
-## Zasady
+## Publikacja i integralność
 
-- Bucket jest zmiennym magazynem obiektów, a nie repozytorium z historią wersji. Dokumentacja Hugging Face opisuje
-  buckety jako „mutable storage” bez kontroli wersji, w przeciwieństwie do repozytoriów Git
-  ([Buckets](https://huggingface.co/docs/huggingface_hub/guides/buckets)). Dlatego:
-  - każdy zestaw danych ma własny prefiks `measurements/<nazwa>-<data>/<sha256 archiwum>/`;
-  - zakończonego prefiksu nie nadpisujemy i nie usuwamy; poprawka danych to nowe archiwum pod nowym prefiksem;
-  - przed użyciem danych zawsze sprawdzamy SHA-256 archiwum i sumy plików w nim.
-- Raport w Gicie podaje URI archiwum i jego SHA-256. Ścieżki plików wewnątrz archiwum są takie same jak ścieżki,
-  pod którymi te pliki były w repozytorium (`reports/<katalog>/<plik>`).
-- Do bucketu trafiają tylko dane, które mogłyby być publiczne w repozytorium: bez adresów, nazw hostów,
-  identyfikatorów maszyn i instancji, lokalnych ścieżek, kwot ani kosztów. Prywatne dane sesji (surowe katalogi z
-  maszyn, rekordy wynajmu) nie są publikowane.
-- Kod repozytorium nie zależy w czasie działania od Hugging Face. Dane pobiera się ręcznie przed analizą.
+Docelowy magazyn to publiczny [HF Storage Bucket itsoltech/basal-rs](https://huggingface.co/buckets/itsoltech/basal-rs),
+URI `hf://buckets/itsoltech/basal-rs/`. Buckety nie mają historii wersji
+([dokumentacja HF](https://huggingface.co/docs/huggingface_hub/guides/buckets)).
+
+1. Przygotuj dane w `.cache/measurement-artifacts/<nazwa>-<data>/`, zachowując logiczne
+   ścieżki `reports/<katalog>/<plik>`. Prywatne surowe dane sesji zostają lokalnie.
+2. Przejrzyj publiczną zawartość: bez sekretów, identyfikatorów maszyn, adresów,
+   nazw hostów, lokalnych ścieżek i kosztów sesji.
+3. Utwórz `SHA256SUMS` ze ścieżkami względnymi i deterministyczne `tar.gz`
+   (kolejność, właściciel i czas plików). Policz SHA-256 archiwum.
+4. Korzystaj z globalnego `hf` CLI, bezpośrednio `~/.local/bin/hf`, gdy istnieje.
+   Sprawdź `hf auth whoami`; przy braku logowania użyj `hf auth login` w tym samym
+   środowisku. Tokenów nie wpisuj do raportów ani czatu.
+5. Sprawdź pusty prefiks przez `hf buckets list itsoltech/basal-rs/<prefiks> -R`.
+   Publikuj przez `hf buckets cp` pod `measurements/<nazwa>-<data>/<sha256 archiwum>/`.
+   Zakończonego prefiksu nie nadpisuj i nie usuwaj; korekta wymaga nowego archiwum.
+6. Pobierz archiwum do innego, pustego katalogu, sprawdź jego SHA-256, rozpakuj i
+   sprawdź wszystkie wpisy `SHA256SUMS`. Potwierdź też pobranie bez autoryzacji.
+7. Dopiero po obu weryfikacjach usuń zbędne kopie wyników z Git i dopisz do raportów
+   URI, SHA-256, ścieżki danych i sposób ich odtworzenia. Zachowaj lokalne archiwum.
+
+Dane pobieramy jawnie przed analizą; runtime nie pobiera archiwów wyników. Nowe lub migrowane runnery,
+które odczytują archiwizowane wyniki, powinny przyjmować katalog przez
+`--measurement-artifacts`, bez automatycznej zależności sieciowej.
+To konwencja dla takich runnerów, np. `tools/perf/run-w4a16-cloud.py` i
+`tools/perf/run-layer-split-cloud.py`; CLI basal nie ma tej opcji.
+
+## Archiwum `upstream-2.0-2026-10-14`
+
+Zawiera 29 plików JSON i 5 oryginalnych raportów Markdown sprzed migracji oraz
+`SHA256SUMS`. Wszystkie ścieżki danych zaczynają się od `reports/`.
+Prywatne surowe katalogi sesji H100, binarki i `.itsol/` pozostają lokalnie.
+
+| Pole | Wartość |
+|---|---|
+| URI | `hf://buckets/itsoltech/basal-rs/measurements/upstream-2.0-2026-10-14/c762b90c590e5db3d308df714faef9545e727eb7fc97af2edb403456db725536/measurement-data.tar.gz` |
+| Rozmiar gzip | 59 198 B |
+| SHA-256 | `c762b90c590e5db3d308df714faef9545e727eb7fc97af2edb403456db725536` |
+| Weryfikacja | 2026-10-14: ponowne pobranie z autoryzacją i anonimowo; SHA archiwum i 34/34 sumy plików zgodne |
+
+| Ścieżka w archiwum | Zawartość |
+|---|---|
+| `reports/upstream-2.0-discovery-2026-10-14/` | 1 JSON z metadanymi/rewizjami modeli i oryginalny README |
+| `reports/upstream-2.0-cpu-2026-10-14/` | 8 JSON: prompty/tokeny, procesory, reguły, kalibracja, błędy i YAML; oryginalny README |
+| `reports/upstream-2.0-boundaries-2026-10-14/` | 3 JSON: certyfikaty/act, plik o2 i budżet promptów; oryginalny README |
+| `reports/upstream-2.0-h100-2026-10-14/` | 13 JSON: readouts, FP32/BF16, media, kolejności, HTTP/lifecycle, bitowe A/B, źródła i kontrole; oryginalny README |
+| `reports/upstream-2.0-decisions-2026-10-14/` | 4 JSON: decyzje względem FP32, arytmetyka hosta, alternatywy sumowania i provenance; oryginalny README |
+
+### Pobranie i odtworzenie
+
+Uruchom z katalogu głównego repozytorium. Potrzebny jest `hf` CLI z `hf buckets`.
+Katalog docelowy rozpakowania musi być nowy. Polecenia nie zastępują istniejących danych.
+
+```bash
+BASAL_ARTIFACT_PREFIX=measurements/upstream-2.0-2026-10-14/c762b90c590e5db3d308df714faef9545e727eb7fc97af2edb403456db725536
+BASAL_ARTIFACT_DL=.cache/measurement-download/upstream-2.0-2026-10-14
+BASAL_ARTIFACT_ROOT=.cache/measurement-artifacts/upstream-2.0-2026-10-14
+mkdir -p .cache/measurement-download .cache/measurement-artifacts &&
+  mkdir "$BASAL_ARTIFACT_DL" &&
+  hf buckets cp "hf://buckets/itsoltech/basal-rs/$BASAL_ARTIFACT_PREFIX/measurement-data.tar.gz" "$BASAL_ARTIFACT_DL/measurement-data.tar.gz" &&
+  echo "c762b90c590e5db3d308df714faef9545e727eb7fc97af2edb403456db725536  $BASAL_ARTIFACT_DL/measurement-data.tar.gz" | sha256sum -c - &&
+  mkdir "$BASAL_ARTIFACT_ROOT" &&
+  tar -xzf "$BASAL_ARTIFACT_DL/measurement-data.tar.gz" -C "$BASAL_ARTIFACT_ROOT" &&
+  (cd "$BASAL_ARTIFACT_ROOT" && sha256sum -c SHA256SUMS)
+```
+
+Na macOS użyj `shasum -a 256 -c` zamiast `sha256sum -c` w obu miejscach.
+
+Po rozpakowaniu dawny `reports/<katalog>/<plik>.json` jest pod
+`$BASAL_ARTIFACT_ROOT/reports/<katalog>/<plik>.json`. Oryginalne README są historycznymi
+kopiami sprzed dopisania not o archiwum; aktualne podsumowania i publiczne odsyłacze
+pozostają w Gicie. Lokalnego stanu inicjatywy `.itsol/` nie publikujemy.
+
+## Końcowa kampania upstream 2.0
+
+[Podsumowanie](../reports/upstream-2.0-final-2026-10-14/README.md) opisuje CUDA, Metal, Intel, rzeczywiste media, act, kontekst i wydajność. Nowe archiwum: `hf://buckets/itsoltech/basal-rs/measurements/upstream-2.0-final-2026-10-14/3bf4dac1aab9a203d731cd67feae1372ea1bf7eaea46f9baf5b2bfc64c474f61/measurement-data.tar.gz`, SHA-256 `3bf4dac1aab9a203d731cd67feae1372ea1bf7eaea46f9baf5b2bfc64c474f61`, 3 148 341 B. Pobranie z autoryzacją i anonimowo potwierdziło 639/639 sum plików.
+
+Użyj powyższej procedury z nazwą `upstream-2.0-final-2026-10-14`, tym prefiksem i tą sumą. Dane są pod `reports/upstream-2.0-final-2026-10-14/` wewnątrz archiwum. Media base64 zastąpiono hashami i liczbą bajtów; przed ponownym forwardem odtwórz je z `inputs/media-source-manifest.json`. Archiwum nie rozprowadza zdjęć/nagrań ani prywatnych danych maszyn; zachowuje logity, tokeny, prawdopodobieństwa, odpowiedzi i niepowodzenia.
+
+Dodatkowy [benchmark Metal 32768](../reports/upstream-2.0-metal-context-2026-10-14/README.md): `hf://buckets/itsoltech/basal-rs/measurements/upstream-2.0-metal-context-2026-10-14/e6f30d416ec8037ca6cb78a85ac8b6e48ffd5fc90cead619a35a8c5a0db2bfb2/measurement-data.tar.gz`, SHA-256 `e6f30d416ec8037ca6cb78a85ac8b6e48ffd5fc90cead619a35a8c5a0db2bfb2`, 10 829 B; 15/15 sum potwierdzonych z autoryzacją i anonimowo. Zawiera również pochodną analizę progu noul z poprzedniego loadtestu. Dane pod `reports/upstream-2.0-metal-context-2026-10-14/`; użyj procedury z nowym prefiksem, nazwą i sumą.
+
+## Wydajność Omni na Ada
+
+[Raport](../reports/omni-performance-ada-2026-10-16/README.md) opisuje pojedyncze żądania tekstowe 128–32768 tokenów, rzeczywiste media, QPS i ogon ruchu mieszanego obu Omni oraz kontrolę jakości FP32. Zachowuje także nieudane warianty i regresje.
+
+Archiwum: `hf://buckets/itsoltech/basal-rs/measurements/omni-performance-ada-2026-10-16/82aaf99af87532eaccfaf19e3fe5462b5e0d9b4f1ffcac6ccba7ba987ac8a0a7/measurement-data.tar.gz`, SHA-256 `82aaf99af87532eaccfaf19e3fe5462b5e0d9b4f1ffcac6ccba7ba987ac8a0a7`, 26 718 255 B. Pobranie z autoryzacją i anonimowo potwierdziło 1812/1812 sum plików. Dane, metody i przenośne analizy są pod `reports/omni-performance-ada-2026-10-16/` wewnątrz archiwum; raport podaje pełne instrukcje odtworzenia. Prawdziwe media pozostają zewnętrzne i są odtwarzane z przypiętych źródeł oraz sum.
 
 ## Archiwum `multigpu-2026-10-14`
 
@@ -42,7 +116,7 @@ Markdown tych raportów z chwili archiwizacji (commit `6e85375`), przed dopisani
 `SHA256SUMS` zawiera sumy wszystkich 75 plików, w formacie `sha256sum`, ze ścieżkami względnymi od katalogu głównego
 archiwum.
 
-### Pobranie i sprawdzenie
+### Pobranie i sprawdzenie `multigpu-2026-10-14`
 
 Polecenia uruchamia się z katalogu głównego repozytorium. Katalog `.cache/` jest ignorowany przez Git. Potrzebny
 jest `hf` CLI z poleceniem `hf buckets` (pakiet `huggingface_hub`).
@@ -130,18 +204,3 @@ Ta sama lista z sumami jest w `SHA256SUMS`. Sumy plików Markdown są tylko tam.
 | `reports/w8a16-2026-10-11/provenance.json` | 23355 | `3a145d4877d105d8b79448c46385ea0c84f02708f9b8b30c9650a3d992691948` |
 | `reports/w8a16-2026-10-11/raw-manifest.json` | 17337 | `9ccd9d51d5042b7f95a6631db6abaa036fad46bd234dfe77f4f2eadf08f73d95` |
 | `reports/w8a16-2026-10-11/static-validation.json` | 3912 | `d021ee7c3e774aad353a798e67c033c694918ab2f7f4b502215b9284551e5500` |
-
-## Publikacja nowego zestawu danych
-
-1. Nowe wyniki pomiaru zapisuj poza Gitem, w `.cache/measurement-artifacts/<nazwa>-<data>/`, w układzie
-   `reports/<katalog raportu>/<plik>`. Raport Markdown w `reports/<katalog raportu>/` zostaje w Gicie.
-2. Przejrzyj dane przed publikacją: usuń adresy, nazwy hostów, identyfikatory maszyn i instancji, lokalne ścieżki,
-   kwoty i koszty. Prywatne surowe dane sesji zostają lokalnie.
-3. Utwórz w katalogu danych `SHA256SUMS` (`sha256sum` ścieżek względnych) i archiwum `tar.gz` z deterministyczną
-   kolejnością, właścicielem i czasem plików. Policz SHA-256 archiwum.
-4. Sprawdź, że prefiks `measurements/<nazwa>-<data>/<sha256 archiwum>/` jest pusty
-   (`hf buckets list itsoltech/basal-rs/<prefiks> -R`). Jeśli nie jest pusty, nie wysyłaj.
-5. Wyślij archiwum: `hf buckets cp <archiwum> hf://buckets/itsoltech/basal-rs/<prefiks>/<archiwum>`.
-6. Pobierz je z powrotem do innego, pustego katalogu w `.cache/` i powtórz kroki z sekcji „Pobranie i
-   sprawdzenie”: suma archiwum i `sha256sum -c SHA256SUMS`.
-7. Dopiero po kroku 6 dopisz w raporcie URI, SHA-256 archiwum i stan publikacji. Lokalną kopię archiwum zachowaj.

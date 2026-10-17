@@ -20,6 +20,8 @@ WORKDIR /src
 FROM chef AS planner
 COPY Cargo.toml Cargo.lock rustfmt.toml ./
 COPY crates crates
+COPY sdk/rust sdk/rust
+COPY vendor vendor
 RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS build
@@ -27,10 +29,13 @@ FROM chef AS build
 # here to detect one)
 ENV CUDA_COMPUTE_CAP=80 CUDA_COMPUTE_CAPS=80,89,90
 COPY --from=planner /src/recipe.json recipe.json
+COPY vendor vendor
 RUN cargo chef cook --profile dist --recipe-path recipe.json \
  && cargo chef cook --profile dist --features basal-cli/cuda --target-dir target/cuda --recipe-path recipe.json
 COPY Cargo.toml Cargo.lock rustfmt.toml ./
 COPY crates crates
+COPY sdk/rust sdk/rust
+COPY vendor vendor
 ARG BASAL_GIT_SHA=unknown
 ENV BASAL_GIT_SHA=${BASAL_GIT_SHA}
 RUN cargo build --profile dist --locked \
@@ -53,9 +58,12 @@ FROM chef AS dev-build
 ARG CUDA_COMPUTE_CAPS=80,89,90
 ENV CUDA_COMPUTE_CAP=80 CUDA_COMPUTE_CAPS=${CUDA_COMPUTE_CAPS}
 COPY --from=planner /src/recipe.json recipe.json
+COPY vendor vendor
 RUN cargo chef cook --release --features basal-cli/cuda --recipe-path recipe.json
 COPY Cargo.toml Cargo.lock rustfmt.toml ./
 COPY crates crates
+COPY sdk/rust sdk/rust
+COPY vendor vendor
 ARG BASAL_GIT_SHA=unknown
 ENV BASAL_GIT_SHA=${BASAL_GIT_SHA}
 RUN cargo build --release --locked --features basal-cli/cuda && mkdir -p /out && cp target/release/basal /out/basal-cuda

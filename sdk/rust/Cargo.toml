@@ -1,0 +1,32 @@
+[package]
+name = "basal-client"
+version = "0.3.0"
+description = "Async Rust client for the native Basal HTTP API"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = ["crates-io"]
+repository = "https://github.com/itsoltech/basal-rs"
+readme = "README.md"
+keywords = ["basal", "inference", "sdk", "client"]
+categories = ["api-bindings"]
+include = ["src/**", "examples/**", "Cargo.toml", "README.md", "LICENSE", "NOTICE"]
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+indexmap = { version = "2", features = ["serde"] }
+bytes = "1"
+base64 = "0.22"
+http = "1"
+http-body-util = "0.1"
+hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "http1", "tokio"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "ring", "tls12", "rustls-platform-verifier"] }
+rustls = { version = "0.23.46", default-features = false, features = ["std", "ring", "tls12"] }
+tokio = { version = "1", default-features = false, features = ["net", "time"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

@@ -1,0 +1,3 @@
+# Hash-locked universal wheels. Update versions and hashes together after review.
+flit_core==4.1.0 \
+    --hash=sha256:17398cdd2c38b24047a5a9c93089ec5c0bf12ec3d1469bbf69c27ed7965299db

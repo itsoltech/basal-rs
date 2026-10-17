@@ -1,0 +1,20 @@
+{
+  "sdk_version": "0.1.0",
+  "live_responses": 7,
+  "answers_per_response": 2,
+  "compared_answers": 14,
+  "differences": 0,
+  "excluded_fields": [
+    "usage.latency_ms"
+  ],
+  "comparison": "same keys/values and exact IEEE-754 binary64 numbers",
+  "variants": [
+    "python.sync",
+    "python.async",
+    "node.esm",
+    "node.adapter",
+    "node.cjs",
+    "csharp.native",
+    "rust.native"
+  ]
+}

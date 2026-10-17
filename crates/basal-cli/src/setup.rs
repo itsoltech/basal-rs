@@ -5,7 +5,7 @@
 //!   manifest) into the user data directory, unless the system already has them. Only the NVIDIA driver has to be
 //!   installed by the administrator. `basal` runs the CUDA build with that directory on `LD_LIBRARY_PATH`.
 //! - `--prefetch`: the models `basal serve` would use (`--model`, `--config`, basal-serve.yml in the working
-//!   directory, else basal-1.5-4.5B) into the Hugging Face cache.
+//!   directory, else basal-2.0-4.5B) into the Hugging Face cache.
 //! - `--service`: a user service that runs `basal serve` with the same models or configuration (systemd on Linux,
 //!   launchd on macOS).
 //!
@@ -50,8 +50,8 @@ pub fn run(o: &Options) -> Result<()> {
         service(&serve_args(o)?)?;
     }
     crate::note!(
-        "next: `basal doctor` checks the machine, `basal serve` starts the server (`basal serve --model mini|4.5B|max` \
-         picks the model)"
+        "next: `basal doctor` checks the machine, `basal serve` starts the server; \
+         `--model 2.0-mini|2.0-4.5B|2.0-max` selects basal-2.0, `--model mini|4.5B|max` selects basal-1.5"
     );
     Ok(())
 }

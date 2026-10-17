@@ -499,9 +499,10 @@ fn configuration(r: &mut Report, file: Option<PathBuf>, model_refs: &[String]) -
         }
         Err(e) => {
             let fix = if model_refs.is_empty() {
-                "fix the file, write a new one (`basal init --force`) or give the model: `basal serve --model 4.5B`"
+                "fix the file, write a new one (`basal init --force`) or give the model: `basal serve --model 2.0-4.5B`"
             } else {
-                "`--model` takes mini, 4.5B, max, a name (owner Remek), owner/name, each with @revision, or a model directory"
+                "`--model` takes 2.0-mini/2.0-4.5B/2.0-max, omni-mini/omni-max, a name (owner Remek), \
+                 owner/name, each with @revision, or a model directory; mini/4.5B/max select basal-1.5"
             };
             r.fail("config", format!("{e:#}"), fix);
             None

@@ -2,10 +2,15 @@
 name: lint
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
     paths:
       - "crates/**"
+      - "vendor/**"
+      - "sdk/**"
+      - "contracts/basal/**"
+      - "tools/sdk/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
@@ -163,10 +168,59 @@ jobs:
       - name: Validate CI policy scripts
         run: shellcheck tools/ci/*.sh
 
+  sdk:
+    name: SDK package (${{ matrix.sdk }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        sdk: [python, typescript, csharp]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.11"
+      - name: Independent SDK manifest and lock versions
+        run: python tools/sdk/check-versions.py
+      - name: Selected locked dependency advisory audit
+        if: matrix.sdk == 'python' || matrix.sdk == 'typescript'
+        env:
+          SELECTED_SDK: ${{ matrix.sdk }}
+        run: python tools/sdk/audit-locks.py --sdk "$SELECTED_SDK"
+      - name: Python distribution from the hash-locked backend
+        if: matrix.sdk == 'python'
+        run: |
+          python -m pip install --require-hashes --only-binary=:all: -r tools/sdk/requirements-build.txt
+          python -m compileall -q sdk/python/src
+          python tools/sdk/build-python.py
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        if: matrix.sdk == 'typescript'
+        with:
+          node-version: "24"
+      - name: npm package and type declarations
+        if: matrix.sdk == 'typescript'
+        working-directory: sdk/typescript
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm pack --pack-destination dist
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1
+        if: matrix.sdk == 'csharp'
+        with:
+          dotnet-version: "10.0.401"
+      - name: NuGet package and C# example
+        if: matrix.sdk == 'csharp'
+        run: |
+          dotnet restore sdk/csharp/examples/Decide/Decide.csproj --locked-mode --configfile sdk/csharp/nuget.config
+          dotnet build sdk/csharp/examples/Decide/Decide.csproj --no-restore --configuration Release -p:ContinuousIntegrationBuild=true
+          dotnet pack sdk/csharp/ITSOL.Basal.Client/ITSOL.Basal.Client.csproj --no-restore --configuration Release -p:ContinuousIntegrationBuild=true --output sdk/csharp/dist
+
   # Preserve the required check name. Fail on any failed, cancelled or skipped prerequisite.
   lint:
     if: always()
-    needs: [format, rust, cuda, dependencies, workflows]
+    needs: [format, rust, cuda, dependencies, workflows, sdk]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -177,8 +231,9 @@ jobs:
           CUDA_RESULT: ${{ needs.cuda.result }}
           DEPENDENCIES_RESULT: ${{ needs.dependencies.result }}
           WORKFLOWS_RESULT: ${{ needs.workflows.result }}
+          SDK_RESULT: ${{ needs.sdk.result }}
         run: |
-          for result in "$FORMAT_RESULT" "$RUST_RESULT" "$CUDA_RESULT" "$DEPENDENCIES_RESULT" "$WORKFLOWS_RESULT"; do
+          for result in "$FORMAT_RESULT" "$RUST_RESULT" "$CUDA_RESULT" "$DEPENDENCIES_RESULT" "$WORKFLOWS_RESULT" "$SDK_RESULT"; do
             if [ "$result" != success ]; then
               echo "A required quality job did not succeed: $result"
               exit 1

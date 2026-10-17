@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>ITSOL.Basal</RootNamespace>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <PackageId>ITSOL.Basal.Client</PackageId>
+    <Version>0.2.0</Version>
+    <Authors>IT SOL</Authors>
+    <Description>HTTP client for the native Basal API, with typed decisions and asynchronous requests.</Description>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <RepositoryUrl>https://github.com/itsoltech/basal-rs</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageProjectUrl>https://github.com/itsoltech/basal-rs/blob/main/docs/SDK.md</PackageProjectUrl>
+    <PackageTags>basal;inference;sdk;client</PackageTags>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Include="../README.md" Pack="true" PackagePath="/" />
+    <None Include="../LICENSE" Pack="true" PackagePath="/" />
+    <None Include="../NOTICE" Pack="true" PackagePath="/" />
+  </ItemGroup>
+</Project>

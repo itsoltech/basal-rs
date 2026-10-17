@@ -16,7 +16,11 @@ pub(super) struct Requests {
 pub(super) fn model_name(name: &str) -> String {
     config::KNOWN_MODELS
         .iter()
-        .find(|m| m.short.eq_ignore_ascii_case(name) || m.repo.eq_ignore_ascii_case(name))
+        .find(|m| {
+            m.short.eq_ignore_ascii_case(name)
+                || m.repo.eq_ignore_ascii_case(name)
+                || m.repo.rsplit('/').next().is_some_and(|n| n.eq_ignore_ascii_case(name))
+        })
         .map_or_else(|| name.to_string(), |m| m.repo.rsplit('/').next().unwrap_or(name).to_string())
 }
 
@@ -72,7 +76,7 @@ impl Requests {
             let mut probe = template.clone();
             probe["state"] = json!("");
             probe["model"] = json!("client-validation");
-            basal_core::request::parse_request(&probe).context("invalid questions in template")?;
+            Self::validate(&probe).map_err(|e| anyhow::anyhow!(e.message)).context("invalid questions in template")?;
             if args.value {
                 ensure!(
                     probe["questions"].as_object().is_some_and(|q| q.len() == 1),
@@ -126,7 +130,15 @@ impl Requests {
     }
 
     pub fn validate(body: &Value) -> Result<(), Failure> {
-        basal_core::request::parse_request(body).map(|_| ()).map_err(Failure::decision)
+        // Validate the current contract's superset here. The selected model/server validates its trained
+        // format's limits; a client cannot infer that format from arbitrary local or remote model names.
+        basal_core::request::parse_request_for_format(
+            body,
+            basal_core::request::Dialect::TypeSafe,
+            basal_core::prompt::PromptFormat::Two,
+        )
+        .map(|_| ())
+        .map_err(Failure::decision)
     }
 
     pub fn validate_pointer(pointer: &str) -> Result<()> {
