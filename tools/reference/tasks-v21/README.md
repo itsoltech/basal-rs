@@ -47,3 +47,8 @@ FP32 answer quality and cannot establish a general performance advantage.
 rejections at `max_inflight=4`, and replica reservation drain after disconnected
 clients. It needs a separately supervised server with `--metrics`, and a new output
 directory. Its intentional 529 series is separate from capacity measurements.
+
+`summarize-quality.py` takes complete exports through `--reference` and repeated
+`--candidate LABEL=RELATIVE_DIRECTORY`, invokes a supplied CPU CLI `--basal`, and
+retains categorical answers, extraction spans/data, automation changes and mean TV.
+It audits observations; it does not turn FP32 agreement into semantic accuracy.

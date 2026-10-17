@@ -137,9 +137,8 @@ impl ModelManifest {
     /// Select a trained protocol and calibration matching the served option-order policy.
     pub fn load_with_orders(dir: &Path, orders: Option<&str>) -> Result<Self> {
         let config = crate::architecture::Architecture::parse(&read_json(&dir.join("config.json"))?)?;
-        let chat_style = match &config {
+        let mut chat_style = match &config {
             crate::architecture::Architecture::Llama(_) => ChatStyle::Llama,
-            crate::architecture::Architecture::Gemma4(c) if c.unified => ChatStyle::Gemma4Unified,
             crate::architecture::Architecture::Gemma4(_) => ChatStyle::Gemma4,
         };
         let basal = read_json(&dir.join("basal.json"))?;
@@ -207,6 +206,13 @@ impl ModelManifest {
                     ),
                     "unsupported Gemma chat template"
                 );
+                // Renderer grammar follows the validated template, independently of the decoder architecture.
+                // Ultra uses the same closed thought prefill as Unified; the older E4B template does not.
+                chat_style = if hash == "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4" {
+                    ChatStyle::Gemma4Unified
+                } else {
+                    ChatStyle::Gemma4
+                };
                 ensure!(prompt_format == PromptFormat::Two, "Gemma Basal needs prompt format 2");
             }
         }
