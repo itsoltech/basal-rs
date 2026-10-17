@@ -78,10 +78,10 @@ pub struct ModelConfig {
     /// Branch, tag or commit of `repo` (default: main). A commit pins the weights.
     #[serde(default)]
     pub revision: Option<String>,
-    /// auto (Llama f16, Gemma bf16), f16, bf16 or f32.
+    /// auto (Llama f16; validated Omni on Ada f16, other Gemma bf16), f16, bf16 or f32.
     #[serde(default = "default_dtype")]
     pub dtype: String,
-    /// auto, accurate (original arithmetic), or balanced (CUDA FP16 Llama, FP32 readout).
+    /// auto, accurate (Llama original, Gemma FP32 attention), or balanced (CUDA FP16 Llama).
     #[serde(default = "default_inference_mode")]
     pub inference_mode: String,
     /// `auto`: the table of this model and GPU from `gemm_cache`, generated when missing or not valid here; `none`:
@@ -279,9 +279,9 @@ pub fn model_ref(s: &str) -> Result<ModelConfig> {
         ensure!(repo.split('/').count() == 2, "model {s:?}: expected name, owner/name or a local directory");
         let rev = rev.map(str::to_string).or_else(|| known.map(|k| k.revision.to_string()));
         // Unknown repositories need architecture-aware precision after their metadata is loaded.
-        // Keep explicit defaults for known checkpoints and their generated configuration.
+        // Known Omni checkpoints also resolve precision after the GPU is known.
         let dtype = match known {
-            Some(m) if m.short.starts_with("omni-") => "bf16",
+            Some(m) if m.short.starts_with("omni-") => "auto",
             Some(_) => "f16",
             None => "auto",
         };
@@ -532,22 +532,32 @@ impl hf_hub::progress::ProgressHandler for DownloadLog {
     }
 }
 
+/// CLI auto precision: use the validated FP16 decoder for the two measured Omni
+/// model names on RTX 6000 Ada. Explicit precision always wins; media towers stay BF16.
+/// Other Gemma devices keep the published BF16 default.
+pub fn model_precision(value: &str, manifest: &ModelManifest) -> Result<basal_gpu::Precision> {
+    if value == "auto"
+        && matches!(&manifest.config, basal_core::architecture::Architecture::Gemma4(_))
+        && matches!(manifest.name.as_str(), "basal-omni-1.0-mini" | "basal-omni-1.0-max")
+        && basal_gpu::gpu_name().is_ok_and(|name| name == "NVIDIA RTX 6000 Ada Generation")
+    {
+        return Ok(basal_gpu::Precision::F16);
+    }
+    basal_gpu::model_precision(value, &manifest.config)
+}
+
 /// GEMM table of a model: `None` for `gemm_table: none` and on builds without CUDA; for `auto` the cached table of
-/// this model, dtype, GPU and cuBLASLt version, generated (one-time, minutes to an hour) when it is missing, was made
-/// on another GPU or cuBLASLt, or does not cover the model's weight shapes.
+/// this model, dtype, GPU and cuBLASLt version. Llama searches once when needed; Gemma
+/// falls back to fixed per-prompt GEMMs when no matching cached or bundled table is available.
 pub fn gemm_table(m: &ModelConfig, manifest: &ModelManifest, cache: &Path) -> Result<Option<PathBuf>> {
     let mut resolved = m.clone();
-    resolved.dtype = match basal_gpu::model_precision(&m.dtype, &manifest.config)? {
+    resolved.dtype = match model_precision(&m.dtype, manifest)? {
         basal_gpu::Precision::F16 => "f16",
         basal_gpu::Precision::Bf16 => "bf16",
         basal_gpu::Precision::F32 => "f32",
     }
     .into();
     let m = &resolved;
-    if matches!(manifest.config, basal_core::architecture::Architecture::Gemma4(_)) {
-        ensure!(matches!(m.gemm_table.as_str(), "auto" | "none"), "Gemma does not support Llama GEMM tables");
-        return Ok(None);
-    }
     match m.gemm_table.as_str() {
         "none" => return Ok(None),
         "auto" => {}
@@ -561,7 +571,7 @@ pub fn gemm_table(m: &ModelConfig, manifest: &ModelManifest, cache: &Path) -> Re
         return Ok(None); // Metal: no cuBLASLt tables
     };
     let gpu = basal_gpu::gpu_name()?;
-    let shapes = basal_gpu::projection_shapes(manifest.config.llama()?);
+    let shapes = basal_gpu::architecture_projection_shapes(&manifest.config)?;
     let path = cache.join(format!("{}-{}.json", manifest.name, m.dtype));
     let problem = match std::fs::read_to_string(&path) {
         Err(_) => Some("no table".to_string()),
@@ -589,6 +599,13 @@ pub fn gemm_table(m: &ModelConfig, manifest: &ModelManifest, cache: &Path) -> Re
                 Err(e) => crate::warn!("{}: GEMM table {file} of this build rejected ({e:#})", manifest.name),
             }
         }
+    }
+    if matches!(manifest.config, basal_core::architecture::Architecture::Gemma4(_)) && problem.is_some() {
+        crate::note!(
+            "{}: using fixed per-prompt GEMMs; an invariant Gemma table for this GPU can be generated with gemm-search",
+            manifest.name
+        );
+        return Ok(None);
     }
     if let Some(why) = problem {
         crate::progress!(

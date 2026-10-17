@@ -686,6 +686,100 @@ pub fn masked_softmax(scores: &Tensor, mask: &Tensor, l: usize, scale: f32) -> R
     scores.apply_op2_no_bwd(mask, &MaskedSoftmax { l, scale })
 }
 
+#[cfg(feature = "cuda")]
+struct GemmaAudioAttention<'a> {
+    relative: &'a Tensor,
+    valid: &'a Tensor,
+}
+
+#[cfg(feature = "cuda")]
+impl CustomOp3 for GemmaAudioAttention<'_> {
+    fn name(&self) -> &'static str {
+        "gemma-audio-attention-f32"
+    }
+
+    fn cpu_fwd(
+        &self,
+        _: &CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+    ) -> Result<(CpuStorage, Shape)> {
+        no_cpu()
+    }
+
+    fn cuda_fwd(
+        &self,
+        q: &CudaStorage,
+        ql: &Layout,
+        k: &CudaStorage,
+        kl: &Layout,
+        v: &CudaStorage,
+        vl: &Layout,
+    ) -> Result<(CudaStorage, Shape)> {
+        use candle_core::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
+        use candle_core::cuda_backend::WrapErr;
+
+        let (rs, rl) = self.relative.storage_and_layout();
+        let (vs, valid_layout) = self.valid.storage_and_layout();
+        let (candle_core::Storage::Cuda(relative), candle_core::Storage::Cuda(valid)) = (&*rs, &*vs) else {
+            candle_core::bail!("Gemma audio attention requires CUDA operands");
+        };
+        let n = ql.shape().dims()[0]; // Validated by gemma_audio_attention before dispatch.
+        let q = view!(q, f32, contiguous(ql, "audio query")?);
+        let k = view!(k, f32, contiguous(kl, "audio key")?);
+        let v = view!(v, f32, contiguous(vl, "audio value")?);
+        let r = view!(relative, f32, contiguous(rl, "audio relative positions")?);
+        let valid = view!(valid, u32, contiguous(valid_layout, "audio validity")?);
+        let dev = relative.device.clone();
+        // SAFETY: validated n is 1..=751. Every one of n*8 complete warps writes its 128
+        // output features exactly once, four per lane, before any subsequent operation reads them.
+        let out = unsafe { dev.alloc::<f32>(n * 8 * 128)? };
+        let f = cu::func(&dev, "gemma_audio_attention_f32", "basal_fused", cu::ptx())?;
+        let mut a = f.builder();
+        let frames = n as u32;
+        a.arg(&q).arg(&k).arg(&v).arg(&r).arg(&valid).arg(&out).arg(&frames);
+        let cfg =
+            LaunchConfig { grid_dim: ((frames * 8).div_ceil(4), 1, 1), block_dim: (128, 1, 1), shared_mem_bytes: 0 };
+        // SAFETY: the wrapper validates contiguous FP32 [n,8,128] Q/K/V, [13,8,128]
+        // relative positions and n u32 validity flags on one device. Indexes stay in these
+        // allocations. Each warp owns its shared-memory row and synchronizes it with syncwarp.
+        // Borrowed storage and driver pointer guards remain alive through enqueue on the same
+        // stream; the output has owned storage and Cudarc tracks outstanding stream accesses.
+        unsafe { a.launch(cfg) }.w()?;
+        Ok((CudaStorage { slice: Cs::F32(out), device: dev }, Shape::from((n, 8, 128))))
+    }
+}
+
+/// FP32 Conformer attention with 11 past frames, relative position 12-lag and a softcap of 50.
+/// Its reduction tree differs from cuBLAS; validate model quality against upstream FP32.
+#[cfg(feature = "cuda")]
+pub(crate) fn gemma_audio_attention(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    relative: &Tensor,
+    valid: &Tensor,
+) -> Result<Tensor> {
+    let (n, heads, width) = q.dims3()?;
+    if !(1..=751).contains(&n)
+        || heads != 8
+        || width != 128
+        || k.dims() != q.dims()
+        || v.dims() != q.dims()
+        || relative.dims() != [13, 8, 128]
+        || valid.dims() != [n]
+        || [q, k, v, relative].iter().any(|t| t.dtype() != DType::F32)
+        || valid.dtype() != DType::U32
+        || [k, v, relative, valid].iter().any(|t| !q.device().same_device(t.device()))
+    {
+        candle_core::bail!("invalid Gemma audio attention operands");
+    }
+    q.apply_op3_no_bwd(k, v, &GemmaAudioAttention { relative, valid })
+}
+
 /// Device address of the first element of a contiguous f32 CUDA tensor (for prefix K/V read by a kernel).
 #[cfg(feature = "cuda")]
 pub fn device_addr_f32(t: &Tensor) -> Result<u64> {
@@ -1302,4 +1396,97 @@ pub fn device_addr_f16(t: &Tensor) -> Result<u64> {
     let stream = cs.device.cuda_stream();
     let (p, _g) = slice.device_ptr(&stream);
     Ok(p + (start * 2) as u64)
+}
+
+/// Absolute positions for Gemma causal/sliding/image-group masking, evaluated on the GPU.
+#[cfg(feature = "cuda")]
+#[derive(Clone, Copy)]
+pub(crate) struct GemmaMask {
+    pub query_start: usize,
+    pub key_start: usize,
+    pub window: usize,
+    pub use_groups: bool,
+}
+
+#[cfg(feature = "cuda")]
+struct GemmaMaskedSoftmax(GemmaMask);
+
+#[cfg(feature = "cuda")]
+impl CustomOp2 for GemmaMaskedSoftmax {
+    fn name(&self) -> &'static str {
+        "gemma-masked-softmax-f32"
+    }
+    fn cpu_fwd(&self, _: &CpuStorage, _: &Layout, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> {
+        no_cpu()
+    }
+    fn cuda_fwd(
+        &self,
+        scores: &CudaStorage,
+        sl: &Layout,
+        groups: &CudaStorage,
+        gl: &Layout,
+    ) -> Result<(CudaStorage, Shape)> {
+        use candle_core::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
+        use candle_core::cuda_backend::WrapErr;
+        let [heads, queries, keys] = sl.shape().dims() else {
+            candle_core::bail!("Gemma softmax score rank");
+        };
+        let rows = heads * queries;
+        let n = sl.shape().elem_count();
+        let sv = view!(scores, f32, contiguous(sl, "Gemma scores")?);
+        let gv = view!(groups, u32, contiguous(gl, "Gemma image groups")?);
+        let dev = scores.device.clone();
+        // SAFETY: validated nonzero score dimensions fit u32. One block owns each row;
+        // its strided loops write every one of the row's key columns exactly once.
+        let out = unsafe { dev.alloc::<f32>(n)? };
+        let f = cu::func(&dev, "gemma_masked_softmax_f32", "basal_fused", cu::ptx())?;
+        let mut a = f.builder();
+        let args = [
+            *queries as u32,
+            *keys as u32,
+            self.0.query_start as u32,
+            self.0.key_start as u32,
+            self.0.window as u32,
+            u32::from(self.0.use_groups),
+        ];
+        a.arg(&sv).arg(&gv).arg(&out);
+        for arg in &args {
+            a.arg(arg);
+        }
+        let threads = if *keys >= 1024 { 256 } else { 128 };
+        let config = LaunchConfig { grid_dim: (rows as u32, 1, 1), block_dim: (threads, 1, 1), shared_mem_bytes: 0 };
+        // SAFETY: the wrapper validates contiguous FP32 scores, U32 groups on the same device,
+        // all absolute group indexes and the launch dimensions. Without image groups the kernel
+        // never reads the one-element sentinel. Blocks own disjoint rows and synchronize their
+        // reduction storage. Borrowed views and driver guards remain alive through enqueue;
+        // owned output and Cudarc's stream tracking preserve storage lifetimes after return.
+        unsafe { a.launch(config) }.w()?;
+        Ok((CudaStorage { slice: Cs::F32(out), device: dev }, sl.shape().clone()))
+    }
+}
+
+/// FP32 softmax with Gemma's positional mask; no dense CPU mask or per-layer mask upload.
+/// The reduction tree differs from Candle's standalone softmax; compare with upstream FP32.
+#[cfg(feature = "cuda")]
+pub(crate) fn gemma_masked_softmax(scores: &Tensor, groups: &Tensor, mask: GemmaMask) -> Result<Tensor> {
+    let (heads, queries, keys) = scores.dims3()?;
+    let group_len = groups.dims1()?;
+    let query_end = mask.query_start.checked_add(queries);
+    let key_end = mask.key_start.checked_add(keys);
+    let rows = heads.checked_mul(queries);
+    if scores.dtype() != DType::F32
+        || groups.dtype() != DType::U32
+        || !scores.device().same_device(groups.device())
+        || heads == 0
+        || queries == 0
+        || keys == 0
+        || group_len == 0
+        || [query_end, key_end, rows, Some(mask.window), Some(queries), Some(keys)]
+            .into_iter()
+            .any(|n| n.is_none_or(|n| n > u32::MAX as usize))
+        || (mask.use_groups && (query_end.is_none_or(|n| n > group_len) || key_end.is_none_or(|n| n > group_len)))
+    {
+        candle_core::bail!("invalid Gemma masked-softmax dimensions, groups or positions");
+    }
+    scores.apply_op2_no_bwd(groups, &GemmaMaskedSoftmax(mask))
 }

@@ -262,20 +262,52 @@ fn bicubic_rgb(input: &image::RgbImage, width: usize, height: usize) -> Result<i
     let (horizontal, hp) = resize_weights(input.width() as usize, width);
     let (vertical, vp) = resize_weights(input.height() as usize, height);
     let mut out = image::RgbImage::new(width as u32, height as u32);
+    // Pillow's separable resize rounds horizontal rows to u8 before the vertical pass.
+    // Cache those exact rows once; the previous loop recomputed them for each vertical tap.
+    // Bound temporary storage for extreme aspect ratios and keep the original path otherwise.
+    let horizontal_pixels = (input.height() as usize)
+        .checked_mul(width)
+        .and_then(|n| n.checked_mul(3))
+        .filter(|bytes| *bytes <= 32 << 20)
+        .map(|bytes| {
+            let mut rows = vec![0u8; bytes];
+            for y in 0..input.height() as usize {
+                for (x, (start_x, wx)) in horizontal.iter().enumerate() {
+                    let mut pixel = [1i64 << (hp - 1); 3];
+                    for (dx, &wx) in wx.iter().enumerate() {
+                        let rgb = input.get_pixel((start_x + dx) as u32, y as u32);
+                        for c in 0..3 {
+                            pixel[c] += i64::from(rgb[c]) * wx;
+                        }
+                    }
+                    for c in 0..3 {
+                        rows[(y * width + x) * 3 + c] = (pixel[c] >> hp).clamp(0, 255) as u8;
+                    }
+                }
+            }
+            rows
+        });
     let mut accum = vec![0i64; width.checked_mul(3).context("resize dimensions overflow")?];
     for (y, (start_y, wy)) in vertical.iter().enumerate() {
         accum.fill(1i64 << (vp - 1));
         for (dy, &wy) in wy.iter().enumerate() {
-            for (x, (start_x, wx)) in horizontal.iter().enumerate() {
-                let mut pixel = [1i64 << (hp - 1); 3];
-                for (dx, &wx) in wx.iter().enumerate() {
-                    let rgb = input.get_pixel((start_x + dx) as u32, (start_y + dy) as u32);
-                    for c in 0..3 {
-                        pixel[c] += i64::from(rgb[c]) * wx;
-                    }
+            if let Some(rows) = &horizontal_pixels {
+                let row = &rows[(start_y + dy) * width * 3..(start_y + dy + 1) * width * 3];
+                for (sum, pixel) in accum.iter_mut().zip(row) {
+                    *sum += i64::from(*pixel) * wy;
                 }
-                for c in 0..3 {
-                    accum[x * 3 + c] += (pixel[c] >> hp).clamp(0, 255) * wy;
+            } else {
+                for (x, (start_x, wx)) in horizontal.iter().enumerate() {
+                    let mut pixel = [1i64 << (hp - 1); 3];
+                    for (dx, &wx) in wx.iter().enumerate() {
+                        let rgb = input.get_pixel((start_x + dx) as u32, (start_y + dy) as u32);
+                        for c in 0..3 {
+                            pixel[c] += i64::from(rgb[c]) * wx;
+                        }
+                    }
+                    for c in 0..3 {
+                        accum[x * 3 + c] += (pixel[c] >> hp).clamp(0, 255) * wy;
+                    }
                 }
             }
         }
@@ -454,6 +486,16 @@ fn mel(x: &[f32]) -> Result<AudioInput> {
                 .max(0.0);
         }
     }
+    // Zero filter coefficients contribute only signed zero to a nonnegative finite
+    // energy. Preserve the bin order of every nonzero product and the same f64 sum.
+    let bands: [Vec<(usize, f64)>; 128] = std::array::from_fn(|k| {
+        (0..257)
+            .filter_map(|bin| {
+                let weight = filters[bin * 128 + k];
+                (weight != 0.0).then_some((bin, weight))
+            })
+            .collect()
+    });
     let mut features = vec![0.0f32; frames * 128];
     let mut valid = vec![false; frames];
     for i in 0..frames {
@@ -466,8 +508,16 @@ fn mel(x: &[f32]) -> Result<AudioInput> {
             data[n].re = f64::from(sample * window[n]);
         }
         fft.process(&mut data);
+        // Each FFT magnitude is shared by all 128 mel filters. Keep the same f64
+        // magnitude operation; non-finite inputs retain the original zero-product behavior.
+        let magnitudes: [f64; 257] = std::array::from_fn(|bin| data[bin].norm());
+        let finite = magnitudes.iter().all(|value| value.is_finite());
         for k in 0..128 {
-            let energy: f64 = (0..257).map(|bin| data[bin].norm() * filters[bin * 128 + k]).sum();
+            let energy: f64 = if finite {
+                bands[k].iter().map(|&(bin, weight)| magnitudes[bin] * weight).sum()
+            } else {
+                (0..257).map(|bin| magnitudes[bin] * filters[bin * 128 + k]).sum()
+            };
             features[i * 128 + k] = (energy + 0.001).ln() as f32 * if valid[i] { 1.0 } else { 0.0 };
         }
     }

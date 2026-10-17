@@ -1505,3 +1505,96 @@ ATTN_TC_PIPE_ENTRY(attn_tree_tc_pipe, true, true)
 ATTN_TC_STATIC_ENTRY(attn_tree_tc_static, true, true)
 ATTN_TC_STATIC_ENTRY(attn_tree_tc_qk1_static, false, true)
 ATTN_TC_STATIC_ENTRY(attn_tree_tc_f16_static, false, false)
+
+// Gemma mini Conformer: one warp computes one frame/head over at most 12 causal frames.
+// Q, K, V and relative-position operands, both dot products, softmax and output stay FP32.
+// This changes the reduction tree relative to separate cuBLAS calls and requires an FP32 quality gate.
+extern "C" __global__ void gemma_audio_attention_f32(const float *q, const float *k, const float *v,
+                                                    const float *relative, const unsigned *valid, float *out,
+                                                    unsigned n) {
+    const unsigned warp = threadIdx.x / 32;
+    const unsigned lane = threadIdx.x % 32;
+    const unsigned job = blockIdx.x * 4 + warp;
+    if (job >= n * 8) return;  // Uniform within each full warp.
+    const unsigned frame = job / 8, head = job % 8;
+    const unsigned first = frame > 11 ? frame - 11 : 0;
+    const unsigned len = frame - first + 1;
+    __shared__ float probabilities[4][12];
+    float query[4];
+#pragma unroll
+    for (unsigned part = 0; part < 4; ++part) query[part] = q[job * 128 + lane + part * 32];
+    for (unsigned j = 0; j < len; ++j) {
+        const unsigned key_frame = first + j;
+        const unsigned rel = 12 - (frame - key_frame);
+        float content = 0.0f, position = 0.0f;
+#pragma unroll
+        for (unsigned part = 0; part < 4; ++part) {
+            const unsigned d = lane + part * 32;
+            content = fmaf(query[part], k[(key_frame * 8 + head) * 128 + d], content);
+            position = fmaf(query[part], relative[(rel * 8 + head) * 128 + d], position);
+        }
+#pragma unroll
+        for (unsigned delta = 16; delta > 0; delta /= 2) {
+            content += __shfl_down_sync(0xffffffff, content, delta);
+            position += __shfl_down_sync(0xffffffff, position, delta);
+        }
+        if (lane == 0) {
+            const float score = 50.0f * tanhf((content + position) / 50.0f);
+            probabilities[warp][j] = score + (valid[key_frame] ? 0.0f : -1e9f);
+        }
+    }
+    __syncwarp();
+    if (lane == 0) {
+        float maximum = -INFINITY;
+        for (unsigned j = 0; j < len; ++j) maximum = fmaxf(maximum, probabilities[warp][j]);
+        float total = 0.0f;
+        for (unsigned j = 0; j < len; ++j) {
+            probabilities[warp][j] = expf(probabilities[warp][j] - maximum);
+            total += probabilities[warp][j];
+        }
+        for (unsigned j = 0; j < len; ++j) probabilities[warp][j] /= total;
+    }
+    __syncwarp();
+#pragma unroll
+    for (unsigned part = 0; part < 4; ++part) {
+        const unsigned d = lane + part * 32;
+        float value = 0.0f;
+        for (unsigned j = 0; j < len; ++j)
+            value = fmaf(probabilities[warp][j], v[((first + j) * 8 + head) * 128 + d], value);
+        out[job * 128 + d] = value;
+    }
+}
+
+// Gemma: derive causal/sliding/image-group masks from absolute positions, then FP32 softmax.
+// One independent block per (head, query) keeps the arithmetic independent of other prompts.
+__device__ __forceinline__ float gemma_mask_value(const float *row, const unsigned *groups,
+                                                 unsigned column, unsigned query, unsigned key_start,
+                                                 unsigned window, unsigned group) {
+    const unsigned key = key_start + column;
+    const bool vision = group != 0xffffffffu && groups[key] == group;
+    const bool allowed = (key <= query || vision) && (!window || query < window || key > query - window);
+    return row[column] + (allowed ? 0.0f : -INFINITY);
+}
+extern "C" __global__ void gemma_masked_softmax_f32(const float *scores, const unsigned *groups, float *out,
+                                                   unsigned queries, unsigned keys, unsigned query_start,
+                                                   unsigned key_start, unsigned window, unsigned use_groups) {
+    __shared__ float reduction[32];
+    const size_t row = blockIdx.x;
+    const unsigned query = query_start + row % queries;
+    const unsigned group = use_groups && window ? groups[query] : 0xffffffffu;
+    const float *x = scores + row * keys;
+    float *y = out + row * keys;
+    float maximum = -INFINITY;
+    for (unsigned j = threadIdx.x; j < keys; j += blockDim.x)
+        maximum = fmaxf(maximum, gemma_mask_value(x, groups, j, query, key_start, window, group));
+    maximum = block_reduce<true>(maximum, reduction);
+    float sum = 0.0f;
+    for (unsigned j = threadIdx.x; j < keys; j += blockDim.x) {
+        const float value = expf(gemma_mask_value(x, groups, j, query, key_start, window, group) - maximum);
+        y[j] = value;
+        sum += value;
+    }
+    sum = block_reduce<false>(sum, reduction);
+    const float inverse = 1.0f / sum;
+    for (unsigned j = threadIdx.x; j < keys; j += blockDim.x) y[j] *= inverse;
+}

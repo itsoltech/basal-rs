@@ -393,9 +393,9 @@ wiersza poleceń, np. `--max-batch-tokens`):
 |---|---|---|
 | `repo`, `revision` | | repozytorium Hugging Face `owner/name` i gałąź, tag albo commit (domyślnie `main`); pobierane do cache Hugging Face (`HF_HOME`, w obrazie `/data/hf`), przy braku dostępu do Hub z cache |
 | `path` | | lokalny katalog modelu (zamiast `repo`) |
-| `gemm_table` | `auto` | tabela algorytmów cuBLASLt (opis niżej); `none`: algorytmy dobierane przy pierwszym użyciu, wynik może zależeć od partii; albo ścieżka tabeli |
-| `dtype` | `f16` | `f16`, `bf16` albo `f32` (referencja numeryczna, wolna) |
-| `inference_mode` | `auto` | dobór attention; `accurate`: dotychczasowe obliczenia; `balanced`: CUDA Llama f16, iloczyn Q/K w f16, softmax i akumulacja w f32, prawdopodobieństwa hi/lo |
+| `gemm_table` | `auto` | tabela algorytmów cuBLASLt (opis niżej); `none`: Llama dobiera algorytmy przy pierwszym użyciu, Gemma wykonuje osobne GEMM dla promptów; albo ścieżka tabeli |
+| `dtype` | `auto` | Llama: `f16`; Omni na rozpoznanej RTX 6000 Ada: `f16`, pozostałe Gemma: `bf16`; jawne `f16`, `bf16` lub `f32` mają pierwszeństwo |
+| `inference_mode` | `auto` | dobór attention; `accurate`: pierwotne attention Llamy lub iloczyny FP32 Gemmy; `balanced`: CUDA Llama f16, softmax i akumulacja f32, prawdopodobieństwa hi/lo |
 | `max_batch_tokens` | 8192 | tokeny jednej partii, liczone po współdzieleniu prefiksów |
 | `schedule` | `hrrn` | kolejność przyjmowania żądań: `hrrn` (krótkie przed długimi, bez zagłodzenia) albo `fifo` |
 | `long_tokens` | 4096 | żądania powyżej tej liczby tokenów idą do toru długich żądań, który oddaje GPU krótkim partiom między warstwami; `0` wyłącza |
@@ -403,11 +403,16 @@ wiersza poleceń, np. `--max-batch-tokens`):
 
 `inference_mode: auto` wybiera `balanced` dla Basal 2.0 mini/4.5B/max na
 RTX 6000 Ada Generation, przy CUDA f16, fused kernels i odczycie f32.
-Poza tym zakresem zachowuje dotychczasową politykę. `accurate` zachowuje
-pierwotną arytmetykę attention; cały forward FP32 wymaga `dtype: f32`.
+Poza tym zakresem Llama zachowuje dotychczasową politykę. Omni mini/max z dekoderem
+FP16 na tej karcie wybierają iloczyny attention FP16 z softmaxem i akumulacją FP32;
+`accurate` wybiera iloczyny FP32. Jawne BF16/FP32 oraz pozostałe urządzenia Gemma
+również używają iloczynów FP32. Cały forward FP32 wymaga `dtype: f32`.
 Tryb można ustawić także przez `--inference-mode` w CLI i lokalnym kliencie.
 [Pomiary latency, QPS i jakości FP32](reports/precision-performance-ada-2026-10-16/README.md)
 obejmują również regresje p95 oraz brak bezpośredniej długiej referencji FP32 Max.
+Osobna [kampania Omni](reports/omni-performance-ada-2026-10-16/README.md) porównuje
+oba modele z upstream eager BF16 i opisuje jakość względem FP32. Szczegóły precyzji
+encoderów i tabel GEMM są w [OMNI.md](docs/OMNI.md).
 
 Opcje procesu: `addr` (nadpisywany przez zmienną `BASAL_ADDR`; w obrazie
 `0.0.0.0:8000`), `default_model`, `max_inflight` (1024, limit żądań w

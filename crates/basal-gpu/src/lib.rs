@@ -274,6 +274,30 @@ pub fn projection_shapes(c: &LlamaConfig) -> Vec<(usize, usize)> {
     vec![(qd + 2 * kvd, h), (h, qd), (2 * i, h), (h, i)]
 }
 
+/// Decoder projection shapes (N, K), including Gemma's per-layer embeddings and separate Q/K/V.
+pub fn architecture_projection_shapes(cfg: &basal_core::architecture::Architecture) -> Result<Vec<(usize, usize)>> {
+    use basal_core::architecture::Architecture;
+    let Architecture::Gemma4(c) = cfg else {
+        return Ok(projection_shapes(cfg.llama()?));
+    };
+    c.validate()?;
+    let h = c.hidden;
+    let mut shapes = std::collections::BTreeSet::new();
+    for layer in &c.layers {
+        let q = layer.heads.checked_mul(layer.head_dim).context("Gemma query shape overflow")?;
+        let kv = layer.kv_heads.checked_mul(layer.head_dim).context("Gemma KV shape overflow")?;
+        shapes.extend([(q, h), (h, q), (layer.intermediate, h), (h, layer.intermediate)]);
+        if !layer.shared_kv {
+            shapes.insert((kv, h));
+        }
+    }
+    if c.per_layer_input > 0 {
+        let packed = c.layers.len().checked_mul(c.per_layer_input).context("Gemma per-layer shape overflow")?;
+        shapes.extend([(packed, h), (c.per_layer_input, h), (h, c.per_layer_input)]);
+    }
+    Ok(shapes.into_iter().collect())
+}
+
 /// Name of the GPU (CUDA device 0), as recorded in GEMM tables.
 pub fn gpu_name() -> Result<String> {
     #[cfg(feature = "cuda")]

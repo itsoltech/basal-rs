@@ -25,7 +25,9 @@ impl RuntimeBackend {
     pub fn configure_inference(&mut self, mode: InferenceMode, model_name: &str) -> Result<(), InferenceConfigError> {
         match self {
             Self::Llama(b) => b.configure_inference(mode, model_name),
-            _ => {
+            Self::Gemma(b) => b.configure_inference(mode, model_name),
+            #[cfg(all(feature = "intel", not(target_os = "macos")))]
+            Self::Intel(_) => {
                 if mode == InferenceMode::Balanced {
                     Err(InferenceConfigError::UnsupportedBalanced)
                 } else {
@@ -97,7 +99,7 @@ impl RuntimeBackend {
     pub fn gemm_table_missing(&self) -> Vec<(usize, usize)> {
         match self {
             Self::Llama(b) => b.gemm_table_missing(),
-            Self::Gemma(_) => vec![],
+            Self::Gemma(b) => b.gemm_table_missing(),
             #[cfg(all(feature = "intel", not(target_os = "macos")))]
             Self::Intel(b) => b.gemm_table_missing(),
         }
@@ -106,7 +108,7 @@ impl RuntimeBackend {
     pub fn load_gemm_table(&mut self, path: &Path) -> Result<usize> {
         match self {
             Self::Llama(b) => b.load_gemm_table(path),
-            Self::Gemma(_) => anyhow::bail!("Gemma does not use Llama cuBLASLt algorithm tables"),
+            Self::Gemma(b) => b.load_gemm_table(path),
             #[cfg(all(feature = "intel", not(target_os = "macos")))]
             Self::Intel(b) => b.load_gemm_table(path),
         }

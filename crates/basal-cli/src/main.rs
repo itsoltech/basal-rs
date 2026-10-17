@@ -130,16 +130,16 @@ const INFERENCE_MODES: [&str; 3] = ["auto", "accurate", "balanced"];
 
 #[derive(Args, Clone)]
 struct GpuArgs {
-    /// Enable image/audio processors and native encoders (omni CUDA, bf16 or f32)
+    /// Enable image/audio processors and native encoders (omni CUDA; BF16/F32 encoders)
     #[arg(long)]
     media: bool,
     /// Option orders: 1, 2, auto or `2le<N>`; default 2 for format 1, 1 for format 2
     #[arg(long)]
     orders: Option<String>,
-    /// Weight/activation precision: auto (Llama f16, Gemma bf16), f16, bf16 or f32 (numerical reference)
+    /// Weight/activation precision: auto (Llama f16; Omni Ada f16, other Gemma bf16), f16, bf16 or f32 (numerical reference)
     #[arg(long, default_value = "auto")]
     dtype: String,
-    /// Attention arithmetic: auto, accurate (original), or balanced (CUDA f16, FP32 softmax)
+    /// Attention arithmetic: auto, accurate (Llama original, Gemma FP32 products), or balanced (CUDA f16 Llama)
     #[arg(long, default_value = "auto", value_parser = INFERENCE_MODES)]
     inference_mode: String,
     /// Letter logits: f32, or bf16 (f32 rounded to bf16, diagnostic emulation of a bf16 lm_head)
@@ -559,7 +559,7 @@ fn gpu_engine_at(dir: &Path, g: &GpuArgs) -> Result<Engine<GpuBackend>> {
     let backend = GpuBackend::load(
         dir,
         &manifest.config,
-        basal_gpu::model_precision(&g.dtype, &manifest.config)?,
+        config::model_precision(&g.dtype, &manifest)?,
         readout,
         Kernels::parse(&g.kernels)?,
         g.media,
@@ -914,7 +914,7 @@ fn run() -> Result<()> {
                 } else {
                     (16..=512).step_by(16).chain((640..=max_m).step_by(128)).collect()
                 };
-                let shapes = basal_gpu::projection_shapes(ModelManifest::load(&m.dir()?)?.config.llama()?);
+                let shapes = basal_gpu::architecture_projection_shapes(&ModelManifest::load(&m.dir()?)?.config)?;
                 let t = basal_gpu::gemm_search(&classes, &shapes, &dtype, invariant)?;
                 write_json(&out, &t)?;
             }
