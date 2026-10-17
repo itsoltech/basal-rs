@@ -5,4 +5,4 @@ set -e
 HOST=$1
 DIR=$2
 cd "$(dirname "$0")/../.."
-rsync -az --exclude target --exclude .venv --exclude '__pycache__' crates tools vendor Cargo.toml Cargo.lock rustfmt.toml "$HOST:$DIR/"
+rsync -az --relative --exclude target --exclude .venv --exclude '__pycache__' crates tools vendor sdk/rust Cargo.toml Cargo.lock rustfmt.toml "$HOST:$DIR/"

@@ -40,6 +40,30 @@ workspace `[patch.crates-io]` entry, its workspace exclusion and this directory
 when an official compatible Candle release uses the fixed `zip`. Review the
 release diff and repeat the dependency and build checks before removal.
 
-The patch is included in both Docker build paths and the CUDA source sync tool.
+The patch is included in both Docker build paths, the cloud build source sync
+and the CUDA source sync tool. The sync tools retain `sdk/rust` at its workspace
+path as required by the Docker builders.
 CI runs on changes under `vendor/`. Compilation and an advisory scan do not
 establish GPU runtime parity or renew the existing performance measurements.
+
+## Validation of this patch
+
+- `cargo deny --locked --all-features check --hide-inclusion-graph`: passes
+  advisories, licenses, sources and bans, retaining existing duplicate warnings.
+- Workspace formatting, release Clippy and private Rustdoc with warnings denied:
+  pass locally on Linux without GPU and with the Intel feature.
+- The existing scoped `paste` exception matches its approved dependency graph.
+- Applying `zip-9.patch` to the checksum-verified official archive reproduces
+  all 68 selected source, manifest and license/documentation files exactly.
+- A local one-off comparison reads upstream's three PTH fixtures (plain,
+  nested state dictionary and Fortran storage) and NPZ eagerly and by index.
+  Names, original dtypes, shapes and the decoded values of seven small integer
+  tensors agree before and after the patch. No test framework or CI test gate
+  is added. This is an archive-reader check, not model inference parity.
+- The pinned cargo-chef 0.1.73 recipe assembles in an isolated directory with
+  the vendored dependency and resolves locked metadata successfully.
+
+Full Docker execution was unavailable in the local environment because access
+to the daemon was denied. CUDA and Metal compile/lint verification belongs to
+CI; no GPU inference was performed for this patch. Existing performance reports
+continue to describe their original measured binaries.
