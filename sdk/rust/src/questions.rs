@@ -197,7 +197,7 @@ pub struct ScoreAnswer<'a> {
 pub struct MultiAnswer<'a> {
     /// Selected labels, possibly empty.
     pub selected: &'a [String],
-    /// Applied threshold.
+    /// Applied threshold; absent for exact, IoU and F1 objectives.
     pub threshold: Option<f64>,
     /// Selection objective.
     pub objective: MultiObjective,
@@ -225,11 +225,13 @@ pub struct ToolAnswer<'a> {
     pub multi: bool,
     /// Selected tool keys in multi mode.
     pub tools: &'a [String],
+    /// Multi-mode selection threshold or objective score and constraints, with `tools` as selected labels.
+    pub selection: Option<MultiAnswer<'a>>,
     /// Ranked candidates.
     pub ranking: &'a [ToolRanking],
     /// Server probabilities.
     pub probabilities: &'a IndexMap<String, f64>,
-    /// Original result, including selection scores and deferral metadata.
+    /// Original result, including deferral metadata.
     pub raw: &'a Answer,
 }
 /// Checked act answer.
@@ -301,21 +303,22 @@ kind!(ScoreKind, ScoreAnswer, Score, a, {
         raw: a,
     })
 });
-kind!(MultiKind, MultiAnswer, Multi, a, {
+/// Selection fields shared by multi answers and multi-mode tool answers.
+fn selection<'a>(a: &'a Answer, selected: &'a [String]) -> Result<MultiAnswer<'a>, Error> {
+    let objective = a.objective.unwrap_or_default();
     Ok(MultiAnswer {
-        selected: a.selected.as_deref().ok_or(Error::InvalidResponse("missing selected labels"))?,
-        threshold: if a.objective.unwrap_or_default() == MultiObjective::Threshold {
-            Some(result_number(a.threshold)?)
-        } else {
-            None
-        },
-        objective: a.objective.unwrap_or_default(),
+        selected,
+        threshold: if objective == MultiObjective::Threshold { Some(result_number(a.threshold)?) } else { None },
+        objective,
         expected_score: a.expected_score.map(|v| result_number(Some(v))).transpose()?,
         constraints_applied: a.constraints_applied.as_ref(),
         set_confidence: result_number(a.set_confidence)?,
         probabilities: &a.probabilities,
         raw: a,
     })
+}
+kind!(MultiKind, MultiAnswer, Multi, a, {
+    selection(a, a.selected.as_deref().ok_or(Error::InvalidResponse("missing selected labels"))?)
 });
 kind!(ActKind, ActAnswer, Act, a, {
     let costs = a.expected_costs.as_ref().ok_or(Error::InvalidResponse("missing expected costs"))?;
@@ -341,15 +344,12 @@ kind!(ActKind, ActAnswer, Act, a, {
 
 kind!(ToolKind, ToolAnswer, Tool, a, {
     let multi = a.multi.unwrap_or(false);
-    if multi {
-        let tools = a.tools.as_ref().ok_or(Error::InvalidResponse("missing selected tools"))?;
+    let selection = if multi {
+        let tools = a.tools.as_deref().ok_or(Error::InvalidResponse("missing selected tools"))?;
         if tools.iter().any(|k| !a.probabilities.contains_key(k)) {
             return Err(Error::InvalidResponse("unknown selected tool"));
         }
-        result_number(a.set_confidence)?;
-        if a.objective.unwrap_or_default() == MultiObjective::Threshold {
-            result_number(a.threshold)?;
-        }
+        Some(selection(a, tools)?)
     } else {
         result_number(a.confidence)?;
         if a.tool.as_ref().is_some_and(|k| !a.probabilities.contains_key(k))
@@ -357,7 +357,8 @@ kind!(ToolKind, ToolAnswer, Tool, a, {
         {
             return Err(Error::InvalidResponse("missing or unknown tool"));
         }
-    }
+        None
+    };
     if a.ranking.as_deref().unwrap_or_default().iter().any(|r| {
         !a.probabilities.contains_key(&r.tool) || !r.probability.is_finite() || !(0.0..=1.0).contains(&r.probability)
     }) {
@@ -369,6 +370,7 @@ kind!(ToolKind, ToolAnswer, Tool, a, {
         confidence: a.confidence,
         multi,
         tools: a.tools.as_deref().unwrap_or_default(),
+        selection,
         ranking: a.ranking.as_deref().unwrap_or_default(),
         probabilities: &a.probabilities,
         raw: a,
