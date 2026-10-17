@@ -98,6 +98,8 @@ Docker: [niżej](#uruchomienie-w-dockerze). Wymagania, ścieżki i szczegóły:
 Nowe aliasy `omni-1.1-max` oraz `omni-ultra` i eksperymentalne zadania upstream 2.1
 opisuje [docs/TASKS.md](docs/TASKS.md). Zakres potwierdzenia GPU tych modeli jest
 oddzielny od kompilacji i zgodności logiki zadań na CPU.
+Pomiary nowych modeli, kontrolę FP32 i rzeczywiste wywołania czterech SDK opisuje
+[raport upstream 2.1](reports/upstream-2.1-2026-10-17/README.md).
 
 Modele format 2 mają natywny odczyt 2–255 opcji oraz typ `tool`.
 Domyślnie serwujemy `basal-2.0-4.5B`. Aliasy `mini`, `4.5B` i `max` nadal wskazują modele basal-1.5.
