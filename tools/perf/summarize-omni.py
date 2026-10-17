@@ -40,6 +40,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--measurement-artifacts', type=Path, required=True, help='one screen/confirm result directory')
     p.add_argument('--inputs', type=Path, required=True, help='restored frozen corpus used by that run')
+    p.add_argument('--ladder-choice', help='Optional known correct option key for every single-question text ladder')
     p.add_argument('--out', type=Path, required=True)
     a = p.parse_args()
     if a.out.exists():
@@ -111,6 +112,9 @@ def main():
                              and not response.get('usage', {}).get('truncated'))
                     if source and 'target_tokens' in source:
                         valid = valid and response.get('usage', {}).get('input_tokens') == source['target_tokens']
+                        if a.ladder_choice:
+                            answers = response.get('answers', {})
+                            valid = valid and len(answers) == 1 and next(iter(answers.values())).get('choice') == a.ladder_choice
                     if not valid or not row.get('valid') or not math.isfinite(row.get('elapsed_ms', math.nan)):
                         issues.append(dict(kind='invalid_response', tag=tag, id=row['id'], phase=row['phase']))
                         continue
@@ -182,6 +186,8 @@ def main():
                   media_case_summary=summarize_groups(case_groups, ['model', 'id', 'variant']),
                   summary_method='median of retained repetition metrics; ranges retain between-run variation',
                   inputs_sha256=hashlib.sha256((a.inputs/'provenance.json').read_bytes()).hexdigest())
+    if a.ladder_choice:
+        result['ladder_expected_choice'] = a.ladder_choice
     a.out.write_text(json.dumps(result, indent=2) + '\n')
     print(json.dumps(dict(status=result['status'], issues=len(issues), summarized_phases=len(summaries))))
     if issues:
