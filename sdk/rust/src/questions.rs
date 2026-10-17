@@ -1,7 +1,11 @@
 //! Typed question factories and checked result views, without a schema/runtime dependency.
 
-use crate::{Answer, DecisionRequest, DecisionResponse, Error, EvidenceSpan, Question, QuestionType, Usage};
+use crate::{
+    Answer, DecisionRequest, DecisionResponse, Error, EvidenceSpan, Language, MediaDetail, MediaInput, Question,
+    QuestionType, ToolRanking, Usage,
+};
 use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{marker::PhantomData, sync::Arc};
 
@@ -30,13 +34,71 @@ pub struct EvidenceOptions {
 }
 /// Multi options intentionally have no evidence field.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct MultiOptions {
+pub struct MultiOptions<'a> {
     /// Selection threshold in [0, 1], default 0.5.
     pub threshold: Option<f64>,
     /// Minimum number of labels.
     pub min: Option<usize>,
     /// Maximum number of labels.
     pub max: Option<usize>,
+    /// Selection objective, threshold by default.
+    pub objective: MultiObjective,
+    /// Mutually exclusive label keys.
+    pub exclusive: &'a [&'a str],
+    /// Fallback label key.
+    pub fallback: Option<&'a str>,
+    /// Explicit fallback probability threshold.
+    pub fallback_threshold: Option<f64>,
+}
+/// Multi-set selection objective.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MultiObjective {
+    /// Independent threshold selection.
+    #[default]
+    Threshold,
+    /// Most probable exact set.
+    Exact,
+    /// Maximize expected intersection over union.
+    Iou,
+    /// Maximize expected F1.
+    F1,
+}
+impl MultiObjective {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Threshold => "threshold",
+            Self::Exact => "exact",
+            Self::Iou => "iou",
+            Self::F1 => "f1",
+        }
+    }
+}
+/// Optional non-tool choices.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolExtra {
+    /// Answer without a tool.
+    AnswerDirectly,
+    /// Ask the user for clarification.
+    AskUser,
+    /// Select no tool.
+    None,
+}
+/// Tool routing options. Definitions are normalized and validated by the server.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ToolOptions<'a> {
+    /// Non-tool choices appended to definitions. `None` keeps the server default (all three for a single tool,
+    /// none in multi mode); `Some(&[])` sends no non-tool choice.
+    pub extra: Option<&'a [ToolExtra]>,
+    /// Number of ranked candidates.
+    pub rank: Option<usize>,
+    /// Select a set of tools.
+    pub multi: bool,
+    /// Certified error target.
+    pub max_error: Option<f64>,
+    /// Multi selection rules, only valid in multi mode.
+    pub selection: MultiOptions<'a>,
 }
 /// Act options. Omitted criteria use true/false outcomes.
 #[derive(Debug, Clone, Copy, Default)]
@@ -67,6 +129,12 @@ pub struct DecisionOptions<'a> {
     pub model: Option<&'a str>,
     /// Native facts mode.
     pub facts: Option<FactsMode>,
+    /// Explicit prompt language.
+    pub lang: Option<Language>,
+    /// Inline media in request order.
+    pub media: Option<&'a [MediaInput]>,
+    /// Image detail budget.
+    pub detail: Option<MediaDetail>,
 }
 
 mod sealed {
@@ -129,13 +197,41 @@ pub struct ScoreAnswer<'a> {
 pub struct MultiAnswer<'a> {
     /// Selected labels, possibly empty.
     pub selected: &'a [String],
-    /// Applied threshold.
-    pub threshold: f64,
+    /// Applied threshold; absent for exact, IoU and F1 objectives.
+    pub threshold: Option<f64>,
+    /// Selection objective.
+    pub objective: MultiObjective,
+    /// Expected objective score, if reported.
+    pub expected_score: Option<f64>,
+    /// Constraint diagnostics.
+    pub constraints_applied: Option<&'a Value>,
     /// Confidence of exactly the selected set.
     pub set_confidence: f64,
     /// Independent P(yes) values.
     pub probabilities: &'a IndexMap<String, f64>,
     /// Original answer.
+    pub raw: &'a Answer,
+}
+/// Checked tool routing answer. This SDK never executes a selected tool.
+#[derive(Debug, Clone, Copy)]
+pub struct ToolAnswer<'a> {
+    /// Single selected tool; absent for multi mode or deferral.
+    pub tool: Option<&'a str>,
+    /// Whether an actual tool was selected.
+    pub call: bool,
+    /// Single-tool confidence, absent in multi mode.
+    pub confidence: Option<f64>,
+    /// Whether this is a multi selection.
+    pub multi: bool,
+    /// Selected tool keys in multi mode.
+    pub tools: &'a [String],
+    /// Multi-mode selection threshold or objective score and constraints, with `tools` as selected labels.
+    pub selection: Option<MultiAnswer<'a>>,
+    /// Ranked candidates.
+    pub ranking: &'a [ToolRanking],
+    /// Server probabilities.
+    pub probabilities: &'a IndexMap<String, f64>,
+    /// Original result, including deferral metadata.
     pub raw: &'a Answer,
 }
 /// Checked act answer.
@@ -207,14 +303,22 @@ kind!(ScoreKind, ScoreAnswer, Score, a, {
         raw: a,
     })
 });
-kind!(MultiKind, MultiAnswer, Multi, a, {
+/// Selection fields shared by multi answers and multi-mode tool answers.
+fn selection<'a>(a: &'a Answer, selected: &'a [String]) -> Result<MultiAnswer<'a>, Error> {
+    let objective = a.objective.unwrap_or_default();
     Ok(MultiAnswer {
-        selected: a.selected.as_deref().ok_or(Error::InvalidResponse("missing selected labels"))?,
-        threshold: result_number(a.threshold)?,
+        selected,
+        threshold: if objective == MultiObjective::Threshold { Some(result_number(a.threshold)?) } else { None },
+        objective,
+        expected_score: a.expected_score.map(|v| result_number(Some(v))).transpose()?,
+        constraints_applied: a.constraints_applied.as_ref(),
         set_confidence: result_number(a.set_confidence)?,
         probabilities: &a.probabilities,
         raw: a,
     })
+}
+kind!(MultiKind, MultiAnswer, Multi, a, {
+    selection(a, a.selected.as_deref().ok_or(Error::InvalidResponse("missing selected labels"))?)
 });
 kind!(ActKind, ActAnswer, Act, a, {
     let costs = a.expected_costs.as_ref().ok_or(Error::InvalidResponse("missing expected costs"))?;
@@ -224,7 +328,7 @@ kind!(ActKind, ActAnswer, Act, a, {
     let calibration = a
         .calibration
         .as_deref()
-        .filter(|v| matches!(*v, "validated" | "unvalidated"))
+        .filter(|v| matches!(*v, "validated" | "unvalidated" | "text"))
         .ok_or(Error::InvalidResponse("invalid calibration"))?;
     Ok(ActAnswer {
         action: a.action.as_deref().ok_or(Error::InvalidResponse("missing action"))?,
@@ -234,6 +338,41 @@ kind!(ActKind, ActAnswer, Act, a, {
         expected_costs: costs,
         probabilities: &a.probabilities,
         evidence: a.evidence.as_deref().unwrap_or_default(),
+        raw: a,
+    })
+});
+
+kind!(ToolKind, ToolAnswer, Tool, a, {
+    let multi = a.multi.unwrap_or(false);
+    let selection = if multi {
+        let tools = a.tools.as_deref().ok_or(Error::InvalidResponse("missing selected tools"))?;
+        if tools.iter().any(|k| !a.probabilities.contains_key(k)) {
+            return Err(Error::InvalidResponse("unknown selected tool"));
+        }
+        Some(selection(a, tools)?)
+    } else {
+        result_number(a.confidence)?;
+        if a.tool.as_ref().is_some_and(|k| !a.probabilities.contains_key(k))
+            || (a.tool.is_none() && a.deferred != Some(true))
+        {
+            return Err(Error::InvalidResponse("missing or unknown tool"));
+        }
+        None
+    };
+    if a.ranking.as_deref().unwrap_or_default().iter().any(|r| {
+        !a.probabilities.contains_key(&r.tool) || !r.probability.is_finite() || !(0.0..=1.0).contains(&r.probability)
+    }) {
+        return Err(Error::InvalidResponse("invalid tool ranking"));
+    }
+    Ok(ToolAnswer {
+        tool: a.tool.as_deref(),
+        call: a.call.ok_or(Error::InvalidResponse("missing call flag"))?,
+        confidence: a.confidence,
+        multi,
+        tools: a.tools.as_deref().unwrap_or_default(),
+        selection,
+        ranking: a.ranking.as_deref().unwrap_or_default(),
+        probabilities: &a.probabilities,
         raw: a,
     })
 });
@@ -268,6 +407,8 @@ pub type ScoreQuestion = QuestionSpec<ScoreKind>;
 pub type MultiQuestion = QuestionSpec<MultiKind>;
 /// A typed act question.
 pub type ActQuestion = QuestionSpec<ActKind>;
+/// Tool routing definition.
+pub type ToolQuestion = QuestionSpec<ToolKind>;
 
 fn text(value: &str) -> Result<(), Error> {
     if value.trim().is_empty() {
@@ -304,14 +445,14 @@ fn base(kind: QuestionType, instructions: &str, evidence: bool) -> Result<Questi
     }
     Ok(q)
 }
-/// Choose one of 2–10 ordered named options.
+/// Choose one of 2–255 ordered named options.
 pub fn choice_with_options(
     instructions: &str,
     values: &[(&str, &str)],
     options: ChoiceOptions,
 ) -> Result<ChoiceQuestion, Error> {
     let mut q = base(QuestionType::Choice, instructions, options.evidence)?;
-    q.criteria = Some(criteria(values, 2, 10)?);
+    q.criteria = Some(criteria(values, 2, 255)?);
     if matches!(options.option_keys, OptionKeys::Hide) {
         q.extra.insert("option_keys".into(), Value::String("hide".into()));
     }
@@ -321,14 +462,14 @@ pub fn choice_with_options(
 pub fn noul_with_options(instructions: &str, options: EvidenceOptions) -> Result<NoulQuestion, Error> {
     Ok(QuestionSpec::new(base(QuestionType::Noul, instructions, options.evidence)?))
 }
-/// Score over 2–10 ordered text levels.
+/// Score over 2–255 ordered text levels.
 pub fn score_with_options(
     instructions: &str,
     levels: &[&str],
     options: EvidenceOptions,
 ) -> Result<ScoreQuestion, Error> {
-    if !(2..=10).contains(&levels.len()) {
-        return Err(Error::InvalidRequest("score requires 2–10 levels"));
+    if !(2..=255).contains(&levels.len()) {
+        return Err(Error::InvalidRequest("score requires 2–255 levels"));
     }
     let mut values = Vec::with_capacity(levels.len());
     for &level in levels {
@@ -343,26 +484,94 @@ pub fn score_with_options(
 pub fn multi_with_options(
     instructions: &str,
     values: &[(&str, &str)],
-    options: MultiOptions,
+    options: MultiOptions<'_>,
 ) -> Result<MultiQuestion, Error> {
     let mut q = base(QuestionType::Multi, instructions, false)?;
     q.criteria = Some(criteria(values, 1, usize::MAX)?);
-    if let Some(t) = options.threshold {
-        q.extra.insert("threshold".into(), finite(t, true)?);
+    q.extra.extend(selection_fields(options, Some(values))?);
+    Ok(QuestionSpec::new(q))
+}
+fn selection_fields(options: MultiOptions<'_>, values: Option<&[(&str, &str)]>) -> Result<Map<String, Value>, Error> {
+    let mut fields = Map::new();
+    if options.objective != MultiObjective::Threshold {
+        fields.insert("objective".into(), serde_json::to_value(options.objective).map_err(Error::Encode)?);
     }
-    for (name, limit) in [("min", options.min), ("max", options.max)] {
-        if let Some(limit) = limit {
-            if limit > values.len() {
+    if let Some(t) = options.threshold {
+        if options.objective != MultiObjective::Threshold {
+            return Err(Error::InvalidRequest("threshold requires threshold objective"));
+        }
+        fields.insert("threshold".into(), finite(t, true)?);
+    }
+    for (key, limit) in [("min", options.min), ("max", options.max)] {
+        if let Some(n) = limit {
+            if values.is_some_and(|v| n > v.len()) {
                 return Err(Error::InvalidRequest("selection limit exceeds labels"));
             }
-            q.extra.insert(name.into(), Value::from(limit));
+            fields.insert(key.into(), n.into());
         }
     }
-    if options.min.zip(options.max).is_some_and(|(min, max)| min > max) {
+    if options.min.zip(options.max).is_some_and(|(a, b)| a > b) {
         return Err(Error::InvalidRequest("min exceeds max"));
+    }
+    let valid_key = |key: &str| -> Result<(), Error> {
+        text(key)?;
+        if values.is_some_and(|vs| !vs.iter().any(|(k, _)| *k == key)) {
+            return Err(Error::InvalidRequest("unknown selection key"));
+        }
+        Ok(())
+    };
+    if !options.exclusive.is_empty() {
+        for key in options.exclusive {
+            valid_key(key)?;
+        }
+        fields.insert("exclusive".into(), serde_json::to_value(options.exclusive).map_err(Error::Encode)?);
+    }
+    if let Some(key) = options.fallback {
+        valid_key(key)?;
+        fields.insert("fallback".into(), key.into());
+    }
+    if let Some(t) = options.fallback_threshold {
+        if options.fallback.is_none() {
+            return Err(Error::InvalidRequest("fallback_threshold requires fallback"));
+        }
+        fields.insert("fallback_threshold".into(), finite(t, true)?);
+    }
+    Ok(fields)
+}
+/// Select tools from OpenAI, MCP or Anthropic definition objects.
+pub fn tool_with_options(instructions: &str, tools: &[Value], options: ToolOptions<'_>) -> Result<ToolQuestion, Error> {
+    if tools.iter().any(|v| !v.is_object()) {
+        return Err(Error::InvalidRequest("tools require definition objects"));
+    }
+    let mut q = base(QuestionType::Tool, instructions, false)?;
+    q.extra.insert("tools".into(), Value::Array(tools.to_vec()));
+    if let Some(extra) = options.extra {
+        q.extra.insert("extra".into(), serde_json::to_value(extra).map_err(Error::Encode)?);
+    }
+    if let Some(rank) = options.rank {
+        if rank == 0 {
+            return Err(Error::InvalidRequest("rank must be positive"));
+        }
+        q.extra.insert("rank".into(), rank.into());
+    }
+    if let Some(v) = options.max_error {
+        q.extra.insert("max_error".into(), finite(v, true)?);
+    }
+    let fields = selection_fields(options.selection, None)?;
+    if !options.multi && !fields.is_empty() {
+        return Err(Error::InvalidRequest("selection rules require multi"));
+    }
+    if options.multi {
+        q.extra.insert("multi".into(), true.into());
+        q.extra.extend(fields);
     }
     Ok(QuestionSpec::new(q))
 }
+/// Select one tool with default options; does not execute it.
+pub fn tool(instructions: &str, tools: &[Value]) -> Result<ToolQuestion, Error> {
+    tool_with_options(instructions, tools, ToolOptions::default())
+}
+
 /// Select an action from a full cost matrix. Omitted criteria use true/false outcomes.
 pub fn act_with_options(instructions: &str, costs: &CostMatrix, options: ActOptions<'_>) -> Result<ActQuestion, Error> {
     if costs.is_empty() {
@@ -370,7 +579,7 @@ pub fn act_with_options(instructions: &str, costs: &CostMatrix, options: ActOpti
     }
     let mut q = base(QuestionType::Act, instructions, options.evidence)?;
     if let Some(values) = options.criteria {
-        q.criteria = Some(criteria(values, 2, 10)?);
+        q.criteria = Some(criteria(values, 2, 255)?);
     }
     let outcomes: Vec<&str> =
         options.criteria.map_or_else(|| vec!["true", "false"], |values| values.iter().map(|(key, _)| *key).collect());
@@ -445,6 +654,17 @@ impl Questions {
                 ),
             );
         }
+        request.lang = options.lang;
+        request.detail = options.detail;
+        if let Some(media) = options.media {
+            if !(1..=8).contains(&media.len()) {
+                return Err(Error::InvalidRequest("media requires 1 to 8 inputs"));
+            }
+            for input in media {
+                input.validate()?;
+            }
+            request.media = Some(media.to_vec());
+        }
         for (id, entry) in &self.entries {
             request.insert_question(id, &entry.data)?;
         }
@@ -458,6 +678,20 @@ impl Questions {
         for (id, entry) in &self.entries {
             let answer = raw.answers.get(id).ok_or(Error::InvalidResponse("missing answer"))?;
             (entry.validate)(answer)?;
+            if matches!(answer.kind, QuestionType::Tool)
+                && answer.multi.unwrap_or(false)
+                    != entry.data.extra.get("multi").and_then(Value::as_bool).unwrap_or(false)
+            {
+                return Err(Error::InvalidResponse("mismatched tool selection mode"));
+            }
+            if matches!(answer.kind, QuestionType::Multi)
+                || (matches!(answer.kind, QuestionType::Tool) && answer.multi == Some(true))
+            {
+                let expected = entry.data.extra.get("objective").and_then(Value::as_str).unwrap_or("threshold");
+                if answer.objective.unwrap_or_default().as_str() != expected {
+                    return Err(Error::InvalidResponse("mismatched selection objective"));
+                }
+            }
             if answer.probabilities.values().any(|v| !v.is_finite() || !(0.0..=1.0).contains(v)) {
                 return Err(Error::InvalidResponse("invalid probabilities"));
             }
@@ -493,6 +727,8 @@ pub enum AnswerResult<'a> {
     Multi(MultiAnswer<'a>),
     /// Selected action.
     Act(ActAnswer<'a>),
+    /// Tool routing result.
+    Tool(ToolAnswer<'a>),
 }
 
 impl<'a> AnswerResult<'a> {
@@ -503,6 +739,7 @@ impl<'a> AnswerResult<'a> {
             QuestionType::Score => ScoreKind::parse(answer).map(Self::Score),
             QuestionType::Multi => MultiKind::parse(answer).map(Self::Multi),
             QuestionType::Act => ActKind::parse(answer).map(Self::Act),
+            QuestionType::Tool => ToolKind::parse(answer).map(Self::Tool),
         }
     }
 }
@@ -637,6 +874,10 @@ impl<S: AnswerSchema> TypedDecisionResponse<S> {
     pub fn multi(&self, id: &str) -> Result<MultiAnswer<'_>, Error> {
         MultiKind::parse(self.answer_raw(id)?)
     }
+    /// Look up a tool routing answer by key.
+    pub fn tool(&self, id: &str) -> Result<ToolAnswer<'_>, Error> {
+        ToolKind::parse(self.answer_raw(id)?)
+    }
     /// Look up an action answer by key.
     pub fn act(&self, id: &str) -> Result<ActAnswer<'_>, Error> {
         ActKind::parse(self.answer_raw(id)?)
@@ -713,7 +954,7 @@ macro_rules! questions {
     }};
 }
 
-/// Choose from 2–10 options with default display settings.
+/// Choose from 2–255 options with default display settings.
 pub fn choice(instructions: &str, values: &[(&str, &str)]) -> Result<ChoiceQuestion, Error> {
     choice_with_options(instructions, values, ChoiceOptions::default())
 }

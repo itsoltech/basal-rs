@@ -1,9 +1,16 @@
 import { buildRequest, type QuestionSet, type TypedDecisionResponse, type DecisionOptions } from "./questions.js";
 export * from "./questions.js";
+export * from "./media.js";
 /** Native Basal wire types. Criterion order is significant; do not sort keys. */
 export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+export type Calibration = "validated" | "unvalidated" | "text";
+export type MultiObjective = "threshold" | "exact" | "iou" | "f1";
+export interface MediaInput { type: "image" | "audio"; data: string }
+export interface MediaUsage { images: number; audio: number; media_tokens: number; detail: "default" | "high" }
+export interface ToolRanking { tool: string; probability: number }
+export type ToolDefinition = Record<string, JsonValue>;
 export interface Question {
-  type?: "choice" | "noul" | "score" | "multi" | "act";
+  type?: "choice" | "noul" | "score" | "multi" | "act" | "tool";
   instructions?: JsonValue;
   criteria?: Record<string, JsonValue> | JsonValue[];
   levels?: Record<string, JsonValue> | JsonValue[];
@@ -16,33 +23,57 @@ export interface Question {
   costs?: Record<string, number> | Record<string, Record<string, number>>;
   defer_action?: string;
   max_error?: number;
+  objective?: MultiObjective;
+  exclusive?: readonly string[];
+  fallback?: string;
+  fallback_threshold?: number;
+  tools?: readonly ToolDefinition[];
+  extra?: readonly ("answer_directly" | "ask_user" | "none")[];
+  rank?: number;
+  multi?: boolean;
 }
 export interface DecisionRequest {
   state: JsonValue;
   questions: Record<string, Question>;
   model?: string;
   facts?: "off" | "auto";
+  lang?: "pl" | "en";
+  media?: readonly MediaInput[];
+  detail?: "default" | "high";
 }
 export interface EvidenceSpan { text: string; start: number; end: number; probability: number }
-interface BaseAnswer<K extends string = string> { probabilities: Record<K, number>; evidence?: EvidenceSpan[] }
+interface BaseAnswer<K extends string = string> { probabilities: Record<K, number>; evidence?: EvidenceSpan[]; calibration?: Calibration }
 export interface ChoiceAnswer<K extends string = string> extends BaseAnswer<K> { type: "choice"; choice: K; confidence: number }
 export interface NoulAnswer extends BaseAnswer<"true" | "false"> { type: "noul"; noul: number; confidence: number }
 export interface ScoreAnswer extends BaseAnswer { type: "score"; score: number; legend: Record<string, string>; confidence: number }
-export interface MultiAnswer<K extends string = string> extends BaseAnswer<K> { type: "multi"; selected: K[]; threshold: number; set_confidence: number }
+export interface SelectionResult<K extends string = string> {
+  threshold?: number; objective?: MultiObjective; expected_score?: number | null; constraints_applied?: JsonValue;
+  set_confidence: number;
+}
+export interface MultiAnswer<K extends string = string> extends BaseAnswer<K>, SelectionResult<K> { type: "multi"; selected: K[] }
+export interface SingleToolAnswer extends BaseAnswer {
+  type: "tool"; multi?: false; tool: string | null; call: boolean; confidence: number;
+  ranking?: ToolRanking[]; deferred?: boolean; refused?: string; max_error?: string;
+}
+export interface MultiToolAnswer extends BaseAnswer, SelectionResult {
+  type: "tool"; multi: true; tools: string[]; call: boolean; ranking?: ToolRanking[];
+}
+export type ToolAnswer = SingleToolAnswer | MultiToolAnswer;
 export interface ActAnswer<K extends string = string, A extends string = string> extends BaseAnswer<K> {
   type: "act";
   action: A;
   answer: K;
   expected_costs: Record<A, number>;
   confidence: number;
-  calibration: "validated" | "unvalidated";
+  calibration: Calibration;
   refused?: string;
   max_error?: string;
+  deferred?: boolean;
 }
-export type Answer = ChoiceAnswer | NoulAnswer | ScoreAnswer | MultiAnswer | ActAnswer;
-export interface Usage { input_tokens: number; output_tokens: number; questions?: number; branches?: number; latency_ms?: number }
+export type Answer = ChoiceAnswer | NoulAnswer | ScoreAnswer | MultiAnswer | ActAnswer | ToolAnswer;
+export interface Usage { input_tokens: number; output_tokens: number; questions?: number; branches?: number; latency_ms?: number; longest_prompt_tokens?: number; second_order_branches?: number; media?: MediaUsage }
 export interface DecisionResponse { model: string; answers: Record<string, Answer>; usage: Usage }
-export interface ModelMetadata { name: string; description?: string; release_date?: string; mode?: string; early_exit?: JsonValue[] }
+export interface ModelMetadata { name: string; description?: string; release_date?: string; mode?: string; early_exit?: JsonValue[]; prompt_format?: number; orders?: JsonValue; temperature_per_prim?: Record<string,number>; media?: ("image"|"audio")[] }
 export interface ModelsResponse { models: ModelMetadata[] }
 
 export class BasalError extends Error {}

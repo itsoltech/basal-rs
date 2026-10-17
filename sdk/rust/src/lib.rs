@@ -4,6 +4,8 @@
 //! this crate preserves native probabilities and confidence. No GPU runtime or automatic retries are needed.
 //! See `examples/decide.rs` for usage. Dropping an in-flight future cancels the client-side request.
 
+mod media;
+pub use media::*;
 mod questions;
 pub use questions::*;
 
@@ -27,16 +29,18 @@ use serde_json::{Map, Value};
 #[non_exhaustive]
 #[serde(rename_all = "lowercase")]
 pub enum QuestionType {
-    /// Choose one of 2–10 options.
+    /// Choose one of 2–255 options.
     Choice,
     /// Probability of "yes".
     Noul,
-    /// Weighted mean of 2–10 ordered levels, indexed from zero.
+    /// Weighted mean of 2–255 ordered levels, indexed from zero.
     Score,
     /// Select labels independently (basal-1.5).
     Multi,
     /// Select the action with minimum expected cost (basal-1.5).
     Act,
+    /// Select a tool or a set of tools without executing them.
+    Tool,
 }
 
 /// Native question. Criteria and cost matrices are JSON objects or arrays; preserve their order.
@@ -75,6 +79,15 @@ pub struct DecisionRequest {
     /// Exact model name advertised by `/v1/models`, or omitted for the server default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Explicit prompt language.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang: Option<Language>,
+    /// Inline media in processing order.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media: Option<Vec<MediaInput>>,
+    /// Image detail budget.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<MediaDetail>,
     /// Optional native fields such as `facts: "auto"`. Do not repeat the fields above.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -83,7 +96,15 @@ pub struct DecisionRequest {
 impl DecisionRequest {
     /// Create a request for the server's default model. Insert questions with [`Self::insert_question`].
     pub fn new(state: impl Into<Value>) -> Self {
-        Self { state: state.into(), questions: Map::new(), model: None, extra: Map::new() }
+        Self {
+            state: state.into(),
+            questions: Map::new(),
+            model: None,
+            lang: None,
+            media: None,
+            detail: None,
+            extra: Map::new(),
+        }
     }
 
     /// Insert a typed question, preserving insertion order. Replaces an existing question of the same ID.
@@ -131,9 +152,36 @@ pub struct Answer {
     pub max_error: Option<String>,
     /// Evidence offsets count Unicode characters, not bytes or UTF-16 code units.
     pub evidence: Option<Vec<EvidenceSpan>>,
+    /// Multi selection objective; absent for legacy threshold responses.
+    pub objective: Option<MultiObjective>,
+    /// Expected score of the selected set.
+    pub expected_score: Option<f64>,
+    /// Constraint diagnostics preserved from the server.
+    pub constraints_applied: Option<Value>,
+    /// Selected single tool, null on certified deferral.
+    pub tool: Option<String>,
+    /// Selected tools in multi mode.
+    pub tools: Option<Vec<String>>,
+    /// Whether the result selects an actual tool.
+    pub call: Option<bool>,
+    /// Whether this is a multi-tool result.
+    pub multi: Option<bool>,
+    /// Ranked tool candidates.
+    pub ranking: Option<Vec<ToolRanking>>,
+    /// Whether the automatic decision was deferred.
+    pub deferred: Option<bool>,
     /// Future native fields.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
+}
+
+/// A ranked tool candidate.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ToolRanking {
+    /// Candidate key.
+    pub tool: String,
+    /// Calibrated probability.
+    pub probability: f64,
 }
 
 /// Supporting span in the original state.
@@ -162,6 +210,12 @@ pub struct Usage {
     pub branches: Option<u64>,
     /// Server-side latency, in milliseconds.
     pub latency_ms: Option<f64>,
+    /// Longest executed full prompt.
+    pub longest_prompt_tokens: Option<u64>,
+    /// Number of branches executed in the second order.
+    pub second_order_branches: Option<u64>,
+    /// Inline media accounting, when present.
+    pub media: Option<MediaUsage>,
     /// Future usage fields.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -186,6 +240,14 @@ pub struct DecisionResponse {
 pub struct ModelMetadata {
     /// Model name.
     pub name: String,
+    /// Prompt protocol version.
+    pub prompt_format: Option<u8>,
+    /// Fixed numeric or adaptive string order policy.
+    pub orders: Option<Value>,
+    /// Supported media kinds when enabled.
+    pub media: Option<Vec<MediaKind>>,
+    /// Calibration temperature by primitive.
+    pub temperature_per_prim: Option<indexmap::IndexMap<String, f64>>,
     /// Native metadata fields, retained without interpretation.
     #[serde(flatten)]
     pub extra: Map<String, Value>,

@@ -113,7 +113,13 @@ public sealed class MultiField : AnswerField<MultiResult>
     /// <summary>Selected criterion keys.</summary>
     public IReadOnlyList<string> Selected => Result.Selected;
     /// <summary>Selection threshold.</summary>
-    public double Threshold => Result.Threshold;
+    public double? Threshold => Result.Threshold;
+    /// <summary>Selection objective.</summary>
+    public string Objective => Result.Objective;
+    /// <summary>Expected objective score.</summary>
+    public double? ExpectedScore => Result.ExpectedScore;
+    /// <summary>Constraint diagnostics, when reported.</summary>
+    public JsonElement? ConstraintsApplied => Result.ConstraintsApplied;
     /// <summary>Native set confidence.</summary>
     public double SetConfidence => Result.SetConfidence;
     /// <summary>Independent label probabilities.</summary>
@@ -141,8 +147,36 @@ public sealed class ActField : AnswerField<ActResult>
     public string? Refused => Result.Refused;
     /// <summary>Optional native certified error target warning.</summary>
     public string? MaxError => Result.MaxError;
+    /// <summary>Whether the automatic action was deferred, when reported.</summary>
+    public bool? Deferred => Result.Deferred;
 }
 
+/// <summary>A named, checked tool routing result.</summary>
+public sealed class ToolField : AnswerField<ToolResult>
+{
+    internal ToolField(AnswerBinding binding):base(binding) { }
+    internal override ToolField Copy(AnswerBinding binding)=>new(binding);
+    /// <summary>Selected single tool.</summary>
+    public string? Tool=>Result.Tool;
+    /// <summary>Whether an actual tool was selected.</summary>
+    public bool Call=>Result.Call;
+    /// <summary>Selected tool set.</summary>
+    public IReadOnlyList<string> Tools=>Result.Tools;
+    /// <summary>Ranked candidates.</summary>
+    public IReadOnlyList<ToolRanking> Ranking=>Result.Ranking;
+    /// <summary>Complete routing probabilities.</summary>
+    public IReadOnlyDictionary<string,double> Probabilities=>Result.Probabilities;
+    /// <summary>Single-tool confidence, null in multi mode.</summary>
+    public double? Confidence=>Result.Confidence;
+    /// <summary>Multi-tool selection score and constraints.</summary>
+    public MultiResult? Selection=>Result.Selection;
+    /// <summary>Whether the certified single-tool decision was deferred, when reported.</summary>
+    public bool? Deferred=>Result.Deferred;
+    /// <summary>Refused tool on deferral.</summary>
+    public string? Refused=>Result.Refused;
+    /// <summary>Optional native certified error target warning.</summary>
+    public string? MaxError=>Result.MaxError;
+}
 /// <summary>Create typed question and answer fields. Factory methods infer IDs from the returned object's member names.
 /// Use only inside a synchronous Prepare or DecideAsync factory; builders are not thread-safe.</summary>
 public sealed class QuestionBuilder
@@ -297,6 +331,10 @@ public sealed class QuestionBuilder
         => Act(ITSOL.Basal.Questions.Act(instructions, costs, options));
     /// <summary>Reuse an action definition in a fresh named answer field.</summary>
     public ActField Act(ActQuestion question) => new(Register(question));
+    /// <summary>Create a tool routing field.</summary>
+    public ToolField Tool(string instructions,IReadOnlyList<System.Text.Json.Nodes.JsonObject> tools,ToolOptions? options=null)=>Tool(ITSOL.Basal.Questions.Tool(instructions,tools,options));
+    /// <summary>Reuse a tool definition in a fresh named field.</summary>
+    public ToolField Tool(ToolQuestion question)=>new(Register(question));
     /// <summary>Create a named field for a generic definition; read its Result property.</summary>
     public AnswerField<TAnswer> From<TAnswer>(QuestionSpec<TAnswer> question) where TAnswer : AnswerResult => new(Register(question));
 
@@ -310,6 +348,8 @@ public sealed class QuestionBuilder
     public MultiField Add(string id, MultiQuestion question) => new(RegisterExplicit(id, question));
     /// <summary>Bind an action definition.</summary>
     public ActField Add(string id, ActQuestion question) => new(RegisterExplicit(id, question));
+    /// <summary>Bind a tool routing definition.</summary>
+    public ToolField Add(string id, ToolQuestion question) => new(RegisterExplicit(id, question));
     /// <summary>Bind a generic definition, with typed access through the field's Result property.</summary>
     public AnswerField<TAnswer> Add<TAnswer>(string id, QuestionSpec<TAnswer> question) where TAnswer : AnswerResult
         => new(RegisterExplicit(id, question));

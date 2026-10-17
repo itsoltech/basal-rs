@@ -9,7 +9,7 @@ import math
 from types import MappingProxyType
 from typing import Any, Generic, Literal, Self, TypeVar, cast, overload
 
-from .types import DecisionResponse, EvidenceSpan, JsonValue, Question as WireQuestion, Usage
+from .types import Calibration, DecisionResponse, EvidenceSpan, JsonValue, MultiObjective, Question as WireQuestion, ToolRanking, Usage
 
 OptionKeys = Literal["show", "hide"]
 
@@ -42,9 +42,27 @@ class ScoreAnswer:
 @dataclass(frozen=True, slots=True)
 class MultiAnswer:
     selected: tuple[str, ...]
-    threshold: float
+    threshold: float | None
     set_confidence: float
     probabilities: dict[str, float]
+    objective: MultiObjective | None = None
+    expected_score: float | None = None
+    constraints_applied: JsonValue = None
+
+
+@dataclass(frozen=True, slots=True)
+class ToolAnswer:
+    call: bool
+    probabilities: dict[str, float]
+    tool: str | None = None
+    confidence: float | None = None
+    multi: bool = False
+    tools: tuple[str, ...] = ()
+    ranking: tuple[ToolRanking, ...] = ()
+    selection: MultiAnswer | None = None
+    deferred: bool | None = None
+    refused: str | None = None
+    max_error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,15 +71,16 @@ class ActAnswer:
     answer: str
     expected_costs: dict[str, float]
     confidence: float
-    calibration: Literal["validated", "unvalidated"]
+    calibration: Calibration
     probabilities: dict[str, float]
     evidence: tuple[EvidenceSpan, ...] = ()
     refused: str | None = None
     max_error: str | None = None
+    deferred: bool | None = None
 
 
 TAnswer = TypeVar("TAnswer")
-AnswerResult = ChoiceAnswer | NoulAnswer | ScoreAnswer | MultiAnswer | ActAnswer
+AnswerResult = ChoiceAnswer | NoulAnswer | ScoreAnswer | MultiAnswer | ActAnswer | ToolAnswer
 TSchema = TypeVar("TSchema", bound="Questions")
 TSchema_co = TypeVar("TSchema_co", bound="Questions", covariant=True)
 
@@ -137,7 +156,7 @@ class QuestionSpec(Generic[TAnswer]):
                 _number(span["probability"], "span probability", True)
             evidence = tuple(cast(list[EvidenceSpan], spans))
             kind = data["type"]
-            result: ChoiceAnswer | NoulAnswer | ScoreAnswer | MultiAnswer | ActAnswer
+            result: AnswerResult
             if kind == "choice":
                 selected = _text(data["choice"], "choice")
                 if selected not in cast(dict[str, JsonValue], self._payload["criteria"]):
@@ -151,13 +170,34 @@ class QuestionSpec(Generic[TAnswer]):
                     raise ValueError("invalid legend")
                 result = ScoreAnswer(_number(data["score"], "score"), _number(data["confidence"], "confidence", True), legend, probabilities, evidence)
             elif kind == "multi":
-                labels = data["selected"]
-                if not isinstance(labels, list) or any(not isinstance(k, str) or k not in cast(dict[str, JsonValue], self._payload["criteria"]) for k in labels):
-                    raise ValueError("invalid selected labels")
-                result = MultiAnswer(tuple(labels), _number(data["threshold"], "threshold", True), _number(data["set_confidence"], "set_confidence", True), probabilities)
+                result = _selection(data, "selected", set(cast(dict[str, JsonValue], self._payload["criteria"])), self._payload.get("objective", "threshold"))
+            elif kind == "tool":
+                if not isinstance(data.get("call"), bool):
+                    raise ValueError("invalid tool call flag")
+                is_multi = self._payload.get("multi", False)
+                if not isinstance(data.get("multi", False), bool) or data.get("multi", False) != is_multi:
+                    raise ValueError("mismatched tool selection mode")
+                selection = _selection(data, "tools", set(probabilities), self._payload.get("objective", "threshold")) if is_multi else None
+                selected_tool = data.get("tool")
+                if not is_multi and (selected_tool is not None and selected_tool not in probabilities):
+                    raise ValueError("unknown tool")
+                if not is_multi and selected_tool is None and data.get("deferred") is not True:
+                    raise ValueError("missing tool")
+                ranking = data.get("ranking", [])
+                if not isinstance(ranking, list):
+                    raise ValueError("invalid ranking")
+                for entry in ranking:
+                    if not isinstance(entry, dict) or entry.get("tool") not in probabilities:
+                        raise ValueError("invalid ranking entry")
+                    _number(entry["probability"], "ranking probability", True)
+                result = ToolAnswer(data["call"], probabilities, tool=selected_tool,
+                    confidence=None if is_multi else _number(data["confidence"], "confidence", True),
+                    multi=bool(is_multi), tools=selection.selected if selection else (), ranking=tuple(ranking),
+                    selection=selection, deferred=_optional_bool(data, "deferred"),
+                    refused=_optional_text(data, "refused"), max_error=_optional_text(data, "max_error"))
             else:
                 action = _text(data["action"], "action")
-                if action not in cast(dict[str, JsonValue], self._payload["costs"]) or data["calibration"] not in ("validated", "unvalidated"):
+                if action not in cast(dict[str, JsonValue], self._payload["costs"]) or data["calibration"] not in ("validated", "unvalidated", "text"):
                     raise ValueError("invalid action or calibration")
                 costs = data["expected_costs"]
                 if not isinstance(costs, dict) or any(not isinstance(k, str) for k in costs):
@@ -167,10 +207,76 @@ class QuestionSpec(Generic[TAnswer]):
                 refused, max_error = data.get("refused"), data.get("max_error")
                 if any(value is not None and not isinstance(value, str) for value in (refused, max_error)):
                     raise ValueError("invalid act metadata")
-                result = ActAnswer(action, _text(data["answer"], "answer"), costs, _number(data["confidence"], "confidence", True), data["calibration"], probabilities, evidence, refused, max_error)
+                result = ActAnswer(action, _text(data["answer"], "answer"), costs, _number(data["confidence"], "confidence", True), data["calibration"], probabilities, evidence, refused, max_error, _optional_bool(data, "deferred"))
             return cast(TAnswer, result)
         except (KeyError, TypeError, ValueError, OverflowError) as error:
             raise BasalProtocolError("Basal returned an invalid typed answer") from error
+
+
+def _optional_bool(data: dict[str, Any], key: str) -> bool | None:
+    value = data.get(key)
+    if value is not None and not isinstance(value, bool):
+        raise ValueError(f"invalid {key}")
+    return value
+
+
+def _optional_text(data: dict[str, Any], key: str) -> str | None:
+    value = data.get(key)
+    if value is not None and not isinstance(value, str):
+        raise ValueError(f"invalid {key}")
+    return value
+
+
+def _selection(data: dict[str, Any], field: str, keys: set[str], objective: JsonValue) -> MultiAnswer:
+    labels = data[field]
+    if not isinstance(labels, list) or any(not isinstance(k, str) or k not in keys for k in labels):
+        raise ValueError("invalid selected labels")
+    if objective == "threshold":
+        threshold = _number(data["threshold"], "threshold", True)
+        expected_score = None
+    else:
+        if objective not in ("exact", "iou", "f1") or data.get("objective") != objective:
+            raise ValueError("invalid objective")
+        threshold = None
+        expected_score = None if data.get("expected_score") is None else _number(data["expected_score"], "expected_score", True)
+    return MultiAnswer(tuple(labels), threshold, _number(data["set_confidence"], "set_confidence", True),
+        data["probabilities"], cast(MultiObjective, objective), expected_score, data.get("constraints_applied"))
+
+
+def _selection_options(keys: set[str] | None, *, objective: MultiObjective = "threshold", threshold: float | None = None,
+        min: int | None = None, max: int | None = None, exclusive: Sequence[str] | None = None,
+        fallback: str | None = None, fallback_threshold: float | None = None) -> dict[str, JsonValue]:
+    if objective not in ("threshold", "exact", "iou", "f1"):
+        raise ValueError("invalid multi objective")
+    fields: dict[str, JsonValue] = {}
+    if objective != "threshold":
+        fields["objective"] = objective
+    if threshold is not None:
+        if objective != "threshold":
+            raise ValueError("threshold applies only to objective threshold")
+        fields["threshold"] = _number(threshold, "threshold", True)
+    for name, value in (("min", min), ("max", max)):
+        if value is not None:
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0 or (keys is not None and value > len(keys)):
+                raise ValueError(f"invalid {name}")
+            fields[name] = value
+    if min is not None and max is not None and min > max:
+        raise ValueError("min exceeds max")
+    if exclusive is not None:
+        if isinstance(exclusive, str):
+            raise ValueError("exclusive must be a sequence of keys")
+        fields["exclusive"] = [_text(key, "exclusive key") for key in exclusive]
+        if keys is not None and any(key not in keys for key in exclusive):
+            raise ValueError("unknown exclusive key")
+    if fallback is not None:
+        fields["fallback"] = _text(fallback, "fallback")
+        if keys is not None and fallback not in keys:
+            raise ValueError("unknown fallback")
+    if fallback_threshold is not None:
+        if fallback is None:
+            raise ValueError("fallback_threshold requires fallback")
+        fields["fallback_threshold"] = _number(fallback_threshold, "fallback_threshold", True)
+    return fields
 
 
 def _display(evidence: bool, option_keys: OptionKeys) -> dict[str, JsonValue]:
@@ -187,7 +293,7 @@ def _display(evidence: bool, option_keys: OptionKeys) -> dict[str, JsonValue]:
 class ChoiceQuestion(QuestionSpec[ChoiceAnswer]):
     def __init__(self, instructions: str, criteria: Mapping[str, str], *, evidence: bool = False,
                  option_keys: OptionKeys = "show"):
-        super().__init__("choice", instructions, {"criteria": _criteria(criteria, 2, 10), **_display(evidence, option_keys)})
+        super().__init__("choice", instructions, {"criteria": _criteria(criteria, 2, 255), **_display(evidence, option_keys)})
 
 
 class NoulQuestion(QuestionSpec[NoulAnswer]):
@@ -197,26 +303,53 @@ class NoulQuestion(QuestionSpec[NoulAnswer]):
 
 class ScoreQuestion(QuestionSpec[ScoreAnswer]):
     def __init__(self, instructions: str, levels: Sequence[str], *, evidence: bool = False):
-        if isinstance(levels, str) or not 2 <= len(levels) <= 10:
-            raise ValueError("score requires 2–10 ordered levels")
+        if isinstance(levels, str) or not 2 <= len(levels) <= 255:
+            raise ValueError("score requires 2–255 ordered levels")
         super().__init__("score", instructions, {"criteria": [_text(value, "level") for value in levels], **_display(evidence, "show")})
 
 
 class MultiQuestion(QuestionSpec[MultiAnswer]):
-    def __init__(self, instructions: str, criteria: Mapping[str, str], *, threshold: float = 0.5,
-                 min: int | None = None, max: int | None = None):
+    def __init__(self, instructions: str, criteria: Mapping[str, str], *, threshold: float | None = None,
+                 min: int | None = None, max: int | None = None, objective: MultiObjective = "threshold",
+                 exclusive: Sequence[str] | None = None, fallback: str | None = None, fallback_threshold: float | None = None):
         fields: dict[str, JsonValue] = {"criteria": _criteria(criteria, 1, None)}
-        _number(threshold, "threshold", True)
-        if threshold != 0.5:
-            fields["threshold"] = threshold
-        for name, value in (("min", min), ("max", max)):
-            if value is not None:
-                if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= len(criteria):
-                    raise ValueError(f"{name} must be an integer within the number of labels")
-                fields[name] = value
-        if min is not None and max is not None and min > max:
-            raise ValueError("min must not exceed max")
+        fields.update(_selection_options(set(criteria), objective=objective, threshold=threshold, min=min, max=max,
+            exclusive=exclusive, fallback=fallback, fallback_threshold=fallback_threshold))
         super().__init__("multi", instructions, fields)
+
+
+class ToolQuestion(QuestionSpec[ToolAnswer]):
+    """Select tools from OpenAI, MCP or Anthropic definitions; never executes them."""
+
+    def __init__(self, instructions: str, tools: Sequence[Mapping[str, JsonValue]], *,
+                 extra: Sequence[Literal["answer_directly", "ask_user", "none"]] | None = None, rank: int | None = None,
+                 multi: bool = False, max_error: float | None = None, objective: MultiObjective = "threshold",
+                 threshold: float | None = None, min: int | None = None, max: int | None = None,
+                 exclusive: Sequence[str] | None = None, fallback: str | None = None, fallback_threshold: float | None = None):
+        if isinstance(tools, (str, bytes)) or not all(isinstance(item, Mapping) for item in tools):
+            raise ValueError("tools must contain definition objects")
+        if not isinstance(multi, bool):
+            raise ValueError("multi must be boolean")
+        fields: dict[str, JsonValue] = {"tools": [deepcopy(dict(item)) for item in tools]}
+        # Omitted extras keep the server default: all non-tool choices for a single tool, none for multi.
+        if extra is not None:
+            if isinstance(extra, str) or any(item not in ("answer_directly", "ask_user", "none") for item in extra):
+                raise ValueError("invalid extra tool option")
+            fields["extra"] = list(extra)
+        if rank is not None:
+            if isinstance(rank, bool) or not isinstance(rank, int) or rank < 1:
+                raise ValueError("rank must be a positive integer")
+            fields["rank"] = rank
+        if max_error is not None:
+            fields["max_error"] = _number(max_error, "max_error", True)
+        selection = _selection_options(None, objective=objective, threshold=threshold, min=min, max=max,
+            exclusive=exclusive, fallback=fallback, fallback_threshold=fallback_threshold)
+        if selection and not multi:
+            raise ValueError("selection options require multi=True")
+        if multi:
+            fields["multi"] = True
+            fields.update(selection)
+        super().__init__("tool", instructions, fields)
 
 
 class ActQuestion(QuestionSpec[ActAnswer]):
@@ -226,7 +359,7 @@ class ActQuestion(QuestionSpec[ActAnswer]):
         outcomes = set(criteria) if criteria is not None else {"true", "false"}
         fields: dict[str, JsonValue] = _display(evidence, "show")
         if criteria is not None:
-            fields["criteria"] = _criteria(criteria, 2, 10)
+            fields["criteria"] = _criteria(criteria, 2, 255)
         if not costs:
             raise ValueError("act requires a nonempty cost matrix")
         matrix: dict[str, JsonValue] = {}
@@ -250,6 +383,7 @@ noul = NoulQuestion
 score = ScoreQuestion
 multi = MultiQuestion
 act = ActQuestion
+tool = ToolQuestion
 QuestionSet = Mapping[str, QuestionSpec[Any]]
 
 
@@ -293,7 +427,7 @@ def build_questions(questions: QuestionSet) -> dict[str, WireQuestion]:
     result: dict[str, WireQuestion] = {}
     for key, question in questions.items():
         _text(key, "question ID")
-        if not isinstance(question, (ChoiceQuestion, NoulQuestion, ScoreQuestion, MultiQuestion, ActQuestion)):
+        if not isinstance(question, (ChoiceQuestion, NoulQuestion, ScoreQuestion, MultiQuestion, ActQuestion, ToolQuestion)):
             raise TypeError("questions must contain typed question specs")
         result[key] = question.to_dict()
     return result

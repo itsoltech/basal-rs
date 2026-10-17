@@ -20,13 +20,17 @@ public enum FactsMode
     Auto
 }
 /// <summary>Typed decision options; cancellation is a method argument.</summary>
-public sealed record DecisionOptions(string? Model = null, FactsMode? Facts = null);
+public sealed record DecisionOptions(string? Model = null, FactsMode? Facts = null, string? Lang = null, IReadOnlyList<MediaInput>? Media = null, string? Detail = null);
 /// <summary>Choice display/evidence options.</summary>
 public sealed record ChoiceOptions(bool Evidence = false, OptionKeys OptionKeys = OptionKeys.Show);
 /// <summary>Evidence options for noul/score.</summary>
 public sealed record EvidenceOptions(bool Evidence = false);
 /// <summary>Multi options deliberately do not include evidence.</summary>
-public sealed record MultiOptions(double? Threshold = null, int? Min = null, int? Max = null);
+public sealed record MultiOptions(double? Threshold = null, int? Min = null, int? Max = null,
+    string Objective = "threshold", IReadOnlyList<string>? Exclusive = null, string? Fallback = null, double? FallbackThreshold = null);
+/// <summary>Tool routing; definitions are normalized by the server and never executed by the SDK.</summary>
+public sealed record ToolOptions(IReadOnlyList<string>? Extra = null, int? Rank = null, bool Multi = false,
+    double? MaxError = null, MultiOptions? Selection = null);
 /// <summary>Act options; omitted criteria use true/false outcomes.</summary>
 public sealed record ActOptions(IReadOnlyDictionary<string, string>? Criteria = null, bool Evidence = false,
     string? DeferAction = null, double? MaxError = null);
@@ -86,7 +90,37 @@ public sealed record NoulResult(double Noul, double Confidence, IReadOnlyDiction
 /// <summary>A checked score result.</summary>
 public sealed record ScoreResult(double Score, double Confidence, IReadOnlyDictionary<string, string> Legend, IReadOnlyDictionary<string, double> Probabilities) : AnswerResult;
 /// <summary>A checked multi result.</summary>
-public sealed record MultiResult(IReadOnlyList<string> Selected, double Threshold, double SetConfidence, IReadOnlyDictionary<string, double> Probabilities) : AnswerResult;
+public sealed record MultiResult(IReadOnlyList<string> Selected, double? Threshold, double SetConfidence, IReadOnlyDictionary<string, double> Probabilities) : AnswerResult
+{
+    /// <summary>Selection objective, threshold when omitted by older servers.</summary>
+    public string Objective { get; init; } = "threshold";
+    /// <summary>Expected objective score.</summary>
+    public double? ExpectedScore { get; init; }
+    /// <summary>Constraint diagnostics.</summary>
+    public JsonElement? ConstraintsApplied { get; init; }
+}
+/// <summary>Checked tool routing, without executing the selected tool.</summary>
+public sealed record ToolResult(bool Call, IReadOnlyDictionary<string,double> Probabilities) : AnswerResult
+{
+    /// <summary>Single selected tool, null for multi or deferral.</summary>
+    public string? Tool { get; init; }
+    /// <summary>Single-tool confidence.</summary>
+    public double? Confidence { get; init; }
+    /// <summary>Whether this is a multi selection.</summary>
+    public bool Multi { get; init; }
+    /// <summary>Selected tool keys.</summary>
+    public IReadOnlyList<string> Tools { get; init; } = [];
+    /// <summary>Ranked candidates.</summary>
+    public IReadOnlyList<ToolRanking> Ranking { get; init; } = [];
+    /// <summary>Multi-tool selection score and constraints.</summary>
+    public MultiResult? Selection { get; init; }
+    /// <summary>Whether the automatic decision was deferred.</summary>
+    public bool? Deferred { get; init; }
+    /// <summary>Refused tool.</summary>
+    public string? Refused { get; init; }
+    /// <summary>Certification warning.</summary>
+    public string? MaxError { get; init; }
+}
 /// <summary>A checked act result.</summary>
 public sealed record ActResult(string Action, string Outcome, double Confidence, string Calibration, IReadOnlyDictionary<string, double> ExpectedCosts, IReadOnlyDictionary<string, double> Probabilities) : AnswerResult
 {
@@ -94,18 +128,20 @@ public sealed record ActResult(string Action, string Outcome, double Confidence,
     public string? Refused { get; init; }
     /// <summary>Native certified error target warning, absent when none was returned.</summary>
     public string? MaxError { get; init; }
+    /// <summary>Whether the automatic action was deferred.</summary>
+    public bool? Deferred { get; init; }
 }
 
 /// <summary>Choose one named option.</summary>
 public sealed class ChoiceQuestion : QuestionSpec<ChoiceResult>
 {
-    /// <summary>Create a choice with 2–10 named criteria.</summary>
+    /// <summary>Create a choice with 2–255 named criteria.</summary>
     public ChoiceQuestion(string instructions, IReadOnlyDictionary<string, string> criteria, ChoiceOptions? options = null)
         : base("choice", instructions, Build(criteria, options ?? new())) { }
     private static JsonObject Build(IReadOnlyDictionary<string, string> criteria, ChoiceOptions options)
     {
         if (!Enum.IsDefined(options.OptionKeys)) throw new ArgumentException("Invalid option keys");
-        var fields = Questions.Display(options.Evidence); fields["criteria"] = Questions.Criteria(criteria, 2, 10);
+        var fields = Questions.Display(options.Evidence); fields["criteria"] = Questions.Criteria(criteria, 2, 255);
         if (options.OptionKeys == OptionKeys.Hide) fields["option_keys"] = "hide";
         return fields;
     }
@@ -130,13 +166,13 @@ public sealed class NoulQuestion : QuestionSpec<NoulResult>
 /// <summary>Score over ordered levels.</summary>
 public sealed class ScoreQuestion : QuestionSpec<ScoreResult>
 {
-    /// <summary>Create a score with 2–10 ordered levels.</summary>
+    /// <summary>Create a score with 2–255 ordered levels.</summary>
     public ScoreQuestion(string instructions, IReadOnlyList<string> levels, EvidenceOptions? options = null)
         : base("score", instructions, Build(levels, options?.Evidence ?? false)) { }
     private static JsonObject Build(IReadOnlyList<string> levels, bool evidence)
     {
         ArgumentNullException.ThrowIfNull(levels);
-        if (levels.Count is < 2 or > 10) throw new ArgumentException("Score requires 2–10 levels");
+        if (levels.Count is < 2 or > 255) throw new ArgumentException("Score requires 2–255 levels");
         var fields = Questions.Display(evidence); var array = new JsonArray();
         foreach (var level in levels) { Questions.Text(level, "level"); array.Add(level); }
         fields["criteria"] = array; return fields;
@@ -156,10 +192,7 @@ public sealed class MultiQuestion : QuestionSpec<MultiResult>
     private static JsonObject Build(IReadOnlyDictionary<string, string> criteria, MultiOptions options)
     {
         var fields = new JsonObject { ["criteria"] = Questions.Criteria(criteria, 1, int.MaxValue) };
-        if (options.Threshold is double t) { Questions.Finite(t, true); fields["threshold"] = t; }
-        if (options.Min is int min) { if (min < 0 || min > criteria.Count) throw new ArgumentException("Invalid min"); fields["min"] = min; }
-        if (options.Max is int max) { if (max < 0 || max > criteria.Count) throw new ArgumentException("Invalid max"); fields["max"] = max; }
-        if (options.Min > options.Max) throw new ArgumentException("Min exceeds Max");
+        foreach(var (key,value) in Questions.SelectionOptions(options,criteria.Keys)) fields[key]=value?.DeepClone();
         return fields;
     }
     /// <inheritdoc/>
@@ -167,7 +200,9 @@ public sealed class MultiQuestion : QuestionSpec<MultiResult>
     {
         var a = Find(response, id, "multi"); var criteria = ToJson()["criteria"]!.AsObject();
         if (a.Selected is null || a.Selected.Any(k => k is null || !criteria.ContainsKey(k))) throw new BasalException("Invalid selected labels");
-        return new(a.Selected, Number(a.Threshold), Number(a.SetConfidence), a.Probabilities) { Extra = a.Extra ?? [] };
+        Questions.ValidateSelection(a, ToJson()["objective"]?.GetValue<string>() ?? "threshold");
+        return new(a.Selected, a.Threshold, Number(a.SetConfidence), a.Probabilities)
+        { Objective = a.Objective ?? "threshold", ExpectedScore = a.ExpectedScore, ConstraintsApplied = a.ConstraintsApplied, Extra = a.Extra ?? [] };
     }
 }
 /// <summary>Minimum expected cost over an explicit matrix.</summary>
@@ -180,7 +215,7 @@ public sealed class ActQuestion : QuestionSpec<ActResult>
     {
         ArgumentNullException.ThrowIfNull(costs);
         if (costs.Count == 0) throw new ArgumentException("Act requires costs");
-        var criteria = options.Criteria is null ? null : Questions.Criteria(options.Criteria, 2, 10);
+        var criteria = options.Criteria is null ? null : Questions.Criteria(options.Criteria, 2, 255);
         var outcomes = criteria is null ? new HashSet<string> { "true", "false" } : criteria.Select(p => p.Key).ToHashSet();
         var matrix = new JsonObject();
         foreach (var (action, row) in costs)
@@ -200,21 +235,82 @@ public sealed class ActQuestion : QuestionSpec<ActResult>
     public override ActResult Read(DecisionResponse response, string id)
     {
         var a = Find(response, id, "act");
-        if (a.Action is null || a.Outcome is null || a.Calibration is not ("validated" or "unvalidated") || a.ExpectedCosts is null
+        if (a.Action is null || a.Outcome is null || a.Calibration is not ("validated" or "unvalidated" or "text") || a.ExpectedCosts is null
             || !ToJson()["costs"]!.AsObject().ContainsKey(a.Action) || a.ExpectedCosts.Values.Any(v => !double.IsFinite(v)))
             throw new BasalException("Invalid act answer");
         return new(a.Action, a.Outcome, Number(a.Confidence), a.Calibration, a.ExpectedCosts, a.Probabilities)
-        { Evidence = a.Evidence ?? [], Extra = a.Extra ?? [], Refused = a.Refused, MaxError = a.MaxError };
+        { Evidence = a.Evidence ?? [], Extra = a.Extra ?? [], Refused = a.Refused, MaxError = a.MaxError, Deferred = a.Deferred };
+    }
+}
+/// <summary>Select tools from OpenAI, MCP or Anthropic definition objects.</summary>
+public sealed class ToolQuestion : QuestionSpec<ToolResult>
+{
+    /// <summary>Create a routing question. The server validates tool definitions and model limits.</summary>
+    public ToolQuestion(string instructions,IReadOnlyList<JsonObject> tools,ToolOptions? options=null)
+        :base("tool",instructions,Build(tools,options??new())) { }
+    private static JsonObject Build(IReadOnlyList<JsonObject> tools,ToolOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(tools);
+        var fields=new JsonObject { ["tools"]=new JsonArray(tools.Select(t=>(JsonNode)(t?.DeepClone()??throw new ArgumentException("Null tool"))).ToArray()) };
+        if(options.Extra is not null) {
+            if(options.Extra.Any(k=>k is not ("answer_directly" or "ask_user" or "none")))throw new ArgumentException("Invalid extra tool option");
+            fields["extra"]=new JsonArray(options.Extra.Select(k=>(JsonNode)JsonValue.Create(k)!).ToArray());
+        }
+        if(options.Rank is int rank) {if(rank<1)throw new ArgumentException("Rank must be positive");fields["rank"]=rank;}
+        if(options.MaxError is double error){Questions.Finite(error,true);fields["max_error"]=error;}
+        var selection=Questions.SelectionOptions(options.Selection??new(),null);
+        if(!options.Multi&&selection.Count>0)throw new ArgumentException("Selection rules require multi");
+        if(options.Multi){fields["multi"]=true;foreach(var (k,v) in selection)fields[k]=v?.DeepClone();}
+        return fields;
+    }
+    /// <inheritdoc/>
+    public override ToolResult Read(DecisionResponse response,string id)
+    {
+        var a=Find(response,id,"tool");
+        if(a.Call is null||(a.Multi??false)!=(ToJson()["multi"]?.GetValue<bool>()??false))throw new BasalException("Invalid tool mode or call flag");
+        MultiResult? selection=null;
+        if(a.Multi==true) {
+            if(a.Tools is null||a.Tools.Any(k=>k is null||!a.Probabilities.ContainsKey(k)))throw new BasalException("Invalid selected tools");
+            Questions.ValidateSelection(a,ToJson()["objective"]?.GetValue<string>()??"threshold");
+            selection=new(a.Tools,a.Threshold,Number(a.SetConfidence),a.Probabilities){Objective=a.Objective??"threshold",ExpectedScore=a.ExpectedScore,ConstraintsApplied=a.ConstraintsApplied};
+        } else {
+            Number(a.Confidence);
+            if(a.Tool is null ? a.Deferred!=true : !a.Probabilities.ContainsKey(a.Tool))throw new BasalException("Missing or unknown tool");
+        }
+        foreach(var r in a.Ranking??[]) {if(r?.Tool is null||!a.Probabilities.ContainsKey(r.Tool)||!double.IsFinite(r.Probability)||r.Probability is <0 or >1)throw new BasalException("Invalid ranking");}
+        return new(a.Call.Value,a.Probabilities){Tool=a.Tool,Confidence=a.Confidence,Multi=a.Multi??false,Tools=a.Tools??[],Ranking=a.Ranking??[],Selection=selection,Deferred=a.Deferred,Refused=a.Refused,MaxError=a.MaxError,Extra=a.Extra??[]};
     }
 }
 /// <summary>Convenient factories, also available through using static ITSOL.Basal.Questions.</summary>
 public static class Questions
 {
-    /// <summary>Choose one of 2–10 named options.</summary>
+    /// <summary>Route to tools without executing them.</summary>
+    public static ToolQuestion Tool(string instructions,IReadOnlyList<JsonObject> tools,ToolOptions? options=null)=>new(instructions,tools,options);
+    internal static JsonObject SelectionOptions(MultiOptions options,IEnumerable<string>? keys)
+    {
+        var known=keys?.ToHashSet(); var fields=new JsonObject();
+        if(options.Objective is not ("threshold" or "exact" or "iou" or "f1"))throw new ArgumentException("Invalid objective");
+        if(options.Objective!="threshold")fields["objective"]=options.Objective;
+        if(options.Threshold is double t){if(options.Objective!="threshold")throw new ArgumentException("Threshold applies only to threshold objective");Finite(t,true);fields["threshold"]=t;}
+        foreach(var (key,value) in new[]{("min",options.Min),("max",options.Max)})if(value is int n){if(n<0||(known is not null&&n>known.Count))throw new ArgumentException("Invalid selection limit");fields[key]=n;}
+        if(options.Min>options.Max)throw new ArgumentException("Min exceeds Max");
+        void ValidKey(string key){Text(key,"selection key");if(known is not null&&!known.Contains(key))throw new ArgumentException("Unknown selection key");}
+        if(options.Exclusive is not null){foreach(var k in options.Exclusive)ValidKey(k);fields["exclusive"]=new JsonArray(options.Exclusive.Select(k=>(JsonNode)JsonValue.Create(k)!).ToArray());}
+        if(options.Fallback is string fallback){ValidKey(fallback);fields["fallback"]=fallback;}
+        if(options.FallbackThreshold is double ft){if(options.Fallback is null)throw new ArgumentException("Fallback threshold requires fallback");Finite(ft,true);fields["fallback_threshold"]=ft;}
+        return fields;
+    }
+    internal static void ValidateSelection(Answer answer,string expected)
+    {
+        if(expected=="threshold") {if(answer.Threshold is not double t||!double.IsFinite(t)||t is <0 or >1)throw new BasalException("Invalid threshold");}
+        else if(answer.Objective!=expected)throw new BasalException("Mismatched objective");
+        if(answer.ExpectedScore is double score&&(!double.IsFinite(score)||score is <0 or >1))throw new BasalException("Invalid expected score");
+    }
+    /// <summary>Choose one of 2–255 named options.</summary>
     public static ChoiceQuestion Choice(string instructions, IReadOnlyDictionary<string, string> criteria, ChoiceOptions? options = null) => new(instructions, criteria, options);
     /// <summary>Yes/no probability.</summary>
     public static NoulQuestion Noul(string instructions, EvidenceOptions? options = null) => new(instructions, options);
-    /// <summary>Score over 2–10 ordered levels.</summary>
+    /// <summary>Score over 2–255 ordered levels.</summary>
     public static ScoreQuestion Score(string instructions, IReadOnlyList<string> levels, EvidenceOptions? options = null) => new(instructions, levels, options);
     /// <summary>Select labels independently.</summary>
     public static MultiQuestion Multi(string instructions, IReadOnlyDictionary<string, string> criteria, MultiOptions? options = null) => new(instructions, criteria, options);

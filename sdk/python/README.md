@@ -85,8 +85,8 @@ available through `__cause__`. There are no automatic retries or redirects. Type
 contract; successful responses are checked to be JSON objects, without full schema validation. Unknown
 JSON fields are preserved. Server validation errors (422) and overload (529) remain distinct.
 
-Supports `choice`, `noul`, `score`, `multi`, `act`, `facts` and `evidence`. Criterion order matters. Native
-choice/score accepts 2–10 options; multi has independent probabilities and `set_confidence`. Evidence
+Supports `choice`, `noul`, `score`, `multi`, `act` and `tool`, with model-dependent `facts` and `evidence` capabilities. Criterion order matters. Native
+choice/score accepts 2–255 options for format-2 models (older model limits are checked by the server); multi has independent probabilities and `set_confidence`. Evidence
 offsets count Unicode characters. The SDK does not evaluate model decisions or perform selected actions.
 
 Factories `choice`, `noul`, `score`, `multi`, `act` return concrete generic question classes.
@@ -113,3 +113,42 @@ classes, `ClassVar` attributes or dataclasses; outside `Questions` they remain q
 
 Runtime uses HTTPX with seven dependencies in the audited Python 3.11 graph. Building requires only the
 hash-locked Flit Core backend; consumers of the wheel do not install the build backend.
+
+
+## Basal 2.0 and Omni
+
+Typed choice/score and act outcomes allow 2–255 options. The server remains
+responsible for limits of older models and for calibration/model capabilities.
+`tool` accepts OpenAI, MCP and Anthropic definition objects, optional non-tool
+choices (`answer_directly`, `ask_user`, `none`), ranking, multi selection and
+certified deferral. The SDK returns the decision; it never executes tools.
+
+Multi selection supports `threshold`, `exact`, `iou` and `f1`, count limits,
+`exclusive`, `fallback` and `fallback_threshold`. `threshold` is optional in
+results because objective-based responses instead contain `objective` and
+`expected_score`; constraint diagnostics remain available. Single tool selection
+can be null on certified deferral, while multi mode returns a tool list.
+
+Typed request options include `lang` (`pl`/`en`), ordered inline `media` and
+`detail` (`default`/`high`). Media helpers accept encoded bytes, base64 or a data
+URL; they never fetch URLs. Read files explicitly in your application. Decoding,
+model support and resource limits are checked by the server. Omni requires a
+CUDA server started with media enabled. `calibration: "text"` means text
+calibration applied to media, not validated calibration for images/audio.
+
+Usage exposes `longest_prompt_tokens`, `second_order_branches` and media counts,
+soft tokens and detail. Discovery exposes `prompt_format`, `orders`, enabled
+media and calibration temperatures. Model names remain strings: use exact names
+from model discovery, not a hardcoded model enumeration. Keep old models and
+raw JSON access available. These SDKs cover server-supported format-2 decisions;
+upstream 2.1 task types are not implemented by this server.
+
+```python
+from basal_client import BasalClient, image, tool, multi
+with BasalClient() as client:
+    response = client.decide("Inspect the supplied material.", {
+        "route": tool("Choose a tool.", [{"name": "inspect", "description": "Inspect the material", "inputSchema": {"type": "object"}}], extra=["none"], rank=2),
+        "labels": multi("Select visible objects.", {"animal": "An animal", "vehicle": "A vehicle"}, objective="f1"),
+    }, model="basal-omni-1.0-mini", lang="en", media=[image(open("photo.jpg", "rb").read())], detail="default")
+    print(response.answer("route"))
+```

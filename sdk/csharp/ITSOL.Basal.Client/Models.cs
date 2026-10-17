@@ -33,6 +33,22 @@ public sealed class Question
     [JsonPropertyName("defer_action")] public string? DeferAction { get; init; }
     /// <summary>Act certified error target, requiring model calibration.</summary>
     [JsonPropertyName("max_error")] public double? MaxError { get; init; }
+    /// <summary>threshold, exact, iou or f1.</summary>
+    [JsonPropertyName("objective")] public string? Objective { get; init; }
+    /// <summary>Mutually exclusive labels.</summary>
+    [JsonPropertyName("exclusive")] public IReadOnlyList<string>? Exclusive { get; init; }
+    /// <summary>Fallback label.</summary>
+    [JsonPropertyName("fallback")] public string? Fallback { get; init; }
+    /// <summary>Explicit fallback threshold.</summary>
+    [JsonPropertyName("fallback_threshold")] public double? FallbackThreshold { get; init; }
+    /// <summary>OpenAI, MCP or Anthropic definition objects.</summary>
+    [JsonPropertyName("tools")] public IReadOnlyList<JsonObject>? Tools { get; init; }
+    /// <summary>answer_directly, ask_user or none.</summary>
+    [JsonPropertyName("extra")] public IReadOnlyList<string>? ExtraOptions { get; init; }
+    /// <summary>Number of ranked candidates.</summary>
+    [JsonPropertyName("rank")] public int? Rank { get; init; }
+    /// <summary>Select a set of tools.</summary>
+    [JsonPropertyName("multi")] public bool? Multi { get; init; }
     /// <summary>Additional native fields. Do not repeat named fields above.</summary>
     [JsonExtensionData] public Dictionary<string, JsonElement>? Extra { get; init; }
 }
@@ -48,6 +64,12 @@ public sealed class DecisionRequest
     [JsonPropertyName("model")] public string? Model { get; init; }
     /// <summary>off or auto (basal-1.5).</summary>
     [JsonPropertyName("facts")] public string? Facts { get; init; }
+    /// <summary>Explicit prompt language, pl or en.</summary>
+    [JsonPropertyName("lang")] public string? Lang { get; init; }
+    /// <summary>Inline media in processing order.</summary>
+    [JsonPropertyName("media")] public IReadOnlyList<MediaInput>? Media { get; init; }
+    /// <summary>Image detail, default or high.</summary>
+    [JsonPropertyName("detail")] public string? Detail { get; init; }
     /// <summary>Additional native fields. Do not repeat named fields above.</summary>
     [JsonExtensionData] public Dictionary<string, JsonElement>? Extra { get; init; }
 }
@@ -68,7 +90,7 @@ public sealed class EvidenceSpan
 /// <summary>Native answer; fields for other question types are null.</summary>
 public sealed class Answer
 {
-    /// <summary>choice, noul, score, multi or act.</summary>
+    /// <summary>choice, noul, score, multi, act or tool.</summary>
     [JsonPropertyName("type")] public required string Type { get; init; }
     /// <summary>Native probabilities; independent P(yes) values for multi.</summary>
     [JsonPropertyName("probabilities")] public required Dictionary<string, double> Probabilities { get; init; }
@@ -94,12 +116,30 @@ public sealed class Answer
     [JsonPropertyName("answer")] public string? Outcome { get; init; }
     /// <summary>Expected cost by act action.</summary>
     [JsonPropertyName("expected_costs")] public Dictionary<string, double>? ExpectedCosts { get; init; }
-    /// <summary>validated or unvalidated for act.</summary>
+    /// <summary>validated, unvalidated or text.</summary>
     [JsonPropertyName("calibration")] public string? Calibration { get; init; }
     /// <summary>Refused automatic act action.</summary>
     [JsonPropertyName("refused")] public string? Refused { get; init; }
     /// <summary>Message when the requested certified threshold is unavailable.</summary>
     [JsonPropertyName("max_error")] public string? MaxError { get; init; }
+    /// <summary>Whether the automatic decision was deferred.</summary>
+    [JsonPropertyName("deferred")] public bool? Deferred { get; init; }
+    /// <summary>Selection objective.</summary>
+    [JsonPropertyName("objective")] public string? Objective { get; init; }
+    /// <summary>Expected selection score.</summary>
+    [JsonPropertyName("expected_score")] public double? ExpectedScore { get; init; }
+    /// <summary>Constraint diagnostics.</summary>
+    [JsonPropertyName("constraints_applied")] public JsonElement? ConstraintsApplied { get; init; }
+    /// <summary>Selected single tool, null on deferral.</summary>
+    [JsonPropertyName("tool")] public string? Tool { get; init; }
+    /// <summary>Selected tools in multi mode.</summary>
+    [JsonPropertyName("tools")] public IReadOnlyList<string>? Tools { get; init; }
+    /// <summary>Whether an actual tool was selected.</summary>
+    [JsonPropertyName("call")] public bool? Call { get; init; }
+    /// <summary>Whether this is a multi-tool result.</summary>
+    [JsonPropertyName("multi")] public bool? Multi { get; init; }
+    /// <summary>Ranked tool candidates.</summary>
+    [JsonPropertyName("ranking")] public IReadOnlyList<ToolRanking>? Ranking { get; init; }
     /// <summary>Optional supporting spans.</summary>
     [JsonPropertyName("evidence")] public List<EvidenceSpan>? Evidence { get; init; }
     /// <summary>Future answer fields.</summary>
@@ -119,6 +159,12 @@ public sealed class Usage
     [JsonPropertyName("branches")] public long? Branches { get; init; }
     /// <summary>Server-side latency in milliseconds.</summary>
     [JsonPropertyName("latency_ms")] public double? LatencyMs { get; init; }
+    /// <summary>Longest executed full prompt.</summary>
+    [JsonPropertyName("longest_prompt_tokens")] public long? LongestPromptTokens { get; init; }
+    /// <summary>Branches executed in the second option order.</summary>
+    [JsonPropertyName("second_order_branches")] public long? SecondOrderBranches { get; init; }
+    /// <summary>Media token accounting.</summary>
+    [JsonPropertyName("media")] public MediaUsage? Media { get; init; }
     /// <summary>Future usage fields.</summary>
     [JsonExtensionData] public Dictionary<string, JsonElement>? Extra { get; init; }
 }
@@ -141,6 +187,14 @@ public sealed class ModelMetadata
 {
     /// <summary>Exact model name.</summary>
     [JsonPropertyName("name")] public required string Name { get; init; }
+    /// <summary>Prompt protocol version.</summary>
+    [JsonPropertyName("prompt_format")] public int? PromptFormat { get; init; }
+    /// <summary>Fixed numeric or adaptive string order policy.</summary>
+    [JsonPropertyName("orders")] public JsonNode? Orders { get; init; }
+    /// <summary>Enabled media kinds.</summary>
+    [JsonPropertyName("media")] public IReadOnlyList<string>? Media { get; init; }
+    /// <summary>Temperature by primitive.</summary>
+    [JsonPropertyName("temperature_per_prim")] public Dictionary<string,double>? TemperaturePerPrim { get; init; }
     /// <summary>Native metadata.</summary>
     [JsonExtensionData] public Dictionary<string, JsonElement>? Extra { get; init; }
 }

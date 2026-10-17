@@ -57,8 +57,8 @@ in `cause`. `BasalHTTPError.body` remains directly accessible but is non-enumera
 inspection and JSON.stringify do not log it. There are no automatic retries or redirects. Types describe the native contract; successful
 responses are checked to be JSON objects without full schema validation. Unknown JSON fields are preserved.
 
-Supports `choice`, `noul`, `score`, `multi`, `act`, `facts` and `evidence`. Native choice/score accepts 2–10
-options. Criterion insertion order matters; JavaScript enumerates integer-like object keys numerically,
+Supports `choice`, `noul`, `score`, `multi`, `act` and `tool`, with model-dependent `facts` and `evidence` capabilities. Native choice/score accepts 2–255
+options for format-2 models (older model limits are checked by the server). Criterion insertion order matters; JavaScript enumerates integer-like object keys numerically,
 so use textual keys (e.g. `low`, `high`) or an ordered score array. Evidence offsets count Unicode code
 points; use the returned text, or `Array.from(state).slice(start, end).join("")` for textual states.
 
@@ -76,3 +76,41 @@ retains the native JSON without those defaults. The one-argument raw `decide(req
 
 
 [Full documentation and publication setup](https://github.com/itsoltech/basal-rs/blob/main/docs/SDK.md).
+
+
+## Basal 2.0 and Omni
+
+Typed choice/score and act outcomes allow 2–255 options. The server remains
+responsible for limits of older models and for calibration/model capabilities.
+`tool` accepts OpenAI, MCP and Anthropic definition objects, optional non-tool
+choices (`answer_directly`, `ask_user`, `none`), ranking, multi selection and
+certified deferral. The SDK returns the decision; it never executes tools.
+
+Multi selection supports `threshold`, `exact`, `iou` and `f1`, count limits,
+`exclusive`, `fallback` and `fallback_threshold`. `threshold` is optional in
+results because objective-based responses instead contain `objective` and
+`expected_score`; constraint diagnostics remain available. Single tool selection
+can be null on certified deferral, while multi mode returns a tool list.
+
+Typed request options include `lang` (`pl`/`en`), ordered inline `media` and
+`detail` (`default`/`high`). Media helpers accept encoded bytes, base64 or a data
+URL; they never fetch URLs. Read files explicitly in your application. Decoding,
+model support and resource limits are checked by the server. Omni requires a
+CUDA server started with media enabled. `calibration: "text"` means text
+calibration applied to media, not validated calibration for images/audio.
+
+Usage exposes `longest_prompt_tokens`, `second_order_branches` and media counts,
+soft tokens and detail. Discovery exposes `prompt_format`, `orders`, enabled
+media and calibration temperatures. Model names remain strings: use exact names
+from model discovery, not a hardcoded model enumeration. Keep old models and
+raw JSON access available. These SDKs cover server-supported format-2 decisions;
+upstream 2.1 task types are not implemented by this server.
+
+```typescript
+import { BasalClient, image, tool, multi } from "@itsoltech/basal-client";
+const response = await new BasalClient().decide("Inspect the supplied material.", {
+  route: tool("Choose a tool.", [{name:"inspect", description:"Inspect material", inputSchema:{type:"object"}}], {extra:["none"], rank:2}),
+  labels: multi("Select visible objects.", {animal:"An animal", vehicle:"A vehicle"}, {objective:"f1"}),
+}, {model:"basal-omni-1.0-mini", lang:"en", media:[image(new Uint8Array(await file.arrayBuffer()))]});
+console.log(response.answers.route, response.answers.labels.expected_score);
+```

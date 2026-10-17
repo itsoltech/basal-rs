@@ -28,6 +28,27 @@ nie zależy od `basal-core`, `basal-gpu` ani `basal-cli`.
 | C# | `sdk/csharp/ITSOL.Basal.Client/ITSOL.Basal.Client.csproj` | `sdk-csharp-vX.Y.Z` | [NuGet](../sdk/csharp/CHANGELOG.md) |
 | Rust | `sdk/rust/Cargo.toml` | `sdk-rust-vX.Y.Z` | [crates.io](../sdk/rust/CHANGELOG.md) |
 
+## Basal 2.0 i Omni
+
+SDK obsługują typowane `tool`, 2–255 opcji choice/score/act (zależnie od modelu),
+cele multi `threshold`/`exact`/`iou`/`f1` i ograniczenia `exclusive`/`fallback`.
+Przy celach innych niż threshold odpowiedź nie wymaga `threshold`; zwraca
+`objective`, `expected_score` i diagnostykę ograniczeń. Tool zwraca decyzję,
+ranking albo zbiór narzędzi i odroczenie; SDK nie wykonuje narzędzi.
+Pominięte `extra` zostawia domyślne opcje serwera: `answer_directly`, `ask_user`
+i `none` dla jednego narzędzia, brak w trybie multi. Pusta lista je wyłącza.
+
+Opcje żądania obejmują `lang`, `media` i `detail`. Pomocniki kodują bajty do
+base64; nie czytają plików ani nie pobierają URL. Obraz i audio wymagają serwera
+Omni z CUDA i włączonymi mediami. Status kalibracji `text` jest akceptowany,
+ale nie oznacza potwierdzonej kalibracji mediów. Typowane usage i metadane
+obejmują liczbę tokenów/mediów, kolejności oraz format promptu.
+
+Nowe wersje źródłowe: Python/npm/.NET **0.2.0**, Rust **0.3.0**. Zmiany modeli
+odpowiedzi (opcjonalny threshold i nowe warianty) są opisane w changelogach.
+Samo scalenie kodu nie publikuje paczek. Runtime nadal sprawdza możliwości
+starszych modeli; SDK nie uruchamiają inferencji lokalnie.
+
 ## Python
 
 Wariant klasy daje dokładne typy nazwanych pól, bez osobnej klasy odpowiedzi:
@@ -219,7 +240,8 @@ pól nazwanych w strukturze. Przykład do kompilacji:
 
 Fabryki mają wspólny schemat: instrukcja, wymagane kryteria/poziomy/koszty oraz opcje
 konkretnego typu. Odpowiadają im klasy/typy ChoiceQuestion, NoulQuestion, ScoreQuestion,
-MultiQuestion, ActQuestion. Choice/score wymaga 2–10 opcji; multi co najmniej jednej.
+MultiQuestion, ActQuestion, ToolQuestion. Choice/score wymaga 2–255 opcji (limity starszych
+modeli sprawdza serwer); multi co najmniej jednej.
 Opcje multi nie zawierają evidence. Act przyjmuje pełną macierz kosztów z wierszem
 na każdą akcję i kosztem dla każdego outcome; bez criteria używa true/false.
 TypeScript wyprowadza klucze outcomes z criteria (domyślnie true/false), wymaga
@@ -274,8 +296,9 @@ aktualizuj kontrakt i DTO we wszystkich czterech SDK.
 - `model` jest opcjonalny. W basal-rs wybiera model po dokładnej nazwie z `/v1/models`;
   bez niego działa `default_model`. Oryginalny serwer upstream ignoruje to pole.
 - SDK wysyła stan jako JSON; renderowanie stanu, kalibracja i decyzje należą do serwera.
-- Typy pytań: `choice`, `noul`, `score`, `multi`, `act`; obsługiwane są `facts` i `evidence`.
-  Natywne choice/score ma limit 2–10 opcji. Multi nie obsługuje evidence.
+- Typy pytań: `choice`, `noul`, `score`, `multi`, `act`, `tool`; obsługiwane są `facts` i `evidence`.
+  Natywne choice/score przyjmuje 2–255 opcji w formacie 2; limity starszych modeli sprawdza
+  serwer. Multi nie obsługuje evidence.
 - SDK zachowuje natywne prawdopodobieństwa i confidence. Dla choice/noul/score/act
   `confidence = max(p)`. Multi ma niezależne P(tak) i `set_confidence`.
 - Kolejność kryteriów wpływa na obliczenia. Nie sortuj kluczy. W JS numeryczne klucze
@@ -505,3 +528,9 @@ odrzucone z powodu już istniejącego pliku. Nie włączaj pomijania istniejący
 plików bez sprawdzenia zgodności ich hashów z pierwotnym artefaktem. Najpierw
 ustal stan publikacji; do rejestru należy przesłać tylko brakujące pliki
 z tego samego zweryfikowanego artefaktu. Ten przypadek wymaga obsługi operatora.
+
+## Weryfikacja Basal 2.0 i Omni
+
+[Raport SDK z 2026-10-17](../reports/sdk-basal2-omni-2026-10-17/README.md)
+obejmuje rzeczywiste wywołania czterech SDK na GPU, zgodność pól odpowiedzi
+z bezpośrednim API oraz archiwum danych i instrukcje odtworzenia.

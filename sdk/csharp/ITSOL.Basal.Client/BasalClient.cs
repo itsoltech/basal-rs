@@ -145,6 +145,13 @@ public sealed class BasalClient : IDisposable
         var request = new JsonObject { ["state"] = state.DeepClone(), ["questions"] = wireQuestions };
         if (options?.Model is string name) request["model"] = name;
         if (options?.Facts is FactsMode mode) request["facts"] = mode == FactsMode.Auto ? "auto" : "off";
+        if(options?.Lang is string lang){if(lang is not ("pl" or "en"))throw new ArgumentException("Invalid lang");request["lang"]=lang;}
+        if(options?.Detail is string detail){if(detail is not ("default" or "high"))throw new ArgumentException("Invalid detail");request["detail"]=detail;}
+        if(options?.Media is { } media){
+            if(media.Count is < 1 or > 8)throw new ArgumentException("Media requires 1 to 8 inputs");
+            foreach(var item in media){ArgumentNullException.ThrowIfNull(item);if(item.Type is not ("image" or "audio"))throw new ArgumentException("Invalid media type");Questions.Text(item.Data,"media data");}
+            request["media"]=JsonSerializer.SerializeToNode(media);
+        }
         var response = await DecideAsync(request, cancellationToken).ConfigureAwait(false);
         return new TypedDecisionResponse(response, snapshot);
     }
