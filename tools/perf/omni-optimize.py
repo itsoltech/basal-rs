@@ -81,6 +81,7 @@ def main():
     p.add_argument('--warmup-seconds', type=float, help='minimum initial text-engine warmup; confirm defaults to 10 seconds')
     p.add_argument('--native-long-tokens', type=int, default=0, help='native urgent/background lane threshold; 0 disables splitting')
     p.add_argument('--native-long-slice-ms', type=int, default=100, help='minimum background GPU slice before handing over to short requests')
+    p.add_argument('--native-schedule', choices=['hrrn', 'fifo'], default='hrrn', help='native request scheduling policy')
     p.add_argument('--latency-samples', type=int, help='measured N=1 samples per ladder point and engine repetition')
     p.add_argument('--mixed', action='store_true', help='also interleave one 8192-token document per 16 short documents at N=8/32')
     p.add_argument('--load-samples', type=int, help='minimum requests per load phase, rounded up to complete corpus repetitions')
@@ -150,7 +151,8 @@ def main():
                   excluded_repetitions=[1] if a.phase == 'confirm' else [],
                   media_engine='upstream-eager; fast rejects media',
                   orders=1, state_cache=False, prefix_cache=False,
-                  native_long_tokens=a.native_long_tokens, native_long_slice_ms=a.native_long_slice_ms, mixed=a.mixed,
+                  native_long_tokens=a.native_long_tokens, native_long_slice_ms=a.native_long_slice_ms,
+                  native_schedule=a.native_schedule, mixed=a.mixed,
                   native_media_admission=4, native_max_large_inflight=128,
                   native_timing_headers=['x-basal-batch-requests', 'x-basal-queue-ms', 'x-basal-compute-ms'],
                   startup_timeout_s=a.startup_timeout, request_timeout_s=a.request_timeout,
@@ -197,6 +199,7 @@ def main():
                    '--model', str(a.models_root / model), '--dtype', a.candidate_dtype if variant == 'candidate' else 'bf16', '--orders', '1',
                    '--state-cache-mb', '0', '--no-prefix-cache', '--gemm-table', (str(candidate_tables[model]) if candidate_tables else gemm_policy) if variant == 'candidate' else 'none', '--long-tokens', str(a.native_long_tokens),
                    '--long-slice-ms', str(a.native_long_slice_ms),
+                   '--schedule', a.native_schedule,
                    '--max-large-inflight', '128', '--addr', '127.0.0.1:18765']
             if with_media:
                 cmd += ['--media']

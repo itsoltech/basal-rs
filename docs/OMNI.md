@@ -93,6 +93,21 @@ ustawienie procesu, którego domyślna wartość nadal wynosi 100 ms. W YAML nal
 do poziomu głównego (`long_slice_ms`), a nie do pojedynczego modelu. Rozkłady czasów
 krótkich i długich żądań oraz wpływ tego ustawienia trzeba czytać osobno.
 
+W kampanii Ada większy QPS tekstowego miksu i niższe globalne p95 dało FIFO bez
+osobnego toru długich. Ten profil wybiera się jawnie:
+
+```bash
+basal serve --model omni-mini --dtype auto --gemm-table auto --schedule fifo --long-tokens 0
+basal serve --model omni-max --dtype auto --gemm-table auto --schedule fifo --long-tokens 0
+```
+
+Przy N=8/32 osiągnął 1,72–1,80× QPS sparowanego upstream eager BF16. Krótkie
+żądania tracą część priorytetu względem HRRN; p95 samych długich przy N=32 nadal
+jest wyższe od upstream o około 3,4% mini i 2,8% max. Pomiar używa dwóch
+powtarzanych długich kontekstów oraz 128 różnych krótkich dokumentów. Nie wyznacza
+maksimum QPS ani produkcyjnego SLO; pełne wyniki, zakresy i kontrola bitowej
+zgodności są w [raporcie Ada](../reports/omni-performance-ada-2026-10-16/README.md).
+
 W Gemma 4 Unified uwaga lokalna jest dwukierunkowa wewnątrz jednego bloku obrazu;
 uwaga globalna pozostaje przyczynowa. Prefill nie rozcina takiego bloku obrazu.
 Mini używa osobnych encoderów obrazu i audio oraz embeddings per-layer w dekoderze.
@@ -107,3 +122,10 @@ Thinking, early exit, MCP server oraz trenowanie kalibracji nie należą do tego
 Zaobserwowaną zgodność i ograniczenia numeryczne opisuje [raport H100](../reports/upstream-2.0-h100-2026-10-14/README.md).
 
 [Końcowa kampania](../reports/upstream-2.0-final-2026-10-14/README.md) obejmuje po 38/38 zgodnych wyborów każdego omni na rzeczywistych obrazach, mowie WAV/FLAC/OGG/MP3 i wejściach mieszanych oraz po 2/2 na skonstruowanym oknie 30 s. Są to wybory względem FP32 i ustalonych etykiet, nie pomiar ASR/WER ani walidacja kalibracji mediów. Długi kontekst nie jest potwierdzony w całym limicie config: mini 131072 i max 8192/262144 przekroczyły limit czasu procesu eksportu. Native omni max było też wolniejsze od upstream eager w opisanym krótkim obciążeniu tekstowym.
+
+Późniejsza [kampania Ada](../reports/omni-performance-ada-2026-10-16/README.md)
+potwierdziła przewagę wybranego Auto FP16 nad działającym upstream eager BF16:
+niższą medianę w 36/36 punktach tekstowych 128–32768 i 68/68 przypadkach mediów
+łącznie dla obu modeli oraz wyższe mediany QPS. Wszystkie 398 decyzji kontrolnych
+zgadzają się z FP32; średnia TV jest mniejsza niż upstream BF16. Zakres jakości
+FP32, pojedyncze regresje i ograniczenia kolejki pozostają opisane osobno.
