@@ -209,6 +209,6 @@ export function buildRequest(state: JsonValue, questions: QuestionSet, options: 
   if(options.facts!==undefined&&!['off','auto'].includes(options.facts))throw new TypeError('invalid facts');
   if(options.lang!==undefined&&!['pl','en'].includes(options.lang))throw new TypeError('invalid lang');
   if(options.detail!==undefined&&!['default','high'].includes(options.detail))throw new TypeError('invalid detail');
-  if(options.media!==undefined&&(!Array.isArray(options.media)||options.media.length>8||options.media.some(m=>!m||!['image','audio'].includes(m.type)||typeof m.data!=='string'||!m.data.trim())))throw new TypeError('invalid media');
+  if(options.media!==undefined&&(!Array.isArray(options.media)||options.media.length<1||options.media.length>8||options.media.some(m=>!m||!['image','audio'].includes(m.type)||typeof m.data!=='string'||!m.data.trim())))throw new TypeError('invalid media');
   return {state,questions:Object.fromEntries(entries),...(options.lang===undefined?{}:{lang:options.lang}),...(options.detail===undefined?{}:{detail:options.detail}),...(options.media===undefined?{}:{media:structuredClone(options.media)}),...(options.model===undefined?{}:{model:options.model}),...(options.facts===undefined?{}:{facts:options.facts})};
 }

@@ -280,6 +280,7 @@
             "items": {
               "$ref": "#/components/schemas/MediaInput"
             },
+            "minItems": 1,
             "maxItems": 8
           },
           "detail": {

@@ -1,7 +1,6 @@
 """Connection-pooled synchronous and asynchronous clients for the Basal API."""
 
 from collections.abc import Sequence
-from copy import deepcopy
 
 import ipaddress
 import json
@@ -13,6 +12,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from .types import DecisionRequest, DecisionResponse, ModelsResponse, JsonValue, MediaInput
+from .media import _media
 from .questions import (
     Questions, QuestionSet, TSchema, TypedDecisionResponse, SchemaDecisionResponse,
     build_questions, schema_questions,
@@ -131,12 +131,9 @@ def _decision_request(state: DecisionRequest | JsonValue, questions: QuestionSet
             raise ValueError("detail must be default or high")
         request["detail"] = detail
     if media is not None:
-        if isinstance(media, (str, bytes)) or len(media) > 8:
-            raise ValueError("media must contain at most 8 inputs")
-        from .media import _media
-        request["media"] = [_media(item["type"], item["data"]) for item in deepcopy(media)]
-        if any(item["type"] not in ("image", "audio") for item in request["media"]):
-            raise ValueError("invalid media type")
+        if isinstance(media, (str, bytes)) or not 1 <= len(media) <= 8:
+            raise ValueError("media must contain 1 to 8 inputs")
+        request["media"] = [_media(item["type"], item["data"]) for item in media]
     return request
 
 

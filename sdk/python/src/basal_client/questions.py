@@ -322,17 +322,20 @@ class ToolQuestion(QuestionSpec[ToolAnswer]):
     """Select tools from OpenAI, MCP or Anthropic definitions; never executes them."""
 
     def __init__(self, instructions: str, tools: Sequence[Mapping[str, JsonValue]], *,
-                 extra: Sequence[Literal["answer_directly", "ask_user", "none"]] = (), rank: int | None = None,
+                 extra: Sequence[Literal["answer_directly", "ask_user", "none"]] | None = None, rank: int | None = None,
                  multi: bool = False, max_error: float | None = None, objective: MultiObjective = "threshold",
                  threshold: float | None = None, min: int | None = None, max: int | None = None,
                  exclusive: Sequence[str] | None = None, fallback: str | None = None, fallback_threshold: float | None = None):
         if isinstance(tools, (str, bytes)) or not all(isinstance(item, Mapping) for item in tools):
             raise ValueError("tools must contain definition objects")
-        if isinstance(extra, str) or any(item not in ("answer_directly", "ask_user", "none") for item in extra):
-            raise ValueError("invalid extra tool option")
         if not isinstance(multi, bool):
             raise ValueError("multi must be boolean")
-        fields: dict[str, JsonValue] = {"tools": [deepcopy(dict(item)) for item in tools], "extra": list(extra)}
+        fields: dict[str, JsonValue] = {"tools": [deepcopy(dict(item)) for item in tools]}
+        # Omitted extras keep the server default: all non-tool choices for a single tool, none for multi.
+        if extra is not None:
+            if isinstance(extra, str) or any(item not in ("answer_directly", "ask_user", "none") for item in extra):
+                raise ValueError("invalid extra tool option")
+            fields["extra"] = list(extra)
         if rank is not None:
             if isinstance(rank, bool) or not isinstance(rank, int) or rank < 1:
                 raise ValueError("rank must be a positive integer")

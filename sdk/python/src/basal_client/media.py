@@ -7,6 +7,8 @@ from .types import MediaInput
 
 
 def _media(kind: Literal["image", "audio"], data: bytes | str) -> MediaInput:
+    if kind not in ("image", "audio"):
+        raise ValueError("media type must be image or audio")
     if isinstance(data, bytes):
         data = b64encode(data).decode("ascii")
     if not isinstance(data, str) or not data.strip() or data[:8].lower().startswith(("http://", "https://")):

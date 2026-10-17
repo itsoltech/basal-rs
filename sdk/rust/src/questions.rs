@@ -88,8 +88,9 @@ pub enum ToolExtra {
 /// Tool routing options. Definitions are normalized and validated by the server.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ToolOptions<'a> {
-    /// Non-tool choices appended to definitions.
-    pub extra: &'a [ToolExtra],
+    /// Non-tool choices appended to definitions. `None` keeps the server default (all three for a single tool,
+    /// none in multi mode); `Some(&[])` sends no non-tool choice.
+    pub extra: Option<&'a [ToolExtra]>,
     /// Number of ranked candidates.
     pub rank: Option<usize>,
     /// Select a set of tools.
@@ -542,8 +543,8 @@ pub fn tool_with_options(instructions: &str, tools: &[Value], options: ToolOptio
     }
     let mut q = base(QuestionType::Tool, instructions, false)?;
     q.extra.insert("tools".into(), Value::Array(tools.to_vec()));
-    if !options.extra.is_empty() {
-        q.extra.insert("extra".into(), serde_json::to_value(options.extra).map_err(Error::Encode)?);
+    if let Some(extra) = options.extra {
+        q.extra.insert("extra".into(), serde_json::to_value(extra).map_err(Error::Encode)?);
     }
     if let Some(rank) = options.rank {
         if rank == 0 {
@@ -654,8 +655,8 @@ impl Questions {
         request.lang = options.lang;
         request.detail = options.detail;
         if let Some(media) = options.media {
-            if media.len() > 8 {
-                return Err(Error::InvalidRequest("at most 8 media inputs"));
+            if !(1..=8).contains(&media.len()) {
+                return Err(Error::InvalidRequest("media requires 1 to 8 inputs"));
             }
             for input in media {
                 input.validate()?;

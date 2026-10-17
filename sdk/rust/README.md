@@ -134,7 +134,7 @@ upstream 2.1 task types are not implemented by this server.
 ```rust,no_run
 use basal_client::{tool_with_options, ToolOptions, ToolExtra, DecisionOptions, Language, MediaInput, questions};
 let definitions = [serde_json::json!({"name":"inspect","description":"Inspect material","inputSchema":{"type":"object"}})];
-let routing = tool_with_options("Choose a tool.", &definitions, ToolOptions { extra: &[ToolExtra::None], rank: Some(2), ..Default::default() })?;
+let routing = tool_with_options("Choose a tool.", &definitions, ToolOptions { extra: Some(&[ToolExtra::None]), rank: Some(2), ..Default::default() })?;
 let questions = questions! { route: &routing }?;
 let media = [MediaInput::image(&std::fs::read("photo.jpg")?)];
 let response = client.decide_with_options("Inspect the supplied material.", &questions, DecisionOptions {
