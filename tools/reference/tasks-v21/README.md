@@ -48,6 +48,14 @@ catalogue to `tools/perf/omni-optimize.py --model-names FULL_NAME ...`; use
 different continuation work when engines choose different source regions; all
 response token/branch counts are retained. Finite corpus timing is separate from
 FP32 answer quality and cannot establish a general performance advantage.
+Pass `--ladder-choice blue` to the performance summarizer for this generator's
+known-answer ladder, in addition to checking status, token lengths and invariance.
+
+`restore-inputs.py` reconstructs one archived frozen input directory using separately
+downloaded media. It accepts the campaign through `--measurement-artifacts`, a
+relative `--input-subdir`, supplied `--assets` and a new `--out`. Public and restored
+original byte checksums are verified. Media sources and hashes remain in the archive;
+the runner does not download anything.
 
 `probe-http.py` records task answers on both endpoints, intentional admission
 rejections at `max_inflight=4`, and replica reservation drain after disconnected
