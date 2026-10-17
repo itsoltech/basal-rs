@@ -105,10 +105,16 @@ impl ProcessedMedia {
 pub struct Processor {
     unified: bool,
     max_audio_seconds: f64,
+    audio_enabled: bool,
 }
 
 impl Processor {
     pub fn load(dir: &Path, unified: bool) -> Result<Self> {
+        Self::load_with_audio(dir, unified, true)
+    }
+
+    /// The processor metadata may advertise audio even when the model has no audio tower.
+    pub fn load_with_audio(dir: &Path, unified: bool, audio_enabled: bool) -> Result<Self> {
         let v: Value = serde_json::from_slice(&std::fs::read(dir.join("processor_config.json"))?)?;
         let expected = if unified { "Gemma4UnifiedProcessor" } else { "Gemma4Processor" };
         ensure!(v.get("processor_class").and_then(Value::as_str) == Some(expected), "unsupported Gemma processor");
@@ -153,7 +159,7 @@ impl Processor {
             .map(|(n, ms)| n * ms / 1000.0)
             .filter(|v| v.is_finite() && *v > 0.0 && *v <= 30.0)
             .context("invalid audio window")?;
-        Ok(Self { unified, max_audio_seconds: window })
+        Ok(Self { unified, max_audio_seconds: window, audio_enabled })
     }
 
     pub fn process(&self, entries: &Value, detail: &str) -> Result<ProcessedMedia> {
@@ -169,6 +175,10 @@ impl Processor {
         let mut items = Vec::with_capacity(entries.len());
         let mut processed_bytes = 0usize;
         for (i, entry) in entries.iter().enumerate() {
+            ensure!(
+                self.audio_enabled || entry.get("type").and_then(Value::as_str) != Some("audio"),
+                "media {i}: this model does not support audio"
+            );
             let data = entry
                 .get("data")
                 .and_then(Value::as_str)

@@ -560,15 +560,15 @@ fn models(r: &mut Report, c: &ServeConfig, gpus: Option<&[Gpu]>) {
         // q8_0 / q4_k: the weight estimate needs the model's config.json (local or cached)
         let mut model_dir = None;
         match (&m.path, &m.repo) {
-            (Some(p), _) => match std::fs::metadata(p.join("model.safetensors")) {
+            (Some(p), _) => match basal_core::checkpoint::bytes(p) {
                 Ok(md) => {
-                    bytes += md.len();
+                    bytes += md;
                     model_dir = Some(p.clone());
-                    r.ok("models", format!("{}: local, {:.1} GB", crate::term::P(&p), md.len() as f64 / GB));
+                    r.ok("models", format!("{}: local, {:.1} GB", crate::term::P(&p), md as f64 / GB));
                 }
                 Err(_) => r.fail(
                     "models",
-                    format!("{}: no model.safetensors", crate::term::P(&p)),
+                    format!("{}: no complete safetensors checkpoint", crate::term::P(&p)),
                     "a model directory holds config.json, basal.json, tokenizer.json and model.safetensors; or use a repository",
                 ),
             },
@@ -577,7 +577,7 @@ fn models(r: &mut Report, c: &ServeConfig, gpus: Option<&[Gpu]>) {
                 let at = m.revision.as_deref().unwrap_or("main");
                 match config::cached_model_dir(repo, m.revision.as_deref()) {
                     Some(dir) => {
-                        let b = std::fs::metadata(dir.join("model.safetensors")).map(|m| m.len()).unwrap_or(0);
+                        let b = basal_core::checkpoint::bytes(&dir).unwrap_or(0);
                         bytes += b;
                         r.ok("models", format!("{repo}@{}: cached, {:.1} GB", short(at), b as f64 / GB));
                         model_dir = Some(dir);

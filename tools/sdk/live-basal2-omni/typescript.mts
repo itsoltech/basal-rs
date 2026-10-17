@@ -33,6 +33,10 @@ for(const c of cases) {
       case 'multi':questions[key]=api.multi(q.instructions,q.criteria,q);break;
       case 'act':questions[key]=api.act(q.instructions,q.costs,q);break;
       case 'tool':questions[key]=api.tool(q.instructions,q.tools,q);break;
+      case 'classify':questions[key]=api.classify(q.instructions??'',q.labels,q);break;
+      case 'verify':questions[key]=api.verify(q.instructions??'',q.claims,q);break;
+      case 'compress':questions[key]=api.compress(q.instructions??'',q);break;
+      case 'extract':questions[key]=api.extract(q.instructions??'',q.schema);break;
       default:throw new Error('unsupported diagnostic case');
     }
   }

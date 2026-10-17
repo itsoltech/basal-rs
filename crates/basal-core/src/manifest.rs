@@ -36,6 +36,8 @@ pub struct ModelManifest {
     pub temperatures: HashMap<QType, f64>,
     /// CALIBRATION.json `thresholds` (certified confidence per target error, keyed by Python `str()` of the target).
     pub thresholds: serde_json::Map<String, Value>,
+    /// Certified confidence thresholds fitted for each experimental task, independent of primitive thresholds.
+    pub task_thresholds: serde_json::Map<String, Value>,
     pub bos_token: String,
     pub prompt_format: PromptFormat,
     pub orders: OptionOrders,
@@ -274,6 +276,17 @@ impl ModelManifest {
             }
         };
         let thresholds = if calibration_unvalidated.is_none() { map("thresholds")? } else { Default::default() };
+        let task_thresholds =
+            if calibration_unvalidated.is_none() { map("task_thresholds")? } else { Default::default() };
+        for (task, rates) in &task_thresholds {
+            let rates = rates.as_object().with_context(|| format!("task_thresholds.{task} must be an object"))?;
+            for (rate, value) in rates {
+                let risk: f64 = rate.parse().with_context(|| format!("invalid task error rate {rate:?}"))?;
+                ensure!(risk.is_finite() && risk > 0.0 && risk < 1.0, "task error rate must be in (0, 1)");
+                let threshold = value.as_f64().context("task threshold must be a number")?;
+                ensure!(threshold.is_finite() && (0.0..=1.0).contains(&threshold), "task threshold must be in [0, 1]");
+            }
+        }
         let multi_calibration = if calibration_unvalidated.is_none() { map("multi")? } else { Default::default() };
         Ok(Self {
             dir: dir.to_path_buf(),
@@ -283,6 +296,7 @@ impl ModelManifest {
             chat_style,
             temperatures,
             thresholds,
+            task_thresholds,
             bos_token,
             prompt_format,
             orders,

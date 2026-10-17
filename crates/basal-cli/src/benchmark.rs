@@ -276,7 +276,7 @@ pub(crate) fn run(model: &ModelArgs, gpu_options: &GpuArgs, options: &Options) -
 /// The model directory (downloaded when missing), its checkpoint size (also reported) and manifest.
 fn model_files(model: &ModelArgs, report: &mut Value) -> Result<(PathBuf, u64, ModelManifest)> {
     let dir = model.dir()?;
-    let checkpoint_bytes = std::fs::metadata(dir.join("model.safetensors")).context("checkpoint size")?.len();
+    let checkpoint_bytes = basal_core::checkpoint::bytes(&dir).context("checkpoint size")?;
     report["model"]["checkpoint_bytes"] = json!(checkpoint_bytes);
     let manifest = ModelManifest::load(&dir)?;
     Ok((dir, checkpoint_bytes, manifest))

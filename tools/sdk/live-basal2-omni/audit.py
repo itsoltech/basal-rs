@@ -8,6 +8,12 @@ import struct
 
 def project(a):
     kind = a["type"]
+    if kind == "classify":
+        keys = ['labels','set_confidence'] if a.get('labels') is not None else ['label','top_label','confidence','automated']
+        return {"type":kind,"experimental":a['experimental'],"scores":a['scores'],**{k:a[k] for k in keys}}
+    if kind in ('verify','compress','extract'):
+        keys={'verify':['claims','all_supported','not_supported'], 'compress':['compressed','kept','units','unit','original_chars','compressed_chars','ratio'], 'extract':['data','fields']}[kind]
+        return {"type":kind,"experimental":a['experimental'],**{k:a[k] for k in keys}}
     common = {"type": kind, "probabilities": a["probabilities"]}
     if kind in ("choice", "noul", "score", "act"):
         common["confidence"] = a["confidence"]

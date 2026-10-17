@@ -415,6 +415,20 @@ impl<B: Backend> Engine<B> {
 
     /// [`Engine::plan_request`] for an endpoint dialect (upstream: no model check, 2..10 options only).
     pub fn plan_request_as(&self, body: &Value, dialect: crate::request::Dialect) -> Result<RequestPlan, DecideError> {
+        if let Some(expansion) = crate::tasks::expand(body, self.manifest.prompt_format.max_options())? {
+            let mut plan = self.plan_decision_request_as(&expansion.request, dialect)?;
+            plan.tasks = Some(expansion.plan);
+            Ok(plan)
+        } else {
+            self.plan_decision_request_as(body, dialect)
+        }
+    }
+
+    fn plan_decision_request_as(
+        &self,
+        body: &Value,
+        dialect: crate::request::Dialect,
+    ) -> Result<RequestPlan, DecideError> {
         for field in ["early_exit", "thinking"] {
             if body.get(field).is_some_and(|v| !v.is_null()) {
                 return Err(DecideError::Unsupported(vec![crate::request::FieldError::new(
@@ -571,6 +585,7 @@ impl<B: Backend> Engine<B> {
         media: Option<Arc<crate::media::ProcessedMedia>>,
     ) -> Result<RequestPlan> {
         let mut plan = RequestPlan {
+            tasks: None,
             prepared: Vec::new(),
             questions: Vec::new(),
             evidence_limit: None,
@@ -695,13 +710,62 @@ impl<B: Backend> Engine<B> {
     /// Run the plans of several requests together: the questions of all plans share the forwards of each round
     /// (first round, then the final round of grouped large choices), as a server batches waiting requests.
     pub fn run_plans(&mut self, plans: &[&RequestPlan]) -> Result<Vec<PlanOutput>> {
+        let mut outputs = self.run_decision_plans(plans)?;
+        if !plans.iter().any(|p| p.tasks.is_some()) {
+            return Ok(outputs);
+        }
+        let mut continuations = Vec::new();
+        let mut owners = Vec::new();
+        for (i, plan) in plans.iter().enumerate() {
+            let Some(mut task) = plan.tasks.clone() else { continue };
+            let raw = plan_response(&self.manifest.name, plan, &outputs[i])?;
+            if let Some(mut body) = task.second_round(&raw, self.manifest.prompt_format.max_options())? {
+                body["model"] = self.manifest.name.clone().into();
+                match self.plan_decision_request_as(&body, plan.dialect) {
+                    Ok(next) => {
+                        continuations.push(next);
+                        owners.push((i, task, raw));
+                    }
+                    Err(error) => outputs[i].task_error = Some(error.to_string()),
+                }
+            } else {
+                let empty = serde_json::Map::new();
+                let thresholds = if plan.media.is_some() { &empty } else { &self.manifest.task_thresholds };
+                outputs[i].task_response = Some(task.finish(raw, None, thresholds)?);
+            }
+        }
+        if !continuations.is_empty() {
+            // These are primitive plans only: extraction has exactly one dependent continuation, on this engine.
+            let refs: Vec<_> = continuations.iter().collect();
+            let second = self.run_decision_plans(&refs)?;
+            for ((next, output), (i, task, mut raw)) in continuations.iter().zip(second).zip(owners) {
+                let next = plan_response(&self.manifest.name, next, &output)?;
+                for key in ["input_tokens", "branches", "second_order_branches"] {
+                    if let Some(n) = next["usage"][key].as_u64() {
+                        let old = raw["usage"][key].as_u64().unwrap_or(0);
+                        raw["usage"][key] = old.saturating_add(n).into();
+                    }
+                }
+                if let Some(n) = next["usage"]["longest_prompt_tokens"].as_u64() {
+                    raw["usage"]["longest_prompt_tokens"] =
+                        n.max(raw["usage"]["longest_prompt_tokens"].as_u64().unwrap_or(0)).into();
+                }
+                let empty = serde_json::Map::new();
+                let thresholds = if plans[i].media.is_some() { &empty } else { &self.manifest.task_thresholds };
+                outputs[i].task_response = Some(task.finish(raw, Some(&next), thresholds)?);
+            }
+        }
+        Ok(outputs)
+    }
+
+    fn run_decision_plans(&mut self, plans: &[&RequestPlan]) -> Result<Vec<PlanOutput>> {
         if plans.iter().any(|p| p.media.is_some()) {
             let mut results = Vec::with_capacity(plans.len());
             for plan in plans {
                 results.push(if plan.media.is_some() {
                     self.run_media_plan(plan)?
                 } else {
-                    self.run_plans(&[plan])?.remove(0)
+                    self.run_decision_plans(&[plan])?.remove(0)
                 });
             }
             return Ok(results);
@@ -882,6 +946,8 @@ impl<B: Backend> Engine<B> {
                 .max()
                 .unwrap_or(0);
             outs.push(PlanOutput {
+                task_response: None,
+                task_error: None,
                 longest_prompt_tokens,
                 finals,
                 final_round_tokens,
@@ -963,6 +1029,8 @@ impl<B: Backend> Engine<B> {
             }
             let n = finals.len();
             Ok(PlanOutput {
+                task_response: None,
+                task_error: None,
                 longest_prompt_tokens,
                 finals,
                 final_round_tokens: extra_tokens,
@@ -1094,6 +1162,8 @@ struct Large {
 /// Answers of a planned request: final distribution per question, and the prompt tokens of the rounds after the
 /// first of grouped large choices (counted in `usage.input_tokens`).
 pub struct PlanOutput {
+    task_response: Option<Value>,
+    task_error: Option<String>,
     pub finals: Vec<(Item, Vec<f64>)>,
     pub second_order_branches: Option<usize>,
     /// Longest executed prompt, including an adaptive reversed order.
@@ -1124,6 +1194,7 @@ pub enum QuestionPlan {
 
 #[derive(Clone, Debug)]
 pub struct RequestPlan {
+    tasks: Option<crate::tasks::TaskPlan>,
     pub prepared: Vec<Prepared>,
     pub questions: Vec<QuestionPlan>,
     /// Characters of the request's own state when facts were appended (evidence spans stay inside it).
@@ -1135,6 +1206,12 @@ pub struct RequestPlan {
 }
 
 pub fn plan_response(model: &str, plan: &RequestPlan, out: &PlanOutput) -> Result<Value, DecideError> {
+    if let Some(error) = &out.task_error {
+        return Err(crate::tasks::invalid(error));
+    }
+    if let Some(response) = &out.task_response {
+        return Ok(response.clone());
+    }
     let mut answers = serde_json::Map::new();
     for ((it, p), ev) in out.finals.iter().zip(&out.evidence) {
         let a = crate::decision::answer_checked(it, p, plan.dialect).map_err(|msg| {

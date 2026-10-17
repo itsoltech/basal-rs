@@ -42,9 +42,10 @@ public abstract class QuestionSpec
     /// <summary>Snapshot a validated question.</summary>
     protected QuestionSpec(string type, string instructions, JsonObject fields)
     {
-        Questions.Text(instructions, nameof(instructions));
+        ArgumentNullException.ThrowIfNull(instructions);
+        if (type is not ("classify" or "verify" or "compress" or "extract")) Questions.Text(instructions, nameof(instructions));
         wire = (JsonObject)fields.DeepClone();
-        wire["type"] = type; wire["instructions"] = instructions;
+        wire["type"] = type; if (instructions.Length > 0) wire["instructions"] = instructions;
     }
     /// <summary>A detached native JSON copy.</summary>
     public JsonObject ToJson() => (JsonObject)wire.DeepClone();
@@ -55,7 +56,7 @@ public abstract class QuestionSpec
     {
         if (response.Answers is null || !response.Answers.TryGetValue(id, out var answer) || answer is null || answer.Type != type)
             throw new BasalException("Basal returned a missing or mismatched answer");
-        if (answer.Probabilities is null || answer.Probabilities.Values.Any(v => !double.IsFinite(v) || v < 0 || v > 1))
+        if (answer.Probabilities is null || (type is not ("classify" or "verify" or "compress" or "extract") && answer.Probabilities.Count == 0) || answer.Probabilities.Values.Any(v => !double.IsFinite(v) || v < 0 || v > 1))
             throw new BasalException("Basal returned invalid probabilities");
         if (answer.Evidence is not null && answer.Evidence.Any(span => span is null || span.Text is null || span.Start < 0 || span.End < 0 || !double.IsFinite(span.Probability) || span.Probability < 0 || span.Probability > 1))
             throw new BasalException("Invalid evidence span");
@@ -282,7 +283,7 @@ public sealed class ToolQuestion : QuestionSpec<ToolResult>
     }
 }
 /// <summary>Convenient factories, also available through using static ITSOL.Basal.Questions.</summary>
-public static class Questions
+public static partial class Questions
 {
     /// <summary>Route to tools without executing them.</summary>
     public static ToolQuestion Tool(string instructions,IReadOnlyList<JsonObject> tools,ToolOptions? options=null)=>new(instructions,tools,options);

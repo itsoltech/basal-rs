@@ -95,6 +95,10 @@ Docker: [niżej](#uruchomienie-w-dockerze). Wymagania, ścieżki i szczegóły:
 | basal-2.0 mini / 4.5B / max, podstawowe BF16 | format 2, CUDA H100 i Metal M2 Max; Intel mini/4.5B, max niepotwierdzony; [wyniki i ograniczenia](reports/upstream-2.0-final-2026-10-14/README.md); [kontrakt i aliasy](docs/UPSTREAM_2.0.md) |
 | basal-omni mini / max, podstawowe BF16 | natywne Gemma 4 / Unified, CUDA; [realne media, kontekst i wydajność](reports/upstream-2.0-final-2026-10-14/README.md); [obraz i audio](docs/OMNI.md) |
 
+Nowe aliasy `omni-1.1-max` oraz `omni-ultra` i eksperymentalne zadania upstream 2.1
+opisuje [docs/TASKS.md](docs/TASKS.md). Zakres potwierdzenia GPU tych modeli jest
+oddzielny od kompilacji i zgodności logiki zadań na CPU.
+
 Modele format 2 mają natywny odczyt 2–255 opcji oraz typ `tool`.
 Domyślnie serwujemy `basal-2.0-4.5B`. Aliasy `mini`, `4.5B` i `max` nadal wskazują modele basal-1.5.
 Instalacje i usługi bez pliku konfiguracji oraz bez `--model` przechodzą na nowy model.

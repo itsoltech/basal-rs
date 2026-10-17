@@ -168,17 +168,31 @@ impl GemmaBackend {
         media: bool,
     ) -> Result<Self> {
         let start = Instant::now();
-        let processor =
-            if media { Some(Arc::new(basal_core::media::Processor::load(dir, cfg.unified)?)) } else { None };
-        let path = dir.join("model.safetensors");
-        // SAFETY: the checkpoint stays immutable for the mapping's lifetime; tensors are copied to owned device storage.
-        let st =
-            unsafe { candle_core::safetensors::MmapedSafetensors::new(&path) }.context("mapping Gemma checkpoint")?;
-        let reader = crate::TensorReader::open(&path)?;
+        let processor = if media {
+            Some(Arc::new(basal_core::media::Processor::load_with_audio(dir, cfg.unified, cfg.audio.is_some())?))
+        } else {
+            None
+        };
+        let paths = basal_core::checkpoint::files(dir)?;
+        // SAFETY: all checkpoint shards stay immutable for the mappings' lifetime. Mappings and readers
+        // remain local until tensors have been copied to owned device storage; loading is synchronous.
+        let st = unsafe { candle_core::safetensors::MmapedSafetensors::multi(&paths) }
+            .context("mapping Gemma checkpoint shards")?;
+        let readers = paths.iter().map(|p| crate::TensorReader::open(p)).collect::<Result<Vec<_>>>()?;
+        let mut locations = std::collections::HashMap::new();
+        for (index, reader) in readers.iter().enumerate() {
+            for name in reader.ranges.keys() {
+                ensure!(
+                    locations.insert(name.clone(), index).is_none(),
+                    "duplicate tensor {name} across checkpoint shards"
+                );
+            }
+        }
         let load_as = |name: &str, shape: &[usize], dtype: DType| -> Result<Tensor> {
             crate::check(&st, name, shape)?;
             let mut data = Vec::new();
-            reader.read(name, &mut data)?;
+            let index = locations.get(name).with_context(|| format!("checkpoint tensor {name} missing"))?;
+            readers[*index].read(name, &mut data)?;
             let tensor = Tensor::from_raw_buffer(&data, DType::BF16, shape, &Device::Cpu)?;
             Ok(tensor.to_dtype(dtype)?.to_device(&dev)?)
         };
@@ -797,7 +811,11 @@ impl GemmaBackend {
 impl Backend for GemmaBackend {
     fn media_kinds(&self) -> Vec<basal_core::media::Kind> {
         if self.processor.is_some() {
-            vec![basal_core::media::Kind::Image, basal_core::media::Kind::Audio]
+            let mut kinds = vec![basal_core::media::Kind::Image];
+            if self.cfg.audio.is_some() {
+                kinds.push(basal_core::media::Kind::Audio);
+            }
+            kinds
         } else {
             vec![]
         }

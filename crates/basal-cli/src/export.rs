@@ -64,6 +64,7 @@ pub fn export<B: Backend>(
         let mut line = json!({"id": case["id"], "source": case["source"], "request": case["request"]});
         let prepared = if dialect == basal_core::request::Dialect::TypeSafe
             && engine.manifest.prompt_format == basal_core::prompt::PromptFormat::One
+            && !case["request"]["questions"].as_object().is_some_and(|qs| qs.values().any(basal_core::tasks::is_task))
         {
             // Retain the legacy raw-export contract, including its capability errors and unexpanded multi item.
             engine.prepare_request(&case["request"]).map(|p| (p, None))
@@ -104,7 +105,15 @@ pub fn export<B: Backend>(
                     }
                 }
                 line["answer"] = answer;
-                line["answer_vs_items_max_abs_prob_diff"] = json!(served_diff);
+                if case["request"]["questions"]
+                    .as_object()
+                    .is_some_and(|qs| qs.values().any(basal_core::tasks::is_task))
+                {
+                    line["answer_vs_items_max_abs_prob_diff"] = Value::Null;
+                    line["task_export_scope"] = "items are first-round primitive readouts; answer includes task assembly and any dependent extraction round".into();
+                } else {
+                    line["answer_vs_items_max_abs_prob_diff"] = json!(served_diff);
+                }
             }
             Err(DecideError::Internal(e)) => return Err(e),
             Err(e) => {

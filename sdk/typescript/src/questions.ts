@@ -50,13 +50,13 @@ function evidence(options: EvidenceOptions): Question {
 export abstract class QuestionSpec<A extends Answer = Answer> {
   private readonly wire: Question;
   protected constructor(kind: A['type'], instructions: string, fields: Question) {
-    this.wire = structuredClone({...fields,type:kind,instructions:text(instructions,'instructions')});
+    this.wire = structuredClone({...fields,type:kind,...(['classify','verify','compress','extract'].includes(kind) ? (instructions ? {instructions} : {}) : {instructions:text(instructions,'instructions')})});
   }
   toJSON(): Question { return structuredClone(this.wire); }
   /** Validate and retrieve an answer with this question's result type. */
   read(response: DecisionResponse, id: string): A {
     const answer = response.answers?.[id];
-    if (!answer || answer.type !== this.wire.type || !answer.probabilities || typeof answer.probabilities !== 'object' || Array.isArray(answer.probabilities)) {
+    if (!answer || !('probabilities' in answer) || answer.type !== this.wire.type || !answer.probabilities || typeof answer.probabilities !== 'object' || Array.isArray(answer.probabilities)) {
       throw new TypeError('Basal returned a missing or mismatched answer');
     }
     const fields: Record<string,Record<string,'number'|'string'|'object'|'boolean'>> = {

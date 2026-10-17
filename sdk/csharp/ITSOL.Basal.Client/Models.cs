@@ -49,6 +49,24 @@ public sealed class Question
     [JsonPropertyName("rank")] public int? Rank { get; init; }
     /// <summary>Select a set of tools.</summary>
     [JsonPropertyName("multi")] public bool? Multi { get; init; }
+    /// <summary>Task labels.</summary>
+    [JsonPropertyName("labels")] public JsonNode? Labels { get; init; }
+    /// <summary>Multi-label classification.</summary>
+    [JsonPropertyName("multi_label")] public bool? MultiLabel { get; init; }
+    /// <summary>Add the none-of-the-above category.</summary>
+    [JsonPropertyName("none")] public bool? None { get; init; }
+    /// <summary>Claims to verify.</summary>
+    [JsonPropertyName("claims")] public JsonNode? Claims { get; init; }
+    /// <summary>Binary verification.</summary>
+    [JsonPropertyName("binary")] public bool? Binary { get; init; }
+    /// <summary>Compression segmentation.</summary>
+    [JsonPropertyName("unit")] public string? Unit { get; init; }
+    /// <summary>Compression retention target.</summary>
+    [JsonPropertyName("keep_ratio")] public double? KeepRatio { get; init; }
+    /// <summary>Minimum retained units.</summary>
+    [JsonPropertyName("min_keep")] public int? MinKeep { get; init; }
+    /// <summary>Extraction schema.</summary>
+    [JsonPropertyName("schema")] public JsonObject? Schema { get; init; }
     /// <summary>Additional native fields. Do not repeat named fields above.</summary>
     [JsonExtensionData] public Dictionary<string, JsonElement>? Extra { get; init; }
 }
@@ -93,7 +111,7 @@ public sealed class Answer
     /// <summary>choice, noul, score, multi, act or tool.</summary>
     [JsonPropertyName("type")] public required string Type { get; init; }
     /// <summary>Native probabilities; independent P(yes) values for multi.</summary>
-    [JsonPropertyName("probabilities")] public required Dictionary<string, double> Probabilities { get; init; }
+    [JsonPropertyName("probabilities")] public Dictionary<string, double> Probabilities { get; init; } = [];
     /// <summary>Max probability for choice/noul/score/act; multi uses set_confidence.</summary>
     [JsonPropertyName("confidence")] public double? Confidence { get; init; }
     /// <summary>Chosen choice key.</summary>
@@ -142,6 +160,42 @@ public sealed class Answer
     [JsonPropertyName("ranking")] public IReadOnlyList<ToolRanking>? Ranking { get; init; }
     /// <summary>Optional supporting spans.</summary>
     [JsonPropertyName("evidence")] public List<EvidenceSpan>? Evidence { get; init; }
+    /// <summary>Experimental task marker.</summary>
+    [JsonPropertyName("experimental")] public bool? Experimental { get; init; }
+    /// <summary>Single classification label.</summary>
+    [JsonPropertyName("label")] public string? Label { get; init; }
+    /// <summary>Top classification label.</summary>
+    [JsonPropertyName("top_label")] public string? TopLabel { get; init; }
+    /// <summary>Selected classification labels.</summary>
+    [JsonPropertyName("labels")] public IReadOnlyList<string>? Labels { get; init; }
+    /// <summary>Classification scores.</summary>
+    [JsonPropertyName("scores")] public Dictionary<string,double>? Scores { get; init; }
+    /// <summary>Task-specific certified automation; null means unavailable.</summary>
+    [JsonPropertyName("automated")] public Dictionary<string,bool?>? Automated { get; init; }
+    /// <summary>Per-claim verification.</summary>
+    [JsonPropertyName("claims")] public Dictionary<string,ClaimResult>? Claims { get; init; }
+    /// <summary>Whether every claim is supported.</summary>
+    [JsonPropertyName("all_supported")] public bool? AllSupported { get; init; }
+    /// <summary>Flagged claim keys.</summary>
+    [JsonPropertyName("not_supported")] public IReadOnlyList<string>? NotSupported { get; init; }
+    /// <summary>Compressed source text.</summary>
+    [JsonPropertyName("compressed")] public string? Compressed { get; init; }
+    /// <summary>Kept source unit indices.</summary>
+    [JsonPropertyName("kept")] public IReadOnlyList<int>? Kept { get; init; }
+    /// <summary>Original source units.</summary>
+    [JsonPropertyName("units")] public IReadOnlyList<CompressionUnit>? Units { get; init; }
+    /// <summary>Compression segmentation.</summary>
+    [JsonPropertyName("unit")] public string? Unit { get; init; }
+    /// <summary>Source Unicode code point count.</summary>
+    [JsonPropertyName("original_chars")] public int? OriginalChars { get; init; }
+    /// <summary>Compressed Unicode code point count.</summary>
+    [JsonPropertyName("compressed_chars")] public int? CompressedChars { get; init; }
+    /// <summary>Character retention ratio.</summary>
+    [JsonPropertyName("ratio")] public double? Ratio { get; init; }
+    /// <summary>Nested extracted data.</summary>
+    [JsonPropertyName("data")] public JsonObject? Data { get; init; }
+    /// <summary>Extraction provenance.</summary>
+    [JsonPropertyName("fields")] public Dictionary<string,ExtractField>? Fields { get; init; }
     /// <summary>Future answer fields.</summary>
     [JsonExtensionData] public Dictionary<string, JsonElement>? Extra { get; init; }
 }

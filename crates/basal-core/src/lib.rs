@@ -3,6 +3,7 @@
 
 pub mod architecture;
 mod budget;
+pub mod checkpoint;
 pub mod decision;
 pub mod engine;
 pub mod evidence;
@@ -16,6 +17,7 @@ pub mod prompt;
 pub mod pyjson;
 pub mod request;
 pub mod sets;
+pub mod tasks;
 pub mod tokenize;
 pub mod tools;
 

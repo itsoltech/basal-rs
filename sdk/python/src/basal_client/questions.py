@@ -9,6 +9,7 @@ import math
 from types import MappingProxyType
 from typing import Any, Generic, Literal, Self, TypeVar, cast, overload
 
+from .task_types import TaskAnswer
 from .types import Calibration, DecisionResponse, EvidenceSpan, JsonValue, MultiObjective, Question as WireQuestion, ToolRanking, Usage
 
 OptionKeys = Literal["show", "hide"]
@@ -80,7 +81,7 @@ class ActAnswer:
 
 
 TAnswer = TypeVar("TAnswer")
-AnswerResult = ChoiceAnswer | NoulAnswer | ScoreAnswer | MultiAnswer | ActAnswer | ToolAnswer
+AnswerResult = ChoiceAnswer | NoulAnswer | ScoreAnswer | MultiAnswer | ActAnswer | ToolAnswer | TaskAnswer
 TSchema = TypeVar("TSchema", bound="Questions")
 TSchema_co = TypeVar("TSchema_co", bound="Questions", covariant=True)
 

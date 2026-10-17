@@ -1,6 +1,8 @@
 import { buildRequest, type QuestionSet, type TypedDecisionResponse, type DecisionOptions } from "./questions.js";
 export * from "./questions.js";
 export * from "./media.js";
+export * from "./tasks.js";
+import type {TaskAnswer} from "./tasks.js";
 /** Native Basal wire types. Criterion order is significant; do not sort keys. */
 export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 export type Calibration = "validated" | "unvalidated" | "text";
@@ -10,7 +12,7 @@ export interface MediaUsage { images: number; audio: number; media_tokens: numbe
 export interface ToolRanking { tool: string; probability: number }
 export type ToolDefinition = Record<string, JsonValue>;
 export interface Question {
-  type?: "choice" | "noul" | "score" | "multi" | "act" | "tool";
+  type?: "choice" | "noul" | "score" | "multi" | "act" | "tool" | "classify" | "verify" | "compress" | "extract";
   instructions?: JsonValue;
   criteria?: Record<string, JsonValue> | JsonValue[];
   levels?: Record<string, JsonValue> | JsonValue[];
@@ -22,7 +24,7 @@ export interface Question {
   base?: "noul" | "choice" | "score";
   costs?: Record<string, number> | Record<string, Record<string, number>>;
   defer_action?: string;
-  max_error?: number;
+  max_error?: number | readonly number[];
   objective?: MultiObjective;
   exclusive?: readonly string[];
   fallback?: string;
@@ -31,6 +33,11 @@ export interface Question {
   extra?: readonly ("answer_directly" | "ask_user" | "none")[];
   rank?: number;
   multi?: boolean;
+  labels?: Record<string,JsonValue> | JsonValue[];
+  multi_label?: boolean; none?: boolean;
+  claims?: Record<string,JsonValue> | JsonValue[]; binary?: boolean;
+  unit?: 'sentence'|'line'|'paragraph'; keep_ratio?: number; min_keep?: number;
+  schema?: Record<string,JsonValue>;
 }
 export interface DecisionRequest {
   state: JsonValue;
@@ -70,7 +77,7 @@ export interface ActAnswer<K extends string = string, A extends string = string>
   max_error?: string;
   deferred?: boolean;
 }
-export type Answer = ChoiceAnswer | NoulAnswer | ScoreAnswer | MultiAnswer | ActAnswer | ToolAnswer;
+export type Answer = ChoiceAnswer | NoulAnswer | ScoreAnswer | MultiAnswer | ActAnswer | ToolAnswer | TaskAnswer;
 export interface Usage { input_tokens: number; output_tokens: number; questions?: number; branches?: number; latency_ms?: number; longest_prompt_tokens?: number; second_order_branches?: number; media?: MediaUsage }
 export interface DecisionResponse { model: string; answers: Record<string, Answer>; usage: Usage }
 export interface ModelMetadata { name: string; description?: string; release_date?: string; mode?: string; early_exit?: JsonValue[]; prompt_format?: number; orders?: JsonValue; temperature_per_prim?: Record<string,number>; media?: ("image"|"audio")[] }

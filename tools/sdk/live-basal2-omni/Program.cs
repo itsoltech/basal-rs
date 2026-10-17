@@ -49,7 +49,7 @@ static string TextValue(JsonObject o,string key)=>o[key]!.GetValue<string>();
 static Dictionary<string,string> Criteria(JsonObject o)=>o["criteria"]!.Deserialize<Dictionary<string,string>>()!;
 static MultiOptions Selection(JsonObject q)=>new(q["threshold"]?.GetValue<double>(),q["min"]?.GetValue<int>(),q["max"]?.GetValue<int>(),q["objective"]?.GetValue<string>()??"threshold",q["exclusive"]?.Deserialize<string[]>(),q["fallback"]?.GetValue<string>(),q["fallback_threshold"]?.GetValue<double>());
 static QuestionSpec Definition(JsonObject q) {
-    var instruction=TextValue(q,"instructions");
+    var instruction=q["instructions"]?.GetValue<string>()??"";
     return TextValue(q,"type") switch {
         "choice"=>Choice(instruction,Criteria(q)),
         "noul"=>Noul(instruction),
@@ -57,10 +57,19 @@ static QuestionSpec Definition(JsonObject q) {
         "multi"=>Multi(instruction,Criteria(q),Selection(q)),
         "act"=>Act(instruction,q["costs"]!.Deserialize<Dictionary<string,Dictionary<string,double>>>()!,new ActOptions(q["criteria"]?.Deserialize<Dictionary<string,string>>(),DeferAction:q["defer_action"]?.GetValue<string>(),MaxError:q["max_error"]?.GetValue<double>())),
         "tool"=>Tool(instruction,q["tools"]!.AsArray().Select(v=>v!.AsObject()).ToArray(),new ToolOptions(q["extra"]?.Deserialize<string[]>(),q["rank"]?.GetValue<int>(),q["multi"]?.GetValue<bool>()??false,q["max_error"]?.GetValue<double>(),Selection(q))),
+        "classify"=>Classify(instruction,q["labels"]!,new ClassifyOptions(q["multi_label"]?.GetValue<bool>()??false,q["none"]?.GetValue<bool>()??false,Risks(q),q["option_keys"]?.GetValue<string>()=="hide"?OptionKeys.Hide:OptionKeys.Show,Selection(q))),
+        "verify"=>Verify(instruction,q["claims"]!,new VerifyOptions(q["binary"]?.GetValue<bool>()??false,Risks(q))),
+        "compress"=>Compress(instruction,new CompressOptions(q["unit"]?.GetValue<string>()??"sentence",q["keep_ratio"]?.GetValue<double>(),q["threshold"]?.GetValue<double>(),q["min_keep"]?.GetValue<int>())),
+        "extract"=>Extract(instruction,q["schema"]!.AsObject()),
         _=>throw new ArgumentException("Unsupported diagnostic question")
     };
 }
+static IReadOnlyList<double>? Risks(JsonObject q)=>q["max_error"] switch {null=>null,JsonArray a=>a.Deserialize<double[]>(),var v=>new[]{v.GetValue<double>()}};
 static object Project(AnswerResult a)=>a switch {
+    ClassifyResult v=>new {type="classify",experimental=v.Experimental,scores=v.Scores,label=v.Label,top_label=v.TopLabel,confidence=v.Confidence,automated=v.Automated,labels=v.Labels,set_confidence=v.SetConfidence},
+    VerifyResult v=>new {type="verify",experimental=v.Experimental,claims=v.Claims,all_supported=v.AllSupported,not_supported=v.NotSupported},
+    CompressResult v=>new {type="compress",experimental=v.Experimental,compressed=v.Compressed,kept=v.Kept,units=v.Units,unit=v.Unit,original_chars=v.OriginalChars,compressed_chars=v.CompressedChars,ratio=v.Ratio},
+    ExtractResult v=>new {type="extract",experimental=v.Experimental,data=v.Data,fields=v.Fields},
     ChoiceResult v=>new {type="choice",choice=v.Choice,confidence=v.Confidence,probabilities=v.Probabilities},
     NoulResult v=>new {type="noul",noul=v.Noul,confidence=v.Confidence,probabilities=v.Probabilities},
     ScoreResult v=>new {type="score",score=v.Score,confidence=v.Confidence,legend=v.Legend,probabilities=v.Probabilities},

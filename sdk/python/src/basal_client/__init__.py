@@ -33,3 +33,16 @@ from .media import image, audio
 from .types import Calibration, MediaInput, MediaUsage, MultiObjective, ToolRanking
 from .questions import ToolAnswer, ToolQuestion, tool
 __all__ += ["image", "audio", "Calibration", "MediaInput", "MediaUsage", "MultiObjective", "ToolRanking", "ToolAnswer", "ToolQuestion", "tool"]
+
+from .tasks import (
+    ClassifyAnswer, VerifyAnswer, CompressAnswer, ExtractAnswer,
+    ClaimResult, CompressionUnit, ExtractField,
+    ClassifyQuestion, VerifyQuestion, CompressQuestion, ExtractQuestion,
+    classify, verify, compress, extract,
+)
+__all__ += [
+    "ClassifyAnswer", "VerifyAnswer", "CompressAnswer", "ExtractAnswer",
+    "ClaimResult", "CompressionUnit", "ExtractField",
+    "ClassifyQuestion", "VerifyQuestion", "CompressQuestion", "ExtractQuestion",
+    "classify", "verify", "compress", "extract",
+]

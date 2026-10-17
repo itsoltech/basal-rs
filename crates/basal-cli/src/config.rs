@@ -457,7 +457,7 @@ pub struct KnownModel {
     pub size_gb: f64,
 }
 
-pub const KNOWN_MODELS: [KnownModel; 8] = [
+pub const KNOWN_MODELS: [KnownModel; 10] = [
     KnownModel {
         short: "mini",
         repo: "Remek/basal-1.5-mini",
@@ -505,6 +505,18 @@ pub const KNOWN_MODELS: [KnownModel; 8] = [
         repo: "Remek/basal-omni-1.0-max",
         revision: "e538228c4f3ffd96dde298a073ed10247da0d637",
         size_gb: 23.9,
+    },
+    KnownModel {
+        short: "omni-1.1-max",
+        repo: "Remek/basal-omni-1.1-max",
+        revision: "c8ab50cd973c116b3ca6bd9e4d574f713bab1f68",
+        size_gb: 23.92,
+    },
+    KnownModel {
+        short: "omni-ultra",
+        repo: "Remek/basal-omni-1.0-ultra",
+        revision: "b8e214cb42d0a7a4cb2c3a93b0ba02c65d7590e4",
+        size_gb: 62.55,
     },
 ];
 
@@ -679,7 +691,8 @@ pub fn cached_model_dir(repo: &str, revision: Option<&str>) -> Option<PathBuf> {
         .local_files_only(true)
         .send()
         .ok()?;
-    MODEL_FILES[..7].iter().all(|f| dir.join(f).exists()).then_some(dir)
+    (MODEL_FILES[..6].iter().all(|f| dir.join(f).exists()) && basal_core::checkpoint::files(&dir).is_ok())
+        .then_some(dir)
 }
 
 /// Directory of a configured model: `path`, or the Hugging Face snapshot of `repo` at `revision` (downloaded when

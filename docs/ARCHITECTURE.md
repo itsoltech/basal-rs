@@ -575,3 +575,13 @@ pomiaru zgodności ani wydajności na sprzęcie. Wyniki pomiarów opisane niżej
   (32 GB) z trzema modelami basal-1.5
   ([pomiar](../reports/metal-m2-max-1.5/README.md),
   [attention](../reports/metal-m2-max-tree/README.md)).
+
+## Warstwa zadań 2.1
+
+`basal-core::tasks` rozwija classify/verify/compress/extract do zwykłych decyzji.
+Plan przechowuje kontekst składania odpowiedzi; extract wykonuje co najwyżej
+jedną zależną kontynuację. `Engine::run_plans` grupuje te kontynuacje na tym
+samym engine, bez ponownego routingu HTTP. Job zachowuje sloty i rezerwację
+repliki przez obie rundy. Plain requests pozostają na dotychczasowej ścieżce.
+Budget sprawdza rozwinięty tekst i gałęzie przed ekspansją. Osobne task_thresholds
+nie są zastępowane kalibracją prymitywów. Szczegóły: [TASKS.md](TASKS.md).
