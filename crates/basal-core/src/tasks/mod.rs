@@ -608,6 +608,7 @@ impl TaskPlan {
                                         return Ok(Value::Null);
                                     }
                                     vals.iter()
+                                        .rev()
                                         .find(|(v, _)| py_string(v) == key)
                                         .map(|(v, _)| v.clone())
                                         .context("invalid extract enum choice")

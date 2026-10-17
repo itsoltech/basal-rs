@@ -79,10 +79,11 @@ export class ClassifyQuestion<K extends string = string> extends TaskQuestion<Cl
     risks(options.max_error);
     for(const k of ['multi_label','none'] as const)if(options[k]!==undefined&&typeof options[k]!=='boolean')throw new TypeError(`invalid ${k}`);
     if(options.option_keys!==undefined&&!['show','hide'].includes(options.option_keys))throw new TypeError('invalid option_keys');
-    if(options.threshold!==undefined)probability(options.threshold);
+    if(options.threshold!==undefined){probability(options.threshold);if(options.objective!==undefined&&options.objective!=='threshold')throw new TypeError('threshold requires threshold objective');}
     for(const k of ['min','max'] as const)if(options[k]!==undefined)offset(options[k]);
     if(options.min!==undefined&&options.max!==undefined&&options.min>options.max)throw new TypeError('min exceeds max');
     if(options.objective!==undefined&&!['threshold','exact','iou','f1'].includes(options.objective))throw new TypeError('invalid objective');
+    if(!options.multi_label&&['threshold','min','max','objective'].some(k=>Object.hasOwn(options,k)))throw new TypeError('selection options require multi_label');
     super('classify',text,{labels:structuredClone(labels) as Record<string,JsonValue>|JsonValue[],...options});
   }
 }
@@ -97,7 +98,7 @@ export class CompressQuestion extends TaskQuestion<CompressAnswer> {
   constructor(text='',options:CompressOptions={}) {
     if(options.unit!==undefined&&!['sentence','line','paragraph'].includes(options.unit))throw new TypeError('invalid unit');
     if(options.keep_ratio!==undefined){probability(options.keep_ratio);if(options.keep_ratio===0)throw new TypeError('keep_ratio must be positive');}
-    if(options.threshold!==undefined)probability(options.threshold);
+    if(options.threshold!==undefined){probability(options.threshold);if(options.objective!==undefined&&options.objective!=='threshold')throw new TypeError('threshold requires threshold objective');}
     if(options.min_keep!==undefined)offset(options.min_keep);
     super('compress',text,options);
   }

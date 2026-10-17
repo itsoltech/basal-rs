@@ -119,8 +119,13 @@ async def export(srv, args, out):
                     if req.get("facts") == "auto":
                         from basal.facts import inject
                         state = inject(state if isinstance(state, str) else json.dumps(state, ensure_ascii=False))
-                    qs = to_items(state, req["questions"], srv.max_options, force_lang=req.get("lang"))
-                    media = srv.media_of(req, None)
+                    primitive = req
+                    if any(q.get("type") in ("classify", "verify", "compress", "extract") for q in req["questions"].values()):
+                        from basal import tasks
+                        primitive, _ = tasks.expand(req, srv.max_options)
+                        rec["task_export_scope"] = "items contain first-round readouts; upstream_answer contains the served task result including dependent extraction"
+                    qs = to_items(state, primitive["questions"], srv.max_options, force_lang=req.get("lang"))
+                    media = srv.media_of(primitive, None)
                     items = []
                     for q in qs:
                         for bi, (question, options) in enumerate(q["branches"]):

@@ -39,7 +39,15 @@ pub(super) fn consts(schema: &Value) -> Option<Vec<(Value, Option<Value>)>> {
         {
             return Some(
                 alts.iter()
-                    .map(|a| (a["const"].clone(), a.get("description").or_else(|| a.get("title")).cloned()))
+                    .map(|a| {
+                        (
+                            a["const"].clone(),
+                            a.get("description")
+                                .filter(|v| crate::request::truthy(Some(v)))
+                                .or_else(|| a.get("title"))
+                                .cloned(),
+                        )
+                    })
                     .collect(),
             );
         }

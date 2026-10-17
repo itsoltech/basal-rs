@@ -1,6 +1,6 @@
 """Typed results of experimental Basal tasks; source offsets count Unicode code points."""
 from dataclasses import dataclass
-from typing import Literal, TypedDict
+from typing import Literal, Required, TypedDict
 from .types import JsonValue
 
 
@@ -18,10 +18,10 @@ class CompressionUnit(TypedDict):
 
 
 class ExtractField(TypedDict, total=False):
-    value: JsonValue
-    confidence: float
-    source: Literal['choice', 'span']
-    calibration: Literal['validated', 'per decision']
+    value: Required[JsonValue]
+    confidence: Required[float]
+    source: Required[Literal['choice', 'span']]
+    calibration: Required[Literal['validated', 'per decision']]
     probabilities: dict[str, float]
     present_probability: float
     text: str

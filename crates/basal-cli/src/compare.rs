@@ -109,7 +109,13 @@ pub fn check_prompts<B: Backend>(engine: &Engine<B>, reference: &Path) -> Result
     for case in read_jsonl(&reference.join("systemone.jsonl"))? {
         let id = str_of(&case, "id");
         let mut items = Vec::new();
-        let ours_error = match engine.prepare_request(&case["request"]) {
+        let prepared =
+            if case["request"]["questions"].as_object().is_some_and(|qs| qs.values().any(basal_core::tasks::is_task)) {
+                engine.plan_request_as(&case["request"], basal_core::request::Dialect::Upstream).map(|p| p.prepared)
+            } else {
+                engine.prepare_request(&case["request"])
+            };
+        let ours_error = match prepared {
             Ok(prep) => {
                 for p in &prep {
                     let same = match item_named(&case, &p.item.name) {
@@ -184,10 +190,95 @@ impl Numeric {
     }
 }
 
+/// Decision-bearing task fields; confidence differences are reported separately.
+fn task_decision(answer: &Value) -> Value {
+    let mut out = serde_json::Map::new();
+    for key in [
+        "type",
+        "experimental",
+        "label",
+        "top_label",
+        "labels",
+        "automated",
+        "all_supported",
+        "not_supported",
+        "compressed",
+        "kept",
+        "unit",
+        "original_chars",
+        "compressed_chars",
+        "data",
+    ] {
+        if let Some(v) = answer.get(key) {
+            out.insert(key.into(), v.clone());
+        }
+    }
+    if let Some(claims) = answer["claims"].as_object() {
+        out.insert(
+            "claims".into(),
+            claims
+                .iter()
+                .map(|(k, v)| (k.clone(), json!({"verdict":v["verdict"],"automated":v["automated"]})))
+                .collect::<serde_json::Map<_, _>>()
+                .into(),
+        );
+    }
+    if let Some(fields) = answer["fields"].as_object() {
+        out.insert(
+            "fields".into(),
+            fields
+                .iter()
+                .map(|(k, v)| {
+                    let values = ["value", "text", "start", "end", "source", "calibration", "error"]
+                        .into_iter()
+                        .filter_map(|key| v.get(key).map(|v| (key.into(), v.clone())))
+                        .collect::<serde_json::Map<_, _>>();
+                    (k.clone(), values.into())
+                })
+                .collect::<serde_json::Map<_, _>>()
+                .into(),
+        );
+    }
+    out.into()
+}
+
 /// Differences of two System One answers for the same question (probabilities, value, choice). The confidence fields
 /// are listed but not differenced: upstream uses max(p), this runtime the TypeSafe definitions.
 fn answer_diff(a: &Value, b: &Value) -> Value {
     let mut out = json!({"type_a": a["type"], "type_b": b["type"]});
+    if basal_core::tasks::is_task(a) || basal_core::tasks::is_task(b) {
+        out["task_decisions_same"] = json!(task_decision(a) == task_decision(b));
+        out["task_decision_a"] = task_decision(a);
+        out["task_decision_b"] = task_decision(b);
+        let mut max_diff = 0.0f64;
+        let mut count = 0usize;
+        fn numbers(a: &Value, b: &Value, max_diff: &mut f64, count: &mut usize) {
+            match (a, b) {
+                (Value::Object(a), Value::Object(b)) => {
+                    for (k, a) in a {
+                        if let Some(b) = b.get(k) {
+                            numbers(a, b, max_diff, count);
+                        }
+                    }
+                }
+                (Value::Array(a), Value::Array(b)) => {
+                    for (a, b) in a.iter().zip(b) {
+                        numbers(a, b, max_diff, count);
+                    }
+                }
+                (Value::Number(a), Value::Number(b)) => {
+                    if let (Some(a), Some(b)) = (a.as_f64(), b.as_f64()) {
+                        *max_diff = max_diff.max((a - b).abs());
+                        *count += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        numbers(a, b, &mut max_diff, &mut count);
+        out["task_numeric_fields_compared"] = count.into();
+        out["task_max_abs_numeric_diff"] = max_diff.into();
+    }
     let max_prob = a["probabilities"].as_object().map(|pa| {
         pa.iter()
             .filter_map(|(k, v)| Some((v.as_f64()? - b["probabilities"].get(k)?.as_f64()?).abs()))

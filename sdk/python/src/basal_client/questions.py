@@ -141,7 +141,7 @@ class QuestionSpec(Generic[TAnswer]):
         data = cast(dict[str, Any], answer)
         try:
             probabilities = data["probabilities"]
-            if not isinstance(probabilities, dict) or any(not isinstance(k, str) for k in probabilities):
+            if not isinstance(probabilities, dict) or not probabilities or any(not isinstance(k, str) for k in probabilities):
                 raise ValueError("invalid probabilities")
             for value in probabilities.values():
                 _number(value, "probability", True)
