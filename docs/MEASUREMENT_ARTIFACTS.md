@@ -204,3 +204,17 @@ Ta sama lista z sumami jest w `SHA256SUMS`. Sumy plików Markdown są tylko tam.
 | `reports/w8a16-2026-10-11/provenance.json` | 23355 | `3a145d4877d105d8b79448c46385ea0c84f02708f9b8b30c9650a3d992691948` |
 | `reports/w8a16-2026-10-11/raw-manifest.json` | 17337 | `9ccd9d51d5042b7f95a6631db6abaa036fad46bd234dfe77f4f2eadf08f73d95` |
 | `reports/w8a16-2026-10-11/static-validation.json` | 3912 | `d021ee7c3e774aad353a798e67c033c694918ab2f7f4b502215b9284551e5500` |
+
+## Upstream 2.1, SDK i nowe Omni
+
+[Raport](../reports/upstream-2.1-2026-10-17/README.md) opisuje zadania 2.1,
+cztery SDK, Omni 1.1 max i Ultra, jakość względem FP32 oraz HTTP względem BF16.
+Zachowuje różnicę starszego `act`, przegrane Ultra w sekwencyjnych zadaniach,
+OOM upstream przy C8, nieukończone próby i krótką serię obrazów jako SIGNAL.
+
+Archiwum: `hf://buckets/itsoltech/basal-rs/measurements/upstream-2.1-2026-10-17/9a8dae4bc02b08a4f2bcaf50aec712710706fb746820aff89961d4924ac1b10d/measurement-data.tar.gz`,
+SHA-256 `9a8dae4bc02b08a4f2bcaf50aec712710706fb746820aff89961d4924ac1b10d`,
+7 352 849 B. Pobranie z autoryzacją i anonimowo potwierdziło 896/896 sum.
+Dane są pod `reports/upstream-2.1-2026-10-17/`; raport oraz archiwalny
+`REPRODUCE.md` podają polecenia odtworzenia. Media są zewnętrzne, przypięte
+hashami. Archiwum zawiera też dokładne źródła pomiarów i patch kodu do `8adebaa`.
