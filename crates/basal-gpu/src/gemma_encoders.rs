@@ -166,8 +166,8 @@ impl Vision {
             projection: load("model.embed_vision.embedding_projection.weight", &[2560, 768])?,
         })
     }
-    fn rotate(x: &Tensor, positions: &[(i64, i64)], dev: &Device) -> Result<Tensor> {
-        let n = x.dim(0)?;
+    fn rotation(positions: &[(i64, i64)], dtype: DType, dev: &Device) -> Result<(Tensor, Tensor)> {
+        let n = positions.len();
         let mut cos = Vec::with_capacity(n * 64);
         let mut sin = Vec::with_capacity(n * 64);
         for &(a, b) in positions {
@@ -180,15 +180,21 @@ impl Vision {
                 }
             }
         }
-        let cos = Tensor::from_vec(cos, (n, 1, 64), dev)?.to_dtype(x.dtype())?;
-        let sin = Tensor::from_vec(sin, (n, 1, 64), dev)?.to_dtype(x.dtype())?;
+        Ok((
+            Tensor::from_vec(cos, (n, 1, 64), dev)?.to_dtype(dtype)?,
+            Tensor::from_vec(sin, (n, 1, 64), dev)?.to_dtype(dtype)?,
+        ))
+    }
+
+    fn rotate(x: &Tensor, rotation: &(Tensor, Tensor)) -> Result<Tensor> {
+        let (cos, sin) = rotation;
         let mut parts = Vec::new();
         for offset in [0, 32] {
             parts.push(Tensor::cat(&[&x.narrow(2, offset + 16, 16)?.neg()?, &x.narrow(2, offset, 16)?], 2)?);
         }
-        Ok((x.broadcast_mul(&cos)? + Tensor::cat(&parts, 2)?.broadcast_mul(&sin)?)?)
+        Ok((x.broadcast_mul(cos)? + Tensor::cat(&parts, 2)?.broadcast_mul(sin)?)?)
     }
-    fn forward(&self, image: &ImageInput, dt: DType, dev: &Device) -> Result<Tensor> {
+    fn forward(&self, image: &ImageInput, dt: DType, dev: &Device, attention_dtype: DType) -> Result<Tensor> {
         let n = image.patch_width.checked_mul(image.patch_height).context("image dimensions overflow")?;
         ensure!(
             image.patch_dim == 768
@@ -207,33 +213,35 @@ impl Vision {
             + self.positions.get(1)?.index_select(&Tensor::from_vec(py, n, dev)?, 0)?)?
         .to_dtype(dt)?;
         let mut x = (linear(&patches, &self.patch)? + positions)?;
+        // Position/dtype are fixed for this image. Reuse exactly the same rotary tensors
+        // for Q and K in all sixteen layers, rather than rebuilding/uploading them 32 times.
+        let rotation = Self::rotation(&image.positions[..n], dt, dev)?;
         for layer in &self.layers {
             let input = norm(&x, Some(&layer.input), 1e-6)?;
             let q = Self::rotate(
                 &norm(&layer.q.forward(&input)?.reshape((n, 12, 64))?, Some(&layer.q_norm), 1e-6)?,
-                &image.positions[..n],
-                dev,
+                &rotation,
             )?;
             let k = Self::rotate(
                 &norm(&layer.k.forward(&input)?.reshape((n, 12, 64))?, Some(&layer.k_norm), 1e-6)?,
-                &image.positions[..n],
-                dev,
+                &rotation,
             )?;
             let v = norm(&layer.v.forward(&input)?.reshape((n, 12, 64))?, None, 1e-6)?;
-            let mut heads = Vec::with_capacity(12);
-            for h in 0..12 {
-                let q = q.narrow(1, h, 1)?.squeeze(1)?.to_dtype(DType::F32)?;
-                let k = k.narrow(1, h, 1)?.squeeze(1)?.to_dtype(DType::F32)?.contiguous()?;
-                let v = v.narrow(1, h, 1)?.squeeze(1)?.to_dtype(DType::F32)?.contiguous()?;
-                let mut tiles = Vec::new();
-                for i in (0..n).step_by(64) {
-                    let len = (n - i).min(64);
-                    let scores = q.narrow(0, i, len)?.contiguous()?.matmul(&k.t()?.contiguous()?)?;
-                    tiles.push(candle_nn::ops::softmax_last_dim(&scores)?.matmul(&v)?.to_dtype(dt)?);
-                }
-                heads.push(Tensor::cat(&tiles, 0)?.unsqueeze(1)?);
+            // Batch heads while keeping softmax and accumulation in FP32; QK/PV outputs use FP16 for half models. Query tiling bounds the
+            // score workspace for high-detail images; changed cuBLAS geometry needs FP32 validation.
+            let q = q.transpose(0, 1)?.to_dtype(attention_dtype)?.contiguous()?;
+            let k = k.transpose(0, 1)?.to_dtype(attention_dtype)?.contiguous()?;
+            let v = v.transpose(0, 1)?.to_dtype(attention_dtype)?.contiguous()?;
+            let kt = k.transpose(1, 2)?;
+            let mut tiles = Vec::new();
+            for i in (0..n).step_by(128) {
+                let len = (n - i).min(128);
+                let scores = q.narrow(1, i, len)?.matmul(&kt)?.to_dtype(DType::F32)?;
+                let values =
+                    candle_nn::ops::softmax_last_dim(&scores)?.to_dtype(attention_dtype)?.matmul(&v)?.to_dtype(dt)?;
+                tiles.push(values.transpose(0, 1)?.contiguous()?);
             }
-            let attn = layer.o.forward(&Tensor::cat(&heads, 1)?.reshape((n, 768))?)?;
+            let attn = layer.o.forward(&Tensor::cat(&tiles, 0)?.reshape((n, 768))?)?;
             x = (x + norm(&attn, Some(&layer.post_attn), 1e-6)?)?;
             let input = norm(&x, Some(&layer.pre_mlp), 1e-6)?;
             let mlp = layer.down.forward(&(layer.gate.forward(&input)?.gelu()? * layer.up.forward(&input)?)?)?;
@@ -245,21 +253,16 @@ impl Vision {
             "vision pooling dimensions"
         );
         // Pool in FP32 as upstream, cast to the model dtype before sqrt(hidden) scaling in FP32.
-        let mut pooled = Vec::with_capacity(out);
-        for y in 0..image.patch_height / 3 {
-            for col in 0..image.patch_width / 3 {
-                let mut rows = Vec::with_capacity(9);
-                for dy in 0..3 {
-                    for dx in 0..3 {
-                        rows.push(
-                            x.narrow(0, (y * 3 + dy) * image.patch_width + col * 3 + dx, 1)?.to_dtype(DType::F32)?,
-                        );
-                    }
-                }
-                pooled.push((Tensor::cat(&rows, 0)?.sum_keepdim(0)? / 9.0)?.to_dtype(dt)?);
-            }
-        }
-        let pooled = (Tensor::cat(&pooled, 0)?.to_dtype(DType::F32)? * (768.0f64).sqrt())?.to_dtype(dt)?;
+        // Preserve dy-major/dx-minor 3x3 patch order and the FP32 reduction axis.
+        // Batched pooling avoids nine tiny copies and one reduction per output token.
+        let pooled = x
+            .reshape((image.patch_height / 3, 3, image.patch_width / 3, 3, 768))?
+            .permute((0, 2, 1, 3, 4))?
+            .contiguous()?
+            .reshape((out, 9, 768))?
+            .to_dtype(DType::F32)?;
+        let pooled = (pooled.sum_keepdim(1)?.squeeze(1)? / 9.0)?.to_dtype(dt)?;
+        let pooled = (pooled.to_dtype(DType::F32)? * (768.0f64).sqrt())?.to_dtype(dt)?;
         linear(&norm(&pooled, None, 1e-6)?, &self.projection)
     }
 }
@@ -369,6 +372,8 @@ impl Audio {
             valid = valid.into_iter().step_by(2).take(x.dim(2)?).collect();
         }
         let n = x.dim(2)?;
+        #[cfg(feature = "cuda")]
+        let valid_tensor = Tensor::from_vec(valid.iter().map(|v| u32::from(*v)).collect::<Vec<_>>(), n, dev)?;
         x = linear(&x.permute((0, 2, 3, 1))?.reshape((n, 1024))?, &self.input)?;
         let times = (Tensor::arange(0u32, 512, dev)?.to_dtype(dt)? * -((10000.0f64).ln() / 511.0))?.exp()?;
         let positions: Vec<u32> = (0..=12).rev().collect();
@@ -389,37 +394,54 @@ impl Audio {
                 .reshape((n, 8, 128))?;
             let v = layer.v.forward(&input)?.to_dtype(DType::F32)?.reshape((n, 8, 128))?;
             let relative = linear(&pos, &layer.relative)?.to_dtype(DType::F32)?.reshape((13, 8, 128))?;
-            let mut rows = Vec::with_capacity(n);
-            // Upstream mask uses dist < (context_left - 1): 11 past frames and the current frame.
-            // Relative positions still use the 13-vector blocked shift (index 12 - lag).
-            for i in 0..n {
-                let first = i.saturating_sub(11);
-                let len = i - first + 1;
-                let mut heads = Vec::with_capacity(8);
-                for head in 0..8 {
-                    let query = q.narrow(0, i, 1)?.narrow(1, head, 1)?.reshape((1, 128))?;
-                    let keys = k.narrow(0, first, len)?.narrow(1, head, 1)?.reshape((len, 128))?;
-                    let values = v.narrow(0, first, len)?.narrow(1, head, 1)?.reshape((len, 128))?;
-                    let indexes: Vec<u32> = (first..=i).map(|j| (12 - (i - j)) as u32).collect();
-                    let rel = relative
-                        .narrow(1, head, 1)?
-                        .squeeze(1)?
-                        .contiguous()?
-                        .index_select(&Tensor::from_vec(indexes, len, dev)?, 0)?;
-                    let scores = query.matmul(&keys.t()?)? + query.matmul(&rel.t()?)?;
-                    let mut scores = ((scores? / 50.0)?.tanh()? * 50.0)?;
-                    let mask: Vec<f32> = valid[first..=i].iter().map(|b| if *b { 0.0 } else { -1e9 }).collect();
-                    scores = scores.broadcast_add(&Tensor::from_vec(mask, (1, len), dev)?)?;
-                    heads.push(candle_nn::ops::softmax_last_dim(&scores)?.matmul(&values)?);
+            #[cfg(feature = "cuda")]
+            let attended = crate::fused::gemma_audio_attention(&q, &k, &v, &relative, &valid_tensor)?
+                .reshape((n, 1024))?
+                .to_dtype(dt)?;
+            #[cfg(not(feature = "cuda"))]
+            let attended = {
+                let mut rows = Vec::with_capacity(n);
+                // Upstream mask uses dist < (context_left - 1): 11 past frames and the current frame.
+                // Relative positions still use the 13-vector blocked shift (index 12 - lag).
+                for i in 0..n {
+                    let first = i.saturating_sub(11);
+                    let len = i - first + 1;
+                    let mut heads = Vec::with_capacity(8);
+                    for head in 0..8 {
+                        let query = q.narrow(0, i, 1)?.narrow(1, head, 1)?.reshape((1, 128))?;
+                        let keys = k.narrow(0, first, len)?.narrow(1, head, 1)?.reshape((len, 128))?;
+                        let values = v.narrow(0, first, len)?.narrow(1, head, 1)?.reshape((len, 128))?;
+                        let indexes: Vec<u32> = (first..=i).map(|j| (12 - (i - j)) as u32).collect();
+                        let rel = relative
+                            .narrow(1, head, 1)?
+                            .squeeze(1)?
+                            .contiguous()?
+                            .index_select(&Tensor::from_vec(indexes, len, dev)?, 0)?;
+                        let scores = query.matmul(&keys.t()?)? + query.matmul(&rel.t()?)?;
+                        let mut scores = ((scores? / 50.0)?.tanh()? * 50.0)?;
+                        let mask: Vec<f32> = valid[first..=i].iter().map(|b| if *b { 0.0 } else { -1e9 }).collect();
+                        scores = scores.broadcast_add(&Tensor::from_vec(mask, (1, len), dev)?)?;
+                        heads.push(candle_nn::ops::softmax_last_dim(&scores)?.matmul(&values)?);
+                    }
+                    rows.push(Tensor::cat(&heads, 1)?.to_dtype(dt)?);
                 }
-                rows.push(Tensor::cat(&heads, 1)?.to_dtype(dt)?);
-            }
-            let attn = layer.post.forward(&Tensor::cat(&rows, 0)?)?;
+                Tensor::cat(&rows, 0)?
+            };
+            let attn = layer.post.forward(&attended)?;
             x = (x + norm(&attn.clamp(-1e10, 1e10)?, Some(&layer.post_attn), 1e-6)?)?;
             let input = layer.conv_start.forward(&norm(&x, Some(&layer.conv_pre), 1e-6)?)?;
             let gated = (input.narrow(1, 0, 1024)? * candle_nn::ops::sigmoid(&input.narrow(1, 1024, 1024)?)?)?;
-            let padded = gated.t()?.unsqueeze(0)?.pad_with_zeros(2, 4, 0)?;
-            let conv = padded.conv1d(&layer.conv.to_dtype(dt)?, 0, 1, 1, 1024)?.squeeze(0)?.t()?;
+            // Candle splits groups=1024 into separate convolution calls. Compute the five taps
+            // over all channels together, accumulating in FP32 before the model-dtype cast.
+            // This changes reduction rounding and requires upstream FP32 quality validation.
+            let padded = gated.to_dtype(DType::F32)?.pad_with_zeros(0, 4, 0)?;
+            let weight = layer.conv.squeeze(1)?.to_dtype(DType::F32)?;
+            let mut conv = Tensor::zeros((n, 1024), DType::F32, dev)?;
+            for tap in 0..5 {
+                let w = weight.narrow(1, tap, 1)?.squeeze(1)?.unsqueeze(0)?;
+                conv = (conv + padded.narrow(0, tap, n)?.broadcast_mul(&w)?)?;
+            }
+            let conv = conv.to_dtype(dt)?;
             let conv = candle_nn::ops::silu(&norm(&conv.clamp(-1e10, 1e10)?, Some(&layer.conv_norm), 1e-6)?)?;
             x = (x + layer.conv_end.forward(&conv)?)?;
             x = layer.ff2.forward(&x)?;
@@ -481,7 +503,7 @@ impl Encoders {
             Ok(Self::Towers { vision: Vision::load(load)?, audio: Audio::load(load)? })
         }
     }
-    pub fn encode(&self, input: &Input, dt: DType, dev: &Device) -> Result<Tensor> {
+    pub fn encode(&self, input: &Input, dt: DType, dev: &Device, attention_dtype: DType) -> Result<Tensor> {
         match (self, input) {
             (Self::Unified { vision, .. }, Input::Image(image)) => vision.forward(image, dt, dev),
             (Self::Unified { audio, .. }, Input::Audio(input)) => {
@@ -495,7 +517,7 @@ impl Encoders {
                 let x = Tensor::from_slice(&input.features, (input.soft_tokens, 640), dev)?.to_dtype(dt)?;
                 linear(&norm(&x, None, 1e-6)?, audio)
             }
-            (Self::Towers { vision, .. }, Input::Image(image)) => vision.forward(image, dt, dev),
+            (Self::Towers { vision, .. }, Input::Image(image)) => vision.forward(image, dt, dev, attention_dtype),
             (Self::Towers { audio, .. }, Input::Audio(input)) => audio.forward(input, dt, dev),
         }
     }

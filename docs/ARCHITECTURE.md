@@ -27,6 +27,22 @@ pozostaje w `basal-core`. Interfejs i przykłady: [CLIENT.md](CLIENT.md).
 Nowe rodziny, format 2, wybór kolejności i kalibracja: [UPSTREAM_2.0.md](UPSTREAM_2.0.md).
 Natywne architektury i lifecycle mediów omni: [OMNI.md](OMNI.md).
 
+Gemma grupuje krótkie teksty w kubełki 32 tokenów (do 32 promptów / 8192 tokenów).
+Projekcje współdzielą GEMM wyłącznie dla kształtów objętych tabelą z bitowo zgodnymi
+redukcjami między klasami M; pozostałe zachowują osobne GEMM. Attention każdego
+promptu wykonuje się oddzielnie. CUDA wylicza maskę pozycyjną w softmaxie FP32,
+zamiast przesyłać gęstą maskę CPU dla każdej warstwy. Kafel wyniku scores ma limit
+128 MiB; nie jest to limit całej pamięci roboczej. Długie prompty zachowują unikalne
+K/V GQA. Prefill ma kroki 2048 tokenów i respektuje granice bloków obrazu.
+
+Stałe obroty pozycyjne obrazu i indeksy głów są współdzielone w swoim zakresie
+użycia. Pooling obrazu zachowuje kolejność 3×3 i redukcję FP32. Procesor CPU
+współdzieli amplitudy FFT między filtrami mel oraz zaokrąglone poziome wiersze
+skalowania obrazu; ten drugi cache ma limit 32 MiB i zachowuje poprzednią ścieżkę
+po jego przekroczeniu. Te zmiany nie wprowadzają cache żądań ani mediów między
+żądaniami. Numeryczne zmiany attention, RMSNorm i Conformera wymagają osobnego
+porównania z upstream FP32, opisanego w raportach.
+
 ## Kontrakt promptu
 
 Prompt, szablon czatu, heurystyka języka (polskie znaki), serializacja stanu,

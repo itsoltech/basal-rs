@@ -9,7 +9,8 @@ use crate::{GpuBackend, Kernels, Precision, Readout};
 pub enum InferenceMode {
     /// Use the measured model/device policy; preserve explicit `BASAL_ATT` experiments.
     Auto,
-    /// Preserve original arithmetic (CUDA Llama: hi/lo tensor cores; full FP32 uses `Precision::F32`).
+    /// High-precision attention: original hi/lo on CUDA Llama, FP32 products on Gemma.
+    /// Full FP32 computation uses `Precision::F32`.
     Accurate,
     /// FP16 Q/K products, hi/lo probabilities, FP32 softmax and accumulation; CUDA FP16 only.
     Balanced,

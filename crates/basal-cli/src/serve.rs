@@ -4,7 +4,8 @@
 //! One thread owns the GPU engine; HTTP handlers (tokio) send jobs to it over a channel. The scheduler plans arriving
 //! requests (validation errors are answered at once), orders the waiting ones (`--schedule`: highest response ratio
 //! next by default, or arrival order) and admits the first one and every other waiting request that fits
-//! `max_batch_tokens` packed tokens (no extra wait, as upstream's adaptive batching with `--wait-ms 0`). They run
+//! `max_batch_tokens` packed tokens. Idle requests start immediately; after a concurrent validated Omni Max batch a bounded
+//! 10 ms collection window coalesces returning clients. They run
 //! together with `Engine::run_plans`: the questions of all admitted requests share the forwards of each round (the
 //! budget counts a state shared by several requests once). A request larger than the budget runs alone; requests
 //! whose client disconnected while waiting are dropped. More than `max_inflight` waiting or running requests are
@@ -225,8 +226,18 @@ fn scheduler<B: Backend>(
     mut lane: Lane,
     long: Option<(std::sync::mpsc::Sender<Waiting>, usize)>,
 ) {
+    // A model idle for at least 100 ms still starts immediately. After a concurrent validated Omni Max batch, collect
+    // its returning clients for at most 10 ms, avoiding repeated 1+(N-1) forwards.
+    // This runs on the dedicated GPU thread, never on a Tokio executor worker.
+    let coalesce = matches!(&engine.manifest.config, basal_core::architecture::Architecture::Gemma4(_))
+        && engine.manifest.name == "basal-omni-1.0-max"
+        && engine.backend.describe()["attention_products"].as_str() == Some("F16");
+    let window = std::time::Duration::from_millis(10);
+    let mut last_batch = 1;
     loop {
         let mut arrived: Vec<Job> = Vec::new();
+        let wait_start = Instant::now();
+        let had_backlog = !lane.waiting.is_empty();
         if lane.waiting.is_empty() {
             match rx.blocking_recv() {
                 Some(j) => arrived.push(j),
@@ -235,6 +246,20 @@ fn scheduler<B: Backend>(
         }
         while let Ok(j) = rx.try_recv() {
             arrived.push(j);
+        }
+        if coalesce && last_batch > 1 && !had_backlog && wait_start.elapsed() < std::time::Duration::from_millis(100) {
+            let until = Instant::now() + window;
+            while Instant::now() < until {
+                match rx.try_recv() {
+                    Ok(job) => arrived.push(job),
+                    Err(mpsc::error::TryRecvError::Disconnected) => break,
+                    Err(mpsc::error::TryRecvError::Empty) => {
+                        std::thread::sleep(
+                            until.saturating_duration_since(Instant::now()).min(std::time::Duration::from_micros(100)),
+                        );
+                    }
+                }
+            }
         }
         for job in arrived {
             if job.reply.is_closed() {
@@ -261,6 +286,7 @@ fn scheduler<B: Backend>(
         }
         let start = Instant::now();
         let (batch, tokens) = lane.admit(start);
+        last_batch = batch.len().max(1);
         if !batch.is_empty() {
             lane.run(&mut engine, batch, tokens, start);
         }

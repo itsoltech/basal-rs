@@ -92,3 +92,9 @@ pozostają w Gicie. Lokalnego stanu inicjatywy `.itsol/` nie publikujemy.
 Użyj powyższej procedury z nazwą `upstream-2.0-final-2026-10-14`, tym prefiksem i tą sumą. Dane są pod `reports/upstream-2.0-final-2026-10-14/` wewnątrz archiwum. Media base64 zastąpiono hashami i liczbą bajtów; przed ponownym forwardem odtwórz je z `inputs/media-source-manifest.json`. Archiwum nie rozprowadza zdjęć/nagrań ani prywatnych danych maszyn; zachowuje logity, tokeny, prawdopodobieństwa, odpowiedzi i niepowodzenia.
 
 Dodatkowy [benchmark Metal 32768](../reports/upstream-2.0-metal-context-2026-10-14/README.md): `hf://buckets/itsoltech/basal-rs/measurements/upstream-2.0-metal-context-2026-10-14/e6f30d416ec8037ca6cb78a85ac8b6e48ffd5fc90cead619a35a8c5a0db2bfb2/measurement-data.tar.gz`, SHA-256 `e6f30d416ec8037ca6cb78a85ac8b6e48ffd5fc90cead619a35a8c5a0db2bfb2`, 10 829 B; 15/15 sum potwierdzonych z autoryzacją i anonimowo. Zawiera również pochodną analizę progu noul z poprzedniego loadtestu. Dane pod `reports/upstream-2.0-metal-context-2026-10-14/`; użyj procedury z nowym prefiksem, nazwą i sumą.
+
+## Wydajność Omni na Ada
+
+[Raport](../reports/omni-performance-ada-2026-10-16/README.md) opisuje pojedyncze żądania tekstowe 128–32768 tokenów, rzeczywiste media, QPS i ogon ruchu mieszanego obu Omni oraz kontrolę jakości FP32. Zachowuje także nieudane warianty i regresje.
+
+Archiwum: `hf://buckets/itsoltech/basal-rs/measurements/omni-performance-ada-2026-10-16/82aaf99af87532eaccfaf19e3fe5462b5e0d9b4f1ffcac6ccba7ba987ac8a0a7/measurement-data.tar.gz`, SHA-256 `82aaf99af87532eaccfaf19e3fe5462b5e0d9b4f1ffcac6ccba7ba987ac8a0a7`, 26 718 255 B. Pobranie z autoryzacją i anonimowo potwierdziło 1812/1812 sum plików. Dane, metody i przenośne analizy są pod `reports/omni-performance-ada-2026-10-16/` wewnątrz archiwum; raport podaje pełne instrukcje odtworzenia. Prawdziwe media pozostają zewnętrzne i są odtwarzane z przypiętych źródeł oraz sum.
