@@ -59,7 +59,7 @@ oversized responses return `Error::ResponseTooLarge`, deadlines return `Error::T
 native DTOs; extra JSON fields are retained. HTTP 422 and overload 529 remain distinct.
 `Display` and `Debug` omit HTTP bodies and nested transport details; access them explicitly when needed.
 
-Native choice/score accepts 2–10 options; multi uses independent probabilities and `set_confidence`.
+Native choice/score accepts 2–255 options for format-2 models (older model limits are checked by the server); multi uses independent probabilities and `set_confidence`.
 Evidence offsets count Unicode characters, not UTF-8 bytes. The SDK does not execute selected actions.
 
 Factories return distinct `QuestionSpec<...>` types. Default factories take only their required
@@ -101,3 +101,49 @@ model/facts, `response.raw()` for native DTOs, and `decide_request(&request)` fo
 
 
 [Full documentation and publication setup](https://github.com/itsoltech/basal-rs/blob/main/docs/SDK.md).
+
+
+## Basal 2.0 and Omni
+
+Typed choice/score and act outcomes allow 2–255 options. The server remains
+responsible for limits of older models and for calibration/model capabilities.
+`tool` accepts OpenAI, MCP and Anthropic definition objects, optional non-tool
+choices (`answer_directly`, `ask_user`, `none`), ranking, multi selection and
+certified deferral. The SDK returns the decision; it never executes tools.
+
+Multi selection supports `threshold`, `exact`, `iou` and `f1`, count limits,
+`exclusive`, `fallback` and `fallback_threshold`. `threshold` is optional in
+results because objective-based responses instead contain `objective` and
+`expected_score`; constraint diagnostics remain available. Single tool selection
+can be null on certified deferral, while multi mode returns a tool list.
+
+Typed request options include `lang` (`pl`/`en`), ordered inline `media` and
+`detail` (`default`/`high`). Media helpers accept encoded bytes, base64 or a data
+URL; they never fetch URLs. Read files explicitly in your application. Decoding,
+model support and resource limits are checked by the server. Omni requires a
+CUDA server started with media enabled. `calibration: "text"` means text
+calibration applied to media, not validated calibration for images/audio.
+
+Usage exposes `longest_prompt_tokens`, `second_order_branches` and media counts,
+soft tokens and detail. Discovery exposes `prompt_format`, `orders`, enabled
+media and calibration temperatures. Model names remain strings: use exact names
+from model discovery, not a hardcoded model enumeration. Keep old models and
+raw JSON access available. These SDKs cover server-supported format-2 decisions;
+upstream 2.1 task types are not implemented by this server.
+
+```rust,no_run
+use basal_client::{tool_with_options, ToolOptions, ToolExtra, DecisionOptions, Language, MediaInput, questions};
+let definitions = [serde_json::json!({"name":"inspect","description":"Inspect material","inputSchema":{"type":"object"}})];
+let routing = tool_with_options("Choose a tool.", &definitions, ToolOptions { extra: &[ToolExtra::None], rank: Some(2), ..Default::default() })?;
+let questions = questions! { route: &routing }?;
+let media = [MediaInput::image(&std::fs::read("photo.jpg")?)];
+let response = client.decide_with_options("Inspect the supplied material.", &questions, DecisionOptions {
+    model: Some("basal-omni-1.0-mini"), lang: Some(Language::En), media: Some(&media), ..Default::default()
+}).await?;
+println!("{:?}", response.answers()?.route.tool);
+```
+
+Rust 0.3 adds a `Tool` question/answer variant and fields to request options and
+metadata. When constructing option structs use `..Default::default()`; multi
+threshold is now `Option<f64>`. `MultiOptions` borrows constraint keys. Existing
+request factories and raw response access remain available.

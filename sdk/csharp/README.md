@@ -159,7 +159,7 @@ Dictionary values have the common `AnswerResult` type and can be narrowed with p
 Use the object factory for exact named field types without pattern matching or null suppression.
 
 For structured states, criteria and cost matrices use `System.Text.Json.Nodes.JsonObject`/`JsonArray`.
-Supports `choice`, `noul`, `score`, `multi`, `act`, `facts` and `evidence`. Extra native fields are retained
+Supports `choice`, `noul`, `score`, `multi`, `act` and `tool`, with model-dependent `facts` and `evidence` capabilities. Extra native fields are retained
 with `JsonExtensionData`; do not duplicate explicit property names in `Extra`.
 For a completely native request, use the `DecideAsync(JsonObject)` overload. It preserves explicit
 JSON null fields, including `instructions: null`; null DTO properties are omitted.
@@ -182,7 +182,7 @@ including HTTP errors. An oversized response raises `BasalException`.
 `BasalException` with the original cause in `InnerException`. Caller cancellation remains an
 `OperationCanceledException`. No automatic retries. Responses deserialize into typed native DTOs.
 
-Native choice/score accepts 2–10 options. Preserve criterion insertion order. Multi probabilities are
+Native choice/score accepts 2–255 options for format-2 models (older model limits are checked by the server). Preserve criterion insertion order. Multi probabilities are
 independent, with `SetConfidence`. Evidence offsets count Unicode characters, not UTF-16 units; prefer
 `EvidenceSpan.Text` when displaying a quote. The SDK does not execute selected actions.
 
@@ -195,3 +195,40 @@ and a cancellation token to either the dictionary or object-factory overload; th
 
 
 [Full documentation and publication setup](https://github.com/itsoltech/basal-rs/blob/main/docs/SDK.md).
+
+
+## Basal 2.0 and Omni
+
+Typed choice/score and act outcomes allow 2–255 options. The server remains
+responsible for limits of older models and for calibration/model capabilities.
+`tool` accepts OpenAI, MCP and Anthropic definition objects, optional non-tool
+choices (`answer_directly`, `ask_user`, `none`), ranking, multi selection and
+certified deferral. The SDK returns the decision; it never executes tools.
+
+Multi selection supports `threshold`, `exact`, `iou` and `f1`, count limits,
+`exclusive`, `fallback` and `fallback_threshold`. `threshold` is optional in
+results because objective-based responses instead contain `objective` and
+`expected_score`; constraint diagnostics remain available. Single tool selection
+can be null on certified deferral, while multi mode returns a tool list.
+
+Typed request options include `lang` (`pl`/`en`), ordered inline `media` and
+`detail` (`default`/`high`). Media helpers accept encoded bytes, base64 or a data
+URL; they never fetch URLs. Read files explicitly in your application. Decoding,
+model support and resource limits are checked by the server. Omni requires a
+CUDA server started with media enabled. `calibration: "text"` means text
+calibration applied to media, not validated calibration for images/audio.
+
+Usage exposes `longest_prompt_tokens`, `second_order_branches` and media counts,
+soft tokens and detail. Discovery exposes `prompt_format`, `orders`, enabled
+media and calibration temperatures. Model names remain strings: use exact names
+from model discovery, not a hardcoded model enumeration. Keep old models and
+raw JSON access available. These SDKs cover server-supported format-2 decisions;
+upstream 2.1 task types are not implemented by this server.
+
+```csharp
+var response = await client.DecideAsync("Inspect the supplied material.", q => new {
+    Route = q.Tool("Choose a tool.", new[] { JsonNode.Parse("""{"name":"inspect","description":"Inspect material","inputSchema":{"type":"object"}}""")!.AsObject() }, new ToolOptions(Extra: ["none"], Rank: 2)),
+    Labels = q.Multi("Select visible objects.", new Dictionary<string,string> { ["animal"]="An animal", ["vehicle"]="A vehicle" }, new MultiOptions(Objective:"f1")),
+}, new DecisionOptions(Model:"basal-omni-1.0-mini", Lang:"en", Media:[Media.Image(File.ReadAllBytes("photo.jpg"))]));
+Console.WriteLine(response.Answers.Route.Tool);
+```

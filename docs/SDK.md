@@ -28,6 +28,25 @@ nie zależy od `basal-core`, `basal-gpu` ani `basal-cli`.
 | C# | `sdk/csharp/ITSOL.Basal.Client/ITSOL.Basal.Client.csproj` | `sdk-csharp-vX.Y.Z` | [NuGet](../sdk/csharp/CHANGELOG.md) |
 | Rust | `sdk/rust/Cargo.toml` | `sdk-rust-vX.Y.Z` | [crates.io](../sdk/rust/CHANGELOG.md) |
 
+## Basal 2.0 i Omni
+
+SDK obsługują typowane `tool`, 2–255 opcji choice/score/act (zależnie od modelu),
+cele multi `threshold`/`exact`/`iou`/`f1` i ograniczenia `exclusive`/`fallback`.
+Przy celach innych niż threshold odpowiedź nie wymaga `threshold`; zwraca
+`objective`, `expected_score` i diagnostykę ograniczeń. Tool zwraca decyzję,
+ranking albo zbiór narzędzi i odroczenie; SDK nie wykonuje narzędzi.
+
+Opcje żądania obejmują `lang`, `media` i `detail`. Pomocniki kodują bajty do
+base64; nie czytają plików ani nie pobierają URL. Obraz i audio wymagają serwera
+Omni z CUDA i włączonymi mediami. Status kalibracji `text` jest akceptowany,
+ale nie oznacza potwierdzonej kalibracji mediów. Typowane usage i metadane
+obejmują liczbę tokenów/mediów, kolejności oraz format promptu.
+
+Nowe wersje źródłowe: Python/npm/.NET **0.2.0**, Rust **0.3.0**. Zmiany modeli
+odpowiedzi (opcjonalny threshold i nowe warianty) są opisane w changelogach.
+Samo scalenie kodu nie publikuje paczek. Runtime nadal sprawdza możliwości
+starszych modeli; SDK nie uruchamiają inferencji lokalnie.
+
 ## Python
 
 Wariant klasy daje dokładne typy nazwanych pól, bez osobnej klasy odpowiedzi:

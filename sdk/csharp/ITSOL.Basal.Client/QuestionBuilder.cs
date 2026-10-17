@@ -113,7 +113,11 @@ public sealed class MultiField : AnswerField<MultiResult>
     /// <summary>Selected criterion keys.</summary>
     public IReadOnlyList<string> Selected => Result.Selected;
     /// <summary>Selection threshold.</summary>
-    public double Threshold => Result.Threshold;
+    public double? Threshold => Result.Threshold;
+    /// <summary>Selection objective.</summary>
+    public string Objective => Result.Objective;
+    /// <summary>Expected objective score.</summary>
+    public double? ExpectedScore => Result.ExpectedScore;
     /// <summary>Native set confidence.</summary>
     public double SetConfidence => Result.SetConfidence;
     /// <summary>Independent label probabilities.</summary>
@@ -143,6 +147,22 @@ public sealed class ActField : AnswerField<ActResult>
     public string? MaxError => Result.MaxError;
 }
 
+/// <summary>A named, checked tool routing result.</summary>
+public sealed class ToolField : AnswerField<ToolResult>
+{
+    internal ToolField(AnswerBinding binding):base(binding) { }
+    internal override ToolField Copy(AnswerBinding binding)=>new(binding);
+    /// <summary>Selected single tool.</summary>
+    public string? Tool=>Result.Tool;
+    /// <summary>Whether an actual tool was selected.</summary>
+    public bool Call=>Result.Call;
+    /// <summary>Selected tool set.</summary>
+    public IReadOnlyList<string> Tools=>Result.Tools;
+    /// <summary>Ranked candidates.</summary>
+    public IReadOnlyList<ToolRanking> Ranking=>Result.Ranking;
+    /// <summary>Complete routing probabilities.</summary>
+    public IReadOnlyDictionary<string,double> Probabilities=>Result.Probabilities;
+}
 /// <summary>Create typed question and answer fields. Factory methods infer IDs from the returned object's member names.
 /// Use only inside a synchronous Prepare or DecideAsync factory; builders are not thread-safe.</summary>
 public sealed class QuestionBuilder
@@ -297,6 +317,10 @@ public sealed class QuestionBuilder
         => Act(ITSOL.Basal.Questions.Act(instructions, costs, options));
     /// <summary>Reuse an action definition in a fresh named answer field.</summary>
     public ActField Act(ActQuestion question) => new(Register(question));
+    /// <summary>Create a tool routing field.</summary>
+    public ToolField Tool(string instructions,IReadOnlyList<System.Text.Json.Nodes.JsonObject> tools,ToolOptions? options=null)=>Tool(ITSOL.Basal.Questions.Tool(instructions,tools,options));
+    /// <summary>Reuse a tool definition in a fresh named field.</summary>
+    public ToolField Tool(ToolQuestion question)=>new(Register(question));
     /// <summary>Create a named field for a generic definition; read its Result property.</summary>
     public AnswerField<TAnswer> From<TAnswer>(QuestionSpec<TAnswer> question) where TAnswer : AnswerResult => new(Register(question));
 

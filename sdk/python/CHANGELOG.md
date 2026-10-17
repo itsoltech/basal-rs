@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.0 — 2026-10-17
+
+- Align typed APIs with Basal 2.0 and Omni: up to 255 choice/score/act outcomes,
+  tool routing/ranking/multi/deferral, multi objectives and constraints.
+- Add inline media helpers and lang/detail request options, calibration `text`,
+  deferral metadata, media usage and model capability discovery.
+- Multi result threshold is now optional; use objective and expected score for
+  exact/IoU/F1 results. Older model capabilities remain server-validated.
+- Registry publication is separate from this source update.
+
 ## Unreleased
 
 ## 0.1.0 — 2026-10-15

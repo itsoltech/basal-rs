@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Native Basal HTTP API for basal-rs SDKs",
-    "version": "0.1.0",
-    "description": "Maintained description of canonical native requests, based on the basal-rs handlers, parser and answer builder. Additional native fields are allowed. This file is not generated from TypeSafe System One. Native choice/score accepts 2–10 options. Criterion order is significant. Evidence offsets count Unicode characters. The contract description version is independent of SDK package and engine versions.",
+    "version": "0.2.0",
+    "description": "Maintained description of canonical native requests, based on the basal-rs handlers, parser and answer builder. Additional native fields are allowed. This file is not generated from TypeSafe System One. Format-2 Basal 2.0/Omni choice/score accepts 2–255 options; older model capability limits are enforced by the server. Tool routing, multi selection objectives and inline image/audio inputs are supported. Media require an enabled Omni CUDA model; no tool execution or URL fetching is performed. Criterion order is significant. Evidence offsets count Unicode characters. The contract description version is independent of SDK package and engine versions.",
     "license": {
       "name": "Apache-2.0"
     }
@@ -126,7 +126,7 @@
         "properties": {
           "type": {
             "type": "string",
-            "description": "Canonical types: choice, noul, score, multi, act. Omitted or unknown types are read as choice by the native parser."
+            "description": "Native types: choice, noul, score, multi, act, tool. Capabilities and option limits depend on the served model; the server validates them."
           },
           "instructions": {},
           "criteria": {
@@ -189,6 +189,54 @@
           },
           "max_error": {
             "type": "number"
+          },
+          "objective": {
+            "type": "string",
+            "enum": [
+              "threshold",
+              "exact",
+              "iou",
+              "f1"
+            ]
+          },
+          "exclusive": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "fallback": {
+            "type": "string"
+          },
+          "fallback_threshold": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "extra": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "answer_directly",
+                "ask_user",
+                "none"
+              ]
+            }
+          },
+          "rank": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "multi": {
+            "type": "boolean"
           }
         },
         "additionalProperties": true
@@ -218,6 +266,27 @@
             "enum": [
               "off",
               "auto"
+            ]
+          },
+          "lang": {
+            "type": "string",
+            "enum": [
+              "pl",
+              "en"
+            ]
+          },
+          "media": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MediaInput"
+            },
+            "maxItems": 8
+          },
+          "detail": {
+            "type": "string",
+            "enum": [
+              "default",
+              "high"
             ]
           }
         },
@@ -270,6 +339,17 @@
           },
           "latency_ms": {
             "type": "number"
+          },
+          "longest_prompt_tokens": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "second_order_branches": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "media": {
+            "$ref": "#/components/schemas/MediaUsage"
           }
         },
         "required": [
@@ -296,6 +376,43 @@
           "early_exit": {
             "type": "array",
             "items": {}
+          },
+          "prompt_format": {
+            "type": "integer",
+            "enum": [
+              1,
+              2
+            ]
+          },
+          "orders": {
+            "oneOf": [
+              {
+                "type": "integer",
+                "enum": [
+                  1,
+                  2
+                ]
+              },
+              {
+                "type": "string"
+              }
+            ]
+          },
+          "media": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "image",
+                "audio"
+              ]
+            }
+          },
+          "temperature_per_prim": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "number"
+            }
           }
         },
         "required": [
@@ -354,6 +471,14 @@
           },
           "confidence": {
             "type": "number"
+          },
+          "calibration": {
+            "type": "string",
+            "enum": [
+              "validated",
+              "unvalidated",
+              "text"
+            ]
           }
         },
         "required": [
@@ -387,6 +512,14 @@
           },
           "confidence": {
             "type": "number"
+          },
+          "calibration": {
+            "type": "string",
+            "enum": [
+              "validated",
+              "unvalidated",
+              "text"
+            ]
           }
         },
         "required": [
@@ -426,6 +559,14 @@
           },
           "confidence": {
             "type": "number"
+          },
+          "calibration": {
+            "type": "string",
+            "enum": [
+              "validated",
+              "unvalidated",
+              "text"
+            ]
           }
         },
         "required": [
@@ -466,16 +607,70 @@
           },
           "set_confidence": {
             "type": "number"
-          }
+          },
+          "calibration": {
+            "type": "string",
+            "enum": [
+              "validated",
+              "unvalidated",
+              "text"
+            ]
+          },
+          "objective": {
+            "type": "string",
+            "enum": [
+              "threshold",
+              "exact",
+              "iou",
+              "f1"
+            ]
+          },
+          "expected_score": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 1
+          },
+          "constraints_applied": {}
         },
         "required": [
           "type",
           "probabilities",
           "selected",
-          "threshold",
           "set_confidence"
         ],
-        "additionalProperties": true
+        "additionalProperties": true,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "objective": {
+                  "enum": [
+                    "exact",
+                    "iou",
+                    "f1"
+                  ]
+                }
+              },
+              "required": [
+                "objective"
+              ]
+            },
+            "then": {
+              "required": [
+                "objective",
+                "expected_score"
+              ]
+            },
+            "else": {
+              "required": [
+                "threshold"
+              ]
+            }
+          }
+        ]
       },
       "ActAnswer": {
         "type": "object",
@@ -514,7 +709,8 @@
             "type": "string",
             "enum": [
               "validated",
-              "unvalidated"
+              "unvalidated",
+              "text"
             ]
           },
           "refused": {
@@ -522,6 +718,9 @@
           },
           "max_error": {
             "type": "string"
+          },
+          "deferred": {
+            "type": "boolean"
           }
         },
         "required": [
@@ -551,6 +750,9 @@
           },
           {
             "$ref": "#/components/schemas/ActAnswer"
+          },
+          {
+            "$ref": "#/components/schemas/ToolAnswer"
           }
         ],
         "discriminator": {
@@ -579,6 +781,228 @@
           "usage"
         ],
         "additionalProperties": true
+      },
+      "MediaInput": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "image",
+              "audio"
+            ]
+          },
+          "data": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Inline base64 or data URL, not an HTTP URL. The server validates codecs and resource limits."
+          }
+        },
+        "required": [
+          "type",
+          "data"
+        ],
+        "additionalProperties": true
+      },
+      "MediaUsage": {
+        "type": "object",
+        "properties": {
+          "images": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "audio": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "media_tokens": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "detail": {
+            "type": "string",
+            "enum": [
+              "default",
+              "high"
+            ]
+          }
+        },
+        "required": [
+          "images",
+          "audio",
+          "media_tokens",
+          "detail"
+        ],
+        "additionalProperties": true
+      },
+      "ToolRanking": {
+        "type": "object",
+        "properties": {
+          "tool": {
+            "type": "string"
+          },
+          "probability": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          }
+        },
+        "required": [
+          "tool",
+          "probability"
+        ],
+        "additionalProperties": true
+      },
+      "ToolAnswer": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "const": "tool"
+          },
+          "probabilities": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          },
+          "calibration": {
+            "type": "string",
+            "enum": [
+              "validated",
+              "unvalidated",
+              "text"
+            ]
+          },
+          "tool": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "call": {
+            "type": "boolean"
+          },
+          "multi": {
+            "type": "boolean"
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "ranking": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ToolRanking"
+            }
+          },
+          "deferred": {
+            "type": "boolean"
+          },
+          "refused": {
+            "type": "string"
+          },
+          "max_error": {
+            "type": "string"
+          },
+          "threshold": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "set_confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "objective": {
+            "type": "string",
+            "enum": [
+              "threshold",
+              "exact",
+              "iou",
+              "f1"
+            ]
+          },
+          "expected_score": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 1
+          },
+          "constraints_applied": {}
+        },
+        "required": [
+          "type",
+          "probabilities",
+          "call"
+        ],
+        "additionalProperties": true,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "multi": {
+                  "const": true
+                }
+              },
+              "required": [
+                "multi"
+              ]
+            },
+            "then": {
+              "required": [
+                "tools",
+                "set_confidence"
+              ],
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "objective": {
+                        "enum": [
+                          "exact",
+                          "iou",
+                          "f1"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "objective"
+                    ]
+                  },
+                  "then": {
+                    "required": [
+                      "objective",
+                      "expected_score"
+                    ]
+                  },
+                  "else": {
+                    "required": [
+                      "threshold"
+                    ]
+                  }
+                }
+              ]
+            },
+            "else": {
+              "required": [
+                "tool",
+                "confidence"
+              ]
+            }
+          }
+        ]
       }
     }
   }

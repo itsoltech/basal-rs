@@ -1,5 +1,8 @@
 """Connection-pooled synchronous and asynchronous clients for the Basal API."""
 
+from collections.abc import Sequence
+from copy import deepcopy
+
 import ipaddress
 import json
 import math
@@ -9,7 +12,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from .types import DecisionRequest, DecisionResponse, ModelsResponse, JsonValue
+from .types import DecisionRequest, DecisionResponse, ModelsResponse, JsonValue, MediaInput
 from .questions import (
     Questions, QuestionSet, TSchema, TypedDecisionResponse, SchemaDecisionResponse,
     build_questions, schema_questions,
@@ -100,10 +103,11 @@ def _check_encoding(response: httpx.Response) -> None:
 
 
 def _decision_request(state: DecisionRequest | JsonValue, questions: QuestionSet | None,
-                      model: str | None, facts: Literal["off", "auto"] | None) -> DecisionRequest:
+                      model: str | None, facts: Literal["off", "auto"] | None, lang: Literal["pl", "en"] | None,
+                      media: Sequence[MediaInput] | None, detail: Literal["default", "high"] | None) -> DecisionRequest:
     if questions is None:
-        if model is not None or facts is not None:
-            raise ValueError("pass model/facts in a raw request, or supply typed questions")
+        if any(value is not None for value in (model, facts, lang, media, detail)):
+            raise ValueError("pass request options in a raw request, or supply typed questions")
         if not isinstance(state, dict):
             raise TypeError("a raw request must be a dictionary")
         return cast(DecisionRequest, state)
@@ -118,6 +122,21 @@ def _decision_request(state: DecisionRequest | JsonValue, questions: QuestionSet
         if facts not in ("off", "auto"):
             raise ValueError("facts must be off or auto")
         request["facts"] = facts
+    if lang is not None:
+        if lang not in ("pl", "en"):
+            raise ValueError("lang must be pl or en")
+        request["lang"] = lang
+    if detail is not None:
+        if detail not in ("default", "high"):
+            raise ValueError("detail must be default or high")
+        request["detail"] = detail
+    if media is not None:
+        if isinstance(media, (str, bytes)) or len(media) > 8:
+            raise ValueError("media must contain at most 8 inputs")
+        from .media import _media
+        request["media"] = [_media(item["type"], item["data"]) for item in deepcopy(media)]
+        if any(item["type"] not in ("image", "audio") for item in request["media"]):
+            raise ValueError("invalid media type")
     return request
 
 
@@ -159,17 +178,20 @@ class BasalClient:
 
     @overload
     def decide(self, state: JsonValue, questions: QuestionSet, *, model: str | None = None,
-               facts: Literal["off", "auto"] | None = None) -> TypedDecisionResponse: ...
+               facts: Literal["off", "auto"] | None = None, lang: Literal["pl", "en"] | None = None,
+               media: Sequence[MediaInput] | None = None, detail: Literal["default", "high"] | None = None) -> TypedDecisionResponse: ...
 
     @overload
     def decide(self, state: JsonValue, questions: type[TSchema], *, model: str | None = None,
-               facts: Literal["off", "auto"] | None = None) -> SchemaDecisionResponse[TSchema]: ...
+               facts: Literal["off", "auto"] | None = None, lang: Literal["pl", "en"] | None = None,
+               media: Sequence[MediaInput] | None = None, detail: Literal["default", "high"] | None = None) -> SchemaDecisionResponse[TSchema]: ...
 
     def decide(self, state: DecisionRequest | JsonValue, questions: QuestionSet | type[Questions] | None = None, *,
-               model: str | None = None, facts: Literal["off", "auto"] | None = None) -> DecisionResponse | TypedDecisionResponse | SchemaDecisionResponse[Questions]:
+               model: str | None = None, facts: Literal["off", "auto"] | None = None, lang: Literal["pl", "en"] | None = None,
+               media: Sequence[MediaInput] | None = None, detail: Literal["default", "high"] | None = None) -> DecisionResponse | TypedDecisionResponse | SchemaDecisionResponse[Questions]:
         """POST a raw request, or decide(state, a question dictionary or Questions class)."""
         schema, fields = _prepare_questions(questions)
-        response = cast(DecisionResponse, self._request("POST", "v1/basal", _decision_request(state, fields, model, facts)))
+        response = cast(DecisionResponse, self._request("POST", "v1/basal", _decision_request(state, fields, model, facts, lang, media, detail)))
         if fields is None:
             return response
         return SchemaDecisionResponse(response, schema, fields) if schema is not None else TypedDecisionResponse(response, fields)
@@ -216,17 +238,20 @@ class AsyncBasalClient:
 
     @overload
     async def decide(self, state: JsonValue, questions: QuestionSet, *, model: str | None = None,
-                     facts: Literal["off", "auto"] | None = None) -> TypedDecisionResponse: ...
+                     facts: Literal["off", "auto"] | None = None, lang: Literal["pl", "en"] | None = None,
+               media: Sequence[MediaInput] | None = None, detail: Literal["default", "high"] | None = None) -> TypedDecisionResponse: ...
 
     @overload
     async def decide(self, state: JsonValue, questions: type[TSchema], *, model: str | None = None,
-                     facts: Literal["off", "auto"] | None = None) -> SchemaDecisionResponse[TSchema]: ...
+                     facts: Literal["off", "auto"] | None = None, lang: Literal["pl", "en"] | None = None,
+               media: Sequence[MediaInput] | None = None, detail: Literal["default", "high"] | None = None) -> SchemaDecisionResponse[TSchema]: ...
 
     async def decide(self, state: DecisionRequest | JsonValue, questions: QuestionSet | type[Questions] | None = None, *,
-                     model: str | None = None, facts: Literal["off", "auto"] | None = None) -> DecisionResponse | TypedDecisionResponse | SchemaDecisionResponse[Questions]:
+                     model: str | None = None, facts: Literal["off", "auto"] | None = None, lang: Literal["pl", "en"] | None = None,
+               media: Sequence[MediaInput] | None = None, detail: Literal["default", "high"] | None = None) -> DecisionResponse | TypedDecisionResponse | SchemaDecisionResponse[Questions]:
         """POST a raw request, a question dictionary, or a declarative Questions class."""
         schema, fields = _prepare_questions(questions)
-        response = cast(DecisionResponse, await self._request("POST", "v1/basal", _decision_request(state, fields, model, facts)))
+        response = cast(DecisionResponse, await self._request("POST", "v1/basal", _decision_request(state, fields, model, facts, lang, media, detail)))
         if fields is None:
             return response
         return SchemaDecisionResponse(response, schema, fields) if schema is not None else TypedDecisionResponse(response, fields)
