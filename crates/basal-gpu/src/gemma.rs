@@ -194,7 +194,13 @@ impl GemmaBackend {
             let index = locations.get(name).with_context(|| format!("checkpoint tensor {name} missing"))?;
             readers[*index].read(name, &mut data)?;
             let tensor = Tensor::from_raw_buffer(&data, DType::BF16, shape, &Device::Cpu)?;
-            Ok(tensor.to_dtype(dtype)?.to_device(&dev)?)
+            // CUDA can convert BF16 to FP16 after transfer, avoiding a CPU conversion of every weight.
+            // Keep host casts elsewhere; FP32 also retains its lower peak VRAM use during loading.
+            Ok(if dev.is_cuda() && dtype == DType::F16 {
+                tensor.to_device(&dev)?.to_dtype(dtype)?
+            } else {
+                tensor.to_dtype(dtype)?.to_device(&dev)?
+            })
         };
         let load = |name: &str, shape: &[usize]| load_as(name, shape, precision.storage());
         let h = cfg.hidden;
