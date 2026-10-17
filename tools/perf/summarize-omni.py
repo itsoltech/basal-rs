@@ -115,7 +115,7 @@ def main():
                             expected[('mixed', clients, 'all')] = (mixed, 2 if confirmed else 1)
                 else:
                     expected[('media-sequential', 1, 'all')] = (media, 3 if confirmed else 1)
-                    expected[('media-load', 4, 'all')] = (media, 8 if confirmed else 2)
+                    expected[('media-load', 4, 'all')] = (media, method.get('media_load_repeats', 8 if confirmed else 2))
                 definitions = {r['id']: r for r in selected_ladder + short + media +
                                [r for r in ladder if r['model'] == model and r['target_tokens'] == 8192]}
                 for row in rows:

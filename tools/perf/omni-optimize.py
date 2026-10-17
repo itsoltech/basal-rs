@@ -158,6 +158,7 @@ def main():
                   latency_samples=a.latency_samples or (4 if a.phase == 'screen' else 10),
                   latency_warmup_samples=a.latency_warmup_samples,
                   load_warmup_samples=min(a.load_warmup_samples, len(short)) if a.load_warmup_samples else 2 * len(short),
+                  media_load_repeats=max(8 if a.phase == 'confirm' else 2, math.ceil(4 / len(media))) if media else 0,
                   timing='before JSON serialization through complete HTTP body read; parse after timing',
                   excluded_repetitions=[1] if a.phase == 'confirm' else [],
                   media_engine='upstream-eager; fast rejects media',
@@ -366,7 +367,8 @@ def main():
                             # All 34 preselected real-media payloads; no speed-based selection.
                             phase(tag, variant, model, media, 1, 1, 'media-warmup')
                             phase(tag, variant, model, media, 1, 1 if a.phase == 'screen' else 3, 'media-sequential')
-                            phase(tag, variant, model, media, 4, 2 if a.phase == 'screen' else 8, 'media-load')
+                            phase(tag, variant, model, media, 4,
+                                  max(8 if a.phase == 'confirm' else 2, math.ceil(4 / len(media))), 'media-load')
                 except (RuntimeError, OSError, TimeoutError) as error:
                     failed.append(dict(tag=tag, error=str(error)))
                     event('run_failed', **failed[-1])
