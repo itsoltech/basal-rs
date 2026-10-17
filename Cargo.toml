@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
 members = ["crates/basal-core", "crates/basal-gpu", "crates/basal-cli", "sdk/rust"]
+exclude = ["vendor/candle-core"]
+
+# Candle 0.11.0 still requires vulnerable zip 8.x. Keep its tensor code unchanged
+# while adapting archive names to patched zip 9; see vendor/README.md.
+[patch.crates-io]
+candle-core = { path = "vendor/candle-core" }
 
 [workspace.package]
 version = "0.1.9"
