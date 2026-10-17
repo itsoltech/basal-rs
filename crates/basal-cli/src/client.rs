@@ -120,6 +120,9 @@ pub(super) struct ClientArgs {
     /// Local CUDA GEMM table (default: same automatic table selection as serve)
     #[arg(long, requires = "local")]
     gemm_table: Option<PathBuf>,
+    /// Local GPU: CUDA device ordinal among the visible GPUs (Metal and Intel: 0)
+    #[arg(long, default_value_t = 0, requires = "local")]
+    device: usize,
 }
 
 #[derive(Serialize)]
@@ -473,7 +476,7 @@ fn load_local(args: &ClientArgs, name: &str) -> Result<basal_core::Engine<crate:
     }
     let dir = crate::config::model_dir(&model)?;
     let manifest = ModelManifest::load_with_orders(&dir, model.orders.as_deref())?;
-    let table = crate::config::gemm_table(&model, &manifest, &crate::config::default_gemm_cache())?;
+    let table = crate::config::gemm_table(&model, &manifest, &crate::config::default_gemm_cache(), args.device)?;
     let gpu = crate::GpuArgs {
         media: model.media,
         orders: model.orders.clone(),
@@ -481,10 +484,14 @@ fn load_local(args: &ClientArgs, name: &str) -> Result<basal_core::Engine<crate:
         inference_mode: args.inference_mode.clone(),
         readout: "f32".into(),
         kernels: "fused".into(),
+        quantization: None,
         no_prefix_cache: false,
         state_cache_mb: 0,
         tree_max_tokens: basal_core::engine::TREE_MAX_TOKENS,
         gemm_table: table.clone(),
+        device: Some(args.device),
+        // `basal client --local` runs a model on one GPU
+        layer_split: None,
     };
     let engine = crate::gpu_engine_at(&dir, &gpu)?;
     if let Some(table) = table {

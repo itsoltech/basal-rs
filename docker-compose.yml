@@ -25,7 +25,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              count: 1
+              count: 1                 # models on several GPUs (`device` in serve.yml): count: all or device_ids
               capabilities: [gpu]
     restart: unless-stopped
 

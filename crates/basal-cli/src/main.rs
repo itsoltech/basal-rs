@@ -41,7 +41,7 @@ use anyhow::{bail, Context, Result};
 use basal_core::pack::Packed;
 use basal_core::{Backend, DecideError, Engine, ModelManifest};
 use basal_gpu::RuntimeBackend as GpuBackend;
-use basal_gpu::{InferenceMode, Kernels, Readout};
+use basal_gpu::{InferenceMode, Kernels, LayerSplit, Quantization, Readout};
 use clap::{Args, Parser, Subcommand};
 use serde_json::{json, Value};
 
@@ -148,6 +148,12 @@ struct GpuArgs {
     /// Decoder kernels: fused (default) or candle (stock candle ops, first port; for comparison)
     #[arg(long, default_value = "fused")]
     kernels: String,
+    /// Projection weights: none (default; dense weights of --dtype), q8_0 (8-bit GGML Q8_0 blocks) or q4_k (4-bit GGML
+    /// Q4_K blocks), dequantized to f16 per projection: less GPU memory, more work per forward, different numerics;
+    /// CUDA with --dtype f16 (auto for Llama) and --kernels fused; Llama models only (Omni is refused). `basal serve`:
+    /// the format of every --model (a configuration file sets `quantization` per model instead)
+    #[arg(long)]
+    quantization: Option<String>,
     /// Do not precompute the K/V of the prompt template prefix
     #[arg(long)]
     no_prefix_cache: bool,
@@ -161,6 +167,50 @@ struct GpuArgs {
     /// CUDA: cuBLASLt algorithm table from `basal gemm-search` (classes not in it are tuned at first use)
     #[arg(long)]
     gemm_table: Option<PathBuf>,
+    /// GPU: CUDA device ordinal among the GPUs visible to this process (CUDA_VISIBLE_DEVICES renumbers them); Metal
+    /// and Intel: 0 only. Default 0. `basal serve`: the device of every --model (a configuration file sets `device`
+    /// per model instead)
+    #[arg(long)]
+    device: Option<usize>,
+    /// CUDA: one model on several GPUs by consecutive layer ranges, DEVICE:LAYERS pairs in layer order (e.g. 0:30,1:30:
+    /// layers 0-29 and the embedding on device 0, layers 30-59 and the head on device 1). At least two distinct GPUs
+    /// of one type, counts adding up to the model's layers; Llama models only (Omni is refused); --dtype f16 (auto for
+    /// Llama) and --kernels fused; instead of --device. The
+    /// same computations as on one GPU, stage after stage. `basal serve`: the split of every --model (a configuration
+    /// file sets `layer_split` per model instead)
+    #[arg(long, conflicts_with = "device")]
+    layer_split: Option<LayerSplit>,
+}
+
+impl GpuArgs {
+    /// The GPU ordinal (`--device`, default 0).
+    fn device(&self) -> usize {
+        self.device.unwrap_or(0)
+    }
+
+    /// The devices the model uses: the --layer-split stages, else `[--device]`.
+    fn devices(&self) -> Vec<usize> {
+        self.layer_split.as_ref().map_or_else(|| vec![self.device()], LayerSplit::devices)
+    }
+
+    /// `--layer-split` of `model` against this build's backend, --dtype and --kernels, then its GPUs against the
+    /// driver (every ordinal visible, one GPU type), before any download, GEMM table or load.
+    fn check_layer_split(&self, model: &str) -> Result<()> {
+        let Some(split) = &self.layer_split else { return Ok(()) };
+        config::check_layer_split(model, split, &self.dtype, &self.kernels, cfg!(feature = "cuda"))?;
+        config::check_same_gpus(model, &config::Placement::Split(split.clone()))
+    }
+
+    /// `--quantization` (default none) of `model`, checked with --dtype and --kernels for this build's backend.
+    fn quantization(&self, model: &str) -> Result<Quantization> {
+        config::check_quantization(
+            model,
+            self.quantization.as_deref().unwrap_or(Quantization::None.as_str()),
+            &self.dtype,
+            &self.kernels,
+            cfg!(feature = "cuda"),
+        )
+    }
 }
 
 #[derive(Subcommand)]
@@ -403,7 +453,7 @@ enum Cmd {
     Serve {
         /// YAML file with the served models and their options (serve.example.yml); replaces the model, GPU and
         /// admission options below. Default: BASAL_CONFIG, else basal-serve.yml in the working directory
-        #[arg(long, conflicts_with_all = ["models", "gemm_table"])]
+        #[arg(long, conflicts_with_all = ["models", "gemm_table", "device", "replica_devices", "layer_split"])]
         config: Option<PathBuf>,
         /// Model to serve: 2.0-mini/2.0-4.5B/2.0-max, omni-mini/omni-max, name (owner Remek), owner/name,
         /// @revision, or a local directory; mini/4.5B/max select basal-1.5. Repeat
@@ -412,6 +462,10 @@ enum Cmd {
         models: Vec<String>,
         #[command(flatten)]
         g: GpuArgs,
+        /// CUDA: independent replicas of every --model under its one name, one per listed device (e.g. 0,1; distinct
+        /// GPUs of one type, instead of --device). A configuration file sets `replica_devices` per model instead
+        #[arg(long, value_delimiter = ',', conflicts_with_all = ["device", "layer_split"])]
+        replica_devices: Option<Vec<usize>>,
         /// Listen address (default: the configuration's, BASAL_ADDR, 127.0.0.1:8000)
         #[arg(long)]
         addr: Option<std::net::SocketAddr>,
@@ -465,6 +519,9 @@ enum Cmd {
         /// batch it runs in
         #[arg(long)]
         invariant: bool,
+        /// CUDA device ordinal to search on (the table is valid for GPUs of its name)
+        #[arg(long, default_value_t = 0)]
+        device: usize,
     },
     /// GEMM micro-benchmark on the projection shapes (diagnostic)
     Gemm {
@@ -474,6 +531,9 @@ enum Cmd {
         m: Vec<usize>,
         #[arg(long, default_value_t = 20)]
         reps: usize,
+        /// GPU ordinal
+        #[arg(long, default_value_t = 0)]
+        device: usize,
     },
     /// Compare two exports (reference or runtime): tokens, decisions, logit and probability differences, answers
     Compare {
@@ -534,6 +594,9 @@ fn read_request(src: &str) -> Result<Value> {
 }
 
 fn gpu_engine(m: &ModelArgs, g: &GpuArgs) -> Result<Engine<GpuBackend>> {
+    // an unsupported weight format or layer split fails before the model is downloaded
+    g.quantization(&m.model)?;
+    g.check_layer_split(&m.model)?;
     gpu_engine_at(&m.dir()?, g)
 }
 
@@ -551,20 +614,74 @@ fn gpu_engine_at(dir: &Path, g: &GpuArgs) -> Result<Engine<GpuBackend>> {
     #[cfg(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos")))]
     anyhow::ensure!(g.state_cache_mb == 0, "Intel state cache is not implemented; use --state-cache-mb 0");
     let manifest = ModelManifest::load_with_orders(dir, g.orders.as_deref())?;
+    let quantization = g.quantization(&manifest.name)?;
+    // quantization and layer split exist for Llama only: refused for Omni (Gemma) before any weight is read
+    config::check_architecture(&manifest, quantization, g.layer_split.is_some())?;
     let readout = match g.readout.as_str() {
         "f32" => Readout::F32,
         "bf16" => Readout::Bf16Rounded,
         r => bail!("unknown readout {r:?} (f32, bf16)"),
     };
-    let backend = GpuBackend::load(
-        dir,
-        &manifest.config,
-        config::model_precision(&g.dtype, &manifest)?,
-        readout,
-        Kernels::parse(&g.kernels)?,
-        g.media,
-    )?;
-    crate::done!("{} loaded on the GPU in {:.1}s", manifest.name, backend.load_s());
+    let precision = config::model_precision(&g.dtype, &manifest, g.devices()[0])?;
+    let kernels = Kernels::parse(&g.kernels)?;
+    let backend = match &g.layer_split {
+        None => GpuBackend::load(dir, &manifest.config, precision, readout, kernels, quantization, g.device(), g.media)
+            .with_context(|| format!("loading {}", manifest.name))?,
+        Some(split) => {
+            // the stages must cover the model's layers exactly: checked before any weight is read
+            let layers = manifest.config.llama()?.num_layers;
+            config::check_split_coverage(&manifest.name, split, layers)?;
+            GpuBackend::load_split(dir, &manifest.config, precision, readout, kernels, quantization, split)
+                .with_context(|| format!("loading {} with layer split {split}", manifest.name))?
+        }
+    };
+    match &g.layer_split {
+        None => crate::done!("{} loaded on GPU {} in {:.1}s", manifest.name, g.device(), backend.load_s()),
+        Some(split) => {
+            let ranges = split.ranges(manifest.config.llama()?.num_layers)?;
+            let stages: Vec<String> = split
+                .devices()
+                .iter()
+                .zip(&ranges)
+                .map(|(d, r)| format!("{d} (layers {}-{})", r.start, r.end - 1))
+                .collect();
+            crate::done!("{} loaded on GPUs {} in {:.1}s", manifest.name, stages.join(", "), backend.load_s());
+        }
+    }
+    match quantization {
+        Quantization::None => {}
+        Quantization::Q8_0 => {
+            let q = &backend.describe()["quantization"];
+            crate::note!(
+                "{}: {quantization} projection weights, {} matrices, {:.2} GiB of blocks ({} zero-scale, {} \
+                 subnormal-scale blocks)",
+                manifest.name,
+                q["matrices"],
+                q["allocated_bytes_with_padding"].as_f64().unwrap_or(f64::NAN) / 1073741824.0,
+                q["zero_scale_blocks"],
+                q["subnormal_scale_blocks"]
+            );
+        }
+        Quantization::Q4K => {
+            let q = &backend.describe()["quantization"];
+            let model = &q["reconstruction_error"]["model"];
+            let groups = &model["groups"];
+            crate::note!(
+                "{}: {quantization} projection weights, {} matrices, {:.2} GiB of blocks; reconstruction relative RMS \
+                 error {} over all projections, {} flattened and {} zero groups of 32 of {}; warm-up check: layer {} \
+                 {} dequantized on the GPU bitwise equal to the host",
+                manifest.name,
+                q["matrices"],
+                q["allocated_bytes_with_padding"].as_f64().unwrap_or(f64::NAN) / 1073741824.0,
+                model["relative_error_ratio"]["sqrt"],
+                groups["flattened"]["count"],
+                groups["zero"],
+                groups["total"],
+                q["warmup_check"]["layer"],
+                q["warmup_check"]["projection"]
+            );
+        }
+    }
     let mut backend = backend;
     backend.configure_inference(inference_mode, &manifest.name)?;
     if let Some(p) = &g.gemm_table {
@@ -684,13 +801,18 @@ fn run() -> Result<()> {
         Cmd::Export { m, g, inputs, out, batching, upstream } => {
             let mut engine = gpu_engine(&m, &g)?;
             let load_s = engine.backend.load_s();
+            let mut run = json!({"dtype": g.dtype, "inference_mode": g.inference_mode, "quantization": g.quantization(&m.model)?.as_str(), "readout": g.readout, "kernels": g.kernels, "prefix_cache": !g.no_prefix_cache, "load_s": load_s});
+            // only with a split: its stages as given (one GPU keeps the run object unchanged)
+            if let Some(split) = &g.layer_split {
+                run["layer_split"] = serde_json::to_value(split.stages())?;
+            }
             export::export(
                 &mut engine,
                 &inputs,
                 &out,
                 parse_batching(&batching)?,
                 if upstream { basal_core::request::Dialect::Upstream } else { basal_core::request::Dialect::TypeSafe },
-                json!({"dtype": g.dtype, "inference_mode": g.inference_mode, "readout": g.readout, "kernels": g.kernels, "prefix_cache": !g.no_prefix_cache, "load_s": load_s}),
+                run,
             )?;
         }
         Cmd::BenchRequests { m, g, requests, out, reps, batching } => {
@@ -724,6 +846,10 @@ fn run() -> Result<()> {
             let prep: Vec<_> =
                 recs.iter().take(n + 1).map(|r| engine.prepare(reference::bench_item(r)?)).collect::<Result<_>>()?;
             engine.run(&prep[..1], basal_core::Batching::Single)?; // warm-up
+            let transfers = engine.backend.stage_transfers(); // layer split: the profiled items only
+            if let Some(t) = &transfers {
+                t.reset();
+            }
             engine.backend.enable_profile(residual_max)?;
             // items after the warm-up one (the reference may hold fewer than n + 1)
             let n = prep.len() - 1;
@@ -739,10 +865,27 @@ fn run() -> Result<()> {
                 (0..nl).map(|l| rmax.iter().skip(l).step_by(nl).copied().fold(0.0f32, f32::max)).collect();
             let sum: f64 = prof.values().sum::<f64>() / n as f64;
             let tokens: f64 = prep[1..].iter().map(|p| p.packed.ids.len() as f64).sum::<f64>() / n as f64;
-            println!(
-                "{}",
-                json!({"items": n, "mean_packed_tokens_with_template": tokens, "ms_per_item_profiled": total, "sections_ms_per_item": prof.iter().map(|(k, v)| (k.to_string(), json!(v / n as f64))).collect::<serde_json::Map<_, _>>(), "sections_sum_ms": sum, "residual_abs_max_per_layer": per_layer, "residual_abs_max": per_layer.iter().copied().fold(0.0f32, f32::max)})
-            );
+            let mut out = json!({"items": n, "mean_packed_tokens_with_template": tokens, "ms_per_item_profiled": total, "sections_ms_per_item": prof.iter().map(|(k, v)| (k.to_string(), json!(v / n as f64))).collect::<serde_json::Map<_, _>>(), "sections_sum_ms": sum, "residual_abs_max_per_layer": per_layer, "residual_abs_max": per_layer.iter().copied().fold(0.0f32, f32::max)});
+            // quantized weights: the dequantizations are a part of the projection sections, so not added to
+            // sections_sum_ms (q8_0 keeps its keys)
+            match engine.backend.dequant_profile() {
+                Some((Quantization::Q8_0, ms, values)) => {
+                    out["q8_dequant_ms_per_item"] = json!(ms / n as f64);
+                    out["q8_dequant_values_per_item"] = json!(values as f64 / n as f64);
+                    out["q8_dequant_scope"] = json!("synchronised time of the q8_0 -> f16 dequantizations; included in the qkv_proj, o_proj, gate_up_proj and down_proj sections, not added to sections_sum_ms");
+                }
+                Some((format, ms, values)) => {
+                    out["dequant_ms_per_item"] = json!(ms / n as f64);
+                    out["dequant_values_per_item"] = json!(values as f64 / n as f64);
+                    out["dequant_format"] = json!(format.as_str());
+                    out["dequant_scope"] = json!(format!("synchronised time of the {format} -> f16 dequantizations; included in the qkv_proj, o_proj, gate_up_proj and down_proj sections, not added to sections_sum_ms"));
+                }
+                None => {}
+            }
+            if let Some(t) = &transfers {
+                out["stage_transfers"] = t.report();
+            }
+            println!("{out}");
         }
         Cmd::GemmTune { dtype, m, reps } => {
             let shapes = [(2048, 2560), (2048, 2048), (2048, 22016), (11008, 2048)];
@@ -796,6 +939,7 @@ fn run() -> Result<()> {
             config,
             models,
             g,
+            replica_devices,
             addr,
             max_batch_tokens,
             max_inflight,
@@ -829,13 +973,36 @@ fn run() -> Result<()> {
                     config::DEFAULT_MODEL.repo
                 ),
             }
-            if !matches!(source, config::Source::File(_)) {
+            if matches!(source, config::Source::File(_)) {
+                // the file's models have their own devices; a device of the command line would be ignored
+                anyhow::ensure!(
+                    g.device.is_none(),
+                    "--device applies to --model; with a configuration file set `device` per model in it"
+                );
+                anyhow::ensure!(
+                    replica_devices.is_none(),
+                    "--replica-devices applies to --model; with a configuration file set `replica_devices` per model \
+                     in it"
+                );
+                anyhow::ensure!(
+                    g.quantization.is_none(),
+                    "--quantization applies to --model; with a configuration file set `quantization` per model in it"
+                );
+                anyhow::ensure!(
+                    g.layer_split.is_none(),
+                    "--layer-split applies to --model; with a configuration file set `layer_split` per model in it"
+                );
+            } else {
                 // models from the command line: the options of the command line
                 for m in &mut c.models {
                     if g.dtype != "auto" {
                         m.dtype = g.dtype.clone();
                     }
                     m.inference_mode = g.inference_mode.clone();
+                    m.quantization = g.quantization.clone().unwrap_or_else(|| Quantization::None.as_str().into());
+                    m.device = g.device;
+                    m.replica_devices.clone_from(&replica_devices);
+                    m.layer_split.clone_from(&g.layer_split);
                     m.gemm_table = match &g.gemm_table {
                         Some(t) => t.display().to_string(),
                         None => "auto".into(),
@@ -853,34 +1020,89 @@ fn run() -> Result<()> {
                 c.release_date = release_date;
             }
             serve::check_admission_limits(c.max_inflight, c.max_large_inflight)?;
+            // devices of every model's instances, its weight format and layer split; the GPUs of a replica group or
+            // a layer split are compared before any download
+            let placements: Vec<config::Placement> = c
+                .models
+                .iter()
+                .map(|m| {
+                    let model = config::describe(m);
+                    config::check_quantization(&model, &m.quantization, &m.dtype, &g.kernels, cfg!(feature = "cuda"))?;
+                    let placement = m.placement().with_context(|| format!("model {model}"))?;
+                    if let Some(split) = placement.split() {
+                        config::check_layer_split(&model, split, &m.dtype, &g.kernels, cfg!(feature = "cuda"))?;
+                    }
+                    Ok(placement)
+                })
+                .collect::<Result<_>>()?;
+            for (m, placement) in c.models.iter().zip(&placements) {
+                if matches!(placement, config::Placement::Replicas(d) if d.len() > 1) {
+                    anyhow::ensure!(
+                        cfg!(feature = "cuda"),
+                        "model {}: several `replica_devices` need the CUDA build",
+                        config::describe(m)
+                    );
+                }
+                config::check_same_gpus(&format!("model {}", config::describe(m)), placement)?;
+            }
             // model files (local or downloaded), then GEMM tables (a search needs no model weights in GPU memory),
             // then the models
             let dirs: Vec<PathBuf> = c.models.iter().map(config::model_dir).collect::<Result<_>>()?;
+            let manifests: Vec<ModelManifest> = dirs.iter().map(|d| ModelManifest::load(d)).collect::<Result<_>>()?;
+            // one engine per model name (the `model` field of requests) before any GEMM search or load
+            for (i, m) in manifests.iter().enumerate() {
+                anyhow::ensure!(
+                    manifests[..i].iter().all(|o| o.name != m.name),
+                    "model {} configured twice (one entry per model; `replica_devices` serves it on several GPUs)",
+                    m.name
+                );
+            }
+            // quantization and layer split exist for Llama only (Omni/Gemma refuses them); a layer split covers exactly
+            // the model's layers (config.json); both before any GEMM table or load
+            for ((mc, manifest), placement) in c.models.iter().zip(&manifests).zip(&placements) {
+                let quantization: Quantization =
+                    mc.quantization.parse().with_context(|| format!("model {}", manifest.name))?;
+                config::check_architecture(manifest, quantization, placement.split().is_some())?;
+                if let Some(split) = placement.split() {
+                    config::check_split_coverage(&manifest.name, split, manifest.config.llama()?.num_layers)?;
+                }
+            }
+            // one table per model, resolved on its first device; the table of a replica group or a layer split is
+            // checked on every device before anything loads (no per-device cache writes)
             let mut tables = Vec::new();
-            for (mc, dir) in c.models.iter().zip(&dirs) {
-                let manifest = ModelManifest::load(dir)?;
-                tables.push(config::gemm_table(mc, &manifest, &c.gemm_cache)?);
+            for ((mc, manifest), placement) in c.models.iter().zip(&manifests).zip(&placements) {
+                let table = config::gemm_table(mc, manifest, &c.gemm_cache, placement.first_device())?;
+                config::check_table_on_devices(manifest, table.as_deref(), placement)?;
+                tables.push(table);
             }
             let mut served = Vec::new();
-            for ((mc, table), dir) in c.models.iter().zip(tables).zip(dirs) {
-                let mg = GpuArgs {
-                    media: mc.media || g.media,
-                    orders: mc.orders.clone().or_else(|| g.orders.clone()),
-                    dtype: mc.dtype.clone(),
-                    inference_mode: mc.inference_mode.clone(),
-                    readout: g.readout.clone(),
-                    kernels: g.kernels.clone(),
-                    no_prefix_cache: mc.no_prefix_cache,
-                    state_cache_mb: mc.state_cache_mb,
-                    tree_max_tokens: mc.tree_max_tokens,
-                    gemm_table: table.clone(),
-                };
-                let engine = gpu_engine_at(&dir, &mg)?;
-                if let Some(t) = &table {
-                    config::check_gemm_coverage(&engine.manifest.name, &engine.backend.gemm_table_missing(), t)?;
+            for (((mc, table), dir), placement) in c.models.iter().zip(tables).zip(dirs).zip(placements) {
+                let instances = placement.instances();
+                let mut replicas = Vec::with_capacity(instances.len());
+                for devices in instances {
+                    let mg = GpuArgs {
+                        media: mc.media || g.media,
+                        orders: mc.orders.clone().or_else(|| g.orders.clone()),
+                        dtype: mc.dtype.clone(),
+                        inference_mode: mc.inference_mode.clone(),
+                        readout: g.readout.clone(),
+                        kernels: g.kernels.clone(),
+                        quantization: Some(mc.quantization.clone()),
+                        no_prefix_cache: mc.no_prefix_cache,
+                        state_cache_mb: mc.state_cache_mb,
+                        tree_max_tokens: mc.tree_max_tokens,
+                        gemm_table: table.clone(),
+                        device: placement.split().is_none().then(|| devices[0]),
+                        layer_split: placement.split().cloned(),
+                    };
+                    let engine = gpu_engine_at(&dir, &mg)?;
+                    if let Some(t) = &table {
+                        config::check_gemm_coverage(&engine.manifest.name, &engine.backend.gemm_table_missing(), t)?;
+                    }
+                    replicas.push(serve::Replica { engine, devices });
                 }
                 served.push(serve::ServedModel {
-                    engine,
+                    replicas,
                     max_batch_tokens: mc.max_batch_tokens,
                     schedule: mc.schedule,
                     long_tokens: mc.long_tokens,
@@ -904,7 +1126,7 @@ fn run() -> Result<()> {
             };
             serve::serve(served, opts)?;
         }
-        Cmd::GemmSearch { m, dtype, out, max_m, m_classes, invariant } => {
+        Cmd::GemmSearch { m, dtype, out, max_m, m_classes, invariant, device } => {
             #[cfg(feature = "cuda")]
             {
                 let classes: Vec<usize> = if !m_classes.is_empty() {
@@ -915,19 +1137,19 @@ fn run() -> Result<()> {
                     (16..=512).step_by(16).chain((640..=max_m).step_by(128)).collect()
                 };
                 let shapes = basal_gpu::architecture_projection_shapes(&ModelManifest::load(&m.dir()?)?.config)?;
-                let t = basal_gpu::gemm_search(&classes, &shapes, &dtype, invariant)?;
+                let t = basal_gpu::gemm_search(&classes, &shapes, &dtype, invariant, device)?;
                 write_json(&out, &t)?;
             }
             #[cfg(not(feature = "cuda"))]
             bail!(
-                "gemm-search needs a CUDA build ({}, {dtype}, {}, {max_m}, {m_classes:?}, {invariant})",
+                "gemm-search needs a CUDA build ({}, {dtype}, {}, {max_m}, {m_classes:?}, {invariant}, {device})",
                 m.model,
                 out.display()
             );
         }
-        Cmd::Gemm { dtype, m, reps } => {
+        Cmd::Gemm { dtype, m, reps, device } => {
             let shapes = [(2048, 2560), (2048, 2048), (2048, 11008), (11008, 2048)];
-            for r in basal_gpu::gemm_microbench(&m, &shapes, &dtype, reps)? {
+            for r in basal_gpu::gemm_microbench(&m, &shapes, &dtype, reps, device)? {
                 println!("{r}");
             }
         }
@@ -974,14 +1196,24 @@ fn run() -> Result<()> {
                 b => bail!("unknown batching {b:?}"),
             };
             // GPU condition probe before and after: the same GEMM (f16, 480x2048 @ 11008x2048^T). A drop between the
-            // two marks throttling or outside load during the run.
-            let probe = || -> Result<f64> {
-                let r = basal_gpu::gemm_microbench(&[480], &[(2048, 11008)], "f16", 30)?;
+            // two marks throttling or outside load during the run. A layer split probes every stage's GPU, one after
+            // another (each probe owns its device and operands and returns host values only).
+            let probe = |device: usize| -> Result<f64> {
+                let r = basal_gpu::gemm_microbench(&[480], &[(2048, 11008)], "f16", 30, device)?;
                 Ok(r.iter().filter_map(|x| x["tflops"].as_f64()).fold(0.0, f64::max))
             };
-            let before = probe()?;
+            let devices = g.devices();
+            let before = devices.iter().map(|&d| probe(d)).collect::<Result<Vec<_>>>()?;
             let mut r = bench::bench(&mut engine, &reference, lat_n, batch)?;
-            r["gpu_probe_tflops"] = json!({"before": before, "after": probe()?});
+            let after = devices.iter().map(|&d| probe(d)).collect::<Result<Vec<_>>>()?;
+            r["gpu_probe_tflops"] = json!({"before": before[0], "after": after[0]});
+            if g.layer_split.is_some() {
+                r["gpu_probe_tflops_per_device"] = json!(devices
+                    .iter()
+                    .zip(before.iter().zip(&after))
+                    .map(|(d, (b, a))| json!({"device": d, "before": b, "after": a}))
+                    .collect::<Vec<_>>());
+            }
             r["load_s"] = json!(load_s);
             r["backend"] = engine.backend.describe();
             r["model"] = json!(engine.manifest.name);

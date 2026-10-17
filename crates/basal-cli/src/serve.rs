@@ -18,8 +18,19 @@
 //!
 //! Several models (`basal serve --config FILE`, [`crate::config`]) run in one process: each has its own engine,
 //! queue and long lane, requests go to the model named in their `model` field (/v1/basal: the default model when the
-//! field is missing), and all engines take turns on the GPU through one gate, so short batches of any model go
-//! before long requests.
+//! field is missing). The engines of the models on one GPU (`device`) take turns on it through one gate, so short
+//! batches of any of them go before long requests; models on different GPUs have separate gates and run at the same
+//! time.
+//!
+//! A model may have replicas (`replica_devices`, CUDA): independent engines on distinct GPUs of one type under the one
+//! model name, each with its own queue, scheduler, caches and long lane. A request goes to the available replica with
+//! the fewest reserved (queued, planned, waiting or running) requests, ties in rotating order; the reservation lives in
+//! the job until it is answered or dropped. The model-level metrics aggregate the replicas, the `basal_replica_*`
+//! series split them.
+//!
+//! A model may instead be split by layers over several GPUs (`layer_split`, CUDA): one instance whose stages run one
+//! after another, each on its GPU. It takes the gate of every GPU it uses, at most one at a time, so engines of other
+//! models on one of those GPUs take turns with the stage there, and its long lane yields on every GPU.
 //!
 //! Timing headers (not part of the System One body): `x-basal-queue-ms` (arrival to the start of its batch),
 //! `x-basal-compute-ms` (planning + forwards of its batch), `x-basal-batch-requests`.
@@ -46,7 +57,7 @@ use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot, Semaphore};
 
 mod metrics;
-use metrics::{LaneMetrics, Metrics, RequestModel};
+use metrics::{LaneMetrics, Metrics, ReplicaMetrics, RequestModel};
 
 pub(crate) const DEFAULT_MAX_LARGE_INFLIGHT: usize = 4;
 
@@ -68,9 +79,18 @@ pub struct ServeOptions {
     pub metrics: bool,
 }
 
-/// One served model: its engine and admission options.
-pub struct ServedModel<B: Backend> {
+/// One instance of a served model.
+pub struct Replica<B: Backend> {
     pub engine: Engine<B>,
+    /// GPU ordinals the engine was loaded on: one, or the stages of a layer split in order. Engines using the same
+    /// ordinal share its gate.
+    pub devices: Vec<usize>,
+}
+
+/// One served model: its instances and admission options.
+pub struct ServedModel<B: Backend> {
+    /// At least one; several are replicas of one model on distinct GPUs, routed by load.
+    pub replicas: Vec<Replica<B>>,
     pub max_batch_tokens: usize,
     pub schedule: Schedule,
     /// Requests above this many packed tokens run in a second lane that yields the GPU between layers (0 = one lane).
@@ -97,19 +117,170 @@ struct Job {
     _large_body_permit: Option<LargeBodyPermit>,
     /// Bound queued/running jobs even after the HTTP handler disconnects.
     _job_permit: tokio::sync::OwnedSemaphorePermit,
+    /// This job counted on its replica (none for a single instance without metrics), until answered or dropped.
+    load: Option<Reservation>,
+}
+
+impl Job {
+    /// Release the reservation, then reply: a client that sends its next request as soon as it has the answer finds
+    /// the replica's count already lowered. The reply is lost when the client is gone.
+    fn answer(self, reply: Reply) {
+        let Self { reply: tx, load, .. } = self;
+        drop(load);
+        let _ = tx.send(reply);
+    }
+}
+
+/// Jobs reserved on one replica: queued, planned, waiting or running. A replica group routes by it; with metrics it
+/// also drives the replica's inflight gauge.
+struct ReplicaLoad {
+    jobs: AtomicUsize,
+    metrics: Option<ReplicaMetrics>,
+}
+
+/// One job counted in its replica's [`ReplicaLoad`]. Owned by the job, so the count drops wherever the job ends:
+/// answered (after its batch even when the client is gone, or on a planning error), skipped in admission because its
+/// client is gone, refused by a stopped worker, or dropped with a worker's queue (end, shutdown, panic).
+struct Reservation(Arc<ReplicaLoad>);
+
+impl Reservation {
+    fn new(load: &Arc<ReplicaLoad>) -> Self {
+        load.jobs.fetch_add(1, Ordering::Relaxed);
+        if let Some(m) = &load.metrics {
+            m.reserve();
+        }
+        Self(load.clone())
+    }
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        self.0.jobs.fetch_sub(1, Ordering::Relaxed);
+        if let Some(m) = &self.0.metrics {
+            m.release();
+        }
+    }
+}
+
+/// Queue of one instance of a model.
+struct ReplicaRoute {
+    tx: mpsc::UnboundedSender<Job>,
+    /// GPU ordinals of the instance (one, or the stages of a layer split).
+    devices: Vec<usize>,
+    /// Device readiness reported by its engines (none when its backend does not report it).
+    health: Vec<DeviceHealth>,
+    /// Always set in a replica group; for a single instance only with metrics.
+    load: Option<Arc<ReplicaLoad>>,
+}
+
+impl ReplicaRoute {
+    /// Queue a job; a stopped worker hands it back untouched.
+    fn submit(&self, job: Job) -> std::result::Result<(), Box<Job>> {
+        self.tx.send(job).map_err(|e| Box::new(e.0))?;
+        if let Some(m) = self.load.as_ref().and_then(|l| l.metrics.as_ref()) {
+            m.routed();
+        }
+        Ok(())
+    }
+
+    fn jobs(&self) -> usize {
+        self.load.as_ref().map_or(0, |l| l.jobs.load(Ordering::Relaxed))
+    }
+
+    /// Why the instance takes no requests: its backend reported the device lost, or its main worker stopped (a stopped
+    /// long lane is not counted: the main lane runs its requests). Not a check of the hardware: a CUDA backend reports
+    /// `device_lost` only when the end of its own GPU work could not be confirmed (two failed synchronisations or
+    /// context binds of that instance); a fatal CUDA error may leave the other GPUs of the process unusable too.
+    fn unavailable(&self) -> Option<&'static str> {
+        if self.health.iter().any(DeviceHealth::is_lost) {
+            Some("device_lost")
+        } else if self.tx.is_closed() {
+            Some("worker_closed")
+        } else {
+            None
+        }
+    }
+
+    fn available(&self) -> bool {
+        self.unavailable().is_none()
+    }
+}
+
+/// Queues of a served model.
+enum Route {
+    /// A single instance, used as without replicas: no availability check, no reservation unless metrics are on.
+    One(ReplicaRoute),
+    Group {
+        replicas: Box<[ReplicaRoute]>,
+        /// Start of the next least-loaded scan, advanced per request so ties rotate between replicas.
+        next: AtomicUsize,
+    },
+}
+
+impl Route {
+    fn replicas(&self) -> &[ReplicaRoute] {
+        match self {
+            Self::One(r) => std::slice::from_ref(r),
+            Self::Group { replicas, .. } => replicas,
+        }
+    }
+
+    /// Queue a job on an instance; false when none took it (the job and its reservation are then dropped). A group
+    /// picks the available replica with the fewest reserved jobs; the pick and the reservation are separate steps, so
+    /// concurrent requests may pick the same replica (the balance is approximate, the counts exact). A worker that
+    /// stopped hands the job back before any work on it, which then goes to another replica, at most one try per
+    /// replica. A job is never retried after it was queued.
+    fn send(&self, mut job: Job) -> bool {
+        match self {
+            Self::One(r) => {
+                job.load = r.load.as_ref().map(Reservation::new);
+                r.submit(job).is_ok()
+            }
+            Self::Group { replicas, next } => {
+                let start = next.fetch_add(1, Ordering::Relaxed);
+                for _ in 0..replicas.len() {
+                    let Some(r) = least_loaded(replicas, start) else { break };
+                    job.load = r.load.as_ref().map(Reservation::new);
+                    match r.submit(job) {
+                        Ok(()) => return true,
+                        Err(back) => {
+                            job = *back;
+                            job.load = None;
+                        }
+                    }
+                }
+                false
+            }
+        }
+    }
+}
+
+/// The available replica with the fewest reserved jobs, scanning from `start` (the first of equal ones wins).
+fn least_loaded(replicas: &[ReplicaRoute], start: usize) -> Option<&ReplicaRoute> {
+    let n = replicas.len();
+    let mut best: Option<(&ReplicaRoute, usize)> = None;
+    for i in 0..n {
+        let r = &replicas[start.wrapping_add(i) % n];
+        if !r.available() {
+            continue;
+        }
+        let jobs = r.jobs();
+        if best.is_none_or(|(_, least)| jobs < least) {
+            best = Some((r, jobs));
+        }
+    }
+    best.map(|(r, _)| r)
 }
 
 struct App {
     metrics: Option<Metrics>,
-    /// Job queue of every served model, by name.
-    routes: HashMap<String, mpsc::UnboundedSender<Job>>,
+    /// Queues of every served model, by name.
+    routes: HashMap<String, Route>,
     names: Vec<String>,
     model_metadata: Vec<Value>,
     large_bodies: Arc<Semaphore>,
     jobs: Arc<Semaphore>,
     media_requests: Arc<Semaphore>,
-    /// Device readiness reported by each model's engines (none when its backend does not report it).
-    health: Vec<(String, Vec<DeviceHealth>)>,
     default_model: String,
     inflight: AtomicUsize,
     max_inflight: usize,
@@ -157,6 +328,14 @@ impl Lane {
     /// the budget (packed tokens of the batch, a state shared by several requests counted once).
     fn admit(&mut self, start: Instant) -> (Vec<(Job, RequestPlan)>, usize) {
         self.waiting.retain(|w| !w.job.reply.is_closed()); // clients gone (their handlers were dropped)
+        let (batch, tokens) = self.take(start);
+        if let Some(metrics) = &self.metrics {
+            metrics.waiting(self.waiting.len());
+        }
+        (batch, tokens)
+    }
+
+    fn take(&mut self, start: Instant) -> (Vec<(Job, RequestPlan)>, usize) {
         if self.schedule == Schedule::Hrrn {
             let rate = self.rate;
             let ratio = |w: &Waiting| (start - w.job.arrived).as_secs_f64() * rate / w.tokens as f64;
@@ -204,14 +383,14 @@ impl Lane {
                         metrics.usage(v);
                     }
                     let queue_ms = (start - job.arrived).as_secs_f64() * 1e3;
-                    let _ = job.reply.send((resp, Some(Timing { queue_ms, compute_ms, batch: n })));
+                    job.answer((resp, Some(Timing { queue_ms, compute_ms, batch: n })));
                 }
             }
             Err(e) => {
                 let msg = format!("{e:#}");
                 crate::warn!("batch of {n} failed: {msg}");
                 for (job, _) in batch {
-                    let _ = job.reply.send((Err(DecideError::Internal(anyhow::anyhow!(msg.clone()))), None));
+                    job.answer((Err(DecideError::Internal(anyhow::anyhow!(msg.clone()))), None));
                 }
             }
         }
@@ -279,9 +458,7 @@ fn scheduler<B: Backend>(
                         _ => lane.waiting.push(w),
                     }
                 }
-                Err(e) => {
-                    let _ = job.reply.send((Err(e), None));
-                }
+                Err(e) => job.answer((Err(e), None)),
             }
         }
         let start = Instant::now();
@@ -491,14 +668,12 @@ async fn decide(
         dialect,
         arrived,
         reply: tx,
+        load: None,
         _media_permit: media_permit,
         _large_body_permit: large,
         _job_permit: job_permit,
     });
-    let reply = match sent {
-        Ok(()) => rx.await.ok(),
-        Err(_) => None,
-    };
+    let reply = if sent { rx.await.ok() } else { None };
     drop(slot);
     drop(admitted);
     let Some((result, timing)) = reply else {
@@ -598,21 +773,61 @@ async fn shutdown_signal() {
     crate::note!("shutting down");
 }
 
-/// Readiness: 200, or 503 once a model's device is permanently lost (its requests fail until a restart).
+/// Readiness. 200, or 503 once the backend of a single-instance model reports its device permanently lost (its
+/// requests fail until a restart): `device_lost` with `lost_models`. A replica group is ready while one replica takes
+/// requests; a group with unavailable replicas is listed in `degraded_models` (200, status still `ok`), one without
+/// any in `unavailable_models` (503, `engine_stopped` unless a device is lost), each as `{model, replicas, available,
+/// unavailable: [{replica, device, reason: worker_closed | device_lost}]}`. Neither checks the GPU hardware.
 async fn health(State(app): State<Arc<App>>) -> Response {
     let lost: Vec<&str> = app
-        .health
+        .names
         .iter()
-        .filter(|(_, devices)| devices.iter().any(DeviceHealth::is_lost))
-        .map(|(name, _)| name.as_str())
+        .filter(
+            |name| matches!(&app.routes[name.as_str()], Route::One(r) if r.health.iter().any(DeviceHealth::is_lost)),
+        )
+        .map(String::as_str)
         .collect();
-    if lost.is_empty() {
-        return Json(json!({"status": "ok", "models": app.names, "default_model": app.default_model})).into_response();
+    let (mut degraded, mut unavailable) = (Vec::new(), Vec::new());
+    for name in &app.names {
+        let Route::Group { replicas, .. } = &app.routes[name.as_str()] else { continue };
+        let down: Vec<Value> = replicas
+            .iter()
+            .enumerate()
+            // replicas run on one GPU each (a layer-split model has no replicas)
+            .filter_map(|(i, r)| {
+                r.unavailable().map(|why| json!({"replica": i, "device": r.devices[0], "reason": why}))
+            })
+            .collect();
+        if down.is_empty() {
+            continue;
+        }
+        let none_left = down.len() == replicas.len();
+        let entry = json!({"model": name, "replicas": replicas.len(), "available": replicas.len() - down.len(),
+                           "unavailable": down});
+        if none_left {
+            unavailable.push(entry)
+        } else {
+            degraded.push(entry)
+        }
     }
-    error_response(
-        StatusCode::SERVICE_UNAVAILABLE,
-        json!({"status": "device_lost", "models": app.names, "default_model": app.default_model, "lost_models": lost}),
-    )
+    let mut body = json!({"status": "ok", "models": app.names, "default_model": app.default_model});
+    let status = if !lost.is_empty() {
+        body["status"] = json!("device_lost");
+        body["lost_models"] = json!(lost);
+        StatusCode::SERVICE_UNAVAILABLE
+    } else if !unavailable.is_empty() {
+        body["status"] = json!("engine_stopped");
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::OK
+    };
+    if !degraded.is_empty() {
+        body["degraded_models"] = Value::Array(degraded);
+    }
+    if !unavailable.is_empty() {
+        body["unavailable_models"] = Value::Array(unavailable);
+    }
+    error_response(status, body)
 }
 
 pub fn serve<B: Backend + Send + 'static>(models: Vec<ServedModel<B>>, opts: ServeOptions) -> Result<()> {
@@ -680,9 +895,25 @@ fn serve_inner<B: Backend + Send + 'static>(
 ) -> Result<()> {
     anyhow::ensure!(!models.is_empty(), "no models to serve");
     check_admission_limits(opts.max_inflight, opts.max_large_inflight)?;
-    let names: Vec<String> = models.iter().map(|m| m.engine.manifest.name.clone()).collect();
-    let supports_media = models.iter().any(|m| !m.engine.backend.media_kinds().is_empty());
-    let model_metadata: Vec<Value> = models.iter().map(|m| metadata_for_model(&m.engine)).collect();
+    let mut layout: Vec<(String, Vec<Vec<usize>>)> = Vec::with_capacity(models.len());
+    for m in &models {
+        let first = m.replicas.first().context("a served model needs at least one engine")?;
+        let name = &first.engine.manifest.name;
+        let mut devices: Vec<Vec<usize>> = Vec::with_capacity(m.replicas.len());
+        for r in &m.replicas {
+            anyhow::ensure!(r.engine.manifest.name == *name, "replicas of {name} load different models");
+            anyhow::ensure!(!r.devices.is_empty(), "{name}: an instance without a GPU");
+            for d in &r.devices {
+                anyhow::ensure!(!devices.iter().flatten().any(|o| o == d), "{name}: two replicas on GPU {d}");
+            }
+            devices.push(r.devices.clone());
+        }
+        layout.push((name.clone(), devices));
+    }
+    let names: Vec<String> = layout.iter().map(|(n, _)| n.clone()).collect();
+    let supports_media = models.iter().any(|m| m.replicas.iter().any(|r| !r.engine.backend.media_kinds().is_empty()));
+    // replicas load the same model with the same options: the first one describes it
+    let model_metadata: Vec<Value> = models.iter().map(|m| metadata_for_model(&m.replicas[0].engine)).collect();
     for (i, n) in names.iter().enumerate() {
         anyhow::ensure!(!names[..i].contains(n), "model {n} configured twice");
     }
@@ -690,58 +921,107 @@ fn serve_inner<B: Backend + Send + 'static>(
     anyhow::ensure!(names.contains(&default_model), "default model {default_model} is not served ({names:?})");
     let metrics = opts
         .metrics
-        .then(|| Metrics::new(&names, opts.max_inflight))
+        .then(|| Metrics::new(&layout, opts.max_inflight))
         .transpose()
         .context("initializing Prometheus metrics")?;
-    // One GPU: with several models or a long lane, every engine takes turns through one gate (short batches of any
-    // model before long requests, which yield between layers).
-    let shared = models.len() > 1 || models.iter().any(|m| m.long_tokens > 0);
-    let gate = shared.then(|| Arc::new(Gate::new(std::time::Duration::from_millis(opts.long_slice_ms))));
+    // Per GPU: with several engines (models or replicas of different models, a layer-split instance counting on each
+    // of its GPUs) or a long lane on it, every engine on that GPU takes turns through its gate (short batches of any of
+    // them before long requests, which yield between layers). GPUs do not wait for each other; a layer-split instance
+    // holds one of its gates at a time.
+    let instances: Vec<(&[usize], usize)> =
+        models.iter().flat_map(|m| m.replicas.iter().map(move |r| (r.devices.as_slice(), m.long_tokens))).collect();
+    let mut gates: HashMap<usize, Arc<Gate>> = HashMap::new();
+    for &(devices, long_tokens) in &instances {
+        for &device in devices {
+            let on_device = instances.iter().filter(|(ds, _)| ds.contains(&device)).count();
+            if on_device > 1 || long_tokens > 0 {
+                gates
+                    .entry(device)
+                    .or_insert_with(|| Arc::new(Gate::new(std::time::Duration::from_millis(opts.long_slice_ms))));
+            }
+        }
+    }
     let mut threads = Vec::new();
     let result = (|| -> Result<()> {
         let mut routes = HashMap::new();
-        let mut readiness = Vec::new();
         for m in models {
-            let ServedModel { mut engine, max_batch_tokens, schedule, long_tokens } = m;
-            // Keep the forward budget aligned with admission, including the forked long lane.
-            // Otherwise a larger server batch is silently split at the engine's default 8192.
-            engine.forward_max_tokens = max_batch_tokens;
-            let name = engine.manifest.name.clone();
-            let mut devices: Vec<DeviceHealth> = engine.backend.device_health().into_iter().collect();
-            let (tx, rx) = mpsc::unbounded_channel();
-            let lane = |kind| Lane::new(schedule, max_batch_tokens, metrics.as_ref().map(|m| m.lane(&name, kind)));
-            let long = if long_tokens > 0 {
-                let mut le = engine.fork().with_context(|| format!("{name}: second engine for the long lane"))?;
-                le.backend.set_gate(gate.clone().unwrap(), false);
-                devices.extend(le.backend.device_health());
-                let (ltx, lrx) = std::sync::mpsc::channel();
-                let l = lane("long");
+            let ServedModel { replicas, max_batch_tokens, schedule, long_tokens } = m;
+            let name = replicas[0].engine.manifest.name.clone();
+            let group = replicas.len() > 1;
+            let mut queues = Vec::with_capacity(replicas.len());
+            for (index, Replica { mut engine, devices }) in replicas.into_iter().enumerate() {
+                // Keep the forward budget aligned with admission, including the forked long lane.
+                // Otherwise a larger server batch is silently split at the engine's default 8192.
+                engine.forward_max_tokens = max_batch_tokens;
+                // threads and messages: the model's name, with the replica index in a group
+                let label = if group { format!("{name}-r{index}") } else { name.clone() };
+                let device_gates: Vec<(usize, &Arc<Gate>)> =
+                    devices.iter().filter_map(|&d| gates.get(&d).map(|g| (d, g))).collect();
+                let mut health: Vec<DeviceHealth> = engine.backend.device_health().into_iter().collect();
+                let (tx, rx) = mpsc::unbounded_channel();
+                let lane =
+                    |kind| Lane::new(schedule, max_batch_tokens, metrics.as_ref().map(|m| m.lane(&name, kind, index)));
+                let long = if long_tokens > 0 {
+                    let mut le = engine.fork().with_context(|| format!("{label}: second engine for the long lane"))?;
+                    anyhow::ensure!(
+                        device_gates.len() == devices.len(),
+                        "{label}: the long lane needs the gate of every GPU it uses"
+                    );
+                    for &(d, gate) in &device_gates {
+                        le.backend
+                            .set_device_gate(d, gate.clone(), false)
+                            .with_context(|| format!("{label}: long lane"))?;
+                    }
+                    health.extend(le.backend.device_health());
+                    let (ltx, lrx) = std::sync::mpsc::channel();
+                    let l = lane("long");
+                    threads.push(
+                        std::thread::Builder::new()
+                            .name(format!("{label}-long"))
+                            .spawn(move || long_lane(le, lrx, l))
+                            .context("starting a long-lane thread")?,
+                    );
+                    Some((ltx, long_tokens))
+                } else {
+                    None
+                };
+                for &(d, gate) in &device_gates {
+                    engine.backend.set_device_gate(d, gate.clone(), true).with_context(|| label.clone())?;
+                }
+                let main_lane = lane("main");
                 threads.push(
                     std::thread::Builder::new()
-                        .name(format!("{name}-long"))
-                        .spawn(move || long_lane(le, lrx, l))
-                        .context("starting a long-lane thread")?,
+                        .name(label)
+                        .spawn(move || scheduler(engine, rx, main_lane, long))
+                        .context("starting a GPU thread")?,
                 );
-                Some((ltx, long_tokens))
-            } else {
-                None
-            };
-            if let Some(g) = &gate {
-                engine.backend.set_gate(g.clone(), true);
+                let on = match devices.as_slice() {
+                    [device] => format!("GPU {device}"),
+                    stages => format!(
+                        "GPUs {} (layer split)",
+                        stages.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+                    ),
+                };
+                crate::note!(
+                    "serving {name}{} on {on} (batch {max_batch_tokens} tokens, {schedule:?}{})",
+                    if group { format!(" replica {index}") } else { String::new() },
+                    if long_tokens > 0 { format!(", long lane above {long_tokens} tokens") } else { String::new() }
+                );
+                // a group routes by its reservations; a single instance counts them only for its metrics
+                let load = (group || metrics.is_some()).then(|| {
+                    Arc::new(ReplicaLoad {
+                        jobs: AtomicUsize::new(0),
+                        metrics: metrics.as_ref().map(|m| m.replica(&name, index)),
+                    })
+                });
+                queues.push(ReplicaRoute { tx, devices, health, load });
             }
-            let main_lane = lane("main");
-            threads.push(
-                std::thread::Builder::new()
-                    .name(name.clone())
-                    .spawn(move || scheduler(engine, rx, main_lane, long))
-                    .context("starting a GPU thread")?,
-            );
-            crate::note!(
-                "serving {name} (batch {max_batch_tokens} tokens, {schedule:?}{})",
-                if long_tokens > 0 { format!(", long lane above {long_tokens} tokens") } else { String::new() }
-            );
-            readiness.push((name.clone(), devices));
-            routes.insert(name, tx);
+            let route = if group {
+                Route::Group { replicas: queues.into_boxed_slice(), next: AtomicUsize::new(0) }
+            } else {
+                Route::One(queues.pop().context("a served model needs at least one engine")?)
+            };
+            routes.insert(name, route);
         }
         let app = Arc::new(App {
             metrics,
@@ -751,7 +1031,6 @@ fn serve_inner<B: Backend + Send + 'static>(
             large_bodies: Arc::new(Semaphore::new(opts.max_large_inflight)),
             jobs: Arc::new(Semaphore::new(opts.max_inflight)),
             media_requests: Arc::new(Semaphore::new(4)),
-            health: readiness,
             default_model,
             inflight: AtomicUsize::new(0),
             max_inflight: opts.max_inflight,

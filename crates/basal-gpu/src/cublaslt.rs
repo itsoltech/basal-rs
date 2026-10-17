@@ -82,6 +82,9 @@ struct Plan {
 type ClassAlgos = Vec<(usize, sys::cublasLtMatmulAlgo_t)>;
 
 pub struct Lt {
+    /// The context of the GPU this handle, its workspace and its algorithm choices belong to: made current before
+    /// cuBLASLt calls that are not preceded by an allocation on it (candle's allocations make it current).
+    ctx: std::sync::Arc<candle_core::cuda_backend::cudarc::driver::CudaContext>,
     handle: sys::cublasLtHandle_t,
     workspace: CudaSlice<u8>,
     plans: Mutex<HashMap<(usize, usize, usize, DType), Plan>>,
@@ -98,9 +101,16 @@ pub struct Lt {
     chosen: Mutex<HashMap<(usize, usize, usize, DType), sys::cublasLtMatmulAlgo_t>>,
 }
 
-// SAFETY: the handle and descriptors are only used under the plan/algo locks on candle's single stream.
+// SAFETY: an `Lt` belongs to one GPU (`ctx`) and is shared only by the engines (lanes) of one model on that GPU,
+// which run on the per-thread streams of their own threads. The descriptors and algorithm maps are only touched under
+// their locks. The handle and the one workspace are used by a matmul only while that model's lanes are serialised on
+// this GPU: by its gate when several lanes share the `Lt` (a lane drains its work on the GPU with `Ok` before it
+// releases the gate, and a lineage whose drain is not confirmed is marked lost and runs nothing more), or by the single
+// thread of a model without a gate. `matmul` refuses operands of another context (no use of this handle or workspace
+// on a foreign GPU's stream). The workspace is freed only when the last owner drops, with this context bound, after
+// those drains.
 unsafe impl Send for Lt {}
-// SAFETY: shared access uses the same plan/algo locks and single candle stream as owned access.
+// SAFETY: shared access uses the same locks, gate serialisation and drains as owned access (above).
 unsafe impl Sync for Lt {}
 
 fn st(s: sys::cublasStatus_t, what: &str) -> Result<()> {
@@ -121,12 +131,15 @@ fn data_type(dt: DType) -> Result<sys::cudaDataType> {
 
 impl Lt {
     pub fn new(dev: &candle_core::CudaDevice) -> Result<Self> {
+        let ctx = dev.cuda_stream().context().clone();
+        ctx.bind_to_thread().w()?;
         let mut handle = std::ptr::null_mut();
         // SAFETY: plain handle creation.
         st(unsafe { sys::cublasLtCreate(&mut handle) }, "create")?;
         // SAFETY: scratch memory for cuBLASLt, never read by us.
         let workspace = unsafe { dev.alloc::<u8>(WORKSPACE)? };
         Ok(Self {
+            ctx,
             handle,
             workspace,
             plans: Mutex::new(HashMap::new()),
@@ -156,6 +169,7 @@ impl Lt {
     /// Every algorithm of the batch-invariant table is accepted by cuBLASLt for its M class on this GPU (a table
     /// made on another GPU or cuBLASLt version may hold configurations this one does not have).
     pub fn validate_invariant(&self) -> Result<()> {
+        self.ctx.bind_to_thread().w()?;
         let inv = self.invariant.lock().unwrap().clone();
         for ((n, k, dt), list) in inv {
             for (mc, a) in list {
@@ -768,6 +782,14 @@ impl Lt {
         let dt = x.dtype();
         let dev = x.device.clone();
         let stream = dev.cuda_stream();
+        // the handle and workspace belong to `ctx`: operands of another GPU's context are an error, never a launch
+        if **stream.context() != *self.ctx {
+            candle_core::bail!(
+                "cuBLASLt matmul: operands on CUDA device {}, this handle belongs to CUDA device {}",
+                stream.context().ordinal(),
+                self.ctx.ordinal()
+            );
+        }
         macro_rules! ptrs {
             ($v:ident, $t:ty) => {{
                 let (Cs::$v(xs), Cs::$v(ws)) = (&x.slice, &w.slice) else { unreachable!() };

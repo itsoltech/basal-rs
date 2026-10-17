@@ -42,15 +42,17 @@ impl GpuBackend {
         mode: InferenceMode,
         model_name: &str,
     ) -> Result<(), InferenceConfigError> {
-        if !self.prefixes.is_empty() || self.gate.is_some() {
+        if !self.prefixes.is_empty() || self.stages.iter().any(|s| s.gate.is_some()) {
             return Err(InferenceConfigError::CacheInitialized);
         }
-        let balanced = self.dev.is_cuda()
+        let balanced = self.is_cuda()
             && self.precision == Precision::F16
             && self.kernels == Kernels::Fused
             && self.readout == Readout::F32;
         let kernel = match mode {
-            InferenceMode::Auto if balanced && measured_balanced(&self.dev, model_name) => {
+            // a layer split computes as on one GPU: auto applies the measured policy only when every stage's GPU is
+            // in its scope
+            InferenceMode::Auto if balanced && self.stages.iter().all(|s| measured_balanced(&s.dev, model_name)) => {
                 Some("attn_tree_tc_qk1_static")
             }
             InferenceMode::Auto => None,

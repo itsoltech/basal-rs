@@ -56,6 +56,184 @@ odpowiedzią `Server.decide`) i `manifest.json` (rewizje, wersje, sumy SHA-256).
 powinno dać różnicę 0,0). Polecenia zapisujące wyniki odmawiają nadpisania
 istniejącej ścieżki.
 
+Kwantyzacja `--quantization q8_0` zmienia numerykę, więc podlega temu samemu
+kryterium FP32 co każda taka zmiana: `basal compare` wobec referencji FP32
+upstream (44 przykłady i 34 żądania System One) z zapisanymi różnicami, bez
+tolerancji liczbowej. Pierwszy, częściowy
+[pomiar](../reports/multigpu-w8-quality-2026-10-11/README.md) wykazał różnice
+(granice evidence, decyzje na 900 pytaniach), dlatego `q8_0` pozostaje
+opcjonalne z jawnie opisanymi różnicami, a domyślne jest `none`
+([podsumowanie](../README.md#serwer)). Koszt czasu, zajętość puli pamięci
+CUDA, profile, zgodność HTTP i replik `q8_0` oraz ich ograniczenia opisuje
+[raport W8A16](../reports/w8a16-2026-10-11/README.md); kryterium FP32 nie
+jest dla `q8_0` spełnione. Domyślne `none` musi dawać eksporty bitowo równe
+wersji bez tej opcji. Manifest eksportu zapisuje `run.quantization`, a opis
+backendu dla `q8_0` obiekt `quantization` (liczba bloków, bajty, liczniki skal
+zerowych i podnormalnych). `basal profile` z `q8_0` podaje
+`q8_dequant_ms_per_item`: zsynchronizowany czas dekwantyzacji, zawarty już w
+sekcjach projekcji i niedodawany do `sections_sum_ms`, oraz
+`q8_dequant_values_per_item` (liczba zdekwantyzowanych wartości wag, podstawa
+efektywnego pasma). Profil `q8_0` jest synchronizowany, więc jego czasy nie są
+latencją żądania ani wynikiem `basal bench`; efektywne pasmo to iloraz bajtów
+i czasu, nie zmierzony transfer pamięci. Ręczny runner kampanii W8A16 na
+wynajętych kartach: `tools/perf/run-w8a16-cloud.py` (`--plan-only` bez GPU i
+bez chmury).
+
+`--quantization q4_k` (W4A16) podlega temu samemu kryterium FP32; ocena `q8_0`
+go nie obejmuje. Pierwszy pomiar GPU (sesja S1:
+[raport](../reports/w4a16-s1-2026-10-12/README.md), mini i 4.5B,
+jeden typ GPU: RTX 6000 Ada)
+daje dla tego kryterium FAIL na obu modelach (klasa `quality-criterion`):
+26 naruszeń predykatu w 15 unikalnych pozycjach (mini) i 20 w 12 (4.5B), przy
+0 dla f16 tej sesji. Liczba naruszeń nie jest liczbą pytań. Na 900 pytaniach
+`q4_k` daje 76 i 81 nowych zmian decyzji wobec FP32 poza zmianami f16,
+a trafność FP32 / f16 / `q4_k` wynosi 664 / 663 / 668 i 703 / 702 / 685;
++5 wobec f16 w mini to wynik próbki, nie poprawa ani równoważność. Kryterium,
+brak tolerancji i statusy FAIL pozostają bez zmian. Decyzja użytkownika (M2)
+dopuszcza `q4_k` wyłącznie jako opcjonalny tryb eksperymentalny z opisanymi
+różnicami; domyślne i zalecane jest `none`
+([podsumowanie](../README.md#serwer)). Decyzja nie dowodzi zachowania jakości,
+zgodności z FP32 ani braku defektu i jest niezależna od decyzji dla `q8_0`.
+Zakres dowodów S1: równość statystyk rekonstrukcji z P0 wykazano dla 14
+z 21 ładowań `q4_k` (pozostałe 7 zapisało tylko linię logu); kontrola
+warm-upu porównuje bitowo jedną macierz (warstwa 0, `o`) w każdym ładowaniu;
+RSS hosta to `ru_maxrss` jednego procesu (serwer HTTP i generator obciążenia)
+od jego startu, a izolowanego szczytu ładowania nie zmierzono.
+
+Wydajność 4.5B zmierzono w dwóch osobnych sesjach (RTX 6000 Ada, GPU 0,
+żądany zegar SM 1200 MHz, limit 300 W), każda z rolami A (baza, przebudowa `750c146`),
+B (kandydat W4A16) i C (kandydat z `q4_k`) w kolejności A B C C B A, z
+parami ustalonymi przed pomiarem. Kompromis C wobec B jest opisowy, bez
+reguły sygnału i bez przypisania przyczyny:
+
+- [S2](../reports/w4a16-s2-2026-10-12/README.md), rodzina `none`: C wobec
+  f16 B ma p50 sekwencyjnych żądań wyższe o 56,52% i 56,85%, żądania/s
+  sequential c1 niższe o 33,17% i 33,23%, a mixed c16 o 7,37% i 7,18%.
+  Regresja `none` (A/B) ma wniosek (a): przy zmierzonej rozdzielczości żaden
+  sygnał nie utrzymał się w rundzie potwierdzenia; nie jest to dowód braku
+  regresji ani zerowego narzutu;
+- [S3](../reports/w4a16-s3-2026-10-12/README.md), rodzina `q8_0`: C wobec
+  `q8_0` B ma żądania/s wyższe o 1,37% i 1,70% (sequential c1) oraz 0,43% i
+  0,66% (mixed c16), a agregat `ab.py` daje medianę C/B per pytanie
+  0,9766. Regresja `q8_0` (A/B) ma utrzymany sygnał: żądania/s i pytania/s
+  mixed c16 (jedna para metryk z tego samego `wall_s`) były gorsze dla B we
+  wszystkich czterech parach obu rund, o 0,1076–0,3732% (status SIGNAL, kod
+  wyjścia 4, bez FAIL). Ograniczona analiza warunków, profili i zmienionego
+  kodu nie wskazała przyczyny (wniosek (c)); nie twierdzimy, że to szum ani
+  że regresji nie ma. Użytkownik zaakceptował ten zaobserwowany spadek jako
+  kompromis; nie tworzy to progu, a surowy sygnał i statusy pozostają.
+  Profil A/B (`--batch 1`, jeden proces na rolę) jest w B wolniejszy o
+  17,59%, w tym dekwantyzacja o 40,25%; to synchronizowany profil sekcji, nie
+  latencja żądań mixed c16 ani wykazana przyczyna.
+
+Zajętość puli alokatora po załadowaniu (`resident_after_load.used_bytes`, bez
+kontekstu CUDA, modułów i alokacji synchronicznych, nie cały VRAM, RSS ani
+szczyt ładowania) wynosi dla 4.5B 2 996 968 960 B z `q4_k` w obu sesjach,
+9 644 216 320 B dla f16 (S2) i 5 309 140 480 B dla `q8_0` (S3). Wartości obu
+sesji nie tworzą par między sobą. Czas kwantyzacji na hoście w `load_s` nie
+jest rozłożony, a dekwantyzację GPU porównano bitowo dla jednej macierzy na
+ładowanie. Jakości nie mierzono ponownie; decyzja M2 pozostaje bez zmian.
+Wybór formatu Q4_K wynika
+z reguły ustalonej przed pomiarem na błędzie wag
+([raport P0](../reports/w4a16-p0-2026-10-12/README.md)), nie z
+jakości modelu. Opis backendu `q4_k` (obiekt `quantization`) podaje liczbę
+macierzy, bloków i bajtów, błąd rekonstrukcji wag (`reconstruction_error`:
+`sum_e2`, `sum_w2`, `max_abs_error`, `rms_error`, `relative_error_ratio`,
+liczniki grup zerowych i spłaszczonych z pierwszą pozycją) dla całego modelu i
+każdego typu projekcji oraz macierz kontroli warm-upu; obiekt jest
+deterministyczny, więc powinien być równy między trybami, kartami i
+`CUDA_VISIBLE_DEVICES`. `basal profile` z `q4_k` podaje
+`dequant_ms_per_item`, `dequant_values_per_item`, `dequant_format` i
+`dequant_scope` w tym samym zakresie co `q8_dequant_*` dla `q8_0`. Ręczny
+runner kampanii W4A16: `tools/perf/run-w4a16-cloud.py` (`--plan-only` bez GPU
+i bez chmury; sesje i reguły w [CLOUD.md](CLOUD.md)).
+
+### Podział warstw
+
+Podział warstw (`--layer-split`, `layer_split`) nie zmienia obliczeń: etapy
+liczą po kolei te same kernele i GEMM co jeden GPU, a granica tylko kopiuje
+aktywacje. Na kartach jednego typu eksport z podziałem musi więc być bajtowo
+równy eksportowi jednego GPU tego samego modelu, trybu (`none`, `q8_0`,
+`q4_k`), flag i tabeli GEMM (`bench.jsonl`, `systemone.jsonl`), a
+`basal compare` obu eksportów musi dać różnicę 0,0. Kryterium FP32 dla
+`q8_0` i `q4_k` pozostaje jak wyżej; podział go nie zmienia. Poza
+zmierzonymi czasami (`bench_s`, `total_s`, `run.load_s`) manifest eksportu z
+podziałem różni się tylko tekstem `backend.device` oraz polami
+`run.layer_split`, `backend.layer_split` i `backend.stage_transfer`:
+
+```sh
+# TABELA: tabela GEMM niezależna od partii dla tej karty, np. z crates/basal-cli/gemm-tables
+./target/release/basal export --model .models/basal-1.5-4.5B --gemm-table TABELA --layer-split 0:30,1:30 \
+  --batching tree --inputs reports/reference-basal-1.5-4.5B-fp32 --out reports/X/export-split
+./target/release/basal export --model .models/basal-1.5-4.5B --gemm-table TABELA --device 0 \
+  --batching tree --inputs reports/reference-basal-1.5-4.5B-fp32 --out reports/X/export-single
+cmp reports/X/export-split/bench.jsonl reports/X/export-single/bench.jsonl
+./target/release/basal compare --a reports/X/export-single --b reports/X/export-split --out reports/X/compare.json
+```
+
+Pojemność sprawdzamy pod jawnym, sztucznym limitem wolnej pamięci.
+`tools/perf/cuda-reserve.py` alokuje rzeczywistą pamięć urządzenia i
+próbkuje wolną pamięć (`cuMemGetInfo`) każdej karty. Z kalibracji bez limitu
+(`U_single`: spadek wolnej pamięci przy jednym GPU, `U_split_g`: na karcie
+`g` przy podziale) wynika limit
+`A = floor((U_single + max_g U_split_g) / 2)` MiB, ważny tylko w oknie
+`max_g U_split_g + 1 GiB ≤ A ≤ U_single − 1 GiB`. Przy rezerwacji
+zostawiającej `A` wolnej pamięci na każdej karcie jeden GPU musi skończyć się
+czystym OOM, a podział ma dać wyniki bitowo równe referencji bez limitu.
+Ciaśniejszy limit karty ostatniego etapu musi dać błąd z kontekstem tego
+etapu. Taki wynik dotyczy tego limitu i tych wejść, nie fizycznie mniejszej
+karty ani dużych partii.
+
+Bieżące źródła kandydata (`831e68e0…`) zmierzono w trzech osobnych sesjach,
+każda na maszynie z dwiema RTX 6000 Ada 48 GB
+([zestawienie](../reports/multigpu-layer-revalidation-2026-10-14/README.md)).
+Nie ustalono, czy sesje miały te same fizyczne karty: pary A/B i podział
+wobec jednego GPU porównujemy w obrębie sesji, a wyniki różnych sesji tylko
+opisowo.
+
+- [L1](../reports/multigpu-layer-l1-revalidation-2026-10-13/README.md)
+  (mini i 4.5B; 599 PASS, 0 FAIL, 42 GAP, 0 SIGNAL): 20 par toru jednego GPU
+  i 24 pary podziału są bajtowo równe referencji, 928 odpowiedzi HTTP
+  kandydata jest równych referencji, a pojemność pod sztucznym limitem ma
+  PASS. Odmowy niepoprawnych konfiguracji mają PASS, ale brak alokacji GPU w
+  nich nie został zmierzony (GAP: proces kończył się przed pierwszą próbką
+  NVML). Profile `stage_transfer` są diagnostyką, nie pomiarem szybkości.
+  Utraty urządzenia w `/health` nie wywoływano. Linia `compare` w
+  poleceniach ilustracyjnych raportu ma błędną składnię; poprawna postać
+  jest wyżej i w [poprawce](../reports/multigpu-layer-l1-revalidation-2026-10-13/COMMANDS.md)
+  (runner używał poprawnej, wyniki się nie zmieniają).
+- [L2](../reports/multigpu-layer-l2-revalidation-2026-10-14/README.md)
+  (107 PASS, 0 FAIL, 1 GAP, 1 SIGNAL): regresja toru domyślnego `none` (A
+  baza `d42a400`, B kandydat na jednym GPU) w parach A/B z regułą sygnału
+  bez progu. Z 9 sygnałów rundy głównej `basal benchmark` utrzymał się
+  jeden, `mixed-c1 queue_ms.p99` (+1,237 do +11,330 ms, +1,46 do +12,79%);
+  przyczyny w kodzie nie wskazano, a użytkownik przyjął ten konkretny wynik
+  ([decyzja](../reports/multigpu-layer-l2-revalidation-2026-10-14/DECISION.md)).
+  Pozostałe 8 nie utrzymało się, choć B jest w wielu z nich gorsze w 3 z 4
+  par. Opisowo podział `none` (C) wobec B: przy jednym kliencie
+  przepustowość HTTP 0,9626–0,9732, przy 16 klientach mieszanego ruchu
+  1,1801 i 1,1740 (latencja p95 0,7478 i 0,7398); GPU 0 w przebiegach A i B
+  miało 80–81 °C i zegar SM do 1035–1095 MHz, w C karty miały 70 i 74 °C.
+- [L3](../reports/multigpu-layer-l3-revalidation-2026-10-14/README.md)
+  (172 PASS, 0 FAIL, 2 GAP, 1 SIGNAL): regresja `q8_0` i `q4_k` na jednym
+  GPU tylko przez `ab.py` (A/B, ta sama reguła). `q8_0` `dec_s` nie utrzymał
+  się (B gorsze w 7 z 8 par). W `q4_k` utrzymał się `dec_s` (8 z 8 par, B/A
+  0,994438–0,999895, przebieg 44 pytań dłuższy o +0,082 do +4,366 ms), a
+  `lat2_ms` nie (7 z 8). Przyczyny w kodzie nie wskazano; koordynator przyjął
+  ten wynik w granicy 1–2% podanej wcześniej przez użytkownika
+  ([rozstrzygnięcie](../reports/multigpu-layer-l3-revalidation-2026-10-14/DECISION.md)).
+  Opisowo podział wobec jednego GPU tego samego kandydata: mediana stosunku
+  latencji pytania w parach 1,128–1,139 (`q8_0`) i 1,183–1,206 (`q4_k`).
+  `basal benchmark` z podziałem wykonano raz na tryb. HTTP jednego GPU
+  kandydata w `q8_0` i `q4_k` nie był mierzony (GAP).
+
+Utrzymany SIGNAL pozostaje SIGNAL-em, a przyjęcie konkretnego wyniku nie
+tworzy progu. Pola bez utrzymanego sygnału nie dowodzą braku narzutu. Pary
+podziału są opisowe i nie są ogólną obietnicą szybkości. Wcześniejsze sesje
+poprzedniego kandydata ([zestawienie](../reports/multigpu-layer-2026-10-13/README.md),
+[poprawka zakresu](../reports/multigpu-layer-2026-10-13/SCOPE.md)) pozostają
+historią.
+
 ## Wydajność
 
 | Narzędzie | Co mierzy |
@@ -317,20 +495,27 @@ odpowiedziami/s: kolejka może rosnąć po osiągnięciu nasycenia.
 
 Domyślne rezerwy to 2 GiB RAM (`--ram-reserve-gib`) i 1 GiB VRAM / Metal
 working set / budżetu Vulkan (`--gpu-reserve-gib`). Przed ładowaniem dochodzi
-szacowany rozmiar wag; dla GPU zunifikowanego także w RAM. Rezerwy RAM i GPU
+szacowany rozmiar wag; dla GPU zunifikowanego także w RAM. Szacunek
+(`model.estimated_weight_bytes`; ta sama liczba w
+`model.estimated_resident_weight_bytes`) to arytmetyka formatu, nie pomiar:
+na Metal i CUDA rozmiar checkpointu, a dla `--quantization q8_0` albo `q4_k`
+ten rozmiar z macierzami projekcji w rozmiarze bloków Q8_0 albo Q4_K (z
+paddingiem Candle); dla Intela szacunek z nagłówka opisany niżej.
+Rezerwy RAM i GPU
 są osobnymi ograniczeniami tej samej pamięci na iGPU, nie sumujemy ich.
 Dla zintegrowanego Intela kontrola wstępna wymaga miejsca w RAM na wagi
 i większą z obu rezerw. Bieżący budżet Vulkan musi mieścić same wagi
 oraz, osobno, rezerwę GPU: jest dynamiczną wskazówką sterownika, a nie
 pojemnością osobnej VRAM. Po załadowaniu modelu i podczas inferencji pełna
 rezerwa GPU jest sprawdzana względem rzeczywistego użycia. `memory_after_load`
-zapisuje oba odczyty, także gdy kontrola przerwie pomiar. Pozostałe backendy
+zapisuje oba odczyty (z podziałem warstw dla karty etapu 0, jak inne pola
+najwyższego poziomu), także gdy kontrola przerwie pomiar. Pozostałe backendy
 i osobne karty Intel nadal wymagają przed ładowaniem sumy wag i rezerwy GPU.
 `model.estimated_resident_weight_bytes` dla Intela obejmuje tensory BF16
 konwertowane do FP16 i współdzielony bufor zerowych biasów, bez pełnych
 embeddingów i `lm_head`: backend czyta tylko potrzebne wiersze tych macierzy.
 Szacunek korzysta ze zwalidowanego nagłówka safetensors, bez odczytywania wag.
-Dla Metal/CUDA nadal jest to rozmiar pliku checkpointu.
+Dla Metal/CUDA nadal jest to szacunek z arytmetyki formatu podany wyżej.
 Cache prefiksów, bufory forwardu, wybrane wiersze i narzut sterownika nie są
 wagami: potrzebują dodatkowej pamięci. Rezerwa przed ładowaniem pozostawia
 na nie zapas, ale nie jest szacunkiem szczytu dla konkretnego obciążenia.
@@ -357,6 +542,43 @@ limitu cgroup lub budżetu sterownika.
 W krótkiej fazie może zabraknąć próbek CPU; wtedy pole ma wartość null.
 Okna pamięci obejmują ostatnie 20000 próbek (około 67 minut przy 5 Hz);
 zbiorcze minima i wzrost swapu dotyczą całego monitorowanego przebiegu.
+
+Na CUDA `memory_pool` podaje dokładne liczniki puli alokatora strumieniowego
+urządzenia (`cuMemAllocAsync`: tensory Candle, bloki `q8_0` i `q4_k`, przejściowe
+tensory f16, workspace cuBLASLt), osobno `used` i `reserved`. Znaczniki
+szczytu są zerowane poza mierzonym czasem: tuż przed ładowaniem (po
+preflight i wyborze tabeli GEMM) oraz przed fazami. `load_peak` to szczyt
+ładowania z rozgrzewką (dla `q4_k` także kontrolą jednej macierzy z kopią do
+hosta), `resident_after_load` stan po załadowaniu i
+synchronizacji kontekstu (zwolnienia buforów przejściowych rozgrzewki
+prefiksów wykonane; po `load_s`, przed mierzonym ruchem),
+`runtime_peak` łączny szczyt wszystkich faz z zamknięciem (bez podziału na
+fazy), a `after_shutdown` pozostałość po zwolnieniu silnika i synchronizacji
+kontekstu (diagnostyka wycieku, nie pamięć rezydentna). Poza pulą pozostają
+kontekst CUDA, moduły, uchwyty bibliotek i alokacje synchroniczne. Bez pul
+(nie-CUDA lub karta bez nich) pole ma `available: false` z opisem luki.
+Uchwyt puli utrzymuje główny kontekst CUDA urządzenia od zerowania przed
+ładowaniem do końca komendy, więc `model.load_s` może nie obejmować tworzenia
+kontekstu, które w wersji bez tej telemetrii mogło przypaść na ładowanie;
+`load_s` obu wersji nie porównujemy bez uwzględnienia tej różnicy. Na CUDA
+`load_s` (także w `basal bench` i manifeście eksportu) kończy się przed
+wczytaniem głowicy evidence i utworzeniem uchwytu cuBLASLt, zarówno w
+`d42a400`, jak i w wersji z podziałem warstw. Ta wersja dodaje po nich
+synchronizację publikacji każdego etapu, także poza `load_s`. Żaden z tych
+zegarów nie jest pełnym czasem uruchomienia, a różnica `load_s` tych wersji
+nie jest porównaniem czasu uruchomienia
+([erratum](../reports/multigpu-layer-revalidation-2026-10-14/LOAD_S.md)).
+Próbkowany całkowity VRAM nadal nie jest szczytem.
+
+Z `--layer-split` benchmark sprawdza zasoby osobno dla karty każdego etapu:
+preflight dolicza szacunek wag etapu (udział jego warstw, embedding na
+pierwszym, `lm_head`, norma i plik głowicy evidence na ostatnim; arytmetyka,
+nie pomiar), a monitor i liczniki puli działają na każdej karcie. Pola
+najwyższego poziomu opisują kartę etapu 0; `layer_split.devices` podaje
+każdą kartę, `layer_split.transfers` liczniki granic, a
+`settings.layer_split` etapy. Pokrycie warstw jest sprawdzane przed
+pierwszym kontekstem CUDA. Pola i ich zakres:
+[Observability](OBSERVABILITY.md#podział-warstw).
 
 Klient i serwer dzielą limit otwartych plików procesu, po dwa gniazda na
 klienta. Gdy limit jest mniejszy niż `2 × max(--concurrency) + 64`,

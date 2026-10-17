@@ -11,7 +11,10 @@ use basal_core::pack::Packed;
 use basal_core::{Backend, DeviceHealth};
 use serde_json::Value;
 
-use crate::{GpuMemory, GpuMemoryProbe, InferenceConfigError, InferenceMode, Kernels, Precision, Readout};
+use crate::{
+    GpuMemory, GpuMemoryProbe, InferenceConfigError, InferenceMode, Kernels, LayerSplit, Precision, Quantization,
+    Readout, StageTransfers,
+};
 
 pub enum RuntimeBackend {
     Llama(Box<crate::GpuBackend>),
@@ -37,27 +40,101 @@ impl RuntimeBackend {
         }
     }
 
+    /// Load a model onto GPU `device`. Projection quantization exists for Llama only: an Omni (Gemma) model is refused
+    /// any format other than `none` before its weights are read.
+    #[expect(clippy::too_many_arguments, reason = "the load options of every architecture, validated together")]
     pub fn load(
         dir: &Path,
         cfg: &Architecture,
         precision: Precision,
         readout: Readout,
         kernels: Kernels,
+        quantization: Quantization,
+        device: usize,
         media: bool,
     ) -> Result<Self> {
         match cfg {
             Architecture::Gemma4(c) => {
-                Ok(Self::Gemma(Box::new(crate::gemma::GemmaBackend::load(dir, c, precision, readout, media)?)))
+                anyhow::ensure!(
+                    quantization == Quantization::None,
+                    "quantization {quantization} is implemented for Llama models only; Gemma needs none"
+                );
+                Ok(Self::Gemma(Box::new(crate::gemma::GemmaBackend::load(dir, c, precision, readout, device, media)?)))
             }
             Architecture::Llama(c) => {
                 anyhow::ensure!(!media, "media requires a Gemma omni model");
                 #[cfg(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos")))]
                 return Ok(Self::Intel(Box::new(crate::intel::IntelBackend::load(
-                    dir, c, precision, readout, kernels,
+                    dir,
+                    c,
+                    precision,
+                    readout,
+                    kernels,
+                    quantization,
+                    device,
                 )?)));
                 #[cfg(not(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos"))))]
-                Ok(Self::Llama(Box::new(crate::GpuBackend::load(dir, c, precision, readout, kernels)?)))
+                Ok(Self::Llama(Box::new(crate::GpuBackend::load(
+                    dir,
+                    c,
+                    precision,
+                    readout,
+                    kernels,
+                    quantization,
+                    device,
+                )?)))
             }
+        }
+    }
+
+    /// Load a model split by consecutive layer ranges over several CUDA devices ([`crate::GpuBackend::load_split`]).
+    /// Llama on the CUDA backend only: Gemma and the Intel backend are refused before anything is opened.
+    pub fn load_split(
+        dir: &Path,
+        cfg: &Architecture,
+        precision: Precision,
+        readout: Readout,
+        kernels: Kernels,
+        quantization: Quantization,
+        split: &LayerSplit,
+    ) -> Result<Self> {
+        let Architecture::Llama(c) = cfg else {
+            anyhow::bail!(
+                "layer split {split} is implemented for Llama models only; serve Gemma on one GPU or as replicas"
+            )
+        };
+        #[cfg(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos")))]
+        {
+            let _ = (dir, c, precision, readout, kernels, quantization);
+            anyhow::bail!("layer split {split}: needs the CUDA backend, this build runs Intel Vulkan")
+        }
+        #[cfg(not(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos"))))]
+        Ok(Self::Llama(Box::new(crate::GpuBackend::load_split(
+            dir,
+            c,
+            precision,
+            readout,
+            kernels,
+            quantization,
+            split,
+        )?)))
+    }
+
+    /// Transfer counters of a layer split (shared with the forks); None on one GPU and for other backends.
+    pub fn stage_transfers(&self) -> Option<StageTransfers> {
+        match self {
+            Self::Llama(b) => b.stage_transfers(),
+            _ => None,
+        }
+    }
+
+    /// `q8_0` / `q4_k` while profiling: the format, synchronised dequantization time and values (Llama CUDA only).
+    pub fn dequant_profile(&self) -> Option<(Quantization, f64, u64)> {
+        match self {
+            Self::Llama(b) => b.dequant_profile(),
+            Self::Gemma(_) => None,
+            #[cfg(all(feature = "intel", not(target_os = "macos")))]
+            Self::Intel(b) => b.dequant_profile(),
         }
     }
 
@@ -164,6 +241,16 @@ impl RuntimeBackend {
         self.memory_probe().snapshot()
     }
 
+    /// One memory probe per device of the model, with its ordinal, in stage order (one entry on one GPU).
+    pub fn memory_probes(&self) -> Vec<(usize, GpuMemoryProbe)> {
+        match self {
+            Self::Llama(b) => b.memory_probes(),
+            Self::Gemma(b) => vec![(b.device, GpuMemoryProbe::candle(b.dev.clone()))],
+            #[cfg(all(feature = "intel", not(target_os = "macos")))]
+            Self::Intel(b) => vec![(0, b.memory_probe())],
+        }
+    }
+
     #[cfg(all(feature = "intel", not(target_os = "macos")))]
     pub fn estimated_weight_bytes(dir: &Path, cfg: &Architecture) -> Result<u64> {
         Ok(crate::intel::IntelBackend::estimated_weight_bytes(dir, cfg.llama()?)?)
@@ -254,6 +341,22 @@ impl Backend for RuntimeBackend {
             Self::Gemma(b) => b.set_gate(gate, urgent),
             #[cfg(all(feature = "intel", not(target_os = "macos")))]
             Self::Intel(b) => b.set_gate(gate, urgent),
+        }
+    }
+    fn set_device_gate(&mut self, device: usize, gate: Arc<Gate>, urgent: bool) -> Result<()> {
+        match self {
+            Self::Llama(b) => b.set_device_gate(device, gate, urgent),
+            Self::Gemma(b) => {
+                anyhow::ensure!(
+                    device == b.device,
+                    "a gate for device {device}, this model runs on device {}",
+                    b.device
+                );
+                b.set_gate(gate, urgent);
+                Ok(())
+            }
+            #[cfg(all(feature = "intel", not(target_os = "macos")))]
+            Self::Intel(b) => b.set_device_gate(device, gate, urgent),
         }
     }
     fn device_health(&self) -> Option<DeviceHealth> {

@@ -146,6 +146,72 @@ rozszerza je przed użyciem (dokładny forward FP32, punkt odniesienia).
   redukcją f32, swizzle; bez tabeli najszybszy z 16 algorytmów heurystyki
   mierzony przy pierwszym użyciu.
 
+### Kwantyzacja W8A16 (`q8_0`)
+
+Opcjonalna, domyślnie wyłączona (`quantization: none`), tylko CUDA z
+`dtype: f16` i kernelami `fused` (walidacja przed pobraniem modelu). Cztery
+macierze projekcji każdej warstwy (`wqkv`, `wo`, `wgu`, `wdown`) mają w
+`Layer` typ `ProjWeight`: `Dense(Tensor)` albo `Quantized(Arc<QTensor>)`
+(typ bloków niesie `QTensor`; ten sam wariant dla `q4_k`). Loader
+czyta części bf16 tak jak dla gęstych wag (sklejone wzdłuż N), sprawdza
+kształt `[N, K]`, `K % 32 == 0`, przepełnienia i dokładną liczbę bloków,
+konwertuje wiersze do f32 na wszystkich rdzeniach (bez kopii f32 całej
+macierzy), odrzuca wartości nieskończone i skale poza zakresem f16, liczy
+bloki ze skalą zerową (`amax/127 ≤ 2⁻²⁵`) i podnormalną, kwantyzuje
+`BlockQ8_0::from_float` i wysyła bloki raz przez `load_quantized` Candle.
+Bloki muszą leżeć na tym samym urządzeniu Candle (`DeviceId`) co backend;
+dekwantyzacja idzie wyłącznie na `q.device()`, więc nie ma transferów.
+Wysłania i jednorazowa dekwantyzacja najmniejszej macierzy (ładuje moduł
+`QUANTIZED` i kernel przy starcie) są kolejkowane przed synchronizacją
+kończącą ładowanie. W forwardzie `matmul_t` dla `Quantized` tworzy przejściowy
+tensor f16 macierzy (`dequantize_block_q8_0_f16`), podaje go temu samemu GEMM
+cuBLASLt f16 i zwalnia go po wywołaniu, na strumieniu wątku silnika. Tor
+`Dense` jest kodem sprzed zmiany; jedyną różnicą jest dopasowanie wariantu.
+Forki silnika (tor długich żądań) współdzielą bloki przez `Arc`, a repliki
+ładują własne. `basal profile` raportuje czas dekwantyzacji osobno
+(`q8_dequant_ms_per_item`, część sekcji projekcji, nie dodawana do
+`sections_sum_ms`). `QMatMul` Candle nie jest używany (kwantyzuje aktywacje
+do Q8_1). Własny kernel W8A16 jest poza zakresem.
+
+### Kwantyzacja W4A16 (`q4_k`)
+
+Ta sama ścieżka co `q8_0` (walidacja, zakres tensorów, `ProjWeight::Quantized`,
+urządzenie, strumienie, forki i repliki, przejściowy f16 przed tym samym GEMM
+cuBLASLt), z blokami GGML Q4_K (`BlockQ4K`, 256 wartości wzdłuż K, 144 B,
+padding Candle 288 B na macierz). Loader generyczny względem typu bloku
+(`load_blocks`) wykonuje dla `q8_0` te same wywołania w tej samej kolejności;
+tor hosta Q8 (`quantize_q8_0`) jest bez zmian. Dla `q4_k` (`quantize_q4_k`)
+sprawdza przed pracą dodatnie wymiary, `K % 256 == 0`, przepełnienia,
+`N·K ≤ i32::MAX` i długość danych, a dla każdego wiersza: skończone wartości
+wejścia, brak stałych niezerowych grup 32 wartości (przypięty
+`make_qkx1_quants` zwraca dla nich `(0, 0)`, więc rekonstruowałyby się do
+zer), długości przed `from_float` i `to_float` (Candle sprawdza je tylko w
+buildzie debug), skończone `to_float` i rekonstrukcję f16 (RNE) przed
+statystykami i wysłaniem. Błąd wskazuje tensor checkpointu, jego wiersz i
+kolumnę (dla q|k|v i gate|up pierwotny tensor) oraz liczby NaN, +inf i −inf
+w wierszu. Statystyki f64 (`Σe²`, `Σw²`, `max|e|`, grupy zerowe i
+spłaszczone, bez progów) są liczone w stałych kawałkach 16 wierszy,
+zapisywane pod indeksem kawałka i redukowane w kolejności kawałków, macierzy
+i warstw (q|k|v, o, gate|up, down) — wynik nie zależy od liczby wątków
+(co najwyżej `available_parallelism`, każdy z ciągłym zakresem kawałków,
+uruchamiane przez `Builder::spawn_scoped` z łączeniem wszystkich przed
+zwróceniem błędu). Ta kolejność i wyrażenia odpowiadają diagnostyce P0.
+W S1 pełny obiekt `quantization` zapisało 14 z 21 ładowań i jego statystyki
+zbiorcze (model i cztery typy projekcji) są równe P0; pozostałe 7 zapisało
+tylko linię logu ([raport](../reports/w4a16-s1-2026-10-12/README.md)).
+Kernel `dequantize_block_q4_K_f16` nie ma argumentu długości ani kontroli
+zakresu, więc przed pierwszym uruchomieniem loader sprawdza na wysłanym
+tensorze typ Q4K, kształt, `K % 256`, `N·K ≤ i32::MAX`, liczbę bloków i bajty
+(`check_q4k_resident`). Warm-up dekwantyzuje na GPU najmniejszą według
+`projection_shapes` macierz warstwy 0 (jej bloki hosta są zachowane tylko do
+tej kontroli), kopiuje wynik f16 do hosta i porównuje wzorce bitowe (także znak
+zera) z `f16(to_float)` tych bloków; różnica jest błędem ładowania, bez
+fallbacku. Kontrola obejmuje jedną macierz, nie wszystkie. `describe` dla
+`q4_k` podaje obiekt `quantization` z błędem rekonstrukcji modelu i typów
+projekcji (deterministyczny: bez czasów i liczby wątków); `basal profile`
+podaje `dequant_ms_per_item`, `dequant_values_per_item`, `dequant_format` i
+`dequant_scope` (ten sam zakres co klucze `q8_dequant_*`).
+
 ### Niezależność od partii
 
 Z tabelą `--invariant` (dla każdego kształtu wag algorytmy bez split-K z
@@ -248,12 +314,157 @@ samymi tensorami, więc wyniki nie zależą od toru ani przerw. Krótkie żądan
 nie czekają w ten sposób na kilkusekundowy forward długiego dokumentu.
 
 Kilka modeli w jednym procesie (`basal serve --config`): każdy ma własny
-silnik, kolejkę i tor długich żądań, a wszystkie silniki korzystają z jednego
-`gate`. Główne tory wszystkich modeli są pilne, tory długich żądań oddają GPU
-między warstwami, więc krótkie partie dowolnego modelu wyprzedzają długie
-żądania każdego modelu. Silniki różnych modeli nie liczą jednocześnie: GPU
-jest i tak ograniczone mocą, a kolejność decyduje harmonogram zamiast
-sterownika.
+silnik, kolejkę i tor długich żądań. Model jest przypisany do jednego GPU
+(`device`, domyślnie 0); silniki wszystkich modeli tego samego GPU, łącznie z
+ich torami długich żądań, korzystają z jednego `gate` tego GPU. Główne tory są
+pilne, tory długich żądań oddają GPU między warstwami, więc krótkie partie
+dowolnego modelu wyprzedzają długie żądania każdego modelu tego GPU. Silniki
+na jednym GPU nie liczą jednocześnie: GPU jest i tak ograniczone mocą, a
+kolejność decyduje harmonogram zamiast sterownika. Różne GPU mają osobne
+`gate` i liczą jednocześnie; limit `max_inflight`, router HTTP i `/health`
+pozostają wspólne dla procesu.
+
+Tożsamością GPU w harmonogramie jest numer `device` z konfiguracji, czyli
+indeks CUDA widoczny dla procesu (po `CUDA_VISIBLE_DEVICES`), a nie
+identyfikator urządzenia candle: każde `Device::new_cuda` tworzy nowy
+identyfikator na tym samym GPU. Ten sam numer wybiera kontekst CUDA przy
+ładowaniu, tabelę GEMM (nazwa karty, wyszukiwanie i walidacja algorytmów
+cuBLASLt na tym GPU) oraz pomiar pamięci w `basal benchmark`. `basal doctor`
+pyta sterownik CUDA (`libcuda.so.1`, bez tworzenia kontekstu) o urządzenia
+widoczne dla swojego procesu i według tych numerów sprawdza pamięć oraz
+compute capability GPU każdego `device`; lista `nvidia-smi` jest tylko
+inwentarzem maszyny, bo jej numeracja może różnić się od CUDA. Gdy sterownika
+nie da się zapytać, doctor nie ocenia urządzeń modeli. Wybór PTX, kernela attention
+(Hopper albo nie) i liczba SM są zapamiętywane osobno dla każdego GPU, więc
+karty różnych architektur w jednym procesie nie dziedziczą wyboru pierwszej.
+Ta sama nazwa modelu w dwóch wpisach kończy się błędem przed ładowaniem.
+Metal i Intel obsługują tylko GPU 0. Podział jednego modelu warstwami między
+karty CUDA opisuje sekcja [Podział warstw między GPU](#podział-warstw-między-gpu-cuda).
+
+Repliki (`replica_devices`, CUDA) to niezależne instancje jednego modelu pod
+jedną nazwą, po jednej na każdy ordinal z listy. Walidacja konfiguracji
+odrzuca pustą listę, powtórzenia, `device` razem z listą (także `device: 0`) i
+`gemm_table: none` przy kilku replikach; jeden element listy to zwykła
+instancja. Przed pobraniem modelu `basal_gpu::gpu_identity` pyta sterownik,
+bez tworzenia kontekstu, o nazwę, compute capability i liczbę SM każdej karty
+grupy; różne typy kończą się błędem. Tabela GEMM jest rozwiązywana raz, na
+pierwszej karcie grupy (jeden plik w `gemm_cache`), a potem
+`check_gemm_table` sprawdza ją na każdej karcie przed załadowaniem
+którejkolwiek repliki. Każda replika ładuje wagi na swoją kartę; fork toru
+długich żądań współdzieli wagi tylko w obrębie repliki, a scratch i cache ma
+własne. Gate'y powstają z płaskiej listy wszystkich instancji (modeli i
+replik) według ordinalu, z tą samą regułą co dla modeli, więc niezależne karty
+nie czekają na siebie.
+
+`App::routes` trzyma dla modelu jedną instancję (`Route::One`, dotychczasowa
+ścieżka: bez kontroli dostępności, bez rezerwacji przy wyłączonych metrykach)
+albo grupę (`Route::Group`). Grupa wybiera dostępną replikę z najmniejszą
+liczbą rezerwacji (`ReplicaLoad`), skanując od indeksu przesuwanego o jeden
+na żądanie, więc remisy rotują. Wybór i zwiększenie licznika to osobne kroki:
+równoległe żądania mogą wybrać tę samą replikę, ale liczniki się nie gubią.
+Rezerwacja (`Reservation`, RAII) należy do zadania: powstaje przed wysłaniem
+do kolejki repliki i znika przy odpowiedzi (przed wysłaniem odpowiedzi
+klientowi), błędzie planowania, pominięciu porzuconego żądania, po partii
+także dla rozłączonego klienta oraz przy opróżnieniu kolejki zamkniętego
+albo spanikowanego workera. `SendError` zwraca całe nieprzyjęte zadanie;
+wtedy router zwalnia rezerwację i próbuje innej dostępnej repliki, co
+najwyżej raz na replikę. Po przyjęciu zadania przez worker nie ma ponowień.
+Bez dostępnej repliki odpowiedź to dotychczasowe „engine stopped”. Globalny
+licznik admission handlerów (`max_inflight`) i gauge
+`basal_model_inflight_requests` nie zmieniają semantyki.
+
+Replika jest niedostępna, gdy backend zgłosił utratę urządzenia
+(`DeviceHealth`) albo jej główny worker zamknął kolejkę; zamknięcie toru
+`long` tego nie zmienia, bo tor główny przejmuje jego żądania. Backend CUDA
+raportuje `DeviceHealth` linii modelu (wspólne dla jej forków, np. toru
+długiego). Linia jest oznaczana jako utracona, gdy nie da się potwierdzić
+końca jej własnej pracy GPU: dwie nieudane synchronizacje przed zwolnieniem
+gate'u albo po błędzie żądania, albo dwa nieudane wiązania kontekstu przed
+zwolnieniem pamięci. Kolejne wywołania tej linii są odrzucane przed pracą
+GPU, a trwające wywołanie toru długiego, które oddało gate w `checkpoint`,
+kończy się tym samym błędem zaraz po jego odzyskaniu. Pamięć, której koniec
+użycia nie jest potwierdzony, jest celowo zatrzymana zamiast zwolniona. Zwykły OOM, błąd żądania i timeout nie
+oznaczają utraty. To nie jest wykrywanie awarii sprzętu: fatalny błąd CUDA
+może wymagać restartu całego procesu, także dla innych kart, więc repliki
+nie są izolacją awarii sprzętu. `/health` dla modeli z jedną
+instancją zachowuje dotychczasową treść i reguły (`device_lost`,
+`lost_models`). Grupa z częścią niedostępnych replik daje 200 ze
+`status: ok` i `degraded_models`, grupa bez dostępnych replik 503 ze
+`status: engine_stopped` i `unavailable_models`; wpis zawiera `model`,
+`replicas`, `available` i `unavailable` (`replica`, `device`, `reason`:
+`worker_closed` albo `device_lost`).
+
+### Podział warstw między GPU (CUDA)
+
+`layer_split` (YAML) i `--layer-split` (CLI) opisuje `basal_gpu::LayerSplit`
+(`crates/basal-gpu/src/split.rs`): etapy `{device, layers}` w kolejności
+warstw. Konstruktor wymaga co najmniej dwóch etapów, co najmniej jednej
+warstwy na etap i różnych kart. Zakres etapu `s` wynika z liczb warstw,
+`[Σ_{t<s} layers_t, Σ_{t≤s} layers_t)`, więc luki i nakładanie się są
+niemożliwe. Kolejność walidacji: parsowanie (clap/serde, nieznane pola
+odrzucone), `ModelConfig::placement` (konflikt z `device` i
+`replica_devices`; w CLI także `conflicts_with` dla `--device`,
+`--replica-devices` i `--config`), `LayerSplit::check` (backend CUDA, `f16`,
+kernele `fused`), `check_same_gpus` (każdy ordinal istnieje w procesie,
+jeden typ karty; sterownik bez tworzenia kontekstu), pokrycie liczby warstw
+z `config.json`, dopiero potem wagi. Serwer i `basal benchmark` rozwiązują
+tabelę GEMM na karcie etapu 0 i przed ładowaniem sprawdzają ją na każdej
+karcie podziału; pozostałe polecenia wczytują `--gemm-table` jak dla jednego
+GPU. Model z podziałem jest w
+serwerze jedną instancją (`Replica.devices` z ordinalami etapów); repliki
+takiego modelu nie są obsługiwane.
+
+`GpuBackend::load_split` tworzy dla każdego etapu urządzenie
+`Device::new_cuda(ordinal)` z własnymi wagami i uchwytem cuBLASLt z
+workspace. Etap 0 trzyma też embedding, ostatni końcową normę, `lm_head` i
+głowicę evidence. Jedyna kopia wag to `input_layernorm` pierwszej warstwy
+następnego etapu, trzymana na etapie przed granicą (`hidden` wartości f16).
+Wybór PTX, kernela attention i liczba SM są i tak zapamiętywane per GPU.
+Błąd ładowania ma kontekst etapu, karty i warstwy, a już załadowane etapy są
+zwalniane, każdy przy własnym kontekście.
+
+Forward (`forward_ragged`, ścieżka `fused`) liczy etapy po kolei. Na
+granicy źródło jest opróżniane, bufor celu `[2, M, H]` f16 alokowany i
+inicjalizowany na następnej karcie, potem następuje kopia API
+urządzenie–urządzenie, potwierdzenie zakończenia na obu kartach, zwolnienie
+źródła i wiązanie kontekstu celu. Peer access nie jest włączany, a fizyczna
+trasa kopii (P2P albo przez hosta w sterowniku) pozostaje nieustalona. K/V
+prefiksów szablonu i cache stanu warstwy `l` leżą na karcie warstwy `l`
+(część etapu). Stan końcowy, logity liter, odczyt evidence i ich pośrednie
+tensory istnieją tylko na ostatnim etapie i trafiają na hosta; logity nie
+wracają na etap 0. Pamięć urządzenia etapu (`OnStage`) jest zwalniana przy
+związanym kontekście swojej karty. Gdy wiązania nie da się potwierdzić albo
+linia modelu jest utracona, pamięć zostaje celowo zatrzymana zamiast
+zwolniona. Bufory granicy z niepotwierdzoną kopią trafiają do kwarantanny
+linii i oznaczają ją jako utraconą (`device_lost`, wyżej).
+
+Gate'y powstają z listy instancji; instancja z podziałem liczy się na każdej
+swojej karcie, a model z torem długim dostaje gate każdej karty. Wątek trzyma
+najwyżej jeden gate naraz i nie czeka na gate, trzymając inny, więc
+oczekiwanie między kartami nie tworzy zakleszczenia. Przed zwolnieniem gate'u
+etapu jego praca jest opróżniana. Modele, które dzielą kartę z etapem,
+korzystają z niej na zmianę z tym etapem, jak modele jednego GPU. Każdy etap
+ma własne wagi, K/V i workspace; strumienie są per wątek i kontekst. Tor
+główny wchodzi do gate'u każdego etapu jako pilny. Tor długi wznawia
+rozpoczęte zadanie na granicy przez `Gate::resume`: bilet w kolejce FIFO,
+której nowe żądania pilne ani wywłaszczalne nie wyprzedzają. Czeka więc
+najwyżej na resztę bieżącej tury, po jednej turze każdego wcześniejszego
+biletu i po jednej turze pilnej na każde oddanie w `checkpoint`. To
+ograniczenie wynika z protokołu i przeglądu kodu, a nie z pomiaru. Kolejność
+między torami pilnymi jednej karty pozostaje kolejnością `Condvar`, bez
+nowej gwarancji sprawiedliwości. Fork toru długiego współdzieli wagi i
+`Lt` etapów, liczniki transferów i `DeviceHealth`, ma własny pusty cache
+stanu i własne gate'y ustawiane przez serwer (`set_device_gate`); fork
+utraconej linii zwraca błąd.
+
+Liczniki transferów istnieją tylko przy podziale: na granicę liczba kopii,
+bajty, czas hosta kopii z jej synchronizacjami i czas czekania na gate
+następnej karty. Trafiają do `basal profile` i `basal benchmark`, a opis
+backendu podaje układ etapów i stały opis protokołu (`stage_transfer`), bez
+liczb. Metryk Prometheus dla transferów nie ma
+([Observability](OBSERVABILITY.md#podział-warstw)). Dla jednego GPU opis
+backendu, manifest eksportu, raporty i odpowiedzi zachowują dotychczasowy
+format.
 
 ### Pomiar scenariuszy HTTP
 
@@ -268,7 +479,8 @@ Payloady planuje `Engine::plan_request` raz na unikalne body, przed fazami.
 Właściciel serwera przekazuje sygnał zamknięcia, anuluje klientów i czeka
 na zakończenie workerów GPU. Zwykłe `serve` nadal używa SIGINT/SIGTERM.
 Monitor pamięci działa na osobnym wątku z uchwytem do rzeczywistego
-urządzenia silnika. Metodyka i ograniczenia: [Pomiary](BENCHMARKS.md).
+urządzenia silnika (przy podziale warstw: do urządzenia każdego etapu).
+Metodyka i ograniczenia: [Pomiary](BENCHMARKS.md).
 
 ### Metryki Prometheus
 
@@ -292,8 +504,72 @@ scrape nie przechodzi przez kolejkę inferencji. Szczegółowa semantyka i PromQ
 
 ## Ograniczenia
 
+Obsługiwane kombinacje architektur i opcji rozmieszczenia (CUDA). Niewspierane są odrzucane
+jawnym błędem po odczytaniu `config.json`, przed tabelą GEMM i ładowaniem wag:
+
+| Model | `device` | `replica_devices` | `layer_split` | `quantization` `q8_0` / `q4_k` | `inference_mode` |
+|---|---|---|---|---|---|
+| basal-1.5 mini/4.5B/max (Llama) | tak | tak, wspólna tabela niezależna od partii | tak, `f16` + `fused` | tak, `f16` + `fused` | `auto`/`accurate`/`balanced` |
+| Basal 2.0 mini/4.5B/max (Llama) | tak | tak, wspólna tabela niezależna od partii | tak, `f16` + `fused` | tak, `f16` + `fused`; `q4_k` wymaga `K % 256 == 0` | `auto` wybiera `balanced` na RTX 6000 Ada |
+| Omni 1.0 mini/max (Gemma 4) | tak | tak; bez pasującej tabeli stałe GEMM per prompt | nie (odmowa) | nie (odmowa, tylko `none`) | `auto`/`accurate`; `balanced` odmowa |
+
+Kombinacje Basal 2.0 i Omni z umieszczeniem na GPU innym niż 0, z replikami, Basal 2.0 z
+podziałem warstw lub kwantyzacją oraz `auto`/`balanced` razem z kwantyzacją lub podziałem
+warstw są złożeniem mechanizmów sprawdzonych osobno; po integracji z `main` nie mają jeszcze
+pomiaru zgodności ani wydajności na sprzęcie. Wyniki pomiarów opisane niżej dotyczą basal-1.5.
+`auto` wybiera `balanced` dla podziału warstw tylko, gdy każda karta etapu jest RTX 6000 Ada.
+
 - Score powyżej 10 poziomów i pytania z jedną opcją kończą się jawnym błędem.
-- Tabela GEMM jest specyficzna dla karty i wersji cuBLASLt.
+- Tabela GEMM jest specyficzna dla karty i wersji cuBLASLt. Plik w
+  `gemm_cache` jest nazwany modelem i precyzją, bez karty: przeniesienie
+  modelu na GPU innego typu generuje tabelę od nowa i zastępuje poprzednią.
+- `quantization: q8_0` działa tylko na CUDA z f16 i dodaje dekwantyzację
+  wag na każdy forward. Na RTX 6000 Ada zmniejsza zajętość puli pamięci CUDA
+  (basal-1.5-mini i 4.5B), wydłuża czas (4.5B) i zmienia część decyzji oraz
+  granic evidence wobec FP32 ([raport](../reports/w8a16-2026-10-11/README.md));
+  model max, inne karty i obciążenia nie zostały zmierzone.
+- `quantization: q4_k` ma te same ograniczenia; dodatkowo wymaga
+  `K % 256 == 0` każdej projekcji. To opcjonalny tryb eksperymentalny,
+  włączany jawnie; domyślne i zalecane jest `none`. Na RTX 6000 Ada
+  (basal-1.5-mini i 4.5B) nie spełnia kryterium FP32 i zmienia decyzje oraz
+  granice evidence wyraźnie bardziej niż `q8_0`
+  ([raport](../reports/w4a16-s1-2026-10-12/README.md)). Bloki Q4_K są przed
+  każdym GEMM dekwantyzowane do f16; nie ma kernela int4 ani rdzeni
+  tensorowych int4, a 4 bity dotyczą tylko wag czterech projekcji. Dla 4.5B
+  na GPU 0 jednej RTX 6000 Ada zmniejsza pulę alokatora po załadowaniu do
+  2 996 968 960 B (f16: 9 644 216 320 B, `q8_0`: 5 309 140 480 B), ale wobec
+  f16 obniża żądania/s o około 33% sekwencyjnie i 7% przy 16 klientach
+  ([S2](../reports/w4a16-s2-2026-10-12/README.md)); wobec `q8_0` różnice
+  żądań/s wynoszą +0,43–1,70%
+  ([S3](../reports/w4a16-s3-2026-10-12/README.md)). To opis dwóch osobnych
+  sesji, bez kryterium szybkości i ustalonej przyczyny. Pulę mini zmierzono w
+  jednym przebiegu, bez szybkości żądań. Czas kwantyzacji na hoście, model max
+  i inne karty nie zostały zmierzone.
+- Repliki wymagają kart jednego typu i wspólnej tabeli GEMM niezależnej od
+  partii; mieszane grupy wymagają osobnej decyzji numerycznej. Zgodność
+  konfiguracji nie zastępuje pomiaru równości wyników na obu kartach.
+- Podział warstw działa tylko na CUDA z `f16` i kernelami `fused`, na
+  kartach jednego typu; etapy liczą po kolei. Na dwóch RTX 6000 Ada (mini i
+  4.5B) wyniki z podziałem są bitowo równe jednemu GPU, a pod sztucznym
+  limitem wolnej pamięci podział uruchamia 4.5B, którego jeden GPU nie
+  mieści ([raport L1](../reports/multigpu-layer-l1-revalidation-2026-10-13/README.md)
+  bieżących źródeł). Wydajność 4.5B zmierzono opisowo, po jednej sesji na
+  tryb; sesje miały tę samą konfigurację kart, ale ich fizyczna tożsamość
+  nie jest ustalona
+  ([zestawienie](../reports/multigpu-layer-revalidation-2026-10-14/README.md)):
+  jedno żądanie jest z podziałem wolniejsze, a 16 klientów `none` dało
+  1,17–1,18× przepustowość jednego GPU przy innych warunkach termicznych
+  kart. Tor jednego GPU ma dwa utrzymane sygnały bez wskazanej przyczyny w
+  kodzie (`none` `mixed-c1 queue_ms.p99`, `q4_k` `dec_s`), przyjęte jako
+  konkretne wyniki, bez progu. Modelu max, innych kart, kart mieszanych ani
+  fizycznej trasy kopii nie zmierzono. Pomiary poprzedniego kandydata
+  ([zestawienie](../reports/multigpu-layer-2026-10-13/README.md),
+  [poprawka zakresu](../reports/multigpu-layer-2026-10-13/SCOPE.md))
+  pozostają historią.
+- 4.5B i mini na dwóch RTX 6000 Ada: bitowa zgodność z wersją sprzed zmiany,
+  przypisanie urządzeń i ruch równoległy sprawdzone
+  ([raport](../reports/multigpu-placement-2026-10-11/README.md)). Nie zmierzono
+  skalowania przepustowości ani pracy kart różnych architektur razem.
 - Metal sprawdzony na M1 Pro (32 GB) z basal-1.0-4.5B i trzema modelami
   basal-1.5 ([pomiar](../reports/metal-m1-pro-1.5/README.md)) oraz na M2 Max
   (32 GB) z trzema modelami basal-1.5

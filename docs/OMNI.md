@@ -12,6 +12,13 @@ pierwszeństwo. Przy dekoderze FP16 wieże mediów zachowują wagi, obliczenia i
 clippingu BF16. `--dtype f32` wybiera obliczenia FP32 do porównań numerycznych.
 Metal i Intel Vulkan nie uruchamiają omni.
 
+Na wielu GPU omni działa na wskazanej karcie (`device`) albo jako niezależne repliki
+(`replica_devices`, karty jednego typu). Przy replikach bez pasującej tabeli GEMM każda
+replika używa stałych GEMM per prompt. Podział warstw (`layer_split`) i kwantyzacja wag
+(`quantization` inna niż `none`) są zaimplementowane tylko dla modeli Llama; dla omni
+start odmawia po odczytaniu `config.json`, przed ładowaniem wag. Umieszczenie na GPU
+innym niż 0 i repliki omni nie mają jeszcze pomiaru zgodności ani wydajności.
+
 `inference_mode: auto` wybiera iloczyny attention FP16 tylko dla tych dwóch modeli,
 dekodera FP16 i rozpoznanej RTX 6000 Ada. Softmax i akumulacja pozostają FP32.
 `accurate`, jawne BF16/FP32 i inne urządzenia używają iloczynów FP32. Sam `accurate`

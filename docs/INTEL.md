@@ -55,7 +55,9 @@ kartę osobną przed zintegrowaną; przy kilku równorzędnych pierwszą
 w kolejności zgłoszonej przez Vulkan. Renderery programowe i GPU innych
 producentów nie są używane, a brak zgodnego urządzenia kończy się błędem
 z powodem odrzucenia każdego GPU Intel. `basal doctor` pokazuje wybrane
-urządzenie i budżet jego pamięci. Wybór urządzenia nie ma opcji CLI.
+urządzenie i budżet jego pamięci. Wybór urządzenia nie ma opcji CLI:
+`--device` i `device` w konfiguracji przyjmują tylko 0, inna wartość kończy
+się błędem.
 
 ```sh
 cargo build --locked --release --features basal-cli/intel

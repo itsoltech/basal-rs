@@ -5,6 +5,7 @@ __pycache__/
 .DS_Store
 target/
 .cache/
+.itsol/
 target-clippy/
 sdk/**/dist/
 sdk/**/node_modules/
@@ -15,9 +16,13 @@ sdk/**/artifact/
 *.nsys-rep
 *.sqlite
 tools/bench/mixed.jsonl
+# Wyniki JSON raportów wiele GPU, W8A16 i W4A16 są w archiwum HF Storage
+# (docs/MEASUREMENT_ARTIFACTS.md); w Gicie zostaje Markdown. Nowe wyniki
+# pomiarów zapisujemy w .cache/measurement-artifacts/.
+/reports/multigpu-*/*.json
+/reports/w4a16-*/*.json
+/reports/w8a16-*/*.json
 
-# Lokalny stan inicjatyw i plany agentów nie należą do PR.
-.itsol/
 # Nowe wyniki tej kampanii są w HF Storage Bucket (docs/MEASUREMENT_ARTIFACTS.md).
 # Dotychczasowe dane wejściowe i tabele GEMM pozostają śledzone.
 /reports/upstream-2.0-*/*.json

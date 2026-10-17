@@ -16,9 +16,12 @@ use candle_core::{Device, Tensor};
 use serde_json::{json, Value};
 use wgpu::Buffer;
 
-use crate::{EvidenceHead, GpuMemory, GpuMemoryProbe, Kernels, Precision, Readout};
+use crate::{EvidenceHead, GpuMemory, GpuMemoryProbe, Kernels, Precision, Quantization, Readout};
 use checkpoint::{Bf16, Checkpoint};
 use runtime::Gpu;
+
+/// The backend selects its Vulkan adapter itself ([`info`]); there is no choice of another one.
+const SINGLE_DEVICE: &str = "the Intel backend runs on device 0 only (the Intel GPU it selects)";
 
 /// Errors while configuring or loading the Intel backend. Inference uses the common [`Backend`] error contract.
 #[derive(Debug, thiserror::Error)]
@@ -94,7 +97,21 @@ impl IntelBackend {
         precision: Precision,
         readout: Readout,
         kernels: Kernels,
+        quantization: Quantization,
+        device: usize,
     ) -> std::result::Result<Self, IntelError> {
+        if device != 0 {
+            return Err(IntelError::Configuration(SINGLE_DEVICE));
+        }
+        match quantization {
+            Quantization::None => {}
+            Quantization::Q8_0 => {
+                return Err(IntelError::Configuration("use quantization none; q8_0 weights need the CUDA backend"))
+            }
+            Quantization::Q4K => {
+                return Err(IntelError::Configuration("use quantization none; q4_k weights need the CUDA backend"))
+            }
+        }
         if precision != Precision::F16 {
             return Err(IntelError::Configuration("use --dtype f16; bf16/f32 forwards are not implemented"));
         }
@@ -448,6 +465,10 @@ impl IntelBackend {
     pub fn load_gemm_table(&mut self, _: &Path) -> Result<usize> {
         bail!("CUDA GEMM tables cannot be used by Intel Vulkan")
     }
+    /// Quantized projection weights are CUDA-only: never any dequantization format, time or values.
+    pub fn dequant_profile(&self) -> Option<(Quantization, f64, u64)> {
+        None
+    }
     pub fn memory(&self) -> Result<GpuMemory> {
         telemetry::Probe::new(&self.gpu.device, &self.gpu.info).snapshot()
     }
@@ -601,7 +622,8 @@ pub fn info() -> std::result::Result<DeviceInfo, IntelError> {
 }
 
 #[cfg(all(not(feature = "cuda"), not(target_os = "macos")))]
-pub(crate) fn memory() -> Result<GpuMemory> {
+pub(crate) fn memory(device: usize) -> Result<GpuMemory> {
+    ensure!(device == 0, "device {device}: {SINGLE_DEVICE}");
     let gpu = Gpu::new()?;
     telemetry::Probe::new(&gpu.device, &gpu.info).snapshot()
 }

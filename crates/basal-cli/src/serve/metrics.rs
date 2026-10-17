@@ -1,4 +1,5 @@
-//! Process-local Prometheus registry. Only configured model names and fixed endpoint/lane labels are exported.
+//! Process-local Prometheus registry. Only configured model names, replica indices and device ordinals, and fixed
+//! endpoint/lane labels are exported.
 
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -33,10 +34,24 @@ pub(super) struct Metrics {
     queue: HistogramVec,
     batch_duration: HistogramVec,
     batch_size: HistogramVec,
+    replica_info: IntGaugeVec,
+    replica_routed: IntCounterVec,
+    replica_inflight: IntGaugeVec,
+    replica_available: IntGaugeVec,
+    replica_waiting: IntGaugeVec,
+    replica_queue: HistogramVec,
+    replica_batch_duration: HistogramVec,
+    replica_batch_size: HistogramVec,
+    model_replicas: IntGaugeVec,
+    model_replicas_available: IntGaugeVec,
 }
 
+const BATCH_SIZES: &[f64] = &[1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0];
+
 impl Metrics {
-    pub fn new(names: &[String], max_inflight: usize) -> prometheus::Result<Self> {
+    /// Registry of the served models, each with the device ordinals of its replicas (one replica for a single
+    /// instance; a layer-split instance lists the ordinals of its stages).
+    pub fn new(models: &[(String, Vec<Vec<usize>>)], max_inflight: usize) -> prometheus::Result<Self> {
         let registry = Registry::new();
         let counter = |name, help, labels| {
             let c = IntCounterVec::new(Opts::new(name, help), labels)?;
@@ -109,31 +124,115 @@ impl Metrics {
                 "basal_batch_requests",
                 "Number of requests admitted to each executed batch.",
                 &["model", "lane"],
-                &[1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0],
+                BATCH_SIZES,
+            )?,
+            replica_info: gauge(
+                "basal_replica_info",
+                // a layer-split instance labels `device` with its stages' ordinals in order, comma-separated; the help
+                // text stays as before
+                "Configured instances of each model (1): replica index and the CUDA device ordinal it runs on.",
+                &["model", "replica", "device"],
+            )?,
+            replica_routed: counter(
+                "basal_replica_routed_requests_total",
+                "Requests queued to each replica of a model.",
+                &["model", "replica"],
+            )?,
+            replica_inflight: gauge(
+                "basal_replica_inflight_requests",
+                "Requests reserved on each replica: queued, planned, waiting or running, until answered or dropped, \
+                 also after their client disconnected.",
+                &["model", "replica"],
+            )?,
+            replica_available: gauge(
+                "basal_replica_available",
+                "Replica takes requests (1): main worker running and no device loss reported; sampled at scrape.",
+                &["model", "replica"],
+            )?,
+            replica_waiting: gauge(
+                "basal_replica_waiting_requests",
+                "Planned requests left waiting in each replica lane after its latest admission.",
+                &["model", "replica", "lane"],
+            )?,
+            replica_queue: histogram(
+                "basal_replica_queue_duration_seconds",
+                "Per-request time from handler arrival to batch admission on each replica lane, including planning.",
+                &["model", "replica", "lane"],
+                SECONDS,
+            )?,
+            replica_batch_duration: histogram(
+                "basal_replica_batch_duration_seconds",
+                "Wall time of batch admission and run_plans on each replica lane, including GPU gate waits.",
+                &["model", "replica", "lane", "outcome"],
+                SECONDS,
+            )?,
+            replica_batch_size: histogram(
+                "basal_replica_batch_requests",
+                "Number of requests admitted to each executed batch of each replica lane.",
+                &["model", "replica", "lane"],
+                BATCH_SIZES,
+            )?,
+            model_replicas: gauge("basal_model_replicas", "Configured replicas of each model.", &["model"])?,
+            model_replicas_available: gauge(
+                "basal_model_replicas_available",
+                "Replicas of each model that take requests; sampled at scrape.",
+                &["model"],
             )?,
             registry,
         };
         for endpoint in ENDPOINTS {
             m.http_inflight.with_label_values(&[endpoint]);
-            for name in names {
+            for (name, _) in models {
                 m.requests.with_label_values(&[endpoint, name, "200"]);
                 m.duration.with_label_values(&[endpoint, name, "200"]);
             }
         }
-        for name in names {
+        for (name, devices) in models {
             m.admitted.with_label_values(&[name]);
             m.input_tokens.with_label_values(&[name]);
             m.output_tokens.with_label_values(&[name]);
             m.questions.with_label_values(&[name]);
+            m.model_replicas.with_label_values(&[name]).set(devices.len() as i64);
+            m.model_replicas_available.with_label_values(&[name]);
+            for (index, stages) in devices.iter().enumerate() {
+                let replica = index.to_string();
+                let device = stages.iter().map(ToString::to_string).collect::<Vec<_>>().join(",");
+                m.replica_info.with_label_values(&[name, &replica, &device]).set(1);
+                m.replica_routed.with_label_values(&[name, &replica]);
+                m.replica_inflight.with_label_values(&[name, &replica]);
+                m.replica_available.with_label_values(&[name, &replica]);
+            }
         }
         Ok(m)
+    }
+
+    /// Handles of replica `index` of `model` for its routing and reservations.
+    pub fn replica(&self, model: &str, index: usize) -> ReplicaMetrics {
+        let replica = index.to_string();
+        ReplicaMetrics {
+            routed: self.replica_routed.with_label_values(&[model, &replica]),
+            inflight: self.replica_inflight.with_label_values(&[model, &replica]),
+        }
+    }
+
+    /// Availability of every replica of `model` at this scrape, in replica order.
+    pub fn set_availability(&self, model: &str, available: impl Iterator<Item = bool>) {
+        let mut n = 0;
+        for (index, up) in available.enumerate() {
+            self.replica_available.with_label_values(&[model, &index.to_string()]).set(i64::from(up));
+            n += usize::from(up);
+        }
+        self.model_replicas_available.with_label_values(&[model]).set(n as i64);
     }
 
     pub fn admitted(&self, model: &str) -> GaugeGuard {
         GaugeGuard::new(self.admitted.with_label_values(&[model]))
     }
 
-    pub fn lane(&self, model: &str, lane: &str) -> LaneMetrics {
+    /// Handles of a lane of replica `replica` of `model`: the model's aggregate series (shared by its replicas) and
+    /// the replica's own.
+    pub fn lane(&self, model: &str, lane: &str, replica: usize) -> LaneMetrics {
+        let r = replica.to_string();
         LaneMetrics {
             queue: self.queue.with_label_values(&[model, lane]),
             size: self.batch_size.with_label_values(&[model, lane]),
@@ -142,6 +241,11 @@ impl Metrics {
             input_tokens: self.input_tokens.with_label_values(&[model]),
             output_tokens: self.output_tokens.with_label_values(&[model]),
             questions: self.questions.with_label_values(&[model]),
+            replica_queue: self.replica_queue.with_label_values(&[model, &r, lane]),
+            replica_size: self.replica_batch_size.with_label_values(&[model, &r, lane]),
+            replica_duration_ok: self.replica_batch_duration.with_label_values(&[model, &r, lane, "success"]),
+            replica_duration_error: self.replica_batch_duration.with_label_values(&[model, &r, lane, "error"]),
+            waiting: self.replica_waiting.with_label_values(&[model, &r, lane]),
         }
     }
 }
@@ -155,17 +259,37 @@ pub(super) struct LaneMetrics {
     input_tokens: IntCounter,
     output_tokens: IntCounter,
     questions: IntCounter,
+    replica_queue: Histogram,
+    replica_size: Histogram,
+    replica_duration_ok: Histogram,
+    replica_duration_error: Histogram,
+    waiting: IntGauge,
 }
 
 impl LaneMetrics {
-    /// One executed batch: its wall time by `run_plans` outcome, its size and the queue time of each request.
+    /// One executed batch: its wall time by `run_plans` outcome, its size and the queue time of each request, in the
+    /// model's and the replica's series.
     pub fn batch(&self, seconds: f64, success: bool, queued: impl ExactSizeIterator<Item = Duration>) {
-        let duration = if success { &self.duration_ok } else { &self.duration_error };
+        let (duration, replica_duration) = if success {
+            (&self.duration_ok, &self.replica_duration_ok)
+        } else {
+            (&self.duration_error, &self.replica_duration_error)
+        };
         duration.observe(seconds);
-        self.size.observe(queued.len() as f64);
+        replica_duration.observe(seconds);
+        let n = queued.len() as f64;
+        self.size.observe(n);
+        self.replica_size.observe(n);
         for q in queued {
-            self.queue.observe(q.as_secs_f64());
+            let q = q.as_secs_f64();
+            self.queue.observe(q);
+            self.replica_queue.observe(q);
         }
+    }
+
+    /// Planned requests left waiting in the lane after an admission.
+    pub fn waiting(&self, n: usize) {
+        self.waiting.set(n as i64);
     }
 
     pub fn usage(&self, response: &Value) {
@@ -179,6 +303,26 @@ impl LaneMetrics {
                 counter.inc_by(n);
             }
         }
+    }
+}
+
+/// Routing handles of one replica, held by its [`super::ReplicaLoad`].
+pub(super) struct ReplicaMetrics {
+    routed: IntCounter,
+    inflight: IntGauge,
+}
+
+impl ReplicaMetrics {
+    pub fn routed(&self) {
+        self.routed.inc();
+    }
+
+    pub fn reserve(&self) {
+        self.inflight.inc();
+    }
+
+    pub fn release(&self) {
+        self.inflight.dec();
     }
 }
 
@@ -244,6 +388,9 @@ pub(super) async fn export(State(app): State<Arc<App>>) -> Response {
     let Some(metrics) = &app.metrics else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    for (name, route) in &app.routes {
+        metrics.set_availability(name, route.replicas().iter().map(super::ReplicaRoute::available));
+    }
     let encoder = TextEncoder::new();
     match encoder.encode_to_string(&metrics.registry.gather()) {
         Ok(body) => ([(CONTENT_TYPE, encoder.format_type())], body).into_response(),

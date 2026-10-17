@@ -91,7 +91,8 @@ impl Guard {
 struct Sample {
     at: Instant,
     host: HostMemory,
-    gpu: GpuMemory,
+    /// One snapshot per monitored device, in the order given to [`Monitor::start`].
+    gpus: Vec<GpuMemory>,
     cpu_s: f64,
     rss: u64,
 }
@@ -99,6 +100,8 @@ struct Sample {
 pub(super) struct ResourceReport {
     pub summary: serde_json::Value,
     samples: std::collections::VecDeque<Sample>,
+    /// Ordinals of the monitored devices (the first one is the device the top-level fields describe).
+    devices: Vec<usize>,
     pub reason: Option<String>,
 }
 
@@ -109,14 +112,26 @@ impl ResourceReport {
             let wall = (b.at - a.at).as_secs_f64();
             (wall > 0.0).then(|| ((b.cpu_s - a.cpu_s).max(0.0), wall))
         });
-        serde_json::json!({"samples": samples.len(),
+        let mut window = serde_json::json!({"samples": samples.len(),
             "min_available_ram_bytes_sampled": samples.iter().map(|s| s.host.available_bytes).min(),
-            "min_available_gpu_bytes_sampled": samples.iter().map(|s| s.gpu.available_bytes).min(),
-            "max_process_gpu_allocated_bytes_sampled": samples.iter().filter_map(|s| s.gpu.process_allocated_bytes).max(),
+            "min_available_gpu_bytes_sampled": samples.iter().filter_map(|s| s.gpus.first()).map(|g| g.available_bytes).min(),
+            "max_process_gpu_allocated_bytes_sampled": samples.iter().filter_map(|s| s.gpus.first()?.process_allocated_bytes).max(),
             "lifetime_peak_rss_bytes": samples.iter().map(|s| s.rss).max(),
             "mean_process_cpu_cores": cpu.map(|(used, wall)| used / wall),
             "cpu_sample_window_s": cpu.map(|(_, wall)| wall),
-            "scope": "same process HTTP server and load generator; sampled memory, not allocation peaks"})
+            "scope": "same process HTTP server and load generator; sampled memory, not allocation peaks"});
+        // several devices (a layer split): each device's samples; one device keeps the fields above only
+        if self.devices.len() > 1 {
+            window["per_device"] = serde_json::json!(self
+                .devices
+                .iter()
+                .enumerate()
+                .map(|(i, d)| serde_json::json!({"device": d,
+                    "min_available_gpu_bytes_sampled": samples.iter().filter_map(|s| s.gpus.get(i)).map(|g| g.available_bytes).min(),
+                    "max_process_gpu_allocated_bytes_sampled": samples.iter().filter_map(|s| s.gpus.get(i)?.process_allocated_bytes).max()}))
+                .collect::<Vec<_>>());
+        }
+        window
     }
 }
 
@@ -127,7 +142,10 @@ pub(super) struct Monitor {
 }
 
 impl Monitor {
-    pub fn start(mut guard: Guard, probe: GpuMemoryProbe) -> Result<Self> {
+    /// Sample the host and every `(device, guard, probe)` (one per device of the model, the first one described by
+    /// the top-level fields) until stopped; the probes are queried one after another and return host data only.
+    pub fn start(mut devices: Vec<(usize, Guard, GpuMemoryProbe)>) -> Result<Self> {
+        anyhow::ensure!(!devices.is_empty(), "resource monitor without a device");
         let abort = Arc::new(AtomicBool::new(false));
         let flag = abort.clone();
         let (stop, receiver) = std::sync::mpsc::channel();
@@ -139,13 +157,19 @@ impl Monitor {
                 loop {
                     let result = (|| -> Result<()> {
                         let host = host_memory()?;
-                        let gpu = probe.snapshot()?;
+                        let gpus = devices.iter().map(|(_, _, probe)| probe.snapshot()).collect::<Result<Vec<_>>>()?;
                         let (cpu_s, rss) = process_usage()?;
-                        let checked = guard.check(&host, &gpu, 0);
+                        let mut checked = Ok(());
+                        for ((d, guard, _), gpu) in devices.iter_mut().zip(&gpus) {
+                            let c = guard.check(&host, gpu, 0);
+                            if checked.is_ok() {
+                                checked = if gpus.len() > 1 { c.with_context(|| format!("device {d}")) } else { c };
+                            }
+                        }
                         if samples.len() == 20_000 {
                             samples.pop_front();
                         }
-                        samples.push_back(Sample { at: Instant::now(), host, gpu, cpu_s, rss });
+                        samples.push_back(Sample { at: Instant::now(), host, gpus, cpu_s, rss });
                         checked
                     })();
                     if let Err(e) = result {
@@ -158,7 +182,19 @@ impl Monitor {
                         _ => break,
                     }
                 }
-                ResourceReport { summary: guard.report(), samples, reason }
+                let mut summary = devices[0].1.report();
+                if devices.len() > 1 {
+                    summary["per_device"] = serde_json::json!(devices
+                        .iter()
+                        .map(|(d, guard, _)| {
+                            let mut r = guard.report();
+                            r["device"] = serde_json::json!(d);
+                            r
+                        })
+                        .collect::<Vec<_>>());
+                }
+                let devices = devices.iter().map(|(d, _, _)| *d).collect();
+                ResourceReport { summary, samples, devices, reason }
             })
             .context("starting benchmark resource monitor")?;
         Ok(Self { abort, stop: Some(stop), thread: Some(thread) })

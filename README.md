@@ -346,9 +346,287 @@ models:
 Żądanie trafia do modelu z pola `model` (nazwa z `basal.json` modelu);
 `/v1/basal` bez tego pola trafia do `default_model`, a nieznana nazwa daje
 błąd 422 z listą obsługiwanych modeli. Każdy model ma własną kolejkę i tor
-długich żądań; wszystkie dzielą GPU tak, że krótkie partie dowolnego modelu
-idą przed długimi żądaniami. Pamięć GPU to suma wag modeli (bf16/f16:
-1.5-max ~23 GB, 1.5-4.5B ~9,5 GB, 1.5-mini ~3,2 GB) plus aktywacje.
+długich żądań; modele na tym samym GPU dzielą je tak, że krótkie partie
+dowolnego z nich idą przed długimi żądaniami. Pamięć GPU to suma wag modeli
+tego GPU (bf16/f16: 1.5-max ~23 GB, 1.5-4.5B ~9,5 GB, 1.5-mini ~3,2 GB) plus
+aktywacje.
+
+Na CUDA klucz `device` przypisuje model do GPU (domyślnie 0), np. max na
+jednej karcie, a 4.5B i mini na drugiej. Modele na różnych GPU liczą
+jednocześnie, za tym samym API i z tymi samymi nazwami modeli. Bez
+`replica_devices` i `layer_split` (opis niżej) model jest ładowany raz, na
+jednym GPU. Numer to indeks CUDA widoczny dla procesu.
+`device` i `replica_devices` obsługują wszystkie modele (basal-1.5, Basal 2.0,
+Omni); `layer_split` i `quantization` tylko modele Llama (basal-1.5 i Basal 2.0),
+a dla Omni są odrzucane przed ładowaniem
+([macierz](docs/ARCHITECTURE.md#ograniczenia)).
+Kolejność wszystkich kart ustala `CUDA_DEVICE_ORDER` (domyślna może różnić się
+od `nvidia-smi`, `PCI_BUS_ID` daje kolejność PCI jak `nvidia-smi`), a
+`CUDA_VISIBLE_DEVICES` wybiera z niej karty, zmienia ich kolejność i numeruje
+od 0. `basal doctor` z tym
+samym środowiskiem wypisuje numery CUDA kart i według nich sprawdza pamięć
+modeli. Metal i Intel obsługują tylko `device: 0`.
+Działanie 4.5B i mini na dwóch RTX 6000 Ada, bitową zgodność z wersją
+sprzed zmiany oraz ruch równoległy sprawdzono na sprzęcie
+([raport](reports/multigpu-placement-2026-10-11/README.md)); pomiar nie
+wyznacza skalowania przepustowości ani zachowania kart różnych architektur.
+
+Repliki (CUDA): `replica_devices: [0, 1]` przy modelu albo
+`basal serve --model mini --replica-devices 0,1` ładuje niezależną kopię modelu
+na każdą wymienioną kartę pod jedną nazwą w API (`/v1/models` wymienia model
+raz). Każda replika ma własną kolejkę, harmonogram, cache i tor długich żądań;
+żądanie trafia do dostępnej repliki z najmniejszą liczbą żądań w kolejce i w
+trakcie, a remisy rozstrzyga rotacja. Żądanie nie jest ponawiane po
+rozpoczęciu obliczeń. Lista musi być niepusta, bez powtórzeń, a karty jednego
+typu (nazwa, compute capability, liczba SM); mieszaną grupę serwer odrzuca
+przed pobraniem modelu. Repliki używają jednej tabeli GEMM niezależnej od
+partii, sprawdzonej na każdej karcie, więc `gemm_table: none` jest wtedy
+błędem. `device` i `replica_devices` razem są błędem, także przy `device: 0`;
+jeden element listy działa jak `device`. Modele bez replik mogą nadal używać
+innych typów kart. Limit `max_inflight` i model domyślny są wspólne. Grupa
+jest gotowa, dopóki ma dostępną replikę; zatrzymany worker repliki widać w
+`/health` i metrykach. To nie jest wykrywanie awarii sprzętu: CUDA zgłasza
+`device_lost` tylko wtedy, gdy instancja nie potwierdziła końca własnej pracy
+GPU (dwie nieudane synchronizacje albo wiązania kontekstu), a po niektórych
+błędach CUDA proces wymaga restartu, także dla pozostałych kart. Bitowej
+zgodności i skalowania replik nie deklarujemy bez pomiaru na sprzęcie.
+
+Podział warstw (opcjonalny, CUDA): `layer_split` przy modelu albo
+`--layer-split 0:30,1:30` (`serve --model`, `export`, `decide`, `bench`,
+`bench-requests`, `benchmark`, `profile`, `eval-*`) ładuje jeden model na
+kilka kart jednego procesu: kolejne zakresy warstw dekodera, po jednym na
+kartę, w kolejności warstw. Flaga przyjmuje pary `URZĄDZENIE:LICZBA_WARSTW`,
+a YAML listę `{device, layers}`. Dla 4.5B (60 warstw):
+
+```yaml
+models:
+  - path: .models/basal-1.5-4.5B
+    dtype: f16                    # domyślne; podział wymaga f16
+    layer_split:                  # zamiast device i replica_devices
+      - {device: 0, layers: 30}   # warstwy 0–29 i embedding
+      - {device: 1, layers: 30}   # warstwy 30–59, końcowa norma, lm_head, głowica evidence
+```
+
+Etapy liczą po kolei: po warstwach etapu aktywacje granicy są kopiowane na
+kartę następnego etapu, a odczyt liter i głowica evidence działają na
+ostatnim. To ten sam ciąg obliczeń co na jednym GPU, a nie równoległość
+tensorowa ani operacje zbiorcze między kartami. Podział służy pojemności
+(wagi i cache K/V każdej warstwy leżą na karcie jej etapu), a nie
+przyspieszeniu, i dodaje kopię na każdej granicy. Numery to indeksy CUDA
+procesu po `CUDA_VISIBLE_DEVICES`: z `CUDA_VISIBLE_DEVICES=1,0` etap
+`0:30` trafia na fizyczną kartę 1.
+
+Przed pobraniem modelu serwer i polecenia odrzucają: mniej niż dwa etapy,
+etap bez warstw, powtórzoną kartę, nieznane pole YAML, build inny niż CUDA,
+`dtype` inne niż `f16`, `--kernels candle`, indeks spoza kart procesu oraz
+karty różnych typów (nazwa, compute capability, liczba SM). Błędem jest też
+`layer_split` razem z `device` (także `device: 0`) albo `replica_devices`,
+a `--layer-split` razem z `--device`, `--replica-devices` albo `--config` (w
+pliku konfiguracji `layer_split` ustawia się przy modelu). Po odczytaniu
+`config.json`, przed tabelą GEMM i wagami, suma liczb warstw musi równać się
+liczbie warstw modelu (mini 32, 4.5B 60, max 50). Tabelę GEMM serwer
+rozwiązuje na karcie etapu 0 i sprawdza na każdej karcie podziału;
+`gemm_table: none` działa jak na jednym GPU. `quantization` dotyczy każdego
+etapu, z tymi samymi zastrzeżeniami co wyżej (domyślne `none`, opcjonalne
+`q8_0`, eksperymentalne `q4_k`). `basal doctor` sprawdza te reguły bez
+ładowania modelu i podaje szacunek wag każdego etapu z arytmetyki formatu
+(szacunek, nie pomiar). Bez `layer_split` nic się nie zmienia.
+
+W serwerze model z podziałem jest jedną instancją, bez replik. Korzysta z
+gate'u każdej swojej karty, ale trzyma najwyżej jeden naraz, więc na każdej
+karcie dzieli ją z innymi modelami jak model jednego GPU.
+[Pomiar L1](reports/multigpu-layer-l1-revalidation-2026-10-13/README.md)
+bieżących źródeł (dwie RTX 6000 Ada 48 GB, mini i 4.5B, `none`, `q8_0`,
+`q4_k`): eksporty z podziałem (m.in.
+`0:30,1:30`, `0:1,1:59`, `0:59,1:1`, `1:30,0:30`, `CUDA_VISIBLE_DEVICES=1,0`,
+900 pytań) są bajtowo równe eksportom jednego GPU w tym samym trybie,
+odpowiedzi HTTP są równe referencji jednego GPU, a 38 niepoprawnych
+konfiguracji kończy się błędem przed pobieraniem i ładowaniem (według
+komunikatów; brak alokacji GPU w tych procesach nie został zmierzony). Pod
+sztucznym
+limitem (rezerwacja zostawiająca 7939 MiB wolnej pamięci na każdej karcie)
+4.5B `none` na jednym GPU kończy się czystym OOM, a `0:30,1:30` działa i daje
+bitowo równe wyniki. Bez takiego limitu 4.5B mieści się na jednej karcie
+48 GB. Pomiar nie obejmuje modelu max, innych kart (np. RTX 4090), kart
+mieszanych, fizycznego braku pamięci ani fizycznej trasy kopii (P2P albo
+przez hosta).
+
+Wydajność bieżących źródeł zmierzono dla 4.5B w osobnych sesjach, każda na
+maszynie z dwiema RTX 6000 Ada 48 GB; nie ustalono, czy sesje miały te same
+fizyczne karty ([zestawienie](reports/multigpu-layer-revalidation-2026-10-14/README.md),
+[L2](reports/multigpu-layer-l2-revalidation-2026-10-14/README.md) `none`,
+[L3](reports/multigpu-layer-l3-revalidation-2026-10-14/README.md) `q8_0` i
+`q4_k`). Każdy stosunek niżej pochodzi z jednej sesji; wyniki różnych sesji
+zestawiamy tylko opisowo. Pojedyncze żądanie jest z podziałem wolniejsze: w
+`none` przepustowość HTTP jednego klienta to 0,963–0,973 przepustowości
+jednego GPU, a w `basal bench` mediana stosunku latencji pytania w parach
+wynosi 1,004–1,009 (`none`), 1,128–1,139 (`q8_0`) i 1,183–1,206 (`q4_k`).
+Przy 16 klientach mieszanego ruchu `none` z podziałem miał w tej sesji
+1,17–1,18× przepustowość jednego GPU, ale karta jednego GPU pracowała wtedy
+goręcej i z niższym zegarem; to nie jest obietnica przyspieszenia.
+
+Na torze jednego GPU kandydat ma wobec `d42a400` dwa utrzymane sygnały
+reguły bez progu, bez wskazanej przyczyny w kodzie: `none`
+`mixed-c1 queue_ms.p99` w `basal benchmark` (+1,2 do +11,3 ms; użytkownik
+przyjął ten wynik, [decyzja](reports/multigpu-layer-l2-revalidation-2026-10-14/DECISION.md))
+i `q4_k` `dec_s` w `basal bench` (−0,01 do −0,56%; koordynator przyjął go w
+granicy 1–2% podanej wcześniej przez użytkownika,
+[rozstrzygnięcie](reports/multigpu-layer-l3-revalidation-2026-10-14/DECISION.md)).
+Sygnały pozostają w raportach, a rozstrzygnięcia nie tworzą progu. Pozostałe
+sygnały się nie utrzymały, co nie dowodzi braku narzutu. Wydajności HTTP
+jednego GPU w `q8_0` i `q4_k` dla tego kandydata nie zmierzono. Pomiary
+poprzedniego kandydata ([zestawienie](reports/multigpu-layer-2026-10-13/README.md),
+[poprawka zakresu](reports/multigpu-layer-2026-10-13/SCOPE.md)) pozostają
+historią. Zestawienie oraz raport, rozstrzygnięcie i fakty L3 błędnie
+podają, że `load_s` w `d42a400` obejmował wczytanie głowicy evidence, uchwyt
+cuBLASLt i synchronizację publikacji. W obu wersjach zegar kończy się przed
+głowicą i uchwytem, a synchronizację publikacji ma tylko kandydat, także poza
+`load_s` ([erratum](reports/multigpu-layer-revalidation-2026-10-14/LOAD_S.md)).
+
+Kwantyzacja W8A16 (opcjonalna, CUDA): `quantization: q8_0` przy modelu albo
+`--quantization q8_0` (`serve --model`, `export`, `bench`, `benchmark`,
+`decide`, `profile`, `eval-*`) trzyma na GPU cztery macierze projekcji każdej
+warstwy (q|k|v, o, gate|up, down) jako bloki GGML Q8_0 (32 wartości wzdłuż K,
+skala f16, int8), kwantyzowane raz przy ładowaniu z dokładnych wartości bf16
+checkpointu. Przed każdym GEMM projekcji macierz jest dekwantyzowana do
+przejściowego tensora f16 i liczona tym samym GEMM cuBLASLt f16 co gęste wagi;
+aktywacje pozostają f16. Embedding, normy, biasy, lm_head, attention, cache
+K/V, odczyt liter i głowica evidence są bez zmian, tak jak tabela GEMM
+(`{model}-f16`) i kontrakt HTTP. Opcja zmniejsza pamięć wag projekcji kosztem
+dodatkowej pracy na każdy forward; nie przyspiesza obliczeń. Wymaga `dtype:
+f16` i domyślnych kerneli `fused`; inna kombinacja, Metal, Intel albo flaga
+`--quantization` razem z plikiem konfiguracji to błąd przed pobraniem modelu.
+`basal doctor` zgłasza te same błędy i szacuje pamięć wag `q8_0` z arytmetyki
+formatu.
+
+Domyślne i zalecane jest `none`. `q8_0` zmienia numerykę i wyniki modelu, więc
+nie obiecujemy zgodności z FP32 upstream. Opcja jest dla tych, którzy za
+mniejszy rozmiar wag projekcji akceptują opisane niżej różnice jakości.
+[Pomiar](reports/multigpu-w8-quality-2026-10-11/README.md) (częściowy;
+basal-1.5-mini i basal-1.5-4.5B, CUDA f16, RTX 6000 Ada) wykazał:
+
+- granice fragmentów evidence zmienione w 3 pytaniach endpointu (mini: 2,
+  4.5B: 1, z 55 na model); f16 bez kwantyzacji zachowało je w tej samej sesji;
+- na 900 pytaniach diagnostycznych nowe decyzje różne od FP32: 3 w mini i 5 w
+  4.5B. Liczby pomijają pytania, w których różni się też f16: w mini jedno ma
+  tę samą różnicę w `q8_0`, a w 4.5B w jednym `q8_0` zachowuje decyzję FP32,
+  którą f16 zmienia;
+- poprawne odpowiedzi FP32 / f16 / `q8_0`: mini 664 / 663 / 664, 4.5B
+  703 / 702 / 704. Nowe zmiany poprawiają i pogarszają odpowiedzi (mini: 2
+  poprawy i 1 pogorszenie, 4.5B: 3 i 2); wynik tej próbki nie dowodzi
+  zachowania jakości w ogólności.
+
+W `basal compare` decyzje 44 przykładów bench `q8_0` są takie jak FP32
+(44/44), ale prawdopodobieństwa się różnią, a porównanie odpowiedzi endpointu
+z FP32 nie spełnia kryterium zgodności (granice evidence wyżej). Odpowiedzi
+HTTP serwera mini `q8_0` na 34 żądania System One (status i treść) są zgodne
+z natywną referencją `q8_0` tych samych wejść (eksport, a dla dwóch przypadków
+nieobsługiwanych przez eksport `basal decide`), a dwie repliki na dwóch kartach
+dają odpowiedzi równe pojedynczemu `q8_0`; to zgodność wewnętrzna `q8_0`, nie
+z FP32.
+
+Kompromis pamięci i czasu zmierzono na RTX 6000 Ada 48 GB, CUDA f16, na jednej
+karcie, z żądanym zegarem SM 1200 MHz i limitem mocy 300 W
+([raport W8A16](reports/w8a16-2026-10-11/README.md)). Zajętość puli
+alokatora CUDA po załadowaniu (`memory_pool.resident_after_load`: wagi,
+prefiksy i workspace; bez kontekstu CUDA, modułów i alokacji synchronicznych,
+nie cały VRAM ani jego szczyt) spadła w 4.5B z 9 644 216 320 do
+5 309 140 480 B, w mini z 3 271 867 392 do 1 868 155 904 B. Czas 4.5B wzrósł:
+mediana `latency2` w `basal bench` z około 25,5 do 42,4–42,6 ms (1,66–1,67×
+w każdej z czterech par), p50 sekwencyjnych żądań `basal benchmark` z około
+26,8–27,0 do 43,0–43,3 ms, a p50 mieszanego ruchu przy 16 klientach z około
+586–598 do 673–675 ms. To wyniki tych obciążeń przy tym zegarze, nie stały
+mnożnik; w tych pomiarach `q8_0` wydłużyło latencję i obniżyło przepustowość.
+Model max, inne karty, zegary, obciążenia i ustawienia nie zostały zmierzone.
+
+Z domyślnym `none` eksporty mini i 4.5B są bitowo równe wersji bez tej opcji,
+a pomiar czasu 4.5B nie wykazał powtarzalnego spadku przy swojej rozdzielczości
+([pomiar](reports/multigpu-w8-none-2026-10-11/README.md)); nie jest to dowód
+zerowego narzutu.
+
+Kwantyzacja W4A16 (opcjonalna, eksperymentalna, CUDA):
+`quantization: q4_k` albo `--quantization q4_k` działa jak `q8_0` (te same
+cztery projekcje, polecenia, wymagania `dtype: f16` i kerneli `fused`, ta sama
+walidacja przed pobraniem modelu i odmowa dla Metal i Intel), ale z blokami
+GGML Q4_K: 256 wartości wzdłuż K w 8 grupach po 32, 6-bitowe skale i minima
+grup względem skal f16 bloku, kody 4-bitowe (144 B na 256 wartości). Każde K
+projekcji musi być wielokrotnością 256 (spełniają to kształty mini, 4.5B i
+max); przy znanym `config.json` `basal doctor` zgłasza inny przypadek jako
+błąd. Ładowanie dodatkowo rekonstruuje każdą macierz na CPU, odrzuca wartości
+nieskończone wag i rekonstrukcji oraz stałe niezerowe grupy 32 wartości
+(przypięty kwantyzator Candle zamienia je na zera) i porównuje bitowo
+dekwantyzację jednej macierzy na GPU z rekonstrukcją na CPU; to kontrola
+jednej macierzy, nie dowód dla pozostałych. Opis backendu (obiekt
+`quantization`) podaje błąd rekonstrukcji wag i liczniki grup. Format wybrano
+regułą ustaloną przed pomiarem, na podstawie błędu w przestrzeni wag
+([raport P0](reports/w4a16-p0-2026-10-12/README.md)); to nie jest ocena
+jakości odpowiedzi. Arytmetyka formatu daje dla bloków projekcji 4.5B
+2 601 192 960 B wobec 4 913 364 480 B przy `q8_0` (z paddingiem Candle); to
+nie jest pomiar puli pamięci ani VRAM.
+
+Domyślne i zalecane jest `none`; `q4_k` to tryb eksperymentalny, włączany
+tylko jawnie. Zmienia numerykę i wyniki modelu; w tym pomiarze różnice wobec
+FP32 były wyraźnie większe niż dla `q8_0`, a kryterium zgodności z FP32
+upstream nie jest spełnione na żadnym z dwóch zmierzonych modeli. Ocena
+i wybór `q8_0` opisane wyżej nie obejmują `q4_k`.
+[Pomiar](reports/w4a16-s1-2026-10-12/README.md) (basal-1.5-mini
+i basal-1.5-4.5B, CUDA f16, RTX 6000 Ada, jedna sesja) wykazał:
+
+- na 44 przykładach bench, 34 żądaniach System One i 55 pytaniach endpointu
+  26 naruszeń kryterium FP32 w 15 pozycjach (mini) i 20 w 12 (4.5B): zmienione
+  decyzje bench i endpointu oraz granice fragmentów evidence; f16 bez
+  kwantyzacji ma w tej samej sesji 0 naruszeń, a jedna pozycja może dać kilka;
+- na 900 pytaniach diagnostycznych nowe decyzje różne od FP32 (bez pytań,
+  które zmienia już f16): 76 w mini i 81 w 4.5B (`q8_0`: 3 i 5);
+- poprawne odpowiedzi FP32 / f16 / `q4_k`: mini 664 / 663 / 668, 4.5B
+  703 / 702 / 685. Nowe zmiany poprawiają i pogarszają odpowiedzi (mini: 38
+  popraw i 33 pogorszenia, 4.5B: 25 i 43). Wynik +5 wobec f16 w mini dotyczy
+  tej próbki i nie oznacza poprawy ani równoważności jakości; w 4.5B `q4_k` ma
+  o 17 poprawnych odpowiedzi mniej niż f16.
+
+Eksporty `q4_k` są bitowo równe między kartami, trybami pakowania,
+`--no-prefix-cache` i `CUDA_VISIBLE_DEVICES`. Odpowiedzi HTTP serwera mini
+`q4_k` są równe natywnej referencji `q4_k` tych samych wejść, a dwie repliki na
+dwóch kartach dają odpowiedzi równe pojedynczemu serwerowi; to zgodność
+wewnętrzna `q4_k`, nie z FP32. Zajętość puli alokatora CUDA po załadowaniu mini
+(jeden przebieg; bez kontekstu CUDA, modułów i alokacji synchronicznych, nie
+cały VRAM) wyniosła 1 119 439 872 B wobec 1 868 155 904 B przy `q8_0`
+i 3 271 867 392 B bez kwantyzacji.
+
+Kompromis pamięci i czasu 4.5B `q4_k` zmierzono na GPU 0 karty RTX 6000 Ada
+48 GB, CUDA f16, z żądanym zegarem SM 1200 MHz i limitem mocy 300 W, w dwóch
+osobnych sesjach, w parach ustalonych przed pomiarem. Wyniki są opisowe: bez
+kryterium szybkości i bez ustalonej przyczyny różnic.
+
+- Wobec f16 bez kwantyzacji ([S2](reports/w4a16-s2-2026-10-12/README.md)):
+  p50 sekwencyjnych żądań `basal benchmark` wzrosło o 56,5% i 56,8% (z około
+  27 do około 42 ms), żądania/s spadły o 33,2% sekwencyjnie oraz o 7,4% i 7,2%
+  w ruchu mieszanym przy 16 klientach, a mediana ilorazu `latency2` per
+  pytanie w `basal bench` wynosi 1,60. Zajętość puli alokatora po załadowaniu
+  spadła z 9 644 216 320 do 2 996 968 960 B. `load_s` benchmarku wzrósł
+  z 11,5–12,8 do 25,4–25,5 s; obejmuje kwantyzację na hoście, której czasu
+  nie mierzymy osobno.
+- Wobec `q8_0` ([S3](reports/w4a16-s3-2026-10-12/README.md)): żądania/s
+  wzrosły o 1,37% i 1,70% sekwencyjnie oraz o 0,43% i 0,66% przy 16 klientach,
+  mediana ilorazu `latency2` per pytanie (`q4_k` / `q8_0`) wynosi 0,977, a pula
+  po załadowaniu to 2 996 968 960 wobec 5 309 140 480 B.
+
+Mniejsza pamięć wag `q4_k` kosztuje więc wobec f16 wyraźnie więcej czasu;
+`q4_k` nie jest ogólnie szybsze ani lepsze jakościowo. S2 i S3 to osobne
+sesje, więc ich wyników nie łączymy w porównanie f16 z `q8_0`. Pula (jak
+wyżej) nie jest całym VRAM ani jego szczytem. Szybkość żądań mini, model max,
+inne karty, zegary i obciążenia nie zostały zmierzone.
+
+Z `none` i `q8_0` zmierzone w S1 eksporty mini i 4.5B są bitowo równe wersji
+sprzed dodania `q4_k`. Pomiar czasu 4.5B z `none` nie wykazał powtarzalnego
+spadku przy swojej rozdzielczości (S2); nie jest to dowód zerowego narzutu.
+Z `q8_0` przepustowość ruchu mieszanego przy 16 klientach była niższa niż
+w wersji sprzed zmiany we wszystkich czterech parach, o 0,11–0,37% (S3).
+Przyczyny nie ustalono i nie twierdzimy, że to szum ani że regresji nie ma;
+użytkownik zaakceptował ten zaobserwowany spadek jako kompromis, bez nowego
+progu. Synchronizowany profil sekcji `q8_0` (batch 1, jeden proces na wersję)
+był w nowej wersji wolniejszy o 17,6%, w tym dekwantyzacja o 40,3%; nie jest
+to latencja żądań ani wykazana przyczyna tej różnicy.
 
 Jeden model bez pliku konfiguracji:
 
@@ -363,8 +641,8 @@ Jeden model bez pliku konfiguracji:
 | `POST /v1/systemone` | TypeSafe System One: ścisła walidacja, odpowiedzi i confidence TypeSafe, rozszerzenia basal-1.5 |
 | `POST /v1/basal` | konwencje `Server.decide` upstream v1.5.0: walidacja `to_items`, `confidence = max(p)`, błędy jako 422 `{"error"}` |
 | `GET /v1/models` | lista modeli TypeSafe z polami upstream `mode` i `early_exit` |
-| `GET /health` | gotowość: 200 `{"status":"ok"}`; 503 `{"status":"device_lost"}` z `lost_models`, gdy backend zgłosił trwałą utratę GPU (obecnie Intel Vulkan) |
-| `GET /metrics` | opcjonalne metryki Prometheus: żądania, opóźnienia, tokeny, kolejka i partie, z podziałem na modele |
+| `GET /health` | gotowość: 200 `{"status":"ok"}`; 503 `{"status":"device_lost"}` z `lost_models`, gdy backend modelu z jedną instancją (także z podziałem warstw) zgłosił trwałą utratę: Intel Vulkan po utracie urządzenia, CUDA gdy nie potwierdził końca własnej pracy GPU (dwie nieudane synchronizacje albo wiązania kontekstu); to nie test sprzętu. Grupy replik: 200 z `degraded_models`, gdy część replik jest niedostępna; 503 `{"status":"engine_stopped"}` z `unavailable_models`, gdy żadna. Wpis: `{"model", "replicas", "available", "unavailable": [{"replica", "device", "reason": "worker_closed" \| "device_lost"}]}` |
+| `GET /metrics` | opcjonalne metryki Prometheus: żądania, opóźnienia, tokeny, kolejka i partie, z podziałem na modele i ich repliki |
 
 Odpowiedzi mają nagłówki `x-basal-queue-ms`, `x-basal-compute-ms` i
 `x-basal-batch-requests`.
@@ -396,6 +674,10 @@ wiersza poleceń, np. `--max-batch-tokens`):
 | `gemm_table` | `auto` | tabela algorytmów cuBLASLt (opis niżej); `none`: Llama dobiera algorytmy przy pierwszym użyciu, Gemma wykonuje osobne GEMM dla promptów; albo ścieżka tabeli |
 | `dtype` | `auto` | Llama: `f16`; Omni na rozpoznanej RTX 6000 Ada: `f16`, pozostałe Gemma: `bf16`; jawne `f16`, `bf16` lub `f32` mają pierwszeństwo |
 | `inference_mode` | `auto` | dobór attention; `accurate`: pierwotne attention Llamy lub iloczyny FP32 Gemmy; `balanced`: CUDA Llama f16, softmax i akumulacja f32, prawdopodobieństwa hi/lo |
+| `quantization` | `none` | format wag projekcji modeli Llama (basal-1.5, Basal 2.0 mini/4.5B/max): `none` (gęste wagi `dtype`), `q8_0` (8-bitowe wagi z aktywacjami f16) albo `q4_k` (4-bitowe wagi z aktywacjami f16, eksperymentalne; K projekcji wielokrotnością 256); tylko CUDA z `dtype` f16 (`auto` dla Llamy to f16); Omni (Gemma) odrzuca inne wartości niż `none` po odczytaniu `config.json`, przed ładowaniem; opis niżej |
+| `device` | 0 | GPU modelu: indeks urządzenia CUDA widoczny dla procesu; modele z tym samym `device` dzielą GPU, z różnymi liczą jednocześnie; Metal i Intel: tylko 0 |
+| `replica_devices` | | CUDA: repliki modelu pod jedną nazwą, po jednej na każdy podany indeks (różne karty jednego typu); zamiast `device`; kilka wymaga `gemm_table` `auto` albo ścieżki: Llama wspólnej tabeli niezależnej od partii, Omni bez pasującej tabeli używa stałych GEMM per prompt |
+| `layer_split` | | CUDA, tylko modele Llama: jeden model na kilku kartach jednego typu, lista `{device, layers}` w kolejności warstw (co najmniej dwa etapy na różnych kartach, suma równa liczbie warstw modelu); wymaga `dtype` f16 (`auto` dla Llamy to f16); zamiast `device` i `replica_devices`; Omni odrzuca po odczytaniu `config.json`; opis wyżej |
 | `max_batch_tokens` | 8192 | tokeny jednej partii, liczone po współdzieleniu prefiksów |
 | `schedule` | `hrrn` | kolejność przyjmowania żądań: `hrrn` (krótkie przed długimi, bez zagłodzenia) albo `fifo` |
 | `long_tokens` | 4096 | żądania powyżej tej liczby tokenów idą do toru długich żądań, który oddaje GPU krótkim partiom między warstwami; `0` wyłącza |

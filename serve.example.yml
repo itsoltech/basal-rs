@@ -22,11 +22,49 @@ models:
     gemm_table: reports/rust-cuda-1.5-max/gemm-equiv/gemm-algos-f16-invariant-groups.json
     dtype: f16                     # f16 (default), bf16, f32
     inference_mode: auto           # balanced for Basal 2.0 text on RTX 6000 Ada; accurate preserves original attention
+    # none (default): dense weights of dtype. q8_0: the q|k|v, o, gate|up and down projections of every layer stay
+    # on the GPU as 8-bit GGML Q8_0 blocks and are dequantized to f16 before each projection GEMM (f16 activations):
+    # less GPU memory for those weights, more work on every forward. CUDA with dtype f16 (auto for Llama) and Llama
+    # models only (basal-1.5, Basal 2.0; an Omni model is refused once its config is read); checked before loading.
+    # Every replica of the model uses it. Also `basal serve --model mini --quantization q8_0`.
+    # q4_k: the same with 4-bit GGML Q4_K blocks (every projection K a multiple of 256). Experimental, explicit opt-in
+    # only; none is recommended. Its measured answers differ from FP32 more than with q8_0 (mini and 4.5B,
+    # reports/w4a16-s1-2026-10-12). On one RTX 6000 Ada, 4.5B q4_k had a smaller GPU allocator pool after load
+    # than f16 but served about 33% fewer sequential and 7% fewer mixed 16-client requests/s
+    # (reports/w4a16-s2-2026-10-12); vs q8_0, a smaller pool and 0.4-1.7% more requests/s
+    # (reports/w4a16-s3-2026-10-12). Request speed of mini, max and other GPUs was not measured.
+    # Both change the numerics of the model.
+    quantization: none
+    # GPU of the model (default 0): CUDA device ordinal visible to the process. CUDA first orders all GPUs (by
+    # default fastest first, which may differ from nvidia-smi; CUDA_DEVICE_ORDER=PCI_BUS_ID: PCI order, as
+    # nvidia-smi), then CUDA_VISIBLE_DEVICES selects, reorders and renumbers them from 0. `basal doctor`, run with
+    # the same environment, lists the ordinals. Models on one device take turns on it, models on different
+    # devices run at the same time. Without replica_devices or layer_split a model is loaded once, on one GPU.
+    # Metal and Intel: 0 only. Not together with replica_devices or layer_split (not even device: 0).
+    device: 0
     max_batch_tokens: 8192         # packed tokens of one batch
     schedule: hrrn                 # hrrn (default) or fifo
     long_tokens: 4096              # requests above this run in the model's long lane (0: none)
     state_cache_mb: 0              # cross-request state cache (0: off)
 
   - path: .models/basal-1.5-4.5B   # or a local model directory
+    # device: 1                    # e.g. 4.5B and mini on a second GPU
+    # CUDA layer split instead of device (optional, off by default; Llama models only, Omni is refused): one model on
+    # several GPUs of one type, consecutive layer ranges in layer order, the stages computed one after another (for
+    # GPU memory, not for speed; not tensor parallelism). At least two stages on distinct ordinals, each with at least
+    # one layer, the counts adding up to the model's layers (basal-1.5: mini 32, 4.5B 60, max 50); dtype f16 (auto for
+    # Llama) and the fused kernels; not together with device (not even device: 0) or replica_devices; quantization applies to every stage. Ordinals as
+    # for device (after CUDA_VISIBLE_DEVICES). Also `basal serve --model 4.5B --layer-split 0:30,1:30`.
+    # layer_split:
+    #   - {device: 0, layers: 30}  # layers 0-29 and the embedding
+    #   - {device: 1, layers: 30}  # layers 30-59, final norm, lm_head, evidence head
 
   - path: .models/basal-1.5-mini
+    # device: 1
+    # CUDA replicas instead of device: an independent copy of the model on each listed GPU under its one name, each
+    # with its own queue, scheduler, caches and long lane; a request goes to the replica with the fewest waiting and
+    # running requests. Distinct ordinals of GPUs of one type (name, compute capability, SM count); several replicas
+    # share one batch-invariant GEMM table checked on every GPU (Omni without a matching table: fixed per-prompt
+    # GEMMs), so gemm_table must not be none. One element is the
+    # same as device. Also `basal serve --model mini --replica-devices 0,1`.
+    # replica_devices: [0, 1]

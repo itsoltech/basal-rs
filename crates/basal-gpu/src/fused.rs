@@ -104,38 +104,59 @@ pub(crate) mod cu {
     // PTX: [(compute capability, PTX)], ascending (build.rs)
     include!(concat!(env!("OUT_DIR"), "/kernels_ptx.rs"));
 
-    static SELECTED: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
-    static CAP: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-
-    /// Choose the PTX for a GPU of compute capability `cap` (major * 10 + minor): the highest architecture not
-    /// above it. None when the GPU is older than every compiled architecture.
-    pub fn select(cap: u32) -> Option<u32> {
-        let &(c, p) = PTX.iter().rev().find(|(c, _)| *c <= cap)?;
-        let _ = SELECTED.set(p);
-        let _ = CAP.set(cap);
-        Some(c)
+    /// The compiled architecture and PTX for a GPU of compute capability `cap` (major * 10 + minor): the highest
+    /// architecture not above it. None when the GPU is older than every compiled architecture.
+    pub fn select(cap: u32) -> Option<(u32, &'static str)> {
+        PTX.iter().rev().find(|(c, _)| *c <= cap).copied()
     }
 
-    /// Streaming multiprocessors of the device (queried once).
-    pub fn sm_count(dev: &CudaDevice) -> candle_core::Result<u32> {
+    /// Kernel choices of one GPU: its compute capability, the PTX chosen by [`select`] and its multiprocessors.
+    #[derive(Clone, Copy)]
+    struct Arch {
+        cap: u32,
+        ptx: &'static str,
+        sms: u32,
+    }
+
+    /// By CUDA ordinal (the process-visible index of the physical GPU, shared by every candle device on it): GPUs of
+    /// one process may differ in architecture, so no choice of one GPU applies to another.
+    static ARCHS: std::sync::OnceLock<Mutex<HashMap<usize, Arch>>> = std::sync::OnceLock::new();
+
+    /// The kernel choices of the GPU of `dev`, queried once per GPU.
+    fn arch(dev: &CudaDevice) -> candle_core::Result<Arch> {
         use candle_core::cuda_backend::cudarc::driver::sys::CUdevice_attribute as A;
         use candle_core::cuda_backend::WrapErr;
-        static SMS: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-        if let Some(&n) = SMS.get() {
-            return Ok(n);
+        let stream = dev.cuda_stream();
+        let ctx = stream.context();
+        let mut archs = ARCHS.get_or_init(Default::default).lock().unwrap();
+        if let Some(a) = archs.get(&ctx.ordinal()) {
+            return Ok(*a);
         }
-        let n = dev.cuda_stream().context().attribute(A::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT).w()? as u32;
-        Ok(*SMS.get_or_init(|| n))
+        let major = ctx.attribute(A::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR).w()?;
+        let minor = ctx.attribute(A::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR).w()?;
+        let cap = (major * 10 + minor) as u32;
+        let Some((_, ptx)) = select(cap) else {
+            candle_core::bail!("no kernels of this build for compute capability {major}.{minor}");
+        };
+        let sms = ctx.attribute(A::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT).w()? as u32;
+        Ok(*archs.entry(ctx.ordinal()).or_insert(Arch { cap, ptx, sms }))
     }
 
-    /// The compute_90a PTX with the Hopper attention, when the build has it and the GPU is of compute capability 9.0.
-    pub fn ptx_90a() -> Option<&'static str> {
-        PTX_90A.filter(|_| CAP.get() == Some(&90))
+    /// Streaming multiprocessors of the GPU of `dev`.
+    pub fn sm_count(dev: &CudaDevice) -> candle_core::Result<u32> {
+        Ok(arch(dev)?.sms)
     }
 
-    /// The PTX chosen by [`select`] (the lowest architecture when nothing was selected).
-    pub fn ptx() -> &'static str {
-        SELECTED.get().copied().unwrap_or(PTX[0].1)
+    /// The compute_90a PTX with the Hopper attention, when the build has it and the GPU of `dev` is of compute
+    /// capability 9.0.
+    pub fn ptx_90a(dev: &CudaDevice) -> candle_core::Result<Option<&'static str>> {
+        let cap = arch(dev)?.cap;
+        Ok(PTX_90A.filter(|_| cap == 90))
+    }
+
+    /// The PTX of the GPU of `dev` ([`select`]).
+    pub fn ptx(dev: &CudaDevice) -> candle_core::Result<&'static str> {
+        Ok(arch(dev)?.ptx)
     }
 
     /// One thread per element of `n`.
@@ -167,14 +188,20 @@ pub(crate) mod cu {
     type Funcs = HashMap<(DeviceId, &'static str, String), CudaFunction>;
     static FUNCS: std::sync::OnceLock<Mutex<Funcs>> = std::sync::OnceLock::new();
 
-    /// The kernel `name` of `module` (loaded from `ptx` the first time), looked up once per device: candle's
-    /// `get_or_load_custom_func` asks the driver for the function on every call, several hundred times per forward.
-    pub fn func(dev: &CudaDevice, name: &str, module: &'static str, ptx: &'static str) -> candle_core::Result<Kernel> {
+    /// The kernel `name` of `module` (loaded the first time from the PTX `ptx` returns for the GPU of `dev`, e.g.
+    /// [`ptx`]), looked up once per device: candle's `get_or_load_custom_func` asks the driver for the function on
+    /// every call, several hundred times per forward.
+    pub fn func(
+        dev: &CudaDevice,
+        name: &str,
+        module: &'static str,
+        ptx: impl FnOnce(&CudaDevice) -> candle_core::Result<&'static str>,
+    ) -> candle_core::Result<Kernel> {
         let key = (dev.id(), module, name.to_string());
         let mut funcs = FUNCS.get_or_init(Default::default).lock().unwrap();
         let fresh = !funcs.contains_key(&key);
         if fresh {
-            let f = dev.get_or_load_custom_func(name, module, ptx)?.into_cuda_function();
+            let f = dev.get_or_load_custom_func(name, module, ptx(dev)?)?.into_cuda_function();
             funcs.insert(key.clone(), f);
         }
         Ok(Kernel { func: funcs[&key].clone(), stream: dev.cuda_stream(), fresh })
@@ -242,7 +269,7 @@ impl CustomOp2 for BiasSiluMul {
             // 8 outputs per thread with 16-byte accesses when the layout allows it (same arithmetic per element)
             let vec8 = S != "f32" && i % 8 == 0 && go % 8 == 0 && bo % 8 == 0;
             let name = if vec8 { format!("bias_silu_mul8_{S}") } else { format!("bias_silu_mul_{S}") };
-            let f = cu::func(&dev, &name, "basal_fused", cu::ptx())?;
+            let f = cu::func(&dev, &name, "basal_fused", cu::ptx)?;
             let mut a = f.builder();
             let threads = if vec8 { total / 8 } else { total };
             let (i_, n_) = (i as u32, threads as u32);
@@ -257,7 +284,7 @@ impl CustomOp2 for BiasSiluMul {
                 Ok("1024") => Some(1024),
                 _ => None,
             }))
-            .unwrap_or(if vec8 && S == "f16" && cu::ptx_90a().is_some() { 256 } else { 1024 });
+            .unwrap_or(if vec8 && S == "f16" && cu::ptx_90a(&dev)?.is_some() { 256 } else { 1024 });
             let cfg = candle_core::cuda_backend::cudarc::driver::LaunchConfig {
                 grid_dim: ((threads as u32).div_ceil(block), 1, 1),
                 block_dim: (block, 1, 1),
@@ -307,8 +334,15 @@ pub fn bias_silu_mul(gu: &Tensor, bias: &Tensor) -> Result<Tensor> {
 /// order), with one read of the residual stream instead of two. Returns (x, normed) as views of one [2, M, H] buffer.
 #[cfg(feature = "cuda")]
 pub fn residual_rmsnorm(x: &Tensor, y: &Tensor, b: &Tensor, alpha: &Tensor, eps: f32) -> Result<(Tensor, Tensor)> {
-    let out = x.apply_op3_no_bwd(y, b, &ResidualRmsNorm { alpha: alpha.clone(), eps })?;
+    let out = residual_rmsnorm_buf(x, y, b, alpha, eps)?;
     Ok((out.get(0)?, out.get(1)?))
+}
+
+/// [`residual_rmsnorm`] as its one `[2, M, H]` buffer (x in row 0, normed in row 1), contiguous from offset 0: the
+/// activations a layer split moves to the next GPU in one copy.
+#[cfg(feature = "cuda")]
+pub fn residual_rmsnorm_buf(x: &Tensor, y: &Tensor, b: &Tensor, alpha: &Tensor, eps: f32) -> Result<Tensor> {
+    x.apply_op3_no_bwd(y, b, &ResidualRmsNorm { alpha: alpha.clone(), eps })
 }
 
 #[cfg(feature = "cuda")]
@@ -342,6 +376,7 @@ impl CustomOp3 for ResidualRmsNorm {
         b: &CudaStorage,
         bl: &Layout,
     ) -> Result<(CudaStorage, Shape)> {
+        use candle_core::backend::BackendDevice;
         use candle_core::cuda_backend::{
             cudarc::driver::{LaunchConfig, PushKernelArg},
             WrapErr,
@@ -353,6 +388,14 @@ impl CustomOp3 for ResidualRmsNorm {
         let candle_core::Storage::Cuda(acs) = &*ast else {
             candle_core::bail!("residual-rmsnorm: alpha must be on the CUDA device");
         };
+        // alpha is read through a raw pointer, outside candle's operand device check: it must be on x's GPU
+        if acs.device.location() != dev.location() {
+            candle_core::bail!(
+                "residual-rmsnorm: alpha on {:?}, x on {:?} (one GPU expected)",
+                acs.device.location(),
+                dev.location()
+            );
+        }
         let ao = contiguous(al, "alpha")?;
         let st = by_dtype!(x.dtype(), |T, S| {
             let (xv, yv, bv, av) = (view!(x, T, xo), view!(y, T, yo), view!(b, T, bo), view!(acs, T, ao));
@@ -362,7 +405,7 @@ impl CustomOp3 for ResidualRmsNorm {
             let keep = *KEEP.get_or_init(|| std::env::var("BASAL_NORM").as_deref() == Ok("register"))
                 && (1024..=8192).contains(&h);
             let name = if keep { format!("residual_rmsnorm_keep_{S}") } else { format!("residual_rmsnorm_{S}") };
-            let f = cu::func(&dev, &name, "basal_fused", cu::ptx())?;
+            let f = cu::func(&dev, &name, "basal_fused", cu::ptx)?;
             let mut a = f.builder();
             let (h_, m_, eps) = (h as u32, m as u32, self.eps);
             a.arg(&xv).arg(&yv).arg(&bv).arg(&av).arg(&out).arg(&h_).arg(&m_).arg(&eps);
@@ -415,7 +458,7 @@ impl CustomOp3 for BiasResidual {
             let (xv, yv, bv) = (view!(x, T, xo), view!(y, T, yo), view!(b, T, bo));
             // SAFETY: every element is written by the kernel.
             let out = unsafe { dev.alloc::<T>(total)? };
-            let f = cu::func(&dev, &format!("bias_residual_{S}"), "basal_fused", cu::ptx())?;
+            let f = cu::func(&dev, &format!("bias_residual_{S}"), "basal_fused", cu::ptx)?;
             let mut a = f.builder();
             let (h_, n_) = (h as u32, total as u32);
             a.arg(&xv).arg(&yv).arg(&bv).arg(&out).arg(&h_).arg(&n_);
@@ -508,7 +551,7 @@ impl CustomOp3 for QkvRope {
         let out = unsafe { dev.alloc::<f32>(n)? };
         by_dtype!(qkv.dtype(), |T, S| {
             let (qv, bv) = (view!(qkv, T, qo), view!(b, T, bo));
-            let f = cu::func(&dev, &format!("qkv_rope_{S}"), "basal_fused", cu::ptx())?;
+            let f = cu::func(&dev, &format!("qkv_rope_{S}"), "basal_fused", cu::ptx)?;
             let mut a = f.builder();
             let c = [d.b as u32, d.l as u32, d.nh as u32, d.nkv as u32, d.hd as u32];
             a.arg(&qv).arg(&bv).arg(&csv).arg(&out).arg(&c[0]).arg(&c[1]).arg(&c[2]).arg(&c[3]).arg(&c[4]);
@@ -607,7 +650,7 @@ impl CustomOp1 for MergeHeads {
         let st = by_dtype!(dt, |T, S| {
             // SAFETY: every element is written by the kernel.
             let out = unsafe { dev.alloc::<T>(n)? };
-            let f = cu::func(&dev, &format!("merge_heads_{S}"), "basal_fused", cu::ptx())?;
+            let f = cu::func(&dev, &format!("merge_heads_{S}"), "basal_fused", cu::ptx)?;
             let mut a = f.builder();
             let c = [d.b as u32, d.l as u32, d.nh as u32, d.hd as u32];
             a.arg(&xv).arg(&out).arg(&c[0]).arg(&c[1]).arg(&c[2]).arg(&c[3]);
@@ -668,7 +711,7 @@ impl CustomOp2 for MaskedSoftmax {
         let (sv, mv) = (view!(s, f32, contiguous(sl, "scores")?), view!(m, f32, contiguous(ml, "mask")?));
         // SAFETY: every element is written by the kernel.
         let out = unsafe { dev.alloc::<f32>(n)? };
-        let f = cu::func(&dev, "masked_softmax_f32", "basal_fused", cu::ptx())?;
+        let f = cu::func(&dev, "masked_softmax_f32", "basal_fused", cu::ptx)?;
         let mut a = f.builder();
         let (l_, lk_) = (self.l as u32, lk as u32);
         a.arg(&sv).arg(&mv).arg(&out).arg(&l_).arg(&lk_).arg(&self.scale);
@@ -737,7 +780,7 @@ impl CustomOp3 for GemmaAudioAttention<'_> {
         // SAFETY: validated n is 1..=751. Every one of n*8 complete warps writes its 128
         // output features exactly once, four per lane, before any subsequent operation reads them.
         let out = unsafe { dev.alloc::<f32>(n * 8 * 128)? };
-        let f = cu::func(&dev, "gemma_audio_attention_f32", "basal_fused", cu::ptx())?;
+        let f = cu::func(&dev, "gemma_audio_attention_f32", "basal_fused", cu::ptx)?;
         let mut a = f.builder();
         let frames = n as u32;
         a.arg(&q).arg(&k).arg(&v).arg(&r).arg(&valid).arg(&out).arg(&frames);
@@ -837,7 +880,7 @@ impl CustomOp3 for LetterLogits {
         let out = unsafe { dev.alloc::<f32>(r * u)? };
         by_dtype!(h.dtype(), |T, S| {
             let hv = view!(h, T, ho);
-            let f = cu::func(&dev, &format!("letter_logits_{S}"), "basal_fused", cu::ptx())?;
+            let f = cu::func(&dev, &format!("letter_logits_{S}"), "basal_fused", cu::ptx)?;
             let mut a = f.builder();
             let c = [r as u32, u as u32, hd as u32];
             a.arg(&hv).arg(&wv).arg(&iv).arg(&out).arg(&c[0]).arg(&c[1]).arg(&c[2]);
@@ -1032,12 +1075,14 @@ impl CustomOp3 for AttentionTree<'_> {
             ("attn_tree_wgp64", 2) => "attn_tree_wgp64_sw128",
             (name, _) => name,
         };
-        let f = match (name, cu::ptx_90a()) {
-            (name, Some(ptx)) if name.starts_with("attn_tree_wg") => cu::func(&dev, name, "basal_fused_90a", ptx)?,
+        let f = match (name, cu::ptx_90a(&dev)?) {
+            (name, Some(ptx)) if name.starts_with("attn_tree_wg") => {
+                cu::func(&dev, name, "basal_fused_90a", |_| Ok(ptx))?
+            }
             (name, None) if name.starts_with("attn_tree_wg") => {
                 candle_core::bail!("BASAL_ATT={name} needs a Hopper GPU (compute capability 9.0)")
             }
-            _ => cu::func(&dev, name, "basal_fused", cu::ptx())?,
+            _ => cu::func(&dev, name, "basal_fused", cu::ptx)?,
         };
         if smem > 0 && f.fresh {
             use candle_core::cuda_backend::cudarc::driver::sys::CUfunction_attribute;
@@ -1128,27 +1173,32 @@ impl CustomOp3 for AttentionTree<'_> {
 /// candidates with the arithmetic of `tc`; their runtime parity and speed must be measured before promotion.
 /// `tc-static`, `tc-qk1-static` and `tc-f16-static` specialize their parent's exact-f16 V/output handling;
 /// other V/output dtypes retain the parent kernel. The per-backend inference policy may override this selector.
-/// Softmax and accumulation stay f32; supported kernels write merged f16/bf16 output when requested.
+/// Softmax and accumulation stay f32; supported kernels write merged f16/bf16 output when requested. The default
+/// depends on the GPU of `dev`.
 #[cfg(feature = "cuda")]
-pub fn tc_kernel() -> &'static str {
-    static K: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
-    K.get_or_init(|| match std::env::var("BASAL_ATT").as_deref() {
-        Ok("tc") => "attn_tree_tc",
-        Ok("tc-static") => "attn_tree_tc_static",
-        Ok("tc-qk1-static") => "attn_tree_tc_qk1_static",
-        Ok("tc-f16-static") => "attn_tree_tc_f16_static",
-        Ok("tc64") => "attn_tree_tc64",
-        Ok("tc-sw128") => "attn_tree_tc_sw128",
-        Ok("tc64-sw128") => "attn_tree_tc64_sw128",
-        Ok("tc-pv1") => "attn_tree_tc_pv1",
-        Ok("tc-qk1") => "attn_tree_tc_qk1",
-        Ok("tc-f16") => "attn_tree_tc_f16",
-        Ok("tc-pipe") => "attn_tree_tc_pipe",
-        Ok("wg") => "attn_tree_wg",
-        Ok("wgp") => "attn_tree_wgp",
-        Ok("wgp64") => "attn_tree_wgp64",
-        _ if cu::ptx_90a().is_some() => "attn_tree_wgp",
-        _ => "attn_tree_tc",
+pub fn tc_kernel(dev: &candle_core::CudaDevice) -> Result<&'static str> {
+    static K: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
+    let forced = *K.get_or_init(|| match std::env::var("BASAL_ATT").as_deref() {
+        Ok("tc") => Some("attn_tree_tc"),
+        Ok("tc-static") => Some("attn_tree_tc_static"),
+        Ok("tc-qk1-static") => Some("attn_tree_tc_qk1_static"),
+        Ok("tc-f16-static") => Some("attn_tree_tc_f16_static"),
+        Ok("tc64") => Some("attn_tree_tc64"),
+        Ok("tc-sw128") => Some("attn_tree_tc_sw128"),
+        Ok("tc64-sw128") => Some("attn_tree_tc64_sw128"),
+        Ok("tc-pv1") => Some("attn_tree_tc_pv1"),
+        Ok("tc-qk1") => Some("attn_tree_tc_qk1"),
+        Ok("tc-f16") => Some("attn_tree_tc_f16"),
+        Ok("tc-pipe") => Some("attn_tree_tc_pipe"),
+        Ok("wg") => Some("attn_tree_wg"),
+        Ok("wgp") => Some("attn_tree_wgp"),
+        Ok("wgp64") => Some("attn_tree_wgp64"),
+        _ => None,
+    });
+    Ok(match forced {
+        Some(k) => k,
+        None if cu::ptx_90a(dev)?.is_some() => "attn_tree_wgp",
+        None => "attn_tree_tc",
     })
 }
 
@@ -1164,8 +1214,16 @@ pub fn attention_tree(
     scale: f32,
     tc: Option<(&Tensor, &Tensor, bool)>,
     merge: Option<DType>,
-    kernel: &'static str,
+    kernel_override: Option<&'static str>,
 ) -> Result<Tensor> {
+    let candle_core::Device::Cuda(dev) = qkv.device() else {
+        candle_core::bail!("attention_tree: qkv must be on a CUDA device");
+    };
+    // the per-backend inference policy (fixed before warmup) wins over the GPU's default
+    let kernel = match kernel_override {
+        Some(k) => k,
+        None => tc_kernel(dev)?,
+    };
     // the tensor-core kernels (except tc-pipe) write merged heads themselves, bitwise as merge_heads would
     let in_kernel =
         merge.filter(|&dt| tc.is_some() && kernel != "attn_tree_tc_pipe" && matches!(dt, DType::F16 | DType::BF16));
@@ -1369,7 +1427,7 @@ impl CustomOp1 for SplitHiLo {
         let xv = view!(x, f32, contiguous(xl, "x")?);
         // SAFETY: both planes are written by the kernel.
         let out = unsafe { dev.alloc::<half::f16>(2 * n)? };
-        let f = cu::func(&dev, "split_hilo_f32", "basal_fused", cu::ptx())?;
+        let f = cu::func(&dev, "split_hilo_f32", "basal_fused", cu::ptx)?;
         let mut a = f.builder();
         let n64 = n as u64;
         a.arg(&xv).arg(&out).arg(&n64);
@@ -1439,7 +1497,7 @@ impl CustomOp2 for GemmaMaskedSoftmax {
         // SAFETY: validated nonzero score dimensions fit u32. One block owns each row;
         // its strided loops write every one of the row's key columns exactly once.
         let out = unsafe { dev.alloc::<f32>(n)? };
-        let f = cu::func(&dev, "gemma_masked_softmax_f32", "basal_fused", cu::ptx())?;
+        let f = cu::func(&dev, "gemma_masked_softmax_f32", "basal_fused", cu::ptx)?;
         let mut a = f.builder();
         let args = [
             *queries as u32,

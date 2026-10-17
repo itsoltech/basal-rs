@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
 use crate::config::{self, ServeConfig};
@@ -76,10 +76,10 @@ pub fn run(file: Option<PathBuf>, model_refs: &[String], as_json: bool) -> Resul
     let mut r = Report::default();
     build(&mut r);
     system(&mut r);
-    let gpu_budget = gpu(&mut r);
+    let gpus = gpu(&mut r);
     let config = configuration(&mut r, file, model_refs);
     if let Some(c) = &config {
-        models(&mut r, c, gpu_budget);
+        models(&mut r, c, gpus.as_deref());
         port(&mut r, c);
     }
     let worst = r.0.iter().map(|c| c.level).max().unwrap_or(Level::Ok);
@@ -190,17 +190,29 @@ fn memory_bytes() -> Option<u64> {
     }
 }
 
-/// GPU checks; returns the memory available to the models (bytes) when known.
-fn gpu(r: &mut Report) -> Option<u64> {
+/// A GPU `basal serve` selects with the `device` number of a model.
+struct Gpu {
+    name: String,
+    /// memory available to the models (bytes), when known
+    memory: Option<u64>,
+    /// CUDA compute capability
+    cap: Option<(u32, u32)>,
+    /// CUDA streaming multiprocessors
+    sms: Option<u32>,
+}
+
+/// GPU checks; returns the GPUs by `device` number, None when the numbers are unknown. CUDA: the devices the driver
+/// shows this process, by ordinal (the numbering of `basal serve` started with the same environment).
+fn gpu(r: &mut Report) -> Option<Vec<Gpu>> {
     #[cfg(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos")))]
-    return intel_gpu(r);
+    return intel_gpu(r).map(|g| vec![g]);
     #[cfg(not(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos"))))]
     candle_gpu(r)
 }
 
 /// The Intel Vulkan device the backend selects and its heap budget, queried through one device.
 #[cfg(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos")))]
-fn intel_gpu(r: &mut Report) -> Option<u64> {
+fn intel_gpu(r: &mut Report) -> Option<Gpu> {
     let info = match basal_gpu::intel::info() {
         Ok(info) => info,
         Err(e) => {
@@ -209,7 +221,7 @@ fn intel_gpu(r: &mut Report) -> Option<u64> {
         }
     };
     r.ok("gpu", format!("{}; Intel Vulkan, {}", info.name, info.driver));
-    match info.memory {
+    let memory = match info.memory {
         Ok(memory) => {
             if memory.unified {
                 r.info("gpu", "GPU shares host RAM; weights and activations compete with the desktop");
@@ -225,7 +237,8 @@ fn intel_gpu(r: &mut Report) -> Option<u64> {
             );
             None
         }
-    }
+    };
+    Some(Gpu { name: info.name, memory, cap: None, sms: None })
 }
 
 /// Metal or NVIDIA CUDA checks.
@@ -233,7 +246,7 @@ fn intel_gpu(r: &mut Report) -> Option<u64> {
     all(feature = "intel", not(feature = "cuda"), not(target_os = "macos")),
     expect(dead_code, reason = "the Intel build checks its Vulkan device instead")
 )]
-fn candle_gpu(r: &mut Report) -> Option<u64> {
+fn candle_gpu(r: &mut Report) -> Option<Vec<Gpu>> {
     if cfg!(target_os = "macos") {
         if std::env::consts::ARCH != "aarch64" {
             r.fail("gpu", "Intel Mac: the Metal backend needs Apple Silicon (M1 or newer)", "use an Apple Silicon Mac");
@@ -243,7 +256,7 @@ fn candle_gpu(r: &mut Report) -> Option<u64> {
         match basal_gpu::metal_info() {
             Some((name, ws)) => {
                 r.ok("gpu", format!("{name}, Metal; recommended working set {:.1} GiB", ws as f64 / GIB));
-                return Some(ws);
+                return Some(vec![Gpu { name, memory: Some(ws), cap: None, sms: None }]);
             }
             None => r.fail("gpu", "no Metal device", "Metal is part of macOS on Apple Silicon; check the system"),
         }
@@ -266,7 +279,8 @@ fn candle_gpu(r: &mut Report) -> Option<u64> {
         cuda_libs(r);
         return None;
     };
-    let mut budget = None;
+    // the inventory of the machine, numbered as nvidia-smi numbers it (not necessarily as CUDA does)
+    let mut caps = Vec::new();
     for (i, line) in q.lines().enumerate() {
         let f: Vec<&str> = line.split(',').map(str::trim).collect();
         if f.len() < 4 {
@@ -274,9 +288,13 @@ fn candle_gpu(r: &mut Report) -> Option<u64> {
         }
         let (name, driver, cap, mem_mib) = (f[0], f[1], f[2], f[3]);
         let mem = mem_mib.parse::<u64>().ok().map(|m| m * 1024 * 1024);
-        r.ok("gpu", format!("GPU {i}: {name}, {:.1} GiB, compute capability {cap}", mem.unwrap_or(0) as f64 / GIB));
+        r.ok(
+            "gpu",
+            format!("nvidia-smi GPU {i}: {name}, {:.1} GiB, compute capability {cap}", mem.unwrap_or(0) as f64 / GIB),
+        );
+        caps.push(version_pair(cap));
+        // one driver serves every GPU
         if i == 0 {
-            budget = mem;
             let d = version_pair(driver);
             if d.is_some_and(|d| d >= MIN_DRIVER) {
                 r.ok("gpu", format!("driver {driver}"));
@@ -290,20 +308,121 @@ fn candle_gpu(r: &mut Report) -> Option<u64> {
                     "update the NVIDIA driver",
                 );
             }
-            if version_pair(cap).is_some_and(|c| c < MIN_COMPUTE_CAP) {
-                r.fail(
-                    "gpu",
-                    format!(
-                        "compute capability {cap}: the kernels need {}.{} or newer (A100, RTX 30xx and later)",
-                        MIN_COMPUTE_CAP.0, MIN_COMPUTE_CAP.1
-                    ),
-                    "use a newer GPU",
-                );
-            }
         }
     }
+    // every GPU of the machine is too old, so none the process may see runs the kernels
+    if !caps.is_empty() && caps.iter().all(|c| c.is_some_and(|c| c < MIN_COMPUTE_CAP)) {
+        r.fail("gpu", min_cap_message("every GPU"), "use a newer GPU");
+    }
+    let devices = cuda_devices(r);
     cuda_libs(r);
-    budget
+    devices
+}
+
+fn min_cap_message(what: &str) -> String {
+    format!(
+        "{what}: the kernels need compute capability {}.{} or newer (A100, RTX 30xx and later)",
+        MIN_COMPUTE_CAP.0, MIN_COMPUTE_CAP.1
+    )
+}
+
+/// The CUDA devices of this process by ordinal, as `basal serve` started with the same environment numbers them;
+/// None when the driver cannot be asked.
+fn cuda_devices(r: &mut Report) -> Option<Vec<Gpu>> {
+    for var in ["CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER"] {
+        if let Some(v) = std::env::var_os(var) {
+            r.info("gpu", format!("{var}={}", v.to_string_lossy()));
+        }
+    }
+    let devices = match query_cuda_devices() {
+        Ok(d) => d,
+        Err(e) => {
+            r.warn(
+                "gpu",
+                format!("CUDA devices unknown: {e:#}"),
+                "the memory and compute capability of each model's `device` are not checked; check the NVIDIA \
+                 driver (libcuda.so.1)",
+            );
+            return None;
+        }
+    };
+    if devices.is_empty() {
+        r.warn("gpu", "the CUDA driver shows this process no GPU", "check CUDA_VISIBLE_DEVICES");
+    }
+    for (i, d) in devices.iter().enumerate() {
+        let cap = d.cap.map_or_else(|| "unknown".to_string(), |(a, b)| format!("{a}.{b}"));
+        let mem = d.memory.map_or_else(|| "memory unknown".to_string(), |m| format!("{:.1} GiB", m as f64 / GIB));
+        r.ok("gpu", format!("CUDA device {i}: {}, {mem}, compute capability {cap}", d.name));
+    }
+    Some(devices)
+}
+
+/// The devices from the CUDA driver API (libcuda.so.1, the driver's own library), which applies
+/// `CUDA_VISIBLE_DEVICES` and `CUDA_DEVICE_ORDER` as the CUDA build does; no context is created.
+fn query_cuda_devices() -> Result<Vec<Gpu>> {
+    use std::ffi::{c_char, c_int, c_uint, CStr};
+    // CUresult and CUdevice_attribute are C enums, CUdevice an int (cuda.h)
+    type CuResult = c_uint;
+    type CuDevice = c_int;
+    const SUCCESS: CuResult = 0;
+    const ERROR_NO_DEVICE: CuResult = 100;
+    const CAP_MAJOR: c_uint = 75;
+    const CAP_MINOR: c_uint = 76;
+    const MULTIPROCESSORS: c_uint = 16;
+    // SAFETY: loads the NVIDIA driver library by its fixed name. The handle is leaked: cuInit may start driver threads
+    // running the library's code, so it must stay mapped for the rest of the process.
+    let lib: &'static libloading::Library =
+        Box::leak(Box::new(unsafe { libloading::Library::new("libcuda.so.1") }.context("loading libcuda.so.1")?));
+    // SAFETY: the signatures of the CUDA driver API (cuda.h, a stable C ABI); cuDeviceTotalMem_v2 is the size_t
+    // variant cuda.h maps cuDeviceTotalMem to. The library stays loaded (above), so the functions stay valid.
+    let (init, count, get, name, total_mem, attribute) = unsafe {
+        (
+            *lib.get::<unsafe extern "C" fn(c_uint) -> CuResult>(b"cuInit\0")?,
+            *lib.get::<unsafe extern "C" fn(*mut c_int) -> CuResult>(b"cuDeviceGetCount\0")?,
+            *lib.get::<unsafe extern "C" fn(*mut CuDevice, c_int) -> CuResult>(b"cuDeviceGet\0")?,
+            *lib.get::<unsafe extern "C" fn(*mut c_char, c_int, CuDevice) -> CuResult>(b"cuDeviceGetName\0")?,
+            *lib.get::<unsafe extern "C" fn(*mut usize, CuDevice) -> CuResult>(b"cuDeviceTotalMem_v2\0")?,
+            *lib.get::<unsafe extern "C" fn(*mut c_int, c_uint, CuDevice) -> CuResult>(b"cuDeviceGetAttribute\0")?,
+        )
+    };
+    let check = |what: &str, res: CuResult| {
+        anyhow::ensure!(res == SUCCESS, "{what}: CUDA driver error {res}");
+        Ok(())
+    };
+    // SAFETY: cuInit takes flags (0, the only valid value) and may be called any number of times
+    match unsafe { init(0) } {
+        SUCCESS => {}
+        // CUDA_VISIBLE_DEVICES hides every GPU, or there is none
+        ERROR_NO_DEVICE => return Ok(Vec::new()),
+        res => check("cuInit", res)?,
+    }
+    let mut n: c_int = 0;
+    // SAFETY: the driver is initialised; `n` is a valid out-pointer for the call
+    check("cuDeviceGetCount", unsafe { count(&mut n) })?;
+    (0..n)
+        .map(|ordinal| {
+            let mut dev: CuDevice = 0;
+            // SAFETY: ordinal in 0..count; `dev` is a valid out-pointer
+            check("cuDeviceGet", unsafe { get(&mut dev, ordinal) })?;
+            let mut buf = [0u8; 256];
+            // SAFETY: `buf` is writable for the length passed (256 fits c_int); the driver writes at most that many
+            // bytes. The name is read up to the first NUL inside `buf` below, so a missing terminator is harmless.
+            check("cuDeviceGetName", unsafe { name(buf.as_mut_ptr().cast(), 256, dev) })?;
+            let name = CStr::from_bytes_until_nul(&buf)
+                .map_or_else(|_| String::from_utf8_lossy(&buf).into_owned(), |s| s.to_string_lossy().into_owned());
+            let mut bytes = 0usize;
+            // SAFETY: `dev` from cuDeviceGet; `bytes` is a valid out-pointer
+            let res = unsafe { total_mem(&mut bytes, dev) };
+            let memory = (res == SUCCESS).then_some(bytes as u64);
+            let attr = |a: c_uint| {
+                let mut v: c_int = 0;
+                // SAFETY: `dev` from cuDeviceGet, `a` a valid attribute; `v` is a valid out-pointer
+                (unsafe { attribute(&mut v, a, dev) } == SUCCESS).then(|| u32::try_from(v).ok()).flatten()
+            };
+            let cap = attr(CAP_MAJOR).zip(attr(CAP_MINOR));
+            Ok(Gpu { name, memory, cap, sms: attr(MULTIPROCESSORS) })
+        })
+        .collect()
 }
 
 fn version_pair(v: &str) -> Option<(u32, u32)> {
@@ -391,14 +510,60 @@ fn configuration(r: &mut Report, file: Option<PathBuf>, model_refs: &[String]) -
     }
 }
 
-fn models(r: &mut Report, c: &ServeConfig, gpu_budget: Option<u64>) {
-    let (mut download, mut resident) = (0u64, 0u64);
+fn models(r: &mut Report, c: &ServeConfig, gpus: Option<&[Gpu]>) {
+    let mut download = 0u64;
+    // checkpoint bytes of the models of each device
+    let mut resident = std::collections::BTreeMap::<usize, u64>::new();
     let mut repos = Vec::new();
+    // replica groups and layer splits (several devices) whose GPUs are compared below
+    let mut groups: Vec<(String, config::Placement)> = Vec::new();
+    // the backend of `basal serve`: this build's, or the CUDA build of the Linux package
+    let cuda = cfg!(feature = "cuda") || crate::paths::cuda_binary().is_some();
     for m in &c.models {
+        // the check `basal serve` makes before any download (with its default kernel set, fused)
+        let checked = config::check_quantization(&config::describe(m), &m.quantization, &m.dtype, "fused", cuda);
+        let quantization = match checked {
+            Ok(q) => q,
+            Err(e) => {
+                r.fail("models", format!("{e:#}"), quantization_fix(&m.quantization));
+                continue;
+            }
+        };
+        let placement = match m.placement() {
+            Ok(p) => p,
+            Err(e) => {
+                r.fail(
+                    "models",
+                    format!("{}: {e:#}", config::describe(m)),
+                    "`device: N` for one GPU, `replica_devices: [N, M]` (distinct CUDA devices) for replicas, or \
+                     `layer_split: [{device: N, layers: K}, ...]` for one model over several GPUs",
+                );
+                continue;
+            }
+        };
+        // the static checks `basal serve` makes of a layer split before any download
+        if let Some(split) = placement.split() {
+            if let Err(e) = config::check_layer_split(&config::describe(m), split, &m.dtype, "fused", cuda) {
+                r.fail(
+                    "models",
+                    format!("{e:#}"),
+                    "`layer_split` runs on the CUDA build with `dtype: f16`; otherwise give the model one `device`",
+                );
+                continue;
+            }
+        }
+        if placement.shared_devices().is_some() {
+            groups.push((config::describe(m), placement.clone()));
+        }
+        // the checkpoint is loaded on every device of the model
+        let mut bytes = 0u64;
+        // q8_0 / q4_k: the weight estimate needs the model's config.json (local or cached)
+        let mut model_dir = None;
         match (&m.path, &m.repo) {
             (Some(p), _) => match std::fs::metadata(p.join("model.safetensors")) {
                 Ok(md) => {
-                    resident += md.len();
+                    bytes += md.len();
+                    model_dir = Some(p.clone());
                     r.ok("models", format!("{}: local, {:.1} GB", crate::term::P(&p), md.len() as f64 / GB));
                 }
                 Err(_) => r.fail(
@@ -413,12 +578,13 @@ fn models(r: &mut Report, c: &ServeConfig, gpu_budget: Option<u64>) {
                 match config::cached_model_dir(repo, m.revision.as_deref()) {
                     Some(dir) => {
                         let b = std::fs::metadata(dir.join("model.safetensors")).map(|m| m.len()).unwrap_or(0);
-                        resident += b;
+                        bytes += b;
                         r.ok("models", format!("{repo}@{}: cached, {:.1} GB", short(at), b as f64 / GB));
+                        model_dir = Some(dir);
                     }
                     None => {
                         download += size.unwrap_or(0);
-                        resident += size.unwrap_or(0);
+                        bytes += size.unwrap_or(0);
                         repos.push((repo.clone(), at.to_string()));
                         r.info(
                             "models",
@@ -436,18 +602,118 @@ fn models(r: &mut Report, c: &ServeConfig, gpu_budget: Option<u64>) {
             }
             _ => {}
         }
+        let checkpoint = bytes;
+        if quantization != basal_gpu::Quantization::None {
+            bytes = quantized_bytes(r, m, model_dir.as_deref(), bytes, quantization);
+        }
+        match placement.split() {
+            // the checkpoint is loaded on every device of the model
+            None => {
+                for devices in placement.instances() {
+                    for d in devices {
+                        *resident.entry(d).or_default() += bytes;
+                    }
+                }
+            }
+            // each stage holds its part of the weights
+            Some(split) => {
+                for (d, b) in split_bytes(r, m, split, model_dir.as_deref(), checkpoint, bytes, quantization) {
+                    *resident.entry(d).or_default() += b;
+                }
+            }
+        }
     }
-    // f16 weights take about the checkpoint size (bf16) on the GPU, plus activations and caches
-    if let Some(b) = gpu_budget {
+    for (model, placement) in &groups {
+        let Some(devices) = placement.shared_devices() else { continue };
+        let split = placement.split().is_some();
+        if !cuda {
+            // a layer split was refused above without the CUDA backend
+            r.fail(
+                "models",
+                format!("{model}: replicas on devices {devices:?} need the CUDA build"),
+                "remove `replica_devices` from the configuration",
+            );
+            continue;
+        }
+        // missing devices are reported per device below; GPUs of unknown type are not compared
+        let Some(gpus) = gpus else { continue };
+        let Some(kinds) = devices.iter().map(|&d| gpus.get(d)).collect::<Option<Vec<_>>>() else { continue };
+        let kind = |g: &Gpu| (g.name.clone(), g.cap, g.sms);
+        if kinds.iter().any(|g| kind(g) != kind(kinds[0])) {
+            let listed: Vec<String> = devices
+                .iter()
+                .zip(&kinds)
+                .map(|(d, g)| {
+                    let cap = g.cap.map_or_else(|| "unknown".to_string(), |(a, b)| format!("{a}.{b}"));
+                    let sms = g.sms.map_or_else(|| "unknown".to_string(), |n| n.to_string());
+                    format!("device {d}: {}, compute capability {cap}, {sms} SMs", g.name)
+                })
+                .collect();
+            if split {
+                r.fail(
+                    "models",
+                    format!("{model}: a layer split needs GPUs of one type ({})", listed.join("; ")),
+                    "list devices of one GPU type in `layer_split`; models of their own may use other GPUs",
+                );
+            } else {
+                r.fail(
+                    "models",
+                    format!("{model}: replicas need GPUs of one type ({})", listed.join("; ")),
+                    "list devices of one GPU type in `replica_devices`; models of their own may use other GPUs",
+                );
+            }
+        } else if split {
+            r.ok("models", format!("{model}: layer split over devices {devices:?} ({})", kinds[0].name));
+        } else {
+            r.ok("models", format!("{model}: {} replicas on devices {devices:?} ({})", devices.len(), kinds[0].name));
+        }
+    }
+    let several = resident.keys().any(|&d| d > 0);
+    for (&device, &resident) in &resident {
+        if device > 0 && !cuda {
+            r.fail(
+                "models",
+                format!("device {device}: this build's GPU backend runs on device 0 only"),
+                "remove `device` from the configuration (several devices need the CUDA build)",
+            );
+            continue;
+        }
+        // numbering unknown (no GPU found, or the CUDA driver cannot be asked): reported in the GPU checks
+        let Some(gpus) = gpus else { continue };
+        let Some(g) = gpus.get(device) else {
+            r.fail(
+                "models",
+                format!("device {device}: this process sees {} GPU(s), numbered from 0", gpus.len()),
+                if cuda {
+                    "set `device` of the model to one of the CUDA devices above (CUDA_VISIBLE_DEVICES selects and \
+                     renumbers them)"
+                } else {
+                    "remove `device` from the configuration"
+                },
+            );
+            continue;
+        };
+        let on = if several { format!(" on device {device} ({})", g.name) } else { String::new() };
+        if g.cap.is_some_and(|c| c < MIN_COMPUTE_CAP) {
+            r.fail("models", min_cap_message(&format!("device {device} ({})", g.name)), "give the models a newer GPU");
+        }
+        let Some(b) = g.memory else { continue };
+        // f16 weights take about the checkpoint size (bf16) on the GPU, plus activations and caches (q8_0 / q4_k
+        // models: their estimated weight bytes)
         let need = resident as f64 * 1.1;
         if need > b as f64 {
             r.warn(
                 "models",
-                format!("models need ~{:.1} GiB of GPU memory, {:.1} GiB available", need / GIB, b as f64 / GIB),
-                "serve fewer or smaller models (`basal serve --model mini`)",
+                format!("models{on} need ~{:.1} GiB of GPU memory, {:.1} GiB available", need / GIB, b as f64 / GIB),
+                if cuda {
+                    "serve fewer or smaller models (`basal serve --model mini`) or spread them over GPUs \
+                     (`device` per model)"
+                } else {
+                    "serve fewer or smaller models (`basal serve --model mini`)"
+                },
             );
         } else if resident > 0 {
-            r.ok("models", format!("GPU memory: ~{:.1} of {:.1} GiB", need / GIB, b as f64 / GIB));
+            r.ok("models", format!("GPU memory{on}: ~{:.1} of {:.1} GiB", need / GIB, b as f64 / GIB));
         }
     }
     if download > 0 {
@@ -472,6 +738,134 @@ fn models(r: &mut Report, c: &ServeConfig, gpu_budget: Option<u64>) {
         let gpus = crate::config::bundled_gpus();
         let built_in = if gpus.is_empty() { "none".to_string() } else { gpus.join(", ") };
         r.info("models", format!("GEMM tables: {}; built in for: {built_in}", crate::term::P(&gc)));
+    }
+}
+
+const QUANTIZATION_FIX: &str =
+    "`quantization: q8_0` runs on CUDA with `dtype: f16`; otherwise use `quantization: none` (default)";
+const QUANTIZATION_FIX_Q4K: &str =
+    "`quantization: q4_k` runs on CUDA with `dtype: f16`; otherwise use `quantization: none` (default)";
+
+/// The fix of a rejected `quantization`: the q4_k text for `q4_k`, otherwise the q8_0 one (also for unknown values).
+fn quantization_fix(quantization: &str) -> &'static str {
+    match quantization.parse() {
+        Ok(basal_gpu::Quantization::Q4K) => QUANTIZATION_FIX_Q4K,
+        _ => QUANTIZATION_FIX,
+    }
+}
+
+/// Estimated GPU bytes of a quantized model's weights (format arithmetic over its config.json); the checkpoint size
+/// when the configuration is not on this machine yet. `q4_k` with a known configuration whose projection K is not a
+/// multiple of 256 fails (the load would); every other estimate error is information, as for `q8_0`.
+fn quantized_bytes(
+    r: &mut Report,
+    m: &config::ModelConfig,
+    dir: Option<&Path>,
+    checkpoint: u64,
+    q: basal_gpu::Quantization,
+) -> u64 {
+    let cfg = model_config(dir);
+    if let (Ok(cfg), basal_gpu::Quantization::Q4K, Some(block)) = (&cfg, q, q.block_values()) {
+        if let Some((n, k)) = basal_gpu::projection_shapes(cfg).into_iter().find(|&(_, k)| !k.is_multiple_of(block)) {
+            r.fail(
+                "models",
+                format!(
+                    "{}: quantization q4_k needs every projection K to be a multiple of {block}; projection {n}x{k} \
+                     is not",
+                    config::describe(m)
+                ),
+                "use `quantization: none` (default) for this model, or `q8_0` when every projection K is a multiple \
+                 of 32",
+            );
+            return checkpoint;
+        }
+    }
+    let estimate = cfg.and_then(|cfg| basal_gpu::estimated_weight_bytes(&cfg, checkpoint, q));
+    match estimate {
+        Ok(b) => {
+            r.ok("models", format!("{}: {q} weights ~{:.1} GB (estimate)", config::describe(m), b as f64 / GB));
+            b
+        }
+        Err(e) => {
+            r.info(
+                "models",
+                format!(
+                    "{}: {q} weight estimate unavailable ({e:#}); the checkpoint size is used",
+                    config::describe(m)
+                ),
+            );
+            checkpoint
+        }
+    }
+}
+
+/// The configuration (`config.json`) of a model directory on this machine.
+fn model_config(dir: Option<&Path>) -> Result<basal_core::manifest::LlamaConfig> {
+    let d = dir.context("not downloaded yet")?;
+    let text = std::fs::read_to_string(d.join("config.json")).context("reading config.json")?;
+    basal_core::manifest::parse_config(&serde_json::from_str(&text).context("parsing config.json")?)
+}
+
+/// Estimated GPU bytes of each stage of a layer split (format arithmetic): with the model's configuration the layers'
+/// share plus the embedding on the first and lm_head and norm on the last stage
+/// ([`basal_gpu::estimated_stage_weight_bytes`]), after checking that the split covers the model's layers; without
+/// it, `total` (the whole model's estimate) in proportion to the stages' layer counts.
+fn split_bytes(
+    r: &mut Report,
+    m: &config::ModelConfig,
+    split: &basal_gpu::LayerSplit,
+    dir: Option<&Path>,
+    checkpoint: u64,
+    total: u64,
+    q: basal_gpu::Quantization,
+) -> Vec<(usize, u64)> {
+    let stages = split.stages();
+    let proportional = || {
+        let layers: u128 = stages.iter().map(|s| s.layers as u128).sum();
+        stages
+            .iter()
+            .map(|s| {
+                (s.device, u64::try_from(u128::from(total) * s.layers as u128 / layers.max(1)).unwrap_or(u64::MAX))
+            })
+            .collect::<Vec<_>>()
+    };
+    let Ok(cfg) = model_config(dir) else { return proportional() };
+    if let Err(e) = config::check_split_coverage(&config::describe(m), split, cfg.num_layers) {
+        r.fail(
+            "models",
+            format!("{e:#}"),
+            format!("give `layer_split` layer counts that add up to the model's {} layers", cfg.num_layers),
+        );
+        return proportional();
+    }
+    let last = stages.len().saturating_sub(1);
+    let estimates = stages
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            basal_gpu::estimated_stage_weight_bytes(&cfg, checkpoint, q, s.layers, i == 0, i == last)
+                .map(|b| (s.device, b))
+        })
+        .collect::<Result<Vec<_>>>();
+    match estimates {
+        Ok(e) => {
+            let per: Vec<String> = e.iter().map(|(d, b)| format!("device {d} ~{:.1} GB", *b as f64 / GB)).collect();
+            r.ok(
+                "models",
+                format!("{}: layer split {split}, weights {} (estimate)", config::describe(m), per.join(", ")),
+            );
+            e
+        }
+        Err(e) => {
+            r.info(
+                "models",
+                format!(
+                    "{}: layer split weight estimate unavailable ({e:#}); shares of the whole",
+                    config::describe(m)
+                ),
+            );
+            proportional()
+        }
     }
 }
 

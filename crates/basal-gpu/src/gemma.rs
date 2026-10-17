@@ -57,6 +57,8 @@ struct Kv {
 
 pub struct GemmaBackend {
     pub(crate) dev: Device,
+    /// The CUDA ordinal `dev` was opened with ([`crate::gpu_device`]).
+    pub(crate) device: usize,
     cfg: GemmaConfig,
     weights: Arc<Weights>,
     precision: Precision,
@@ -146,13 +148,14 @@ impl GemmaBackend {
         cfg: &GemmaConfig,
         precision: Precision,
         readout: Readout,
+        device: usize,
         media: bool,
     ) -> Result<Self> {
         cfg.validate()?;
         ensure!(cfg!(feature = "cuda"), "basal-omni currently requires the CUDA backend");
-        let dev = crate::gpu_device()?;
+        let dev = crate::gpu_device(device)?;
         ensure!(dev.is_cuda(), "basal-omni currently requires the CUDA backend");
-        Self::load_on(dir, cfg, precision, readout, dev, media)
+        Self::load_on(dir, cfg, precision, readout, dev, device, media)
     }
 
     fn load_on(
@@ -161,6 +164,7 @@ impl GemmaBackend {
         precision: Precision,
         readout: Readout,
         dev: Device,
+        device: usize,
         media: bool,
     ) -> Result<Self> {
         let start = Instant::now();
@@ -268,6 +272,7 @@ impl GemmaBackend {
         };
         Ok(Self {
             dev,
+            device,
             cfg: cfg.clone(),
             weights: Arc::new(weights),
             precision,
@@ -368,7 +373,7 @@ impl GemmaBackend {
         #[cfg(feature = "cuda")]
         if let Some(lt) = &self.lt {
             let value: Value = serde_json::from_str(&std::fs::read_to_string(path)?)?;
-            crate::check_gemm_table(&value)?;
+            crate::check_gemm_table(&value, self.device)?;
             let entries = crate::table_entries(&value)?;
             ensure!(
                 !entries.is_empty() && entries.iter().all(|e| e.dtype == self.precision.compute()),
@@ -898,7 +903,7 @@ impl Backend for GemmaBackend {
         Ok(output)
     }
     fn describe(&self) -> Value {
-        json!({"backend":"cuda", "architecture":if self.cfg.unified {"gemma4_unified"} else {"gemma4"},
+        json!({"backend":"cuda", "device": self.device, "architecture":if self.cfg.unified {"gemma4_unified"} else {"gemma4"},
             "precision":format!("{:?}",self.precision), "attention_products":format!("{:?}",self.attention_dtype),
             "attention_accumulation":"F32", "softmax":"F32 with positional masks on CUDA", "query_tile_max":QUERY_TILE,
             "score_workspace_mib":128, "long_attention":"unique GQA K/V", "prefill_chunk":2048,
@@ -969,6 +974,7 @@ impl Backend for GemmaBackend {
     fn fork(&self) -> Result<Self> {
         Ok(Self {
             dev: self.dev.clone(),
+            device: self.device,
             cfg: self.cfg.clone(),
             weights: self.weights.clone(),
             precision: self.precision,
