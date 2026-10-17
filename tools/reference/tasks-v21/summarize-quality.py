@@ -90,6 +90,9 @@ def main():
                          'head_calibrated_argmax_agreement':[s['argmax_agreement_cal'] for s in sections],
                          'tokens_and_coverage_equal':coverage,'served_questions':questions,'served_decision_changes':changes,
                          'automation_changes':automation_changes,'error_changes':error_changes,'gold':comp['quality'],
+                         'argmax_status':'PASS' if coverage and choices else 'FAIL',
+                         'new_task_decision_changes':[x for x in changes if x['reference'].get('type') in ('classify','verify','compress','extract')],
+                         'legacy_decision_changes':[x for x in changes if x['reference'].get('type') not in ('classify','verify','compress','extract')],
                          'categorical_status':'PASS' if coverage and choices and not changes and not error_changes else 'FAIL'}
     baseline=variants.get(a.bf16_label)
     for label,value in variants.items():

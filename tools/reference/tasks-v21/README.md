@@ -30,6 +30,12 @@ making a quality or performance claim. Retain failed exports and private process
 Use `--fp32-device cpu --reference-dtypes float32 --reference-cpu-threads N` for a
 checkpoint whose full upstream FP32 weights and activations exceed device memory.
 This changes the quality reference's device; HTTP timing still compares GPU BF16.
+`--fp32-device cpu-offload` instead retains the FP32 master weights in RAM and
+streams layers through CUDA with Accelerate; the readout head remains resident.
+It disables TF32 through the highest float32 matmul precision and records placement
+in `manifest.json`. Validate the exported probabilities against a CPU FP32 subset
+before using this reference. Neither CPU nor streamed FP32 export time is an HTTP
+performance result.
 `--native-library-path` affects only the native process. `--half-gemm-table` freezes
 f16 GEMMs in auto/f16 A/B exports; without a fixed Llama table, autotuning can pick
 different reductions. The reference exporter uses exactly the frozen API cases and

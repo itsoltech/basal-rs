@@ -31,7 +31,8 @@ def main():
     if subprocess.check_output(['git','-C',str(a.upstream),'status','--porcelain'], text=True).strip():
         p.error('upstream checkout must be immutable')
     sys.path.insert(0, str(a.upstream.resolve()))
-    from basal.prompt import model_format, render
+    from basal.prompt import model_format, render, max_options
+    from basal.server import to_items
     from transformers import AutoTokenizer
     source = a.measurement_artifacts.resolve()
     cases = [json.loads(x) for x in (source/'inputs/cases.jsonl').read_text().splitlines() if x.strip()]
@@ -55,7 +56,16 @@ def main():
                     if n < 0:raise ValueError('target shorter than prompt')
                 else:raise ValueError('cannot construct exact token length')
                 ladder.append({'id':f'{model}-{lang}-{target}','class':'text-ladder','model':model,'target_tokens':target,
-                               'request':{'state':text,'lang':lang,'questions':{'q':{'type':'choice','instructions':question,'criteria':dict(zip(['blue','red'],options))}}}})
+                               'request':{'state':text,'lang':lang,'questions':{'q':{'type':'choice','instructions':question,'criteria':dict(zip(['blue','red'],options)),'option_keys':'hide'}}}})
+    # Validate the final wire question through upstream's parser as well as the prompt renderer.
+    # In particular, option_keys changes the text that appears next to each option code.
+    tokenizers = {model: AutoTokenizer.from_pretrained(a.models_root/model) for model in a.model_names}
+    for row in ladder:
+        body = row['request']; model = row['model']; fmt = model_format(a.models_root/model)
+        item = to_items(body['state'], body['questions'], max_options(fmt), force_lang=body['lang'])[0]
+        prompt = render(tokenizers[model], item['state'], item['question'], item['options'], item['lang'], fmt)
+        if len(tokenizers[model](prompt, add_special_tokens=False).input_ids) != row['target_tokens']:
+            raise ValueError('final wire request differs from planned token length')
     text_cases = [x for x in cases if 'media' not in x and x['id'] != 'named-api']
     if not text_cases:raise ValueError('no task text cases')
     short = []

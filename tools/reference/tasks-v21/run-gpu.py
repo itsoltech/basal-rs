@@ -31,7 +31,7 @@ def main():
     p.add_argument('--upstream', type=Path)
     p.add_argument('--reference-cpu-threads', type=int, default=8)
     p.add_argument('--reference-dtypes', nargs='+', choices=['float32','bfloat16'], default=['float32','bfloat16'])
-    p.add_argument('--fp32-device', choices=['cuda','cpu'], default='cuda')
+    p.add_argument('--fp32-device', choices=['cuda','cpu','cpu-offload'], default='cuda')
     p.add_argument('--command-timeout', type=int, default=900)
     p.add_argument('--stage', choices=['native','reference','both'], default='both')
     a = p.parse_args()
@@ -96,7 +96,8 @@ def main():
         for dtype in a.reference_dtypes:
             tag='upstream-'+dtype
             argv=[a.reference_python,exporter,'--model',a.model_dir,'--out',out/tag,'--dtype',dtype,'--orders','1',
-                  '--questions',out/'inputs/all/bench.jsonl','--n','0','--cases',out/'inputs/all/systemone.jsonl','--exact-cases','--device',a.fp32_device if dtype=='float32' else 'cuda']
+                  '--questions',out/'inputs/all/bench.jsonl','--n','0','--cases',out/'inputs/all/systemone.jsonl','--exact-cases','--device',('cpu' if a.fp32_device=='cpu-offload' else a.fp32_device) if dtype=='float32' else 'cuda']
+            if dtype=='float32' and a.fp32_device=='cpu-offload':argv+=['--fp32-cpu-offload']
             if a.media:argv+=['--media']
             run(tag,argv,env)
     method['status']='completed' if statuses and all(r['exit_code']==0 for r in statuses) else 'partial';save()

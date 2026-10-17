@@ -151,6 +151,7 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--dtype", choices=["float32", "bfloat16"], default="float32")
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--fp32-cpu-offload", action="store_true", help="Keep FP32 master weights in CPU RAM and stream layers to CUDA; quality reference only")
     ap.add_argument("--orders", default="1", choices=["1", "2"])
     ap.add_argument("--media", action="store_true")
     ap.add_argument("--questions")
@@ -161,6 +162,8 @@ def main():
     a = ap.parse_args()
     if (a.cases_only or a.exact_cases) and not a.cases:
         ap.error("--cases-only/--exact-cases requires --cases")
+    if a.fp32_cpu_offload and (a.dtype != "float32" or a.device != "cpu"):
+        ap.error("--fp32-cpu-offload requires --dtype float32 --device cpu")
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=False)
     start = time.monotonic()
@@ -169,12 +172,37 @@ def main():
     if a.media:
         argv += ["--media", "on"]
     srv = Server(parser().parse_args(argv))
+    reference_execution = {"forward_device": a.device, "weights": "resident"}
+    if a.fp32_cpu_offload:
+        from accelerate import cpu_offload
+        from accelerate.hooks import remove_hook_from_module
+        be = srv.backend
+        if any(p.is_floating_point() and p.dtype != torch.float32 for p in be.model.parameters()):
+            raise ValueError("FP32 reference contains non-FP32 parameters")
+        torch.set_float32_matmul_precision("highest")
+        # Only placement changes. Original FP32 weights remain in RAM and every forward operation runs on CUDA.
+        # The upstream backend reads code rows after the model call, so the readout needs a resident head.
+        # A separate allocation preserves the values of the originally tied embedding/readout weights.
+        head = be.head
+        weight = head.weight.detach()
+        bias = head.bias.detach() if head.bias is not None else None
+        cpu_offload(be.model, execution_device=torch.device("cuda:0"), offload_buffers=False)
+        remove_hook_from_module(head)
+        head.weight = torch.nn.Parameter(weight.to("cuda:0"), requires_grad=False)
+        if bias is not None:
+            head.bias = torch.nn.Parameter(bias.to("cuda:0"), requires_grad=False)
+        be.dev = "cuda:0"
+        reference_execution = {"forward_device": "cuda:0", "master_weights": "CPU FP32", "layer_streaming": True,
+                               "resident_head_bytes": head.weight.numel() * head.weight.element_size(),
+                               "matmul_precision": torch.get_float32_matmul_precision(),
+                               "cuda_tf32_allowed": torch.backends.cuda.matmul.allow_tf32,
+                               "scope": "Quality reference only; excluded from all HTTP performance comparisons"}
     capture_codes(srv.backend)
     asyncio.run(export(srv, a, out))
     import subprocess
     manifest = dict(tool=Path(__file__).name, exporter_sha256=sha256(__file__), upstream_revision=subprocess.check_output(
         ["git", "-C", str(UPSTREAM), "rev-parse", "HEAD"], text=True).strip(),
-        model=srv.name, dtype=a.dtype, prompt_format=srv.fmt, orders=srv.orders, media=a.media,
+        model=srv.name, dtype=a.dtype, reference_execution=reference_execution, prompt_format=srv.fmt, orders=srv.orders, media=a.media,
         calibration=srv.cal, versions=versions(), elapsed_s=time.monotonic() - start,
         files={p.name: sha256(p) for p in md.iterdir() if p.name in (
             "config.json", "basal.json", "tokenizer.json", "CALIBRATION.json", "CALIBRATION.o2.json", "processor_config.json")})
