@@ -277,7 +277,7 @@ public sealed class ToolQuestion : QuestionSpec<ToolResult>
             Number(a.Confidence);
             if(a.Tool is null ? a.Deferred!=true : !a.Probabilities.ContainsKey(a.Tool))throw new BasalException("Missing or unknown tool");
         }
-        foreach(var r in a.Ranking??[]) {if(r is null||!a.Probabilities.ContainsKey(r.Tool)||!double.IsFinite(r.Probability)||r.Probability is <0 or >1)throw new BasalException("Invalid ranking");}
+        foreach(var r in a.Ranking??[]) {if(r?.Tool is null||!a.Probabilities.ContainsKey(r.Tool)||!double.IsFinite(r.Probability)||r.Probability is <0 or >1)throw new BasalException("Invalid ranking");}
         return new(a.Call.Value,a.Probabilities){Tool=a.Tool,Confidence=a.Confidence,Multi=a.Multi??false,Tools=a.Tools??[],Ranking=a.Ranking??[],Selection=selection,Deferred=a.Deferred,Refused=a.Refused,MaxError=a.MaxError,Extra=a.Extra??[]};
     }
 }

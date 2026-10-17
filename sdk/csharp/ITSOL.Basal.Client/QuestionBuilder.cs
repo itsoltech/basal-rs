@@ -118,6 +118,8 @@ public sealed class MultiField : AnswerField<MultiResult>
     public string Objective => Result.Objective;
     /// <summary>Expected objective score.</summary>
     public double? ExpectedScore => Result.ExpectedScore;
+    /// <summary>Constraint diagnostics, when reported.</summary>
+    public JsonElement? ConstraintsApplied => Result.ConstraintsApplied;
     /// <summary>Native set confidence.</summary>
     public double SetConfidence => Result.SetConfidence;
     /// <summary>Independent label probabilities.</summary>
@@ -145,6 +147,8 @@ public sealed class ActField : AnswerField<ActResult>
     public string? Refused => Result.Refused;
     /// <summary>Optional native certified error target warning.</summary>
     public string? MaxError => Result.MaxError;
+    /// <summary>Whether the automatic action was deferred, when reported.</summary>
+    public bool? Deferred => Result.Deferred;
 }
 
 /// <summary>A named, checked tool routing result.</summary>
@@ -162,6 +166,16 @@ public sealed class ToolField : AnswerField<ToolResult>
     public IReadOnlyList<ToolRanking> Ranking=>Result.Ranking;
     /// <summary>Complete routing probabilities.</summary>
     public IReadOnlyDictionary<string,double> Probabilities=>Result.Probabilities;
+    /// <summary>Single-tool confidence, null in multi mode.</summary>
+    public double? Confidence=>Result.Confidence;
+    /// <summary>Multi-tool selection score and constraints.</summary>
+    public MultiResult? Selection=>Result.Selection;
+    /// <summary>Whether the certified single-tool decision was deferred, when reported.</summary>
+    public bool? Deferred=>Result.Deferred;
+    /// <summary>Refused tool on deferral.</summary>
+    public string? Refused=>Result.Refused;
+    /// <summary>Optional native certified error target warning.</summary>
+    public string? MaxError=>Result.MaxError;
 }
 /// <summary>Create typed question and answer fields. Factory methods infer IDs from the returned object's member names.
 /// Use only inside a synchronous Prepare or DecideAsync factory; builders are not thread-safe.</summary>
@@ -334,6 +348,8 @@ public sealed class QuestionBuilder
     public MultiField Add(string id, MultiQuestion question) => new(RegisterExplicit(id, question));
     /// <summary>Bind an action definition.</summary>
     public ActField Add(string id, ActQuestion question) => new(RegisterExplicit(id, question));
+    /// <summary>Bind a tool routing definition.</summary>
+    public ToolField Add(string id, ToolQuestion question) => new(RegisterExplicit(id, question));
     /// <summary>Bind a generic definition, with typed access through the field's Result property.</summary>
     public AnswerField<TAnswer> Add<TAnswer>(string id, QuestionSpec<TAnswer> question) where TAnswer : AnswerResult
         => new(RegisterExplicit(id, question));
