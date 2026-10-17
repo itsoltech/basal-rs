@@ -50,6 +50,10 @@ response token/branch counts are retained. Finite corpus timing is separate from
 FP32 answer quality and cannot establish a general performance advantage.
 Pass `--ladder-choice blue` to the performance summarizer for this generator's
 known-answer ladder, in addition to checking status, token lengths and invariance.
+If a combined run stops after one surface completes, the summarizer's explicit
+`--surfaces text` or `--surfaces media` audits only that surface, including all
+scheduled phases and server stops. It preserves the incomplete parent status;
+it does not mark missing phases on other surfaces as completed.
 
 `restore-inputs.py` reconstructs one archived frozen input directory using separately
 downloaded media. It accepts the campaign through `--measurement-artifacts`, a

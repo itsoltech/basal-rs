@@ -41,13 +41,24 @@ def main():
     p.add_argument('--measurement-artifacts', type=Path, required=True, help='one screen/confirm result directory')
     p.add_argument('--inputs', type=Path, required=True, help='restored frozen corpus used by that run')
     p.add_argument('--ladder-choice', help='Optional known correct option key for every single-question text ladder')
+    p.add_argument('--surfaces', nargs='+', choices=['text', 'media'],
+                   help='Audit independently complete surfaces from an interrupted combined run; retains parent status')
     p.add_argument('--out', type=Path, required=True)
     a = p.parse_args()
     if a.out.exists():
         p.error('output must be new')
     root = a.measurement_artifacts
     method = json.loads((root / 'method.json').read_text())
-    complete = json.loads((root / 'complete.json').read_text())
+    complete_path = root / 'complete.json'
+    if complete_path.is_file():
+        complete = json.loads(complete_path.read_text())
+    elif a.surfaces:
+        complete = {'execution_finished': False, 'failures': []}
+    else:
+        p.error('run has no complete.json; --surfaces may select independently completed surfaces')
+    surfaces = a.surfaces or method['surfaces']
+    if not set(surfaces).issubset(method['surfaces']):
+        p.error('selected surfaces were not scheduled by this run')
     provenance = json.loads((a.inputs / 'provenance.json').read_text())
     if provenance != method['inputs']:
         p.error('frozen input manifest differs from the run')
@@ -59,15 +70,16 @@ def main():
     short = read_rows(a.inputs / 'benchmark-short.jsonl')
     media = read_rows(a.inputs / 'cases-real-media.jsonl')
     events = read_rows(root / 'progress.jsonl')
-    issues = [dict(kind='run_failure', **x) for x in complete['failures']]
-    if not complete.get('execution_finished'):
+    issues = [dict(kind='run_failure', **x) for x in complete['failures']
+              if not a.surfaces or x.get('surface') is None or x['surface'] in surfaces]
+    if not complete.get('execution_finished') and not a.surfaces:
         issues.append(dict(kind='execution_incomplete'))
     seen, phases, aggregated = {}, [], collections.defaultdict(list)
     token_counts = {}
     class_groups, case_groups = collections.defaultdict(list), collections.defaultdict(list)
     confirmed = method['phase'] == 'confirm'
     for model in method.get('model_names', ['basal-omni-1.0-' + suffix for suffix in method['models']]):
-        for surface in method['surfaces']:
+        for surface in surfaces:
             counts = collections.Counter()
             for variant in method['schedule']:
                 if surface == 'media' and variant == 'upstream-fast':
@@ -75,6 +87,8 @@ def main():
                 counts[variant] += 1
                 repetition = counts[variant]
                 tag = f'{model}-{surface}-{variant}-r{repetition}'
+                if a.surfaces and not any(e.get('stage') == 'server_stopped' and e.get('tag') == tag for e in events):
+                    issues.append(dict(kind='selected_surface_server_not_stopped', tag=tag))
                 path = root / (tag + '-observations.jsonl')
                 if not path.exists():
                     issues.append(dict(kind='missing_observations', tag=tag))
@@ -188,6 +202,10 @@ def main():
                   inputs_sha256=hashlib.sha256((a.inputs/'provenance.json').read_bytes()).hexdigest())
     if a.ladder_choice:
         result['ladder_expected_choice'] = a.ladder_choice
+    if a.surfaces:
+        result['audited_surfaces'] = surfaces
+        result['parent_execution_finished'] = complete.get('execution_finished', False)
+        result['scope'] = 'Selected surfaces only; each scheduled phase and server stop is required. Parent execution status is preserved.'
     a.out.write_text(json.dumps(result, indent=2) + '\n')
     print(json.dumps(dict(status=result['status'], issues=len(issues), summarized_phases=len(summaries))))
     if issues:
