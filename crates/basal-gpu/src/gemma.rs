@@ -188,6 +188,7 @@ impl GemmaBackend {
                 );
             }
         }
+        let memory = crate::GpuMemoryProbe::candle(dev.clone());
         let load_as = |name: &str, shape: &[usize], dtype: DType| -> Result<Tensor> {
             crate::check(&st, name, shape)?;
             let mut data = Vec::new();
@@ -195,8 +196,13 @@ impl GemmaBackend {
             readers[*index].read(name, &mut data)?;
             let tensor = Tensor::from_raw_buffer(&data, DType::BF16, shape, &Device::Cpu)?;
             // CUDA can convert BF16 to FP16 after transfer, avoiding a CPU conversion of every weight.
-            // Keep host casts elsewhere; FP32 also retains its lower peak VRAM use during loading.
-            Ok(if dev.is_cuda() && dtype == DType::F16 {
+            // Require space for source and destination plus a margin; tight VRAM keeps the old host cast.
+            // FP32 also retains its lower peak VRAM use during loading.
+            let cast_bytes = (data.len() as u64).saturating_mul(2).saturating_add(64 << 20);
+            let cast_on_device = dev.is_cuda()
+                && dtype == DType::F16
+                && memory.snapshot().is_ok_and(|m| m.available_bytes >= cast_bytes);
+            Ok(if cast_on_device {
                 tensor.to_device(&dev)?.to_dtype(dtype)?
             } else {
                 tensor.to_dtype(dtype)?.to_device(&dev)?
