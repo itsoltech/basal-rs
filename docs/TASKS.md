@@ -84,6 +84,9 @@ oraz gotową odpowiedź z obu rund; `task_export_scope` wskazuje ten zakres.
 Ma ten sam decoder i projekcje obrazu/audio Unified co dotychczasowy max.
 Domyślny model i alias `omni-max` pozostają bez zmiany. Certyfikat klasyfikacji
 w opublikowanej kalibracji jednego porządku obejmuje tylko cel błędu 5%.
+Na RTX 6000 Ada `dtype: auto` wybiera decoder FP16; wieże mediów pozostają
+BF16. Profil wykorzystuje zgodną tabelę GEMM według geometrii projekcji,
+więc nazwa starszego modelu w metadanych tabeli nie zmienia zgodności jej kształtów.
 
 `omni-ultra` wskazuje `Remek/basal-omni-1.0-ultra@b8e214cb42d0a7a4cb2c3a93b0ba02c65d7590e4`.
 Checkpoint BF16 ma dwa shardy i około 62,55 GB. Encoder obrazu ma 27 warstw,

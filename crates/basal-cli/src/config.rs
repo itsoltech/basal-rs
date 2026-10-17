@@ -817,13 +817,13 @@ impl hf_hub::progress::ProgressHandler for DownloadLog {
     }
 }
 
-/// CLI auto precision: use the validated FP16 decoder for the two measured Omni
+/// CLI auto precision: use the validated FP16 decoder for the measured Omni
 /// model names on RTX 6000 Ada (GPU `device`; replicas run on GPUs of one type). Explicit precision always wins;
 /// media towers stay BF16. Other Gemma devices keep the published BF16 default.
 pub fn model_precision(value: &str, manifest: &ModelManifest, device: usize) -> Result<basal_gpu::Precision> {
     if value == "auto"
         && matches!(&manifest.config, basal_core::architecture::Architecture::Gemma4(_))
-        && matches!(manifest.name.as_str(), "basal-omni-1.0-mini" | "basal-omni-1.0-max")
+        && matches!(manifest.name.as_str(), "basal-omni-1.0-mini" | "basal-omni-1.0-max" | "basal-omni-1.1-max")
         && basal_gpu::gpu_name(device).is_ok_and(|name| name == "NVIDIA RTX 6000 Ada Generation")
     {
         return Ok(basal_gpu::Precision::F16);
