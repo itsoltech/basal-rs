@@ -74,3 +74,38 @@ directory. Its intentional 529 series is separate from capacity measurements.
 `--candidate LABEL=RELATIVE_DIRECTORY`, invokes a supplied CPU CLI `--basal`, and
 retains categorical answers, extraction spans/data, automation changes and mean TV.
 It audits observations; it does not turn FP32 agreement into semantic accuracy.
+
+`run-gpu.py --candidate-inference-mode auto|accurate|balanced` records and selects
+the candidate arithmetic; `--baseline-inference-mode` selects the baseline policy.
+`tools/perf/omni-optimize.py` accepts the same flag for HTTP candidates. Defaults
+remain auto. Supported modes depend on the backend; Gemma refuses balanced.
+Keep numerical-quality and timing audits separate for each mode.
+
+The HTTP runner optionally accepts `--upstream-batch-tokens N` to tune the eager
+backend in memory without editing its checkout. It records the override; a tuned
+run must be reported separately from the default upstream configuration.
+
+For a native FP16 A/B, the HTTP runner accepts `--baseline-dtype`,
+`--baseline-inference-mode` and an explicit `--baseline-gemm-table`. It records
+them separately from candidate settings; defaults retain the original BF16/no-table
+baseline protocol.
+
+`--media-warmup-repeats`, `--media-sequential-repeats` and `--media-load-repeats`
+select complete passes over the frozen media corpus. Counts are positive and
+recorded in `method.json`; the HTTP auditor uses them when checking coverage.
+Omitting the flags preserves the previous media protocol.
+
+Native byte comparisons check both record sets and reject duplicate IDs. Without
+`--baseline-tasks`, the older baseline receives primitives only, so exactly the
+known new task IDs are excluded from that comparison. The output records this
+scope and both original and compared record counts.
+
+`--text-phases ladder short mixed` selects measured text workloads. Without it,
+the original ladder/short protocol and optional `--mixed` are preserved. A
+mixed-only run warms both 8192-token documents before timing. The auditor records
+the selected phases and checks their complete coverage; omitted workloads are
+outside that run's scope.
+
+`--native-batch-tokens` selects the native admission/forward token budget and
+records it separately from `--upstream-batch-tokens`. Its default is 8192.
+Smaller batches can change latency and throughput; keep response-bit checks.

@@ -78,6 +78,11 @@ def main():
     token_counts = {}
     class_groups, case_groups = collections.defaultdict(list), collections.defaultdict(list)
     confirmed = method['phase'] == 'confirm'
+    text_phases = method.get('text_phases', ['ladder', 'short'] + (['mixed'] if method.get('mixed') else []))
+    if (not text_phases or len(set(text_phases)) != len(text_phases)
+            or not set(text_phases).issubset({'ladder', 'short', 'mixed'})
+            or bool(method.get('mixed')) != ('mixed' in text_phases)):
+        p.error('invalid scheduled text phases')
     for model in method.get('model_names', ['basal-omni-1.0-' + suffix for suffix in method['models']]):
         for surface in surfaces:
             counts = collections.Counter()
@@ -97,12 +102,14 @@ def main():
                 selected_ladder = [r for r in ladder if r['model'] == model and r['target_tokens'] <= method['text_limit']]
                 expected = {}
                 if surface == 'text':
-                    for row in selected_ladder:
-                        expected[('ladder', 1, row['id'])] = ([row], method.get('latency_samples', 10 if confirmed else 4))
+                    if 'ladder' in text_phases:
+                        for row in selected_ladder:
+                            expected[('ladder', 1, row['id'])] = ([row], method.get('latency_samples', 10 if confirmed else 4))
                     repeats = max(1, math.ceil((method.get('requested_load_samples') or (512 if confirmed else 64)) / len(short)))
-                    for clients in [1, 8, 32]:
-                        expected[('short', clients, 'all')] = (short, repeats)
-                    if method.get('mixed'):
+                    if 'short' in text_phases:
+                        for clients in [1, 8, 32]:
+                            expected[('short', clients, 'all')] = (short, repeats)
+                    if 'mixed' in text_phases:
                         longs = [r for r in ladder if r['model'] == model and r['target_tokens'] == 8192]
                         mixed = []
                         for i, row in enumerate(short):
@@ -114,7 +121,7 @@ def main():
                         for clients in [8, 32]:
                             expected[('mixed', clients, 'all')] = (mixed, 2 if confirmed else 1)
                 else:
-                    expected[('media-sequential', 1, 'all')] = (media, 3 if confirmed else 1)
+                    expected[('media-sequential', 1, 'all')] = (media, method.get('media_sequential_repeats', 3 if confirmed else 1))
                     expected[('media-load', 4, 'all')] = (media, method.get('media_load_repeats', 8 if confirmed else 2))
                 definitions = {r['id']: r for r in selected_ladder + short + media +
                                [r for r in ladder if r['model'] == model and r['target_tokens'] == 8192]}
@@ -202,6 +209,8 @@ def main():
                   inputs_sha256=hashlib.sha256((a.inputs/'provenance.json').read_bytes()).hexdigest())
     if a.ladder_choice:
         result['ladder_expected_choice'] = a.ladder_choice
+    if 'text_phases' in method and 'text' in surfaces:
+        result['audited_text_phases'] = text_phases
     if a.surfaces:
         result['audited_surfaces'] = surfaces
         result['parent_execution_finished'] = complete.get('execution_finished', False)

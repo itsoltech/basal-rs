@@ -19,6 +19,9 @@ Native Gemma 4 decoders and media processors/encoders follow Hugging Face Transf
 The port also follows PyTorch antialiased bicubic resampling (PyTorch contributors, BSD-3-Clause).
 The copyright notices, redistribution conditions and disclaimer are reproduced in licenses/PYTORCH-BSD.txt.
 
+The FP16 GELU arithmetic in crates/basal-gpu/src/kernels.cu follows candle-kernels 0.11.0
+(https://github.com/huggingface/candle, MIT OR Apache-2.0), used under Apache-2.0 (see LICENSE).
+
 The NOTICE file of basal (v2.1.0) follows.
 
 --------------------------------------------------------------------------------

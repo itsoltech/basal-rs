@@ -27,13 +27,32 @@ pozostaje w `basal-core`. Interfejs i przykłady: [CLIENT.md](CLIENT.md).
 Nowe rodziny, format 2, wybór kolejności i kalibracja: [UPSTREAM_2.0.md](UPSTREAM_2.0.md).
 Natywne architektury i lifecycle mediów omni: [OMNI.md](OMNI.md).
 
+Loader Gemma czyta kolejne wagi do jednego ponownie używanego bufora. BF16
+przesyła bez pośredniego własnego tensora CPU; przed nadpisaniem bufora czeka
+na zakończenie transferu. F16 zachowuje konwersję na GPU przy wystarczającym
+zapasie VRAM oraz konwersję CPU przy małym zapasie. Tryb obliczeń F32 nadal
+przechowuje wagi BF16 i rozszerza je przed użyciem. Bufor znika przed gotowością
+backendu; nie należy do stanu inferencji.
+
 Gemma grupuje krótkie teksty w kubełki 32 tokenów (do 32 promptów / 8192 tokenów).
 Projekcje współdzielą GEMM wyłącznie dla kształtów objętych tabelą z bitowo zgodnymi
-redukcjami między klasami M; pozostałe zachowują osobne GEMM. Attention każdego
-promptu wykonuje się oddzielnie. CUDA wylicza maskę pozycyjną w softmaxie FP32,
+redukcjami między klasami M; pozostałe zachowują osobne GEMM. Attention domyślnie
+wykonuje prompty oddzielnie. CUDA wylicza maskę pozycyjną w softmaxie FP32,
 zamiast przesyłać gęstą maskę CPU dla każdej warstwy. Kafel wyniku scores ma limit
 128 MiB; nie jest to limit całej pamięci roboczej. Długie prompty zachowują unikalne
 K/V GQA. Prefill ma kroki 2048 tokenów i respektuje granice bloków obrazu.
+
+Dla `basal-omni-1.0-ultra`, FP16 z odczytem FP32, tryb `auto` na NVIDIA H100 PCIe
+łączy niezależne macierze attention partii, zachowując operandy, iloczyny
+i softmax FP32. Jeden kernel układa Q/K/V, powtarza głowy GQA i dokładnie
+rozszerza FP16 do FP32, usuwając pośrednie kopie. Sekwencje wyrównuje do
+8 tokenów; kubełki 32 i limity partii
+pozostają takie same. Bezpośredni RMSNorm używa redukcji FP32, a połączone
+RoPE, GELU z mnożeniem oraz skalar warstwy zachowują punkty zaokrąglenia FP16.
+Nieafiniczna norma V zmienia sposób redukcji i wymaga porównania z FP32.
+K/V warstw bez współdzielenia są zachowywane tylko dla następnego fragmentu
+prefillu. `accurate` i pozostałe konfiguracje zachowują poprzednią ścieżkę.
+Zakres zgodności i pomiary: [raport Ultra](../reports/ultra-attention-2026-10-17/README.md).
 
 Stałe obroty pozycyjne obrazu i indeksy głów są współdzielone w swoim zakresie
 użycia. Pooling obrazu zachowuje kolejność 3×3 i redukcję FP32. Procesor CPU
@@ -139,6 +158,15 @@ rozszerza je przed użyciem (dokładny forward FP32, punkt odniesienia).
   również zachowuje poprzednią politykę.
   [Pomiary i ograniczenia jakości](../reports/precision-performance-ada-2026-10-16/README.md)
   nie są gwarancją zgodności każdego wejścia z FP32.
+- `auto` na H100 PCIe dla Ultra w FP16 łączy niezależne macierze attention
+  przykładów i głów, zachowując produkty i softmax FP32. RMSNorm z wagami używa
+  bezpośrednio kernela Candle z redukcją i mnożeniem FP32 oraz końcowym zapisem
+  FP16. Osobny kernel RoPE zachowuje zaokrąglenia FP16 obu mnożeń i ich sumy.
+  Model bez współdzielenia K/V między warstwami przechowuje je tylko dla
+  rzeczywistego kolejnego chunku. Kubełki długości co 32 tokeny i budżet 8192
+  pozostają bez zmian. `accurate` zachowuje poprzednie kernele i FP32 attention;
+  inne pary model/karta zachowują poprzednią politykę.
+  [Zakres pomiarów i ograniczenia](../reports/ultra-attention-2026-10-17/README.md).
 - W ostatniej warstwie o_proj i MLP liczą się tylko dla pozycji odczytu, a
   logity tylko dla wierszy `lm_head` odpowiadających literom, w f32.
 - CUDA GEMM przez cuBLASLt z tabelą algorytmów z pełnego przeszukania
@@ -511,7 +539,7 @@ jawnym błędem po odczytaniu `config.json`, przed tabelą GEMM i ładowaniem wa
 |---|---|---|---|---|---|
 | basal-1.5 mini/4.5B/max (Llama) | tak | tak, wspólna tabela niezależna od partii | tak, `f16` + `fused` | tak, `f16` + `fused` | `auto`/`accurate`/`balanced` |
 | Basal 2.0 mini/4.5B/max (Llama) | tak | tak, wspólna tabela niezależna od partii | tak, `f16` + `fused` | tak, `f16` + `fused`; `q4_k` wymaga `K % 256 == 0` | `auto` wybiera `balanced` na RTX 6000 Ada |
-| Omni 1.0 mini/max (Gemma 4) | tak | tak; bez pasującej tabeli stałe GEMM per prompt | nie (odmowa) | nie (odmowa, tylko `none`) | `auto`/`accurate`; `balanced` odmowa |
+| Omni 1.0 mini/max, Omni 1.1 max i Ultra (Gemma 4) | tak | tak; bez pasującej tabeli stałe GEMM per prompt | nie (odmowa) | nie (odmowa, tylko `none`) | `auto`/`accurate`; `balanced` odmowa |
 
 Kombinacje Basal 2.0 i Omni z umieszczeniem na GPU innym niż 0, z replikami, Basal 2.0 z
 podziałem warstw lub kwantyzacją oraz `auto`/`balanced` razem z kwantyzacją lub podziałem

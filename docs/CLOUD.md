@@ -15,6 +15,15 @@ sesji. `--hours` i `--spend` przy `up` wynikają z budżetu, więc maszyna sama 
 Kwot, cen i kosztów sesji nie zapisujemy w repozytorium: w raportach, dokumentacji ani w commitach. Raport podaje
 kartę, sterownik, limit mocy i zegar, bez adresu maszyny, nazwy hosta i identyfikatora instancji.
 
+Jeśli użytkownik określi wspólny budżet na bieżące i przyszłe sesje, limit obejmuje ich sumę, również nieudane
+próby uruchomienia. Nie odnawia się przy nowej maszynie ani checkoutcie. Przed `up` sprawdź prywatny ledger
+`~/.local/state/basal-rs/cloud-budget-ledger.json` oraz
+`$(git rev-parse --git-common-dir)/basal-cloud-budget-ledger.json`, jeśli istnieją. Ten drugi może być dowiązaniem
+do pierwszego; stan poza checkoutem obejmuje kolejne worktree i klony w tym środowisku. Rozbieżnych ledgerów
+nie traktuj jako osobnych limitów. Kwoty i dane dostawcy pozostają poza Gitem. Uwzględniaj koszt
+zakończonych prób oraz rezerwacje aktywnych maszyn; po usunięciu uzgodnij je z rozliczeniem dostawcy.
+Niepotwierdzone koszty oznacz jako szacunek z zapasem. Wybór karty nadal podlega zasadom danej sesji.
+
 ## Wymagania
 
 - `shade` CLI zalogowane (`shade auth login`) i klucz SSH zapisany w Shadeform pod nazwą `BASAL_CLOUD_SSH_KEY`.
