@@ -44,10 +44,49 @@ Omni z CUDA i włączonymi mediami. Status kalibracji `text` jest akceptowany,
 ale nie oznacza potwierdzonej kalibracji mediów. Typowane usage i metadane
 obejmują liczbę tokenów/mediów, kolejności oraz format promptu.
 
-Nowe wersje źródłowe: Python/npm/.NET **0.2.0**, Rust **0.3.0**. Zmiany modeli
+Nowe wersje źródłowe: Python/npm/.NET **0.3.0**, Rust **0.4.0**. Zmiany modeli
 odpowiedzi (opcjonalny threshold i nowe warianty) są opisane w changelogach.
 Samo scalenie kodu nie publikuje paczek. Runtime nadal sprawdza możliwości
 starszych modeli; SDK nie uruchamiają inferencji lokalnie.
+
+## Zadania Basal 2.1
+
+Wszystkie cztery SDK udostępniają typowane `classify`, `verify`, `compress` i
+`extract` (w .NET odpowiednio `Classify`, `Verify`, `Compress`, `Extract`).
+Przyjmują instrukcję jako pierwszy argument; pusty tekst pozostawia domyślne
+instrukcje serwera. `compress` może pominąć instrukcję. Kolejny argument to
+mapa/lista etykiet, mapa/lista twierdzeń albo schemat ekstrakcji.
+Zadania działają również w nazwanych schematach i przygotowanych definicjach.
+
+Wyniki mają osobne typy Classify/Verify/Compress/ExtractAnswer (w .NET Result),
+bez wspólnego pola `probabilities`. Surowe SDK zachowują wszystkie pola;
+`probabilities` w surowym DTO jest opcjonalne/domysłnie puste, natomiast
+odczyt typowanego pytania prymitywnego nadal wymaga prawdopodobieństw.
+`automated` zachowuje `null`; ekstrakcja przechowuje JSON, w tym zagnieżdżenia
+i `null`. Szczegóły semantyki, kalibracji i Unicode: [TASKS.md](TASKS.md).
+
+```python
+from basal_client import BasalClient, Questions, classify, verify, compress, extract
+
+class Invoice(Questions):
+    category = classify("", {"invoice": "Invoice", "other": "Other document"})
+    claims = verify("", {"total": "The total is 123.45 PLN."})
+    summary = compress("What is the total?", unit="line")
+    fields = extract("", {"type": "object", "properties": {"total": {"type": "number"}}})
+
+with BasalClient() as client:
+    r = client.decide("Total: 123.45 PLN", Invoice, lang="en")
+    print(r.answers.fields.data, r.answers.claims.claims)
+```
+
+W TypeScript fabryki zachowują nazwane pola odpowiedzi:
+`client.decide(text, {category: classify('', {invoice:'Invoice', other:'Other'})})`.
+W .NET użyj `q.Classify(...)`/`q.Extract(...)` w fabryce; wynik jest w `.Result`.
+W Rust `questions!` przyjmuje `classify(..., ClassifyOptions::default())`,
+`verify`, `compress` i `extract`; `.answers()?.category` jest typowanym widokiem.
+Rust przechowuje wielkości schematu i wartości jako `serde_json::Value`.
+
+Te wersje są aktualizacją źródeł; nie oznacza to publikacji nowych paczek.
 
 ## Python
 

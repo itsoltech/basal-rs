@@ -179,7 +179,7 @@ public sealed class ToolField : AnswerField<ToolResult>
 }
 /// <summary>Create typed question and answer fields. Factory methods infer IDs from the returned object's member names.
 /// Use only inside a synchronous Prepare or DecideAsync factory; builders are not thread-safe.</summary>
-public sealed class QuestionBuilder
+public sealed partial class QuestionBuilder
 {
     private const string SynchronousPreparationRequired = "Prepare requires a synchronous factory. Load asynchronous inputs before preparing questions.";
     private readonly Dictionary<string, QuestionSpec> questions = new(StringComparer.Ordinal);

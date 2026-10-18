@@ -204,3 +204,81 @@ Ta sama lista z sumami jest w `SHA256SUMS`. Sumy plików Markdown są tylko tam.
 | `reports/w8a16-2026-10-11/provenance.json` | 23355 | `3a145d4877d105d8b79448c46385ea0c84f02708f9b8b30c9650a3d992691948` |
 | `reports/w8a16-2026-10-11/raw-manifest.json` | 17337 | `9ccd9d51d5042b7f95a6631db6abaa036fad46bd234dfe77f4f2eadf08f73d95` |
 | `reports/w8a16-2026-10-11/static-validation.json` | 3912 | `d021ee7c3e774aad353a798e67c033c694918ab2f7f4b502215b9284551e5500` |
+
+## Upstream 2.1, SDK i nowe Omni
+
+[Raport](../reports/upstream-2.1-2026-10-17/README.md) opisuje zadania 2.1,
+cztery SDK, Omni 1.1 max i Ultra, jakość względem FP32 oraz HTTP względem BF16.
+Zachowuje różnicę starszego `act`, przegrane Ultra w sekwencyjnych zadaniach,
+OOM upstream przy C8, nieukończone próby i krótką serię obrazów jako SIGNAL.
+
+Archiwum: `hf://buckets/itsoltech/basal-rs/measurements/upstream-2.1-2026-10-17/9a8dae4bc02b08a4f2bcaf50aec712710706fb746820aff89961d4924ac1b10d/measurement-data.tar.gz`,
+SHA-256 `9a8dae4bc02b08a4f2bcaf50aec712710706fb746820aff89961d4924ac1b10d`,
+7 352 849 B. Pobranie z autoryzacją i anonimowo potwierdziło 896/896 sum.
+Dane są pod `reports/upstream-2.1-2026-10-17/`; raport oraz archiwalny
+`REPRODUCE.md` podają polecenia odtworzenia. Media są zewnętrzne, przypięte
+hashami. Archiwum zawiera też dokładne źródła pomiarów i patch kodu do `8adebaa`.
+
+
+## Ultra: optymalizacja attention na H100
+
+[Raport](../reports/ultra-attention-2026-10-17/README.md) opisuje końcowe ABBA tekstu,
+obrazu i FIFO, jakość względem FP32, profile oraz odrzucone warianty.
+Zachowuje regresję p95 długich dokumentów mieszanego C32, różnicę numeryki
+długości względem starego FP16, OOM upstream i nieukończoną serię R13.
+
+Archiwum: `hf://buckets/itsoltech/basal-rs/measurements/ultra-attention-2026-10-17/c298d99630c826cf6a1972aaf5ba477060f9f0c9e88427996213adad8b55f095/measurement-data.tar.gz`,
+SHA-256 `c298d99630c826cf6a1972aaf5ba477060f9f0c9e88427996213adad8b55f095`,
+11 170 513 B. Ponowne pobranie z autoryzacją i anonimowo potwierdziło 1133/1133 sum.
+Dane są pod `reports/ultra-attention-2026-10-17/`. Raport i `REPRODUCE.md` zawierają
+polecenia odtworzenia. Archiwum obejmuje kompletne drzewo końcowych źródeł,
+zweryfikowane także kompilacją CPU, oraz dokładne skrypty pomiarów. Zdjęcia
+pozostają zewnętrzne; surowe ślady Nsight i dane maszyn pozostają prywatne.
+
+
+## Ultra: CPU, RAM i VRAM pod obciążeniem
+
+[Raport](../reports/ultra-resources-2026-10-17/README.md) opisuje C1/C2/C8/C16/C32/C128,
+krótkie zadania i ruch z długimi dokumentami, QPS/HTTP oraz zasoby procesu.
+Zachowuje FAIL kontroli bitowej C128, trzy GAP końcowej bezczynności,
+celowaną referencję FP32 i wolniejszy start basal-rs.
+
+Archiwum: `hf://buckets/itsoltech/basal-rs/measurements/ultra-resources-2026-10-17/47926913c632019d9d05c5461025c397ce45fb79ec5aec29cdff83d139c2cd02/measurement-data.tar.gz`,
+SHA-256 `47926913c632019d9d05c5461025c397ce45fb79ec5aec29cdff83d139c2cd02`, 3729273 B.
+Pobranie z autoryzacją i anonimowo potwierdziło 74/74 sum plików.
+Dane i źródła są pod `reports/ultra-resources-2026-10-17/`; raport i archiwalny
+`REPRODUCE.md` podają instrukcje. Nie obejmuje mediów ani innych modeli rodziny.
+
+
+## Ultra: ładowanie wag
+
+[Raport](../reports/ultra-loader-2026-10-18/README.md) opisuje 12 startów,
+czas/CPU/RAM/VRAM starego i nowego loadera oraz upstream, 408 odpowiedzi C1
+oraz 561 zgodnych bitowo par rekordów eksportu Ultra F16, max1.1 BF16 i mini F32.
+Zachowuje nieudaną pierwszą próbę narzędzia, ograniczenia cache i brak pomiaru C128.
+
+Archiwum: `hf://buckets/itsoltech/basal-rs/measurements/ultra-loader-2026-10-18/1a453f895e4cf547349e240fcd769115040fe793a78495d22c8d13d28df6791c/measurement-data.tar.gz`,
+SHA-256 `1a453f895e4cf547349e240fcd769115040fe793a78495d22c8d13d28df6791c`, 2610101 B.
+Pobranie z autoryzacją i anonimowo potwierdziło 405/405 sum plików.
+Dane i dokładne źródła są pod `reports/ultra-loader-2026-10-18/`; raport i
+archiwalny `REPRODUCE.md` opisują odtworzenie. Zdjęcia pozostają zewnętrzne,
+z przypiętymi hashami i narzędziem odtwarzającym bajty wejść.
+
+
+## Ultra: duże dokumenty C32
+
+[Raport](../reports/ultra-long-documents-2026-10-18/README.md) porównuje istniejący
+profil HRRN/4096/5000 z FIFO na tej samej binarce i upstream BF16 eager na H100.
+Zachowuje kompromis mediany krótkich żądań, odrzucone eksperymenty Rust i przerwaną
+serię z oczekiwanym FAIL/GAP. Końcowo: 4536 odpowiedzi HTTP, 2990 porównań
+natywnych bez różnic; 9 startów, po 2 zachowane na silnik, 44 duże obserwacje
+na silnik z 2 różnych wejść 8192 tokeny. Bez nowego C8/C128/media ani oceny FP32.
+
+Archiwum: `hf://buckets/itsoltech/basal-rs/measurements/ultra-long-documents-2026-10-18/c256b4f32d863f1ed54130662d6d3c72a9bf3457f276baaa1d1b4151a81fcdbc/measurement-data.tar.gz`,
+SHA-256 `c256b4f32d863f1ed54130662d6d3c72a9bf3457f276baaa1d1b4151a81fcdbc`,
+6 482 237 B. Pobranie z autoryzacją i anonimowo 2026-10-18 potwierdziło **780/780**
+sum. Dane są pod `reports/ultra-long-documents-2026-10-18/`; raport i archiwalny
+`REPRODUCE.md` zawierają pobranie, weryfikację i replay. W archiwum są dokładne
+źródła trzech wariantów, wszystkie próby, odpowiedzi, czasy, zasoby, audyty oraz
+rzeczywista kontrola YAML na GPU. Publiczny replay jest identyczny z prywatnym;
+pełne archiwum pozostaje też lokalnie.

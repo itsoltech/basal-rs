@@ -7,7 +7,8 @@ This project reimplements in Rust the inference protocol of basal
 (https://github.com/rkinas/basal, Copyright 2026 Remigiusz Kinas, Apache License 2.0) and ports parts of it:
 the prompt format and letter readout (basal/prompt.py), the System One request handling and answer semantics
 including multi, act, tool and set objectives (basal/server.py), facts injection (basal/facts.py -> crates/basal-core/src/facts.rs),
-evidence spans (basal/evidence.py -> crates/basal-core/src/evidence.rs) and shared-prefix packing (basal/engine.py).
+evidence spans (basal/evidence.py -> crates/basal-core/src/evidence.rs), shared-prefix packing (basal/engine.py),
+and the experimental task layer (basal/tasks.py -> crates/basal-core/src/tasks/).
 Reference requests in tools/reference include examples from basal/examples.
 
 The basal model weights (Remek/basal-1.0-*, Remek/basal-1.5-*, Remek/basal-2.0-*, Remek/basal-omni-1.0-*) are not part of this repository; they are released by
@@ -18,7 +19,10 @@ Native Gemma 4 decoders and media processors/encoders follow Hugging Face Transf
 The port also follows PyTorch antialiased bicubic resampling (PyTorch contributors, BSD-3-Clause).
 The copyright notices, redistribution conditions and disclaimer are reproduced in licenses/PYTORCH-BSD.txt.
 
-The NOTICE file of basal (v2.0.0) follows.
+The FP16 GELU arithmetic in crates/basal-gpu/src/kernels.cu follows candle-kernels 0.11.0
+(https://github.com/huggingface/candle, MIT OR Apache-2.0), used under Apache-2.0 (see LICENSE).
+
+The NOTICE file of basal (v2.1.0) follows.
 
 --------------------------------------------------------------------------------
 

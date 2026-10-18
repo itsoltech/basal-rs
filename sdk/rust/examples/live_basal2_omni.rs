@@ -44,7 +44,7 @@ fn tool_definition(q: &Value) -> Result<ToolQuestion> {
 fn definitions(case: &Value) -> Result<Questions> {
     let mut result = Questions::new();
     for (id, q) in case["questions"].as_object().ok_or("missing questions")? {
-        let instructions = q["instructions"].as_str().ok_or("missing instructions")?;
+        let instructions = q["instructions"].as_str().unwrap_or("");
         let values: Vec<_> = q["criteria"]
             .as_object()
             .into_iter()
@@ -52,7 +52,50 @@ fn definitions(case: &Value) -> Result<Questions> {
             .map(|(k, v)| Ok((k.as_str(), v.as_str().ok_or("criterion text")?)))
             .collect::<Result<_>>()?;
         let exclusive: Vec<_> = q["exclusive"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+        let errors: Vec<f64> = match q.get("max_error") {
+            None => vec![],
+            Some(Value::Array(v)) => {
+                v.iter().map(|v| v.as_f64().ok_or("error target")).collect::<std::result::Result<_, _>>()?
+            }
+            Some(v) => vec![v.as_f64().ok_or("error target")?],
+        };
+        let max_error = q.get("max_error").map(|_| errors.as_slice());
         result = match q["type"].as_str() {
+            Some("classify") => result.with(
+                id,
+                &classify(
+                    instructions,
+                    q["labels"].clone(),
+                    ClassifyOptions {
+                        multi_label: q["multi_label"].as_bool().unwrap_or(false),
+                        none: q["none"].as_bool().unwrap_or(false),
+                        max_error,
+                        hide_keys: q["option_keys"] == "hide",
+                        selection: selection(q, &exclusive),
+                    },
+                )?,
+            )?,
+            Some("verify") => result.with(
+                id,
+                &verify(
+                    instructions,
+                    q["claims"].clone(),
+                    VerifyOptions { binary: q["binary"].as_bool().unwrap_or(false), max_error },
+                )?,
+            )?,
+            Some("compress") => result.with(
+                id,
+                &compress(
+                    instructions,
+                    CompressOptions {
+                        unit: serde_json::from_value(q.get("unit").cloned().unwrap_or(json!("sentence")))?,
+                        keep_ratio: q["keep_ratio"].as_f64(),
+                        threshold: q["threshold"].as_f64(),
+                        min_keep: q["min_keep"].as_u64().map(|v| v as usize),
+                    },
+                )?,
+            )?,
+            Some("extract") => result.with(id, &extract(instructions, q["schema"].clone())?)?,
             Some("choice") => result.with(id, &choice(instructions, &values)?)?,
             Some("noul") => result.with(id, &noul(instructions)?)?,
             Some("score") => {
@@ -92,6 +135,16 @@ fn selection_projection(a: MultiAnswer<'_>) -> Value {
 }
 fn project(answer: AnswerResult<'_>) -> Value {
     match answer {
+        AnswerResult::Classify(a) => {
+            json!({"type":"classify","experimental":true,"scores":a.scores,"label":a.label,"top_label":a.top_label,"confidence":a.confidence,"automated":a.automated,"labels":a.labels,"set_confidence":a.set_confidence})
+        }
+        AnswerResult::Verify(a) => {
+            json!({"type":"verify","experimental":true,"claims":a.claims,"all_supported":a.all_supported,"not_supported":a.not_supported})
+        }
+        AnswerResult::Compress(a) => {
+            json!({"type":"compress","experimental":true,"compressed":a.compressed,"kept":a.kept,"units":a.units,"unit":a.unit,"original_chars":a.original_chars,"compressed_chars":a.compressed_chars,"ratio":a.ratio})
+        }
+        AnswerResult::Extract(a) => json!({"type":"extract","experimental":true,"data":a.data,"fields":a.fields}),
         AnswerResult::Choice(a) => {
             json!({"type":"choice","choice":a.choice,"confidence":a.confidence,"probabilities":a.probabilities})
         }

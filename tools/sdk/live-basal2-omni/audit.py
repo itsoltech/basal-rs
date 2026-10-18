@@ -8,6 +8,19 @@ import struct
 
 def project(a):
     kind = a["type"]
+    if kind == "classify":
+        keys = ['labels','set_confidence'] if a.get('labels') is not None else ['label','top_label','confidence','automated']
+        return {"type":kind,"experimental":a['experimental'],"scores":a['scores'],**{k:a[k] for k in keys}}
+    if kind == 'extract':
+        # Typed DTOs represent absent optional wire fields as null. Require the common fields;
+        # normalize only optional diagnostics, preserving their values when present.
+        fields = {name: {**{key:field[key] for key in ('value','confidence','source','calibration')},
+                         **{key:field.get(key) for key in ('probabilities','present_probability','line_probability','span_probability','text','start','end','error')}}
+                  for name,field in a['fields'].items()}
+        return {'type':kind,'experimental':a['experimental'],'data':a['data'],'fields':fields}
+    if kind in ('verify','compress'):
+        keys={'verify':['claims','all_supported','not_supported'], 'compress':['compressed','kept','units','unit','original_chars','compressed_chars','ratio']}[kind]
+        return {"type":kind,"experimental":a['experimental'],**{k:a[k] for k in keys}}
     common = {"type": kind, "probabilities": a["probabilities"]}
     if kind in ("choice", "noul", "score", "act"):
         common["confidence"] = a["confidence"]

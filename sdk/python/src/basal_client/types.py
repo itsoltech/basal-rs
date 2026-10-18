@@ -28,7 +28,7 @@ class ToolRanking(TypedDict):
 class Question(TypedDict, total=False):
     """Native question fields; validation and calibration belong to the server."""
 
-    type: Literal["choice", "noul", "score", "multi", "act", "tool"]
+    type: Literal["choice", "noul", "score", "multi", "act", "tool", "classify", "verify", "compress", "extract"]
     instructions: JsonValue
     criteria: dict[str, JsonValue] | list[JsonValue]
     levels: dict[str, JsonValue] | list[JsonValue]
@@ -40,7 +40,7 @@ class Question(TypedDict, total=False):
     base: Literal["noul", "choice", "score"]
     costs: dict[str, float] | dict[str, dict[str, float]]
     defer_action: str
-    max_error: float
+    max_error: float | list[float]
     objective: MultiObjective
     exclusive: list[str]
     fallback: str
@@ -49,6 +49,15 @@ class Question(TypedDict, total=False):
     extra: list[Literal["answer_directly", "ask_user", "none"]]
     rank: int
     multi: bool
+    labels: dict[str, JsonValue] | list[JsonValue]
+    multi_label: bool
+    none: bool
+    claims: dict[str, JsonValue] | list[JsonValue]
+    binary: bool
+    unit: Literal["sentence", "line", "paragraph"]
+    keep_ratio: float
+    min_keep: int
+    schema: dict[str, JsonValue]
 
 
 class DecisionRequest(TypedDict):
@@ -69,8 +78,8 @@ class EvidenceSpan(TypedDict):
 
 
 class Answer(TypedDict):
-    type: Literal["choice", "noul", "score", "multi", "act", "tool"]
-    probabilities: dict[str, float]
+    type: Literal["choice", "noul", "score", "multi", "act", "tool", "classify", "verify", "compress", "extract"]
+    probabilities: NotRequired[dict[str, float]]
     confidence: NotRequired[float]
     choice: NotRequired[str]
     noul: NotRequired[float]
@@ -95,6 +104,24 @@ class Answer(TypedDict):
     multi: NotRequired[bool]
     ranking: NotRequired[list[ToolRanking]]
     deferred: NotRequired[bool]
+    experimental: NotRequired[bool]
+    label: NotRequired[str]
+    top_label: NotRequired[str]
+    labels: NotRequired[list[str]]
+    scores: NotRequired[dict[str, float]]
+    automated: NotRequired[dict[str, bool | None]]
+    claims: NotRequired[dict[str, JsonValue]]
+    all_supported: NotRequired[bool]
+    not_supported: NotRequired[list[str]]
+    compressed: NotRequired[str]
+    kept: NotRequired[list[int]]
+    units: NotRequired[list[JsonValue]]
+    unit: NotRequired[str]
+    original_chars: NotRequired[int]
+    compressed_chars: NotRequired[int]
+    ratio: NotRequired[float]
+    data: NotRequired[dict[str, JsonValue]]
+    fields: NotRequired[dict[str, JsonValue]]
 
 
 class Usage(TypedDict):

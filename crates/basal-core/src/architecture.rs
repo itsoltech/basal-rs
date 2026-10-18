@@ -62,6 +62,8 @@ fn number(value: &Value, key: &str) -> Result<f64> {
 
 impl Architecture {
     pub fn parse(config: &Value) -> Result<Self> {
+        ensure!(config.get("quantization_config").is_none_or(Value::is_null),
+            "serialized checkpoint quantization (including ModelOpt FP8) is not supported; use the base BF16 checkpoint");
         let unified = match config.get("model_type").and_then(Value::as_str) {
             Some("llama") => return Ok(Self::Llama(parse_config(config)?)),
             Some("gemma4") => false,

@@ -40,13 +40,25 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--measurement-artifacts', type=Path, required=True, help='one screen/confirm result directory')
     p.add_argument('--inputs', type=Path, required=True, help='restored frozen corpus used by that run')
+    p.add_argument('--ladder-choice', help='Optional known correct option key for every single-question text ladder')
+    p.add_argument('--surfaces', nargs='+', choices=['text', 'media'],
+                   help='Audit independently complete surfaces from an interrupted combined run; retains parent status')
     p.add_argument('--out', type=Path, required=True)
     a = p.parse_args()
     if a.out.exists():
         p.error('output must be new')
     root = a.measurement_artifacts
     method = json.loads((root / 'method.json').read_text())
-    complete = json.loads((root / 'complete.json').read_text())
+    complete_path = root / 'complete.json'
+    if complete_path.is_file():
+        complete = json.loads(complete_path.read_text())
+    elif a.surfaces:
+        complete = {'execution_finished': False, 'failures': []}
+    else:
+        p.error('run has no complete.json; --surfaces may select independently completed surfaces')
+    surfaces = a.surfaces or method['surfaces']
+    if not set(surfaces).issubset(method['surfaces']):
+        p.error('selected surfaces were not scheduled by this run')
     provenance = json.loads((a.inputs / 'provenance.json').read_text())
     if provenance != method['inputs']:
         p.error('frozen input manifest differs from the run')
@@ -58,16 +70,21 @@ def main():
     short = read_rows(a.inputs / 'benchmark-short.jsonl')
     media = read_rows(a.inputs / 'cases-real-media.jsonl')
     events = read_rows(root / 'progress.jsonl')
-    issues = [dict(kind='run_failure', **x) for x in complete['failures']]
-    if not complete.get('execution_finished'):
+    issues = [dict(kind='run_failure', **x) for x in complete['failures']
+              if not a.surfaces or x.get('surface') is None or x['surface'] in surfaces]
+    if not complete.get('execution_finished') and not a.surfaces:
         issues.append(dict(kind='execution_incomplete'))
     seen, phases, aggregated = {}, [], collections.defaultdict(list)
     token_counts = {}
     class_groups, case_groups = collections.defaultdict(list), collections.defaultdict(list)
     confirmed = method['phase'] == 'confirm'
-    for suffix in method['models']:
-        model = 'basal-omni-1.0-' + suffix
-        for surface in method['surfaces']:
+    text_phases = method.get('text_phases', ['ladder', 'short'] + (['mixed'] if method.get('mixed') else []))
+    if (not text_phases or len(set(text_phases)) != len(text_phases)
+            or not set(text_phases).issubset({'ladder', 'short', 'mixed'})
+            or bool(method.get('mixed')) != ('mixed' in text_phases)):
+        p.error('invalid scheduled text phases')
+    for model in method.get('model_names', ['basal-omni-1.0-' + suffix for suffix in method['models']]):
+        for surface in surfaces:
             counts = collections.Counter()
             for variant in method['schedule']:
                 if surface == 'media' and variant == 'upstream-fast':
@@ -75,6 +92,8 @@ def main():
                 counts[variant] += 1
                 repetition = counts[variant]
                 tag = f'{model}-{surface}-{variant}-r{repetition}'
+                if a.surfaces and not any(e.get('stage') == 'server_stopped' and e.get('tag') == tag for e in events):
+                    issues.append(dict(kind='selected_surface_server_not_stopped', tag=tag))
                 path = root / (tag + '-observations.jsonl')
                 if not path.exists():
                     issues.append(dict(kind='missing_observations', tag=tag))
@@ -83,12 +102,14 @@ def main():
                 selected_ladder = [r for r in ladder if r['model'] == model and r['target_tokens'] <= method['text_limit']]
                 expected = {}
                 if surface == 'text':
-                    for row in selected_ladder:
-                        expected[('ladder', 1, row['id'])] = ([row], method.get('latency_samples', 10 if confirmed else 4))
+                    if 'ladder' in text_phases:
+                        for row in selected_ladder:
+                            expected[('ladder', 1, row['id'])] = ([row], method.get('latency_samples', 10 if confirmed else 4))
                     repeats = max(1, math.ceil((method.get('requested_load_samples') or (512 if confirmed else 64)) / len(short)))
-                    for clients in [1, 8, 32]:
-                        expected[('short', clients, 'all')] = (short, repeats)
-                    if method.get('mixed'):
+                    if 'short' in text_phases:
+                        for clients in [1, 8, 32]:
+                            expected[('short', clients, 'all')] = (short, repeats)
+                    if 'mixed' in text_phases:
                         longs = [r for r in ladder if r['model'] == model and r['target_tokens'] == 8192]
                         mixed = []
                         for i, row in enumerate(short):
@@ -100,8 +121,8 @@ def main():
                         for clients in [8, 32]:
                             expected[('mixed', clients, 'all')] = (mixed, 2 if confirmed else 1)
                 else:
-                    expected[('media-sequential', 1, 'all')] = (media, 3 if confirmed else 1)
-                    expected[('media-load', 4, 'all')] = (media, 8 if confirmed else 2)
+                    expected[('media-sequential', 1, 'all')] = (media, method.get('media_sequential_repeats', 3 if confirmed else 1))
+                    expected[('media-load', 4, 'all')] = (media, method.get('media_load_repeats', 8 if confirmed else 2))
                 definitions = {r['id']: r for r in selected_ladder + short + media +
                                [r for r in ladder if r['model'] == model and r['target_tokens'] == 8192]}
                 for row in rows:
@@ -112,12 +133,19 @@ def main():
                              and not response.get('usage', {}).get('truncated'))
                     if source and 'target_tokens' in source:
                         valid = valid and response.get('usage', {}).get('input_tokens') == source['target_tokens']
+                        if a.ladder_choice:
+                            answers = response.get('answers', {})
+                            valid = valid and len(answers) == 1 and next(iter(answers.values())).get('choice') == a.ladder_choice
                     if not valid or not row.get('valid') or not math.isfinite(row.get('elapsed_ms', math.nan)):
                         issues.append(dict(kind='invalid_response', tag=tag, id=row['id'], phase=row['phase']))
                         continue
                     token_key = (model, row['id'])
                     tokens = response.get('usage', {}).get('input_tokens')
-                    if not isinstance(tokens, int) or tokens <= 0 or (token_key in token_counts and token_counts[token_key] != tokens):
+                    task = any(q.get('type') in ('classify','verify','compress','extract') for q in source['request']['questions'].values())
+                    # A task's dependent extraction prompt is chosen by the model. Keep the response's work
+                    # accounting; compare HTTP requests rather than requiring identical internal work across engines.
+                    allow_task_work = task and method.get('task_accounting') is not None
+                    if not isinstance(tokens, int) or tokens <= 0 or (not allow_task_work and token_key in token_counts and token_counts[token_key] != tokens):
                         issues.append(dict(kind='input_token_count_mismatch', tag=tag, id=row['id']))
                     token_counts.setdefault(token_key, tokens)
                     key = (model, variant, row['id'])
@@ -179,6 +207,14 @@ def main():
                   media_case_summary=summarize_groups(case_groups, ['model', 'id', 'variant']),
                   summary_method='median of retained repetition metrics; ranges retain between-run variation',
                   inputs_sha256=hashlib.sha256((a.inputs/'provenance.json').read_bytes()).hexdigest())
+    if a.ladder_choice:
+        result['ladder_expected_choice'] = a.ladder_choice
+    if 'text_phases' in method and 'text' in surfaces:
+        result['audited_text_phases'] = text_phases
+    if a.surfaces:
+        result['audited_surfaces'] = surfaces
+        result['parent_execution_finished'] = complete.get('execution_finished', False)
+        result['scope'] = 'Selected surfaces only; each scheduled phase and server stop is required. Parent execution status is preserved.'
     a.out.write_text(json.dumps(result, indent=2) + '\n')
     print(json.dumps(dict(status=result['status'], issues=len(issues), summarized_phases=len(summaries))))
     if issues:

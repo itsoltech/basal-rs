@@ -6,6 +6,8 @@
 
 mod media;
 pub use media::*;
+mod tasks;
+pub use tasks::*;
 mod questions;
 pub use questions::*;
 
@@ -41,6 +43,14 @@ pub enum QuestionType {
     Act,
     /// Select a tool or a set of tools without executing them.
     Tool,
+    /// Experimental document classification.
+    Classify,
+    /// Experimental claim verification.
+    Verify,
+    /// Experimental extractive compression.
+    Compress,
+    /// Experimental schema extraction.
+    Extract,
 }
 
 /// Native question. Criteria and cost matrices are JSON objects or arrays; preserve their order.
@@ -121,6 +131,7 @@ pub struct Answer {
     #[serde(rename = "type")]
     pub kind: QuestionType,
     /// Native probabilities (for multi: independent P(yes) values).
+    #[serde(default)]
     pub probabilities: indexmap::IndexMap<String, f64>,
     /// Native max probability for choice, noul, score and act. Multi uses `set_confidence`.
     pub confidence: Option<f64>,
@@ -170,6 +181,42 @@ pub struct Answer {
     pub ranking: Option<Vec<ToolRanking>>,
     /// Whether the automatic decision was deferred.
     pub deferred: Option<bool>,
+    /// Experimental task marker.
+    pub experimental: Option<bool>,
+    /// Single classification label.
+    pub label: Option<String>,
+    /// Top classification label.
+    pub top_label: Option<String>,
+    /// Selected classification labels.
+    pub labels: Option<Vec<String>>,
+    /// Classification probabilities.
+    pub scores: Option<indexmap::IndexMap<String, f64>>,
+    /// Task-specific certified automation; null values mean unavailable.
+    pub automated: Option<Automation>,
+    /// Per-claim verification results.
+    pub claims: Option<indexmap::IndexMap<String, ClaimResult>>,
+    /// Whether every claim is supported.
+    pub all_supported: Option<bool>,
+    /// Flagged claim keys.
+    pub not_supported: Option<Vec<String>>,
+    /// Source-preserving compressed text.
+    pub compressed: Option<String>,
+    /// Kept source unit indices.
+    pub kept: Option<Vec<usize>>,
+    /// Source unit spans in Unicode code points.
+    pub units: Option<Vec<CompressionUnit>>,
+    /// Compression segmentation.
+    pub unit: Option<CompressionUnitKind>,
+    /// Source Unicode code point count.
+    pub original_chars: Option<usize>,
+    /// Compressed Unicode code point count.
+    pub compressed_chars: Option<usize>,
+    /// Compressed/source character ratio.
+    pub ratio: Option<f64>,
+    /// Nested extracted data; missing values are null.
+    pub data: Option<indexmap::IndexMap<String, Value>>,
+    /// Extraction field provenance and probabilities.
+    pub fields: Option<indexmap::IndexMap<String, ExtractField>>,
     /// Future native fields.
     #[serde(flatten)]
     pub extra: Map<String, Value>,

@@ -136,6 +136,7 @@ pub const PREFILL: &str = "{\"answer\": \"";
 pub enum ChatStyle {
     Llama,
     Gemma4,
+    /// Validated Gemma template with a closed empty thought block (Unified and Ultra checkpoints).
     Gemma4Unified,
 }
 const PL_CHARS: &str = "ąćęłńóśźżĄĆĘŁŃÓŚŹŻ";

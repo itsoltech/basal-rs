@@ -36,6 +36,8 @@ pub struct ModelManifest {
     pub temperatures: HashMap<QType, f64>,
     /// CALIBRATION.json `thresholds` (certified confidence per target error, keyed by Python `str()` of the target).
     pub thresholds: serde_json::Map<String, Value>,
+    /// Certified confidence thresholds fitted for each experimental task, independent of primitive thresholds.
+    pub task_thresholds: serde_json::Map<String, Value>,
     pub bos_token: String,
     pub prompt_format: PromptFormat,
     pub orders: OptionOrders,
@@ -135,9 +137,8 @@ impl ModelManifest {
     /// Select a trained protocol and calibration matching the served option-order policy.
     pub fn load_with_orders(dir: &Path, orders: Option<&str>) -> Result<Self> {
         let config = crate::architecture::Architecture::parse(&read_json(&dir.join("config.json"))?)?;
-        let chat_style = match &config {
+        let mut chat_style = match &config {
             crate::architecture::Architecture::Llama(_) => ChatStyle::Llama,
-            crate::architecture::Architecture::Gemma4(c) if c.unified => ChatStyle::Gemma4Unified,
             crate::architecture::Architecture::Gemma4(_) => ChatStyle::Gemma4,
         };
         let basal = read_json(&dir.join("basal.json"))?;
@@ -205,6 +206,13 @@ impl ModelManifest {
                     ),
                     "unsupported Gemma chat template"
                 );
+                // Renderer grammar follows the validated template, independently of the decoder architecture.
+                // Ultra uses the same closed thought prefill as Unified; the older E4B template does not.
+                chat_style = if hash == "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4" {
+                    ChatStyle::Gemma4Unified
+                } else {
+                    ChatStyle::Gemma4
+                };
                 ensure!(prompt_format == PromptFormat::Two, "Gemma Basal needs prompt format 2");
             }
         }
@@ -274,6 +282,17 @@ impl ModelManifest {
             }
         };
         let thresholds = if calibration_unvalidated.is_none() { map("thresholds")? } else { Default::default() };
+        let task_thresholds =
+            if calibration_unvalidated.is_none() { map("task_thresholds")? } else { Default::default() };
+        for (task, rates) in &task_thresholds {
+            let rates = rates.as_object().with_context(|| format!("task_thresholds.{task} must be an object"))?;
+            for (rate, value) in rates {
+                let risk: f64 = rate.parse().with_context(|| format!("invalid task error rate {rate:?}"))?;
+                ensure!(risk.is_finite() && risk > 0.0 && risk < 1.0, "task error rate must be in (0, 1)");
+                let threshold = value.as_f64().context("task threshold must be a number")?;
+                ensure!(threshold.is_finite() && (0.0..=1.0).contains(&threshold), "task threshold must be in [0, 1]");
+            }
+        }
         let multi_calibration = if calibration_unvalidated.is_none() { map("multi")? } else { Default::default() };
         Ok(Self {
             dir: dir.to_path_buf(),
@@ -283,6 +302,7 @@ impl ModelManifest {
             chat_style,
             temperatures,
             thresholds,
+            task_thresholds,
             bos_token,
             prompt_format,
             orders,

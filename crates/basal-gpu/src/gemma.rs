@@ -41,6 +41,7 @@ struct Weights {
     empty_mask_group: Tensor,
     embed: Tensor,
     norm: Tensor,
+    unit_norm: Tensor,
     layers: Vec<Layer>,
     ple_embed: Option<Tensor>,
     ple_projection: Option<Tensor>,
@@ -63,6 +64,7 @@ pub struct GemmaBackend {
     weights: Arc<Weights>,
     precision: Precision,
     attention_dtype: DType,
+    optimized: bool,
     readout: Readout,
     gate: Option<(Arc<Gate>, bool)>,
     pub load_s: f64,
@@ -168,19 +170,53 @@ impl GemmaBackend {
         media: bool,
     ) -> Result<Self> {
         let start = Instant::now();
-        let processor =
-            if media { Some(Arc::new(basal_core::media::Processor::load(dir, cfg.unified)?)) } else { None };
-        let path = dir.join("model.safetensors");
-        // SAFETY: the checkpoint stays immutable for the mapping's lifetime; tensors are copied to owned device storage.
-        let st =
-            unsafe { candle_core::safetensors::MmapedSafetensors::new(&path) }.context("mapping Gemma checkpoint")?;
-        let reader = crate::TensorReader::open(&path)?;
+        let processor = if media {
+            Some(Arc::new(basal_core::media::Processor::load_with_audio(dir, cfg.unified, cfg.audio.is_some())?))
+        } else {
+            None
+        };
+        let paths = basal_core::checkpoint::files(dir)?;
+        // SAFETY: all checkpoint shards stay immutable for the mappings' lifetime. Mappings and readers
+        // remain local until tensors have been copied to owned device storage; loading is synchronous.
+        let st = unsafe { candle_core::safetensors::MmapedSafetensors::multi(&paths) }
+            .context("mapping Gemma checkpoint shards")?;
+        let readers = paths.iter().map(|p| crate::TensorReader::open(p)).collect::<Result<Vec<_>>>()?;
+        let mut locations = std::collections::HashMap::new();
+        for (index, reader) in readers.iter().enumerate() {
+            for name in reader.ranges.keys() {
+                ensure!(
+                    locations.insert(name.clone(), index).is_none(),
+                    "duplicate tensor {name} across checkpoint shards"
+                );
+            }
+        }
+        let memory = crate::GpuMemoryProbe::candle(dev.clone());
+        // Decoder and media weights load synchronously through the same Fn callback. Reuse its
+        // byte buffer rather than faulting in a new allocation for every checkpoint tensor.
+        let buffer = std::cell::RefCell::new(Vec::new());
         let load_as = |name: &str, shape: &[usize], dtype: DType| -> Result<Tensor> {
             crate::check(&st, name, shape)?;
-            let mut data = Vec::new();
-            reader.read(name, &mut data)?;
-            let tensor = Tensor::from_raw_buffer(&data, DType::BF16, shape, &Device::Cpu)?;
-            Ok(tensor.to_dtype(dtype)?.to_device(&dev)?)
+            let mut data = buffer.try_borrow_mut().context("overlapping checkpoint weight loads")?;
+            data.clear();
+            let index = locations.get(name).with_context(|| format!("checkpoint tensor {name} missing"))?;
+            readers[*index].read(name, &mut data)?;
+            // CUDA can convert BF16 to FP16 after transfer, avoiding a CPU conversion of every weight.
+            // Require space for source and destination plus a margin; tight VRAM keeps the old host cast.
+            // FP32 also retains its lower peak VRAM use during loading.
+            let cast_bytes = (data.len() as u64).saturating_mul(2).saturating_add(64 << 20);
+            let cast_on_device = dev.is_cuda()
+                && dtype == DType::F16
+                && memory.snapshot().is_ok_and(|m| m.available_bytes >= cast_bytes);
+            Ok(if cast_on_device || dtype == DType::BF16 {
+                // Avoid the intermediate owned CPU tensor. Finish the upload before the next
+                // callback overwrites the buffer; do not rely on pageable CUDA copies blocking.
+                let tensor = Tensor::from_raw_buffer(&data, DType::BF16, shape, &dev)?;
+                dev.synchronize()?;
+                tensor.to_dtype(dtype)?
+            } else {
+                let tensor = Tensor::from_raw_buffer(&data, DType::BF16, shape, &Device::Cpu)?;
+                tensor.to_dtype(dtype)?.to_device(&dev)?
+            })
         };
         let load = |name: &str, shape: &[usize]| load_as(name, shape, precision.storage());
         let h = cfg.hidden;
@@ -248,6 +284,11 @@ impl GemmaBackend {
             encoders,
             embed: load("model.language_model.embed_tokens.weight", &[cfg.vocab, h])?,
             norm: load("model.language_model.norm.weight", &[h])?,
+            unit_norm: Tensor::ones(
+                cfg.layers.iter().map(|layer| layer.head_dim).max().context("Gemma has no layers")?,
+                precision.compute(),
+                &dev,
+            )?,
             layers,
             ple_embed: if packed_ple == 0 {
                 None
@@ -265,6 +306,7 @@ impl GemmaBackend {
                 Some(load("model.language_model.per_layer_projection_norm.weight", &[cfg.per_layer_input])?)
             },
         };
+        drop(buffer);
         #[cfg(feature = "cuda")]
         let lt = match (&dev, precision.compute()) {
             (Device::Cuda(d), DType::F16 | DType::BF16) => Some(Arc::new(crate::cublaslt::Lt::new(d)?)),
@@ -277,6 +319,7 @@ impl GemmaBackend {
             weights: Arc::new(weights),
             precision,
             attention_dtype: DType::F32,
+            optimized: false,
             readout,
             gate: None,
             load_s: start.elapsed().as_secs_f64(),
@@ -318,7 +361,52 @@ impl GemmaBackend {
             DType::F32
         };
         self.attention_dtype = dtype;
+        #[cfg(feature = "cuda")]
+        let measured = mode == crate::InferenceMode::Auto
+            && self.precision == Precision::F16
+            && self.readout == Readout::F32
+            && model_name == "basal-omni-1.0-ultra"
+            && matches!(&self.dev, Device::Cuda(dev) if dev.cuda_stream().context().name().is_ok_and(|name| name == "NVIDIA H100 PCIe"));
+        #[cfg(not(feature = "cuda"))]
+        let measured = false;
+        self.optimized = measured;
         Ok(())
+    }
+
+    fn decoder_norm(&self, x: &Tensor, weight: Option<&Tensor>, eps: f64) -> Result<Tensor> {
+        if self.optimized && x.dtype() == DType::F16 {
+            let unit =
+                if weight.is_none() { Some(self.weights.unit_norm.narrow(0, 0, x.dim(D::Minus1)?)?) } else { None };
+            if let Some(w) = weight.or(unit.as_ref()).filter(|w| w.dtype() == DType::F16) {
+                // Candle's CUDA FP16 kernel converts both operands to FP32 internally,
+                // with the same reduction and affine multiplication as its FP32 kernel.
+                // Only the final store rounds to FP16; avoid the three explicit casts.
+                // For non-affine V normalization this replaces mean/pow with RMSNorm's
+                // reduction/rsqrt, a numerical change evaluated against upstream FP32.
+                return Ok(candle_nn::ops::rms_norm(&x.contiguous()?, w, eps as f32)?);
+            }
+        }
+        norm(x, weight, eps)
+    }
+
+    fn layer_scale(&self, x: &Tensor, scale: &Tensor) -> Result<Tensor> {
+        let scale = scale.to_dtype(x.dtype())?;
+        #[cfg(feature = "cuda")]
+        if self.optimized {
+            return Ok(crate::gemma_ops::scale(x, &scale)?);
+        }
+        Ok(x.broadcast_mul(&scale)?)
+    }
+
+    fn mlp(&self, input: &Tensor, layer: &Layer) -> Result<Tensor> {
+        #[cfg(feature = "cuda")]
+        if self.optimized {
+            let gate = self.linear(input, &layer.gate)?;
+            let up = self.linear(input, &layer.up)?;
+            return self.linear(&crate::gemma_ops::gelu_mul(&gate, &up)?, &layer.down);
+        }
+        let gate = self.linear(input, &layer.gate)?.gelu()?;
+        self.linear(&(gate * self.linear(input, &layer.up)?)?, &layer.down)
     }
 
     /// A table accelerates shared GEMMs only for covered shapes with an invariant reduction.
@@ -431,6 +519,10 @@ impl GemmaBackend {
             }
         };
         let r = &cache[index];
+        #[cfg(feature = "cuda")]
+        if self.optimized && x.dtype() == DType::F16 {
+            return Ok(crate::gemma_ops::rope(x, &r.cos, &r.sin)?);
+        }
         let rotated = Tensor::cat(&[&x.narrow(3, half, half)?.neg()?, &x.narrow(3, 0, half)?], 3)?;
         Ok((x.broadcast_mul(&r.cos)? + rotated.broadcast_mul(&r.sin)?)?)
     }
@@ -526,30 +618,24 @@ impl GemmaBackend {
         Ok(Tensor::cat(&heads, 0)?.transpose(0, 1)?.contiguous()?.reshape((1, n, c.heads * c.head_dim))?)
     }
 
-    fn attention(
+    fn attention_inputs(
         &self,
         q: &Tensor,
         kv: &Kv,
         c: &GemmaLayerConfig,
-        offset: usize,
-        mask: &AttentionMask<'_>,
         map: &Tensor,
-    ) -> Result<Tensor> {
-        let attention_dtype = self.attention_dtype;
+    ) -> Result<(Tensor, Tensor, Tensor)> {
+        #[cfg(feature = "cuda")]
+        if self.optimized {
+            return Ok((
+                crate::gemma_ops::attention_pack(&kv.k, c.heads, true)?,
+                crate::gemma_ops::attention_pack(&kv.v, c.heads, false)?,
+                crate::gemma_ops::attention_pack(q, c.heads, false)?,
+            ));
+        }
         let (batch, n, _, _) = q.dims4()?;
-        if batch > 1 {
-            let mut parts = Vec::with_capacity(batch);
-            for i in 0..batch {
-                let kv = Kv { k: kv.k.narrow(0, i, 1)?, v: kv.v.narrow(0, i, 1)?, start: kv.start };
-                parts.push(self.attention(&q.narrow(0, i, 1)?, &kv, c, offset, mask, map)?);
-            }
-            return Ok(Tensor::cat(&parts, 0)?);
-        }
         let k_len = kv.k.dim(1)?;
-        if batch == 1 && k_len > 4096 {
-            return self.attention_long(q, kv, c, offset, mask, attention_dtype);
-        }
-        let query_tile = QUERY_TILE.min((128 << 20) / (k_len * c.heads * batch * 4)).max(1);
+        let attention_dtype = self.attention_dtype;
         // FP32 attention batches heads into one matrix product. GQA heads select their shared K/V.
         let key =
             kv.k.index_select(map, 2)?
@@ -569,6 +655,37 @@ impl GemmaBackend {
             .contiguous()?
             .reshape((batch * c.heads, n, c.head_dim))?
             .to_dtype(attention_dtype)?;
+        Ok((key, value, query))
+    }
+
+    fn attention(
+        &self,
+        q: &Tensor,
+        kv: &Kv,
+        c: &GemmaLayerConfig,
+        offset: usize,
+        mask: &AttentionMask<'_>,
+        map: &Tensor,
+    ) -> Result<Tensor> {
+        let attention_dtype = self.attention_dtype;
+        let (batch, n, _, _) = q.dims4()?;
+        if batch > 1 && !self.optimized {
+            let mut parts = Vec::with_capacity(batch);
+            for i in 0..batch {
+                let kv = Kv { k: kv.k.narrow(0, i, 1)?, v: kv.v.narrow(0, i, 1)?, start: kv.start };
+                parts.push(self.attention(&q.narrow(0, i, 1)?, &kv, c, offset, mask, map)?);
+            }
+            return Ok(Tensor::cat(&parts, 0)?);
+        }
+        // Text buckets share positions and a causal/sliding mask; flattening batch and heads
+        // keeps each matrix independent. Media prompts are restricted to batch=1 in step.
+        // The tile bound below includes the full batch, so score workspace stays bounded.
+        let k_len = kv.k.dim(1)?;
+        if batch == 1 && k_len > 4096 {
+            return self.attention_long(q, kv, c, offset, mask, attention_dtype);
+        }
+        let query_tile = QUERY_TILE.min((128 << 20) / (k_len * c.heads * batch * 4)).max(1);
+        let (key, value, query) = self.attention_inputs(q, kv, c, map)?;
         let mut tiles = Vec::new();
         // Bound score tiles; CUDA derives the positional mask inside the softmax kernel.
         for start in (0..n).step_by(query_tile) {
@@ -591,6 +708,7 @@ impl GemmaBackend {
         cache: &mut [Option<Kv>],
         media: Option<&MediaPrompt>,
         readouts: &[usize],
+        cache_next: bool,
     ) -> Result<Tensor> {
         let batch = readouts.len();
         ensure!(batch > 0 && !ids.is_empty() && ids.len().is_multiple_of(batch), "invalid Gemma batch");
@@ -637,7 +755,10 @@ impl GemmaBackend {
                 * rounded((self.cfg.per_layer_input as f64).sqrt(), dt))?
             .reshape((batch, n, self.cfg.layers.len(), self.cfg.per_layer_input))?;
             let context = (self.linear(&x, proj)? / (self.cfg.hidden as f64).sqrt())?.reshape(identity.shape())?;
-            Some(((norm(&context, Some(w), self.cfg.rms_eps)? + identity)? * std::f64::consts::FRAC_1_SQRT_2)?)
+            Some(
+                ((self.decoder_norm(&context, Some(w), self.cfg.rms_eps)? + identity)?
+                    * std::f64::consts::FRAC_1_SQRT_2)?,
+            )
         } else {
             None
         };
@@ -649,11 +770,15 @@ impl GemmaBackend {
             has_image_groups: media.is_some_and(|m| m.has_image_groups),
         };
         let mut rotations = Vec::new();
+        // A model without cross-layer KV sharing needs no completed layer's KV in this
+        // forward. Only an actual continuation chunk needs the cache after step returns.
+        let discard_kv = self.discard_unused_kv();
         let mut active: Vec<Option<Kv>> = vec![None; self.cfg.layers.len()];
         for (i, (c, l)) in self.cfg.layers.iter().zip(&self.weights.layers).enumerate() {
-            let input = norm(&x, Some(&l.input_norm), self.cfg.rms_eps)?;
+            let input = self.decoder_norm(&x, Some(&l.input_norm), self.cfg.rms_eps)?;
             let query = self.linear(&input, &l.q)?.reshape((batch, n, c.heads, c.head_dim))?;
-            let query = self.rotate(&norm(&query, Some(&l.q_norm), self.cfg.rms_eps)?, c, offset, &mut rotations)?;
+            let query =
+                self.rotate(&self.decoder_norm(&query, Some(&l.q_norm), self.cfg.rms_eps)?, c, offset, &mut rotations)?;
             let kv = if c.shared_kv {
                 active[c.kv_source].as_ref().context("Gemma KV producer not run")?.clone()
             } else {
@@ -664,8 +789,13 @@ impl GemmaBackend {
                     Some(w) => self.linear(&input, w)?.reshape(key.shape())?,
                     None => key.clone(),
                 };
-                let key = self.rotate(&norm(&key, l.k_norm.as_ref(), self.cfg.rms_eps)?, c, offset, &mut rotations)?;
-                let value = norm(&value, None, self.cfg.rms_eps)?;
+                let key = self.rotate(
+                    &self.decoder_norm(&key, l.k_norm.as_ref(), self.cfg.rms_eps)?,
+                    c,
+                    offset,
+                    &mut rotations,
+                )?;
+                let value = self.decoder_norm(&value, None, self.cfg.rms_eps)?;
                 match &cache[i] {
                     Some(past) => Kv {
                         k: Tensor::cat(&[&past.k, &key], 1)?,
@@ -676,17 +806,16 @@ impl GemmaBackend {
                 }
             };
             let attn = self.linear(&self.attention(&query, &kv, c, offset, &mask, &l.head_map)?, &l.o)?;
-            x = (x + norm(&attn, Some(&l.post_attn_norm), self.cfg.rms_eps)?)?;
-            let input = norm(&x, Some(&l.pre_mlp_norm), self.cfg.rms_eps)?;
-            let gate = self.linear(&input, &l.gate)?.gelu()?;
-            let mlp = self.linear(&(gate * self.linear(&input, &l.up)?)?, &l.down)?;
-            x = (x + norm(&mlp, Some(&l.post_mlp_norm), self.cfg.rms_eps)?)?;
+            x = (x + self.decoder_norm(&attn, Some(&l.post_attn_norm), self.cfg.rms_eps)?)?;
+            let input = self.decoder_norm(&x, Some(&l.pre_mlp_norm), self.cfg.rms_eps)?;
+            let mlp = self.mlp(&input, l)?;
+            x = (x + self.decoder_norm(&mlp, Some(&l.post_mlp_norm), self.cfg.rms_eps)?)?;
             if let (Some(ple), Some(gate), Some(proj), Some(w)) = (&ple, &l.ple_gate, &l.ple_projection, &l.ple_norm) {
                 let signal = (self.linear(&x, gate)?.gelu()? * ple.narrow(2, i, 1)?.squeeze(2)?)?;
-                x = (x + norm(&self.linear(&signal, proj)?, Some(w), self.cfg.rms_eps)?)?;
+                x = (x + self.decoder_norm(&self.linear(&signal, proj)?, Some(w), self.cfg.rms_eps)?)?;
             }
-            x = x.broadcast_mul(&l.scalar.to_dtype(dt)?)?;
-            if !c.shared_kv {
+            x = self.layer_scale(&x, &l.scalar)?;
+            if !c.shared_kv && (!discard_kv || cache_next) {
                 let keep =
                     if c.sliding { kv.k.dim(1)?.min(self.cfg.sliding_window.saturating_sub(1)) } else { kv.k.dim(1)? };
                 let skip = kv.k.dim(1)? - keep;
@@ -695,8 +824,12 @@ impl GemmaBackend {
                     v: kv.v.narrow(1, skip, keep)?.contiguous()?,
                     start: kv.start + skip,
                 });
+            } else if discard_kv {
+                cache[i] = None;
             }
-            active[i] = Some(kv);
+            if !discard_kv {
+                active[i] = Some(kv);
+            }
             self.checkpoint()?;
         }
         let states: Vec<Tensor> = readouts
@@ -704,7 +837,7 @@ impl GemmaBackend {
             .enumerate()
             .map(|(i, pos)| x.narrow(0, i, 1)?.narrow(1, *pos, 1)?.squeeze(1))
             .collect::<candle_core::Result<_>>()?;
-        norm(&Tensor::cat(&states, 0)?, Some(&self.weights.norm), self.cfg.rms_eps)
+        self.decoder_norm(&Tensor::cat(&states, 0)?, Some(&self.weights.norm), self.cfg.rms_eps)
     }
 
     fn read_prompt(&self, ids: &[u32], codes: &[u32]) -> Result<Vec<f32>> {
@@ -735,7 +868,8 @@ impl GemmaBackend {
                     }
                 }
             }
-            hidden = Some(self.step(&ids[offset..end], offset, &mut cache, media, &[end - offset - 1])?);
+            hidden =
+                Some(self.step(&ids[offset..end], offset, &mut cache, media, &[end - offset - 1], end < ids.len())?);
             offset = end;
         }
         self.readout_hidden(&hidden.context("Gemma empty prompt")?, codes)
@@ -756,6 +890,10 @@ impl GemmaBackend {
         Ok(logits)
     }
 
+    fn discard_unused_kv(&self) -> bool {
+        self.optimized && self.cfg.layers.iter().all(|c| !c.shared_kv)
+    }
+
     /// Reconstruct one prompt from a row whose dimensions, nodes and parents were validated by `letter_logits`.
     fn prompt_ids(row: &Packed, last: usize) -> Result<Vec<u32>> {
         ensure!(last < row.ids.len(), "invalid Gemma readout position");
@@ -772,7 +910,9 @@ impl GemmaBackend {
 
     fn read_batch(&self, prompts: &[(&[u32], &[u32])]) -> Result<Vec<Vec<f32>>> {
         ensure!(!prompts.is_empty() && prompts.len() <= 32, "Gemma batch size");
-        let n = prompts.iter().map(|(ids, _)| ids.len()).max().context("empty Gemma batch")?.div_ceil(32) * 32;
+        let alignment = if self.optimized { 8 } else { 32 };
+        let n = prompts.iter().map(|(ids, _)| ids.len()).max().context("empty Gemma batch")?.div_ceil(alignment)
+            * alignment;
         ensure!(
             n > 0
                 && n <= 512
@@ -789,7 +929,7 @@ impl GemmaBackend {
             ids.resize(readouts.len() * n, self.cfg.pad_token);
         }
         let mut cache = vec![None; self.cfg.layers.len()];
-        let hidden = self.step(&ids, 0, &mut cache, None, &readouts)?;
+        let hidden = self.step(&ids, 0, &mut cache, None, &readouts, false)?;
         prompts.iter().enumerate().map(|(i, (_, codes))| self.readout_hidden(&hidden.narrow(0, i, 1)?, codes)).collect()
     }
 }
@@ -797,7 +937,11 @@ impl GemmaBackend {
 impl Backend for GemmaBackend {
     fn media_kinds(&self) -> Vec<basal_core::media::Kind> {
         if self.processor.is_some() {
-            vec![basal_core::media::Kind::Image, basal_core::media::Kind::Audio]
+            let mut kinds = vec![basal_core::media::Kind::Image];
+            if self.cfg.audio.is_some() {
+                kinds.push(basal_core::media::Kind::Audio);
+            }
+            kinds
         } else {
             vec![]
         }
@@ -905,9 +1049,14 @@ impl Backend for GemmaBackend {
     fn describe(&self) -> Value {
         json!({"backend":"cuda", "device": self.device, "architecture":if self.cfg.unified {"gemma4_unified"} else {"gemma4"},
             "precision":format!("{:?}",self.precision), "attention_products":format!("{:?}",self.attention_dtype),
+            "fused_weighted_norm":self.optimized, "fused_rope":self.optimized,
+            "fused_value_norm":self.optimized, "fused_gelu_mul":self.optimized,
+            "fused_layer_scale":self.optimized, "text_padding_multiple":if self.optimized {8} else {32},
+            "chunk_kv_retention":if self.discard_unused_kv() {"continuation chunks only"} else {"original"},
             "attention_accumulation":"F32", "softmax":"F32 with positional masks on CUDA", "query_tile_max":QUERY_TILE,
             "score_workspace_mib":128, "long_attention":"unique GQA K/V", "prefill_chunk":2048,
-            "short_attention_batch":1, "text_bucket_tokens":32, "text_batch_max":32, "text_batch_tokens_max":8192,
+            "short_attention_batch":if self.optimized {32} else {1}, "text_bucket_tokens":32,
+            "text_batch_max":32, "text_batch_tokens_max":8192,
             "gemm":"covered invariant table shapes share a GEMM; otherwise fixed per-prompt GEMMs",
             "readout":"FP32 code rows, final logit softcap", "state_cache":false,
             "encoder_weights":"BF16", "encoder_compute":if self.precision==Precision::F32 {"F32"} else {"BF16"}})
@@ -979,6 +1128,7 @@ impl Backend for GemmaBackend {
             weights: self.weights.clone(),
             precision: self.precision,
             attention_dtype: self.attention_dtype,
+            optimized: self.optimized,
             readout: self.readout,
             gate: None,
             load_s: 0.0,

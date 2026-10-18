@@ -87,7 +87,7 @@ pub struct ModelConfig {
     /// Branch, tag or commit of `repo` (default: main). A commit pins the weights.
     #[serde(default)]
     pub revision: Option<String>,
-    /// auto (Llama f16; validated Omni on Ada f16, other Gemma bf16), f16, bf16 or f32.
+    /// auto (Llama f16; measured Omni/GPU pairs f16, other Gemma bf16), f16, bf16 or f32.
     #[serde(default = "default_dtype")]
     pub dtype: String,
     /// Format of the projection weights: `none` (default, dense weights of `dtype`), `q8_0` (GGML Q8_0 blocks) or
@@ -457,7 +457,7 @@ pub struct KnownModel {
     pub size_gb: f64,
 }
 
-pub const KNOWN_MODELS: [KnownModel; 8] = [
+pub const KNOWN_MODELS: [KnownModel; 10] = [
     KnownModel {
         short: "mini",
         repo: "Remek/basal-1.5-mini",
@@ -505,6 +505,18 @@ pub const KNOWN_MODELS: [KnownModel; 8] = [
         repo: "Remek/basal-omni-1.0-max",
         revision: "e538228c4f3ffd96dde298a073ed10247da0d637",
         size_gb: 23.9,
+    },
+    KnownModel {
+        short: "omni-1.1-max",
+        repo: "Remek/basal-omni-1.1-max",
+        revision: "c8ab50cd973c116b3ca6bd9e4d574f713bab1f68",
+        size_gb: 23.92,
+    },
+    KnownModel {
+        short: "omni-ultra",
+        repo: "Remek/basal-omni-1.0-ultra",
+        revision: "b8e214cb42d0a7a4cb2c3a93b0ba02c65d7590e4",
+        size_gb: 62.55,
     },
 ];
 
@@ -679,7 +691,8 @@ pub fn cached_model_dir(repo: &str, revision: Option<&str>) -> Option<PathBuf> {
         .local_files_only(true)
         .send()
         .ok()?;
-    MODEL_FILES[..7].iter().all(|f| dir.join(f).exists()).then_some(dir)
+    (MODEL_FILES[..6].iter().all(|f| dir.join(f).exists()) && basal_core::checkpoint::files(&dir).is_ok())
+        .then_some(dir)
 }
 
 /// Directory of a configured model: `path`, or the Hugging Face snapshot of `repo` at `revision` (downloaded when
@@ -804,14 +817,19 @@ impl hf_hub::progress::ProgressHandler for DownloadLog {
     }
 }
 
-/// CLI auto precision: use the validated FP16 decoder for the two measured Omni
-/// model names on RTX 6000 Ada (GPU `device`; replicas run on GPUs of one type). Explicit precision always wins;
+/// CLI auto precision: use the validated FP16 decoder for measured Omni/GPU pairs
+/// (GPU `device`; replicas run on GPUs of one type). Explicit precision always wins;
 /// media towers stay BF16. Other Gemma devices keep the published BF16 default.
 pub fn model_precision(value: &str, manifest: &ModelManifest, device: usize) -> Result<basal_gpu::Precision> {
     if value == "auto"
         && matches!(&manifest.config, basal_core::architecture::Architecture::Gemma4(_))
-        && matches!(manifest.name.as_str(), "basal-omni-1.0-mini" | "basal-omni-1.0-max")
-        && basal_gpu::gpu_name(device).is_ok_and(|name| name == "NVIDIA RTX 6000 Ada Generation")
+        && basal_gpu::gpu_name(device).is_ok_and(|name| match name.as_str() {
+            "NVIDIA RTX 6000 Ada Generation" => {
+                matches!(manifest.name.as_str(), "basal-omni-1.0-mini" | "basal-omni-1.0-max" | "basal-omni-1.1-max")
+            }
+            "NVIDIA H100 PCIe" => manifest.name == "basal-omni-1.0-ultra",
+            _ => false,
+        })
     {
         return Ok(basal_gpu::Precision::F16);
     }

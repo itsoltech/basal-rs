@@ -74,7 +74,12 @@ impl Requests {
         if let Some(template) = &requests.template {
             ensure!(template.is_object(), "template must be a request object containing questions");
             let mut probe = template.clone();
-            probe["state"] = json!("");
+            probe["state"] =
+                if probe["questions"].as_object().is_some_and(|qs| qs.values().any(basal_core::tasks::is_task)) {
+                    json!("template validation")
+                } else {
+                    json!("")
+                };
             probe["model"] = json!("client-validation");
             Self::validate(&probe).map_err(|e| anyhow::anyhow!(e.message)).context("invalid questions in template")?;
             if args.value {
@@ -132,8 +137,10 @@ impl Requests {
     pub fn validate(body: &Value) -> Result<(), Failure> {
         // Validate the current contract's superset here. The selected model/server validates its trained
         // format's limits; a client cannot infer that format from arbitrary local or remote model names.
+        let expansion = basal_core::tasks::expand(body, 255).map_err(Failure::decision)?;
+        let validated = expansion.as_ref().map_or(body, |e| &e.request);
         basal_core::request::parse_request_for_format(
-            body,
+            validated,
             basal_core::request::Dialect::TypeSafe,
             basal_core::prompt::PromptFormat::Two,
         )

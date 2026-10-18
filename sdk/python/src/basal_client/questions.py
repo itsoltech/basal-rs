@@ -9,6 +9,7 @@ import math
 from types import MappingProxyType
 from typing import Any, Generic, Literal, Self, TypeVar, cast, overload
 
+from .task_types import TaskAnswer
 from .types import Calibration, DecisionResponse, EvidenceSpan, JsonValue, MultiObjective, Question as WireQuestion, ToolRanking, Usage
 
 OptionKeys = Literal["show", "hide"]
@@ -80,7 +81,7 @@ class ActAnswer:
 
 
 TAnswer = TypeVar("TAnswer")
-AnswerResult = ChoiceAnswer | NoulAnswer | ScoreAnswer | MultiAnswer | ActAnswer | ToolAnswer
+AnswerResult = ChoiceAnswer | NoulAnswer | ScoreAnswer | MultiAnswer | ActAnswer | ToolAnswer | TaskAnswer
 TSchema = TypeVar("TSchema", bound="Questions")
 TSchema_co = TypeVar("TSchema_co", bound="Questions", covariant=True)
 
@@ -140,7 +141,7 @@ class QuestionSpec(Generic[TAnswer]):
         data = cast(dict[str, Any], answer)
         try:
             probabilities = data["probabilities"]
-            if not isinstance(probabilities, dict) or any(not isinstance(k, str) for k in probabilities):
+            if not isinstance(probabilities, dict) or not probabilities or any(not isinstance(k, str) for k in probabilities):
                 raise ValueError("invalid probabilities")
             for value in probabilities.values():
                 _number(value, "probability", True)
@@ -422,12 +423,14 @@ def schema_questions(schema: type[Questions]) -> dict[str, QuestionSpec[Any]]:
 
 
 def build_questions(questions: QuestionSet) -> dict[str, WireQuestion]:
+    from .tasks import ClassifyQuestion, VerifyQuestion, CompressQuestion, ExtractQuestion
     if not questions:
         raise ValueError("questions must not be empty")
     result: dict[str, WireQuestion] = {}
     for key, question in questions.items():
         _text(key, "question ID")
-        if not isinstance(question, (ChoiceQuestion, NoulQuestion, ScoreQuestion, MultiQuestion, ActQuestion, ToolQuestion)):
+        if not isinstance(question, (ChoiceQuestion, NoulQuestion, ScoreQuestion, MultiQuestion, ActQuestion, ToolQuestion,
+                                     ClassifyQuestion, VerifyQuestion, CompressQuestion, ExtractQuestion)):
             raise TypeError("questions must contain typed question specs")
         result[key] = question.to_dict()
     return result

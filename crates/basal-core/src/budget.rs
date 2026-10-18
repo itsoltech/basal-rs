@@ -16,6 +16,17 @@ pub(crate) fn prepared_input_bytes(body: &Value) -> Result<usize, DecideError> {
     let mut bytes = 0usize;
     let mut branches = 0usize;
     for q in questions.values() {
+        if crate::tasks::is_task(q) {
+            let (count, expanded) = crate::tasks::estimate(q, &body["state"])?;
+            branches = branches.saturating_add(count);
+            bytes = bytes.saturating_add(expanded);
+            if branches > MAX_BRANCHES || bytes > MAX_TEXT_BYTES {
+                return Err(crate::request::api_usage_error(
+                    "request exceeds the host prompt budget (4096 branches or 32 MiB, including task continuation)",
+                ));
+            }
+            continue;
+        }
         let multi = q.get("type").and_then(Value::as_str) == Some("multi")
             || (q.get("type").and_then(Value::as_str) == Some("tool") && crate::request::truthy(q.get("multi")));
         let labels = match q.get("type").and_then(Value::as_str) {

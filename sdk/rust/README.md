@@ -147,3 +147,11 @@ Rust 0.3 adds a `Tool` question/answer variant and fields to request options and
 metadata. When constructing option structs use `..Default::default()`; multi
 threshold is now `Option<f64>`. `MultiOptions` borrows constraint keys. Existing
 request factories and raw response access remain available.
+
+## Experimental Basal 2.1 tasks
+
+Typed classify, verify, compress and extract factories preserve nullable task automation,
+Unicode code point offsets and nested JSON extraction values. Task answers do not share
+the primitive probabilities field. See [task semantics](../../docs/TASKS.md) and
+[SDK examples](../../docs/SDK.md#zadania-basal-21). These source changes require a server
+with the experimental task layer; installing an SDK does not update the inference server.

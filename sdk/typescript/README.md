@@ -114,3 +114,11 @@ const response = await new BasalClient().decide("Inspect the supplied material."
 }, {model:"basal-omni-1.0-mini", lang:"en", media:[image(new Uint8Array(await file.arrayBuffer()))]});
 console.log(response.answers.route, response.answers.labels.expected_score);
 ```
+
+## Experimental Basal 2.1 tasks
+
+Typed classify, verify, compress and extract factories preserve nullable task automation,
+Unicode code point offsets and nested JSON extraction values. Task answers do not share
+the primitive probabilities field. See [task semantics](../../docs/TASKS.md) and
+[SDK examples](../../docs/SDK.md#zadania-basal-21). These source changes require a server
+with the experimental task layer; installing an SDK does not update the inference server.

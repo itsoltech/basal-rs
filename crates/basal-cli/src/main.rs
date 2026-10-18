@@ -136,7 +136,7 @@ struct GpuArgs {
     /// Option orders: 1, 2, auto or `2le<N>`; default 2 for format 1, 1 for format 2
     #[arg(long)]
     orders: Option<String>,
-    /// Weight/activation precision: auto (Llama f16; Omni Ada f16, other Gemma bf16), f16, bf16 or f32 (numerical reference)
+    /// Weight/activation precision: auto (Llama f16; measured Omni/GPU pairs f16, other Gemma bf16), f16, bf16 or f32
     #[arg(long, default_value = "auto")]
     dtype: String,
     /// Attention arithmetic: auto, accurate (Llama original, Gemma FP32 products), or balanced (CUDA f16 Llama)

@@ -9,20 +9,24 @@ import os
 from pathlib import Path
 
 from basal_client import (AsyncBasalClient, BasalClient, Questions, choice, noul, score,
-                          multi, act, tool, image, audio, BasalHTTPError)
+                          multi, act, tool, image, audio, BasalHTTPError, classify, verify, compress, extract)
 
 
 def definitions(case):
     result = {}
     for key, wire in case["questions"].items():
         args = dict(wire)
-        kind, instructions = args.pop("type"), args.pop("instructions")
+        kind, instructions = args.pop("type"), args.pop("instructions", "")
         if kind == "choice": result[key] = choice(instructions, args.pop("criteria"), **args)
         elif kind == "score": result[key] = score(instructions, args.pop("criteria"), **args)
         elif kind == "noul": result[key] = noul(instructions, **args)
         elif kind == "multi": result[key] = multi(instructions, args.pop("criteria"), **args)
         elif kind == "act": result[key] = act(instructions, args.pop("costs"), **args)
         elif kind == "tool": result[key] = tool(instructions, args.pop("tools"), **args)
+        elif kind == "classify": result[key] = classify(instructions, args.pop("labels"), **args)
+        elif kind == "verify": result[key] = verify(instructions, args.pop("claims"), **args)
+        elif kind == "compress": result[key] = compress(instructions, **args)
+        elif kind == "extract": result[key] = extract(instructions, args.pop("schema"))
         else: raise ValueError("unsupported diagnostic case")
     return result
 

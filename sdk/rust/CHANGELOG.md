@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.0
+
+- Add experimental Basal 2.1 classify, verify, compress and extract tasks with typed results.
+- Preserve nullable task automation, source offsets in Unicode code points and nested JSON extraction values.
+- Task answers no longer require the primitive-only probabilities field.
+
 ## Unreleased
 
 ## 0.3.0 — 2026-10-17

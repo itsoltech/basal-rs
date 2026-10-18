@@ -1,0 +1,22 @@
+# Ultra / H100 PCIe: profil dużych dokumentów w tekstowym ruchu mieszanym C32.
+# Wyniki i kompromisy: reports/ultra-long-documents-2026-10-18/README.md.
+# Limity przyjęcia są z pomiaru; nie określają pojemności produkcyjnej usługi.
+addr: 127.0.0.1:8000
+default_model: basal-omni-1.0-ultra
+max_inflight: 1024
+max_large_inflight: 1024
+long_slice_ms: 5000
+models:
+  - repo: Remek/basal-omni-1.0-ultra
+    revision: b8e214cb42d0a7a4cb2c3a93b0ba02c65d7590e4
+    device: 0
+    dtype: auto
+    inference_mode: auto
+    gemm_table: auto
+    max_batch_tokens: 16384
+    schedule: hrrn
+    long_tokens: 4096
+    state_cache_mb: 0
+    no_prefix_cache: true
+    orders: "1"
+    media: false

@@ -11,10 +11,7 @@ type Load<'a> = dyn Fn(&str, &[usize]) -> Result<Tensor> + 'a;
 
 struct Clip {
     weight: Tensor,
-    input_min: f64,
-    input_max: f64,
-    output_min: f64,
-    output_max: f64,
+    bounds: Option<[f64; 4]>,
 }
 impl Clip {
     fn load(load: &Load<'_>, prefix: &str, input: usize, output: usize) -> Result<Self> {
@@ -23,18 +20,24 @@ impl Clip {
             ensure!(!value.is_nan(), "NaN clipping bound");
             Ok(value)
         };
-        let c = Self {
-            weight: load(&format!("{prefix}.linear.weight"), &[output, input])?,
-            input_min: scalar("input_min")?,
-            input_max: scalar("input_max")?,
-            output_min: scalar("output_min")?,
-            output_max: scalar("output_max")?,
-        };
-        ensure!(c.input_min <= c.input_max && c.output_min <= c.output_max, "invalid clipping bounds");
-        Ok(c)
+        let bounds = [scalar("input_min")?, scalar("input_max")?, scalar("output_min")?, scalar("output_max")?];
+        ensure!(bounds[0] <= bounds[1] && bounds[2] <= bounds[3], "invalid clipping bounds");
+        Ok(Self { weight: load(&format!("{prefix}.linear.weight"), &[output, input])?, bounds: Some(bounds) })
+    }
+    fn vision(load: &Load<'_>, prefix: &str, input: usize, output: usize, clipped: bool) -> Result<Self> {
+        if clipped {
+            Self::load(load, prefix, input, output)
+        } else {
+            Ok(Self { weight: load(&format!("{prefix}.linear.weight"), &[output, input])?, bounds: None })
+        }
     }
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        Ok(linear(&x.clamp(self.input_min, self.input_max)?, &self.weight)?.clamp(self.output_min, self.output_max)?)
+        match self.bounds {
+            Some([input_min, input_max, output_min, output_max]) => {
+                Ok(linear(&x.clamp(input_min, input_max)?, &self.weight)?.clamp(output_min, output_max)?)
+            }
+            None => linear(x, &self.weight),
+        }
     }
 }
 
@@ -135,45 +138,90 @@ pub(crate) struct Vision {
     positions: Tensor,
     layers: Vec<VisionLayer>,
     projection: Tensor,
+    hidden: usize,
+    heads: usize,
+    head_dim: usize,
+    standardization: Option<(Tensor, Tensor)>,
 }
 
 impl Vision {
-    fn load(load: &Load<'_>) -> Result<Self> {
-        let mut layers = Vec::with_capacity(16);
-        for i in 0..16 {
+    fn load(load: &Load<'_>, cfg: &GemmaConfig) -> Result<Self> {
+        let v = cfg.vision.as_ref().context("vision config missing")?;
+        // Both published tower architectures use full axial RoPE and ordinary multi-head attention.
+        // Validate the supported layouts before allocating any encoder weights.
+        let mini = cfg.hidden == 2560
+            && v["hidden_size"] == 768
+            && v["num_hidden_layers"] == 16
+            && v["num_attention_heads"] == 12
+            && v["head_dim"] == 64
+            && v["intermediate_size"] == 3072
+            && v["standardize"] == false
+            && v["use_clipped_linears"] == true;
+        let ultra = cfg.hidden == 5376
+            && v["hidden_size"] == 1152
+            && v["num_hidden_layers"] == 27
+            && v["num_attention_heads"] == 16
+            && v["head_dim"] == 72
+            && v["intermediate_size"] == 4304
+            && v["standardize"] == true
+            && v["use_clipped_linears"] == false;
+        ensure!(
+            (mini || ultra)
+                && v["num_key_value_heads"] == v["num_attention_heads"]
+                && v["patch_size"] == 16
+                && v["pooling_kernel_size"] == 3
+                && v["position_embedding_size"] == 10240
+                && v["rms_norm_eps"] == 1e-6
+                && v["hidden_activation"] == "gelu_pytorch_tanh"
+                && v["rope_parameters"]["rope_type"] == "axial"
+                && v["rope_parameters"]["rope_theta"] == 100.0,
+            "unsupported vision tower architecture"
+        );
+        let (h, count, heads, d, mlp) = if mini { (768, 16, 12, 64, 3072) } else { (1152, 27, 16, 72, 4304) };
+        let mut layers = Vec::with_capacity(count);
+        for i in 0..count {
             let p = format!("model.vision_tower.encoder.layers.{i}");
             let get = |name, shape: &[usize]| load(&format!("{p}.{name}"), shape);
+            let linear = |name: &str, input, output| Clip::vision(load, &format!("{p}.{name}"), input, output, mini);
             layers.push(VisionLayer {
-                input: get("input_layernorm.weight", &[768])?,
-                post_attn: get("post_attention_layernorm.weight", &[768])?,
-                pre_mlp: get("pre_feedforward_layernorm.weight", &[768])?,
-                post_mlp: get("post_feedforward_layernorm.weight", &[768])?,
-                q: Clip::load(load, &format!("{p}.self_attn.q_proj"), 768, 768)?,
-                k: Clip::load(load, &format!("{p}.self_attn.k_proj"), 768, 768)?,
-                v: Clip::load(load, &format!("{p}.self_attn.v_proj"), 768, 768)?,
-                o: Clip::load(load, &format!("{p}.self_attn.o_proj"), 768, 768)?,
-                q_norm: get("self_attn.q_norm.weight", &[64])?,
-                k_norm: get("self_attn.k_norm.weight", &[64])?,
-                gate: Clip::load(load, &format!("{p}.mlp.gate_proj"), 768, 3072)?,
-                up: Clip::load(load, &format!("{p}.mlp.up_proj"), 768, 3072)?,
-                down: Clip::load(load, &format!("{p}.mlp.down_proj"), 3072, 768)?,
+                input: get("input_layernorm.weight", &[h])?,
+                post_attn: get("post_attention_layernorm.weight", &[h])?,
+                pre_mlp: get("pre_feedforward_layernorm.weight", &[h])?,
+                post_mlp: get("post_feedforward_layernorm.weight", &[h])?,
+                q: linear("self_attn.q_proj", h, h)?,
+                k: linear("self_attn.k_proj", h, h)?,
+                v: linear("self_attn.v_proj", h, h)?,
+                o: linear("self_attn.o_proj", h, h)?,
+                q_norm: get("self_attn.q_norm.weight", &[d])?,
+                k_norm: get("self_attn.k_norm.weight", &[d])?,
+                gate: linear("mlp.gate_proj", h, mlp)?,
+                up: linear("mlp.up_proj", h, mlp)?,
+                down: linear("mlp.down_proj", mlp, h)?,
             });
         }
         Ok(Self {
-            patch: load("model.vision_tower.patch_embedder.input_proj.weight", &[768, 768])?,
-            positions: load("model.vision_tower.patch_embedder.position_embedding_table", &[2, 10240, 768])?,
+            patch: load("model.vision_tower.patch_embedder.input_proj.weight", &[h, 768])?,
+            positions: load("model.vision_tower.patch_embedder.position_embedding_table", &[2, 10240, h])?,
             layers,
-            projection: load("model.embed_vision.embedding_projection.weight", &[2560, 768])?,
+            projection: load("model.embed_vision.embedding_projection.weight", &[cfg.hidden, h])?,
+            hidden: h,
+            heads,
+            head_dim: d,
+            standardization: if ultra {
+                Some((load("model.vision_tower.std_bias", &[h])?, load("model.vision_tower.std_scale", &[h])?))
+            } else {
+                None
+            },
         })
     }
-    fn rotation(positions: &[(i64, i64)], dtype: DType, dev: &Device) -> Result<(Tensor, Tensor)> {
+    fn rotation(positions: &[(i64, i64)], dim: usize, dtype: DType, dev: &Device) -> Result<(Tensor, Tensor)> {
         let n = positions.len();
-        let mut cos = Vec::with_capacity(n * 64);
-        let mut sin = Vec::with_capacity(n * 64);
+        let mut cos = Vec::with_capacity(n * dim);
+        let mut sin = Vec::with_capacity(n * dim);
         for &(a, b) in positions {
             for position in [a, b] {
                 let angles: Vec<f32> =
-                    (0..16).map(|i| position as f32 / 100.0f32.powf((2 * i) as f32 / 32.0)).collect();
+                    (0..dim / 4).map(|i| position as f32 / 100.0f32.powf((2 * i) as f32 / (dim / 2) as f32)).collect();
                 for _ in 0..2 {
                     cos.extend(angles.iter().map(|x| x.cos()));
                     sin.extend(angles.iter().map(|x| x.sin()));
@@ -181,16 +229,20 @@ impl Vision {
             }
         }
         Ok((
-            Tensor::from_vec(cos, (n, 1, 64), dev)?.to_dtype(dtype)?,
-            Tensor::from_vec(sin, (n, 1, 64), dev)?.to_dtype(dtype)?,
+            Tensor::from_vec(cos, (n, 1, dim), dev)?.to_dtype(dtype)?,
+            Tensor::from_vec(sin, (n, 1, dim), dev)?.to_dtype(dtype)?,
         ))
     }
 
     fn rotate(x: &Tensor, rotation: &(Tensor, Tensor)) -> Result<Tensor> {
         let (cos, sin) = rotation;
         let mut parts = Vec::new();
-        for offset in [0, 32] {
-            parts.push(Tensor::cat(&[&x.narrow(2, offset + 16, 16)?.neg()?, &x.narrow(2, offset, 16)?], 2)?);
+        let quarter = x.dim(2)? / 4;
+        for offset in [0, quarter * 2] {
+            parts.push(Tensor::cat(
+                &[&x.narrow(2, offset + quarter, quarter)?.neg()?, &x.narrow(2, offset, quarter)?],
+                2,
+            )?);
         }
         Ok((x.broadcast_mul(cos)? + Tensor::cat(&parts, 2)?.broadcast_mul(sin)?)?)
     }
@@ -214,19 +266,19 @@ impl Vision {
         .to_dtype(dt)?;
         let mut x = (linear(&patches, &self.patch)? + positions)?;
         // Position/dtype are fixed for this image. Reuse exactly the same rotary tensors
-        // for Q and K in all sixteen layers, rather than rebuilding/uploading them 32 times.
-        let rotation = Self::rotation(&image.positions[..n], dt, dev)?;
+        // for Q and K in all layers.
+        let rotation = Self::rotation(&image.positions[..n], self.head_dim, dt, dev)?;
         for layer in &self.layers {
             let input = norm(&x, Some(&layer.input), 1e-6)?;
             let q = Self::rotate(
-                &norm(&layer.q.forward(&input)?.reshape((n, 12, 64))?, Some(&layer.q_norm), 1e-6)?,
+                &norm(&layer.q.forward(&input)?.reshape((n, self.heads, self.head_dim))?, Some(&layer.q_norm), 1e-6)?,
                 &rotation,
             )?;
             let k = Self::rotate(
-                &norm(&layer.k.forward(&input)?.reshape((n, 12, 64))?, Some(&layer.k_norm), 1e-6)?,
+                &norm(&layer.k.forward(&input)?.reshape((n, self.heads, self.head_dim))?, Some(&layer.k_norm), 1e-6)?,
                 &rotation,
             )?;
-            let v = norm(&layer.v.forward(&input)?.reshape((n, 12, 64))?, None, 1e-6)?;
+            let v = norm(&layer.v.forward(&input)?.reshape((n, self.heads, self.head_dim))?, None, 1e-6)?;
             // Batch heads while keeping softmax and accumulation in FP32; QK/PV outputs use FP16 for half models. Query tiling bounds the
             // score workspace for high-detail images; changed cuBLAS geometry needs FP32 validation.
             let q = q.transpose(0, 1)?.to_dtype(attention_dtype)?.contiguous()?;
@@ -241,7 +293,7 @@ impl Vision {
                     candle_nn::ops::softmax_last_dim(&scores)?.to_dtype(attention_dtype)?.matmul(&v)?.to_dtype(dt)?;
                 tiles.push(values.transpose(0, 1)?.contiguous()?);
             }
-            let attn = layer.o.forward(&Tensor::cat(&tiles, 0)?.reshape((n, 768))?)?;
+            let attn = layer.o.forward(&Tensor::cat(&tiles, 0)?.reshape((n, self.hidden))?)?;
             x = (x + norm(&attn, Some(&layer.post_attn), 1e-6)?)?;
             let input = norm(&x, Some(&layer.pre_mlp), 1e-6)?;
             let mlp = layer.down.forward(&(layer.gate.forward(&input)?.gelu()? * layer.up.forward(&input)?)?)?;
@@ -256,13 +308,20 @@ impl Vision {
         // Preserve dy-major/dx-minor 3x3 patch order and the FP32 reduction axis.
         // Batched pooling avoids nine tiny copies and one reduction per output token.
         let pooled = x
-            .reshape((image.patch_height / 3, 3, image.patch_width / 3, 3, 768))?
+            .reshape((image.patch_height / 3, 3, image.patch_width / 3, 3, self.hidden))?
             .permute((0, 2, 1, 3, 4))?
             .contiguous()?
-            .reshape((out, 9, 768))?
+            .reshape((out, 9, self.hidden))?
             .to_dtype(DType::F32)?;
         let pooled = (pooled.sum_keepdim(1)?.squeeze(1)? / 9.0)?.to_dtype(dt)?;
-        let pooled = (pooled.to_dtype(DType::F32)? * (768.0f64).sqrt())?.to_dtype(dt)?;
+        let scaled = (pooled.to_dtype(DType::F32)? * (self.hidden as f64).sqrt())?;
+        // Ultra standardizes before the final cast: scaling alone can overflow FP16.
+        let pooled = if let Some((bias, scale)) = &self.standardization {
+            scaled.broadcast_sub(&bias.to_dtype(DType::F32)?)?.broadcast_mul(&scale.to_dtype(DType::F32)?)?
+        } else {
+            scaled
+        }
+        .to_dtype(dt)?;
         linear(&norm(&pooled, None, 1e-6)?, &self.projection)
     }
 }
@@ -457,13 +516,13 @@ impl Audio {
 
 pub(crate) enum Encoders {
     Unified { vision: UnifiedVision, audio: Tensor },
-    Towers { vision: Vision, audio: Audio },
+    Towers { vision: Vision, audio: Option<Audio> },
 }
 impl Encoders {
     pub fn load(cfg: &GemmaConfig, load: &Load<'_>) -> Result<Self> {
         let vision = cfg.vision.as_ref().context("Gemma vision config missing")?;
-        let audio = cfg.audio.as_ref().context("Gemma audio config missing")?;
         if cfg.unified {
+            let audio = cfg.audio.as_ref().context("Gemma audio config missing")?;
             ensure!(
                 cfg.hidden == 3840
                     && vision["patch_size"] == 16
@@ -478,29 +537,25 @@ impl Encoders {
                 audio: load("model.embed_audio.embedding_projection.weight", &[3840, 640])?,
             })
         } else {
-            ensure!(
-                cfg.hidden == 2560
-                    && vision["hidden_size"] == 768
-                    && vision["num_hidden_layers"] == 16
-                    && vision["num_attention_heads"] == 12
-                    && vision["num_key_value_heads"] == 12
-                    && vision["head_dim"] == 64
-                    && vision["intermediate_size"] == 3072
-                    && vision["standardize"] == false
-                    && vision["hidden_activation"] == "gelu_pytorch_tanh"
-                    && vision["use_clipped_linears"] == true
-                    && audio["hidden_size"] == 1024
-                    && audio["num_hidden_layers"] == 12
-                    && audio["num_attention_heads"] == 8
-                    && audio["conv_kernel_size"] == 5
-                    && audio["attention_context_left"] == 13
-                    && audio["attention_context_right"] == 0
-                    && audio["attention_chunk_size"] == 12
-                    && audio["attention_logit_cap"] == 50.0
-                    && audio["use_clipped_linears"] == true,
-                "unsupported tower media architecture"
-            );
-            Ok(Self::Towers { vision: Vision::load(load)?, audio: Audio::load(load)? })
+            let audio = if let Some(audio) = &cfg.audio {
+                ensure!(
+                    cfg.hidden == 2560
+                        && audio["hidden_size"] == 1024
+                        && audio["num_hidden_layers"] == 12
+                        && audio["num_attention_heads"] == 8
+                        && audio["conv_kernel_size"] == 5
+                        && audio["attention_context_left"] == 13
+                        && audio["attention_context_right"] == 0
+                        && audio["attention_chunk_size"] == 12
+                        && audio["attention_logit_cap"] == 50.0
+                        && audio["use_clipped_linears"] == true,
+                    "unsupported audio tower architecture"
+                );
+                Some(Audio::load(load)?)
+            } else {
+                None
+            };
+            Ok(Self::Towers { vision: Vision::load(load, cfg)?, audio })
         }
     }
     pub fn encode(&self, input: &Input, dt: DType, dev: &Device, attention_dtype: DType) -> Result<Tensor> {
@@ -518,7 +573,9 @@ impl Encoders {
                 linear(&norm(&x, None, 1e-6)?, audio)
             }
             (Self::Towers { vision, .. }, Input::Image(image)) => vision.forward(image, dt, dev, attention_dtype),
-            (Self::Towers { audio, .. }, Input::Audio(input)) => audio.forward(input, dt, dev),
+            (Self::Towers { audio, .. }, Input::Audio(input)) => {
+                audio.as_ref().context("this model does not support audio")?.forward(input, dt, dev)
+            }
         }
     }
 }

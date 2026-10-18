@@ -137,7 +137,7 @@ pub struct DecisionOptions<'a> {
     pub detail: Option<MediaDetail>,
 }
 
-mod sealed {
+pub(crate) mod sealed {
     pub trait Sealed {}
 }
 /// Closed association between a question and its required result fields.
@@ -267,7 +267,7 @@ macro_rules! kind {
         impl AnswerKind for $name {
             type Output<'a> = $view<'a>;
             fn parse($answer: &Answer) -> Result<Self::Output<'_>, Error> {
-                if !matches!($answer.kind, QuestionType::$variant) {
+                if !matches!($answer.kind, QuestionType::$variant) || $answer.probabilities.is_empty() {
                     return Err(Error::InvalidResponse("mismatched answer type"));
                 }
                 $body
@@ -389,7 +389,7 @@ impl<A: AnswerKind> Clone for QuestionSpec<A> {
     }
 }
 impl<A: AnswerKind> QuestionSpec<A> {
-    fn new(question: Question) -> Self {
+    pub(crate) fn new(question: Question) -> Self {
         Self { data: Arc::new(question), marker: PhantomData }
     }
     /// Borrow the immutable native question.
@@ -491,7 +491,10 @@ pub fn multi_with_options(
     q.extra.extend(selection_fields(options, Some(values))?);
     Ok(QuestionSpec::new(q))
 }
-fn selection_fields(options: MultiOptions<'_>, values: Option<&[(&str, &str)]>) -> Result<Map<String, Value>, Error> {
+pub(crate) fn selection_fields(
+    options: MultiOptions<'_>,
+    values: Option<&[(&str, &str)]>,
+) -> Result<Map<String, Value>, Error> {
     let mut fields = Map::new();
     if options.objective != MultiObjective::Threshold {
         fields.insert("objective".into(), serde_json::to_value(options.objective).map_err(Error::Encode)?);
@@ -729,6 +732,14 @@ pub enum AnswerResult<'a> {
     Act(ActAnswer<'a>),
     /// Tool routing result.
     Tool(ToolAnswer<'a>),
+    /// Document classification.
+    Classify(crate::ClassifyAnswer<'a>),
+    /// Claim verification.
+    Verify(crate::VerifyAnswer<'a>),
+    /// Extractive compression.
+    Compress(crate::CompressAnswer<'a>),
+    /// Schema extraction.
+    Extract(crate::ExtractAnswer<'a>),
 }
 
 impl<'a> AnswerResult<'a> {
@@ -740,6 +751,10 @@ impl<'a> AnswerResult<'a> {
             QuestionType::Multi => MultiKind::parse(answer).map(Self::Multi),
             QuestionType::Act => ActKind::parse(answer).map(Self::Act),
             QuestionType::Tool => ToolKind::parse(answer).map(Self::Tool),
+            QuestionType::Classify => crate::ClassifyKind::parse(answer).map(Self::Classify),
+            QuestionType::Verify => crate::VerifyKind::parse(answer).map(Self::Verify),
+            QuestionType::Compress => crate::CompressKind::parse(answer).map(Self::Compress),
+            QuestionType::Extract => crate::ExtractKind::parse(answer).map(Self::Extract),
         }
     }
 }

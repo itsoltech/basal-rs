@@ -17,6 +17,59 @@ template <> __device__ __forceinline__ __nv_bfloat16 from_f<__nv_bfloat16>(float
 // round through T
 template <typename T> __device__ __forceinline__ float rt(float v) { return to_f<T>(from_f<T>(v)); }
 
+// Reorder independent attention matrices and expand GQA heads. FP16 -> FP32
+// is exact; this replaces gather, permutation, copies and casts, not arithmetic.
+extern "C" __global__ void gemma_attention_pack_f32(const __half *x, float *out, unsigned tokens,
+                                                    unsigned source_heads, unsigned heads, unsigned dim,
+                                                    unsigned total, unsigned transpose) {
+    const unsigned id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (id >= total) return;
+    const unsigned feature = transpose ? (id / tokens) % dim : id % dim;
+    const unsigned token = transpose ? id % tokens : (id / dim) % tokens;
+    const unsigned head = (id / (tokens * dim)) % heads;
+    const unsigned batch = id / (tokens * dim * heads);
+    const unsigned source_head = head / (heads / source_heads);
+    const unsigned source = ((batch * tokens + token) * source_heads + source_head) * dim + feature;
+    out[id] = __half2float(x[source]);
+}
+
+// X[B,N,H,D], cos/sin[1,N,1,D]. Keep the FP16 store after each multiply,
+// then add the two rounded products, as in Gemma's separate Candle operations.
+extern "C" __global__ void gemma_rope_f16(const __half *x, const __half *cos, const __half *sin, __half *out,
+                                          unsigned tokens, unsigned heads, unsigned dim, unsigned total) {
+    const unsigned id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (id >= total) return;
+    const unsigned feature = id % dim;
+    const unsigned half = dim / 2;
+    const unsigned paired = id - feature + (feature < half ? feature + half : feature - half);
+    const unsigned angle = ((id / dim / heads) % tokens) * dim + feature;
+    const float rotated = feature < half ? -to_f(x[paired]) : to_f(x[paired]);
+    const float a = rt<__half>(__fmul_rn(to_f(x[id]), to_f(cos[angle])));
+    const float b = rt<__half>(__fmul_rn(rotated, to_f(sin[angle])));
+    out[id] = from_f<__half>(__fadd_rn(a, b));
+}
+
+extern "C" __global__ void gemma_scale_f16(const __half *x, const __half *scale, __half *out, unsigned total) {
+    const unsigned id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (id < total) out[id] = from_f<__half>(__fmul_rn(to_f(x[id]), to_f(scale[0])));
+}
+
+
+// Candle 0.11.0 gelu_fwd (Apache-2.0): the same half intermediates and tanh conversion.
+// The product with up is rounded only after the GELU result has been rounded to half.
+extern "C" __global__ void gemma_gelu_mul_f16(const __half *gate, const __half *up, __half *out, unsigned total) {
+    const unsigned id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (id >= total) return;
+    const __half x = gate[id];
+    const __half square = x * x;
+    const __half cube = square * x;
+    const __half alpha = x + static_cast<__half>(0.044715) * cube;
+    const __half argument = static_cast<__half>(0.7978845608028654) * alpha;
+    const __half t = __float2half(tanhf(__half2float(argument)));
+    const __half gelu = static_cast<__half>(0.5) * x * (static_cast<__half>(1.0) + t);
+    out[id] = gelu * up[id];
+}
+
 // out[m, i] = T(silu(T(g + bg))) * T(u + bu), with gu = [M, 2I] = [gate | up] (fused projection without bias)
 template <typename T>
 __device__ void bias_silu_mul(const T *gu, const T *bias, T *out, unsigned I, unsigned total) {
