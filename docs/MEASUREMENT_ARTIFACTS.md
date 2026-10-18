@@ -263,3 +263,22 @@ Pobranie z autoryzacją i anonimowo potwierdziło 405/405 sum plików.
 Dane i dokładne źródła są pod `reports/ultra-loader-2026-10-18/`; raport i
 archiwalny `REPRODUCE.md` opisują odtworzenie. Zdjęcia pozostają zewnętrzne,
 z przypiętymi hashami i narzędziem odtwarzającym bajty wejść.
+
+
+## Ultra: duże dokumenty C32
+
+[Raport](../reports/ultra-long-documents-2026-10-18/README.md) porównuje istniejący
+profil HRRN/4096/5000 z FIFO na tej samej binarce i upstream BF16 eager na H100.
+Zachowuje kompromis mediany krótkich żądań, odrzucone eksperymenty Rust i przerwaną
+serię z oczekiwanym FAIL/GAP. Końcowo: 4536 odpowiedzi HTTP, 2990 porównań
+natywnych bez różnic; 9 startów, po 2 zachowane na silnik, 44 duże obserwacje
+na silnik z 2 różnych wejść 8192 tokeny. Bez nowego C8/C128/media ani oceny FP32.
+
+Archiwum: `hf://buckets/itsoltech/basal-rs/measurements/ultra-long-documents-2026-10-18/c256b4f32d863f1ed54130662d6d3c72a9bf3457f276baaa1d1b4151a81fcdbc/measurement-data.tar.gz`,
+SHA-256 `c256b4f32d863f1ed54130662d6d3c72a9bf3457f276baaa1d1b4151a81fcdbc`,
+6 482 237 B. Pobranie z autoryzacją i anonimowo 2026-10-18 potwierdziło **780/780**
+sum. Dane są pod `reports/ultra-long-documents-2026-10-18/`; raport i archiwalny
+`REPRODUCE.md` zawierają pobranie, weryfikację i replay. W archiwum są dokładne
+źródła trzech wariantów, wszystkie próby, odpowiedzi, czasy, zasoby, audyty oraz
+rzeczywista kontrola YAML na GPU. Publiczny replay jest identyczny z prywatnym;
+pełne archiwum pozostaje też lokalnie.

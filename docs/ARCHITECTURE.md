@@ -338,8 +338,9 @@ korzystają z GPU na zmianę (`basal_core::gate`): tor długich żądań po każ
 warstwie czeka na zakończenie swoich kerneli i oddaje GPU, gdy główny tor ma
 partię, a on sam pracował co najmniej `--long-slice-ms`. Po jednej partii
 głównego toru wraca do tej samej warstwy. Zatrzymany forward kontynuuje z tymi
-samymi tensorami, więc wyniki nie zależą od toru ani przerw. Krótkie żądania
-nie czekają w ten sposób na kilkusekundowy forward długiego dokumentu.
+samymi tensorami. Parametr przydziału steruje kompromisem między czasem
+dużych dokumentów a oczekiwaniem krótkich żądań; większa wartość oznacza
+rzadsze oddawanie GPU. Niezmienność wyników potwierdzamy pomiarami danej konfiguracji.
 
 Kilka modeli w jednym procesie (`basal serve --config`): każdy ma własny
 silnik, kolejkę i tor długich żądań. Model jest przypisany do jednego GPU
