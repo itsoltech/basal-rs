@@ -35,6 +35,7 @@ fn tool_definition(q: &Value) -> Result<ToolQuestion> {
         ToolOptions {
             extra: q.get("extra").map(|_| extras.as_slice()),
             rank: q["rank"].as_u64().map(|n| n as usize),
+            description_chars: q["description_chars"].as_u64().map(|n| n as usize),
             multi: q["multi"].as_bool().unwrap_or(false),
             max_error: q["max_error"].as_f64(),
             selection: selection(q, &exclusive),

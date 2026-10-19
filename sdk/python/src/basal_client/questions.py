@@ -320,18 +320,23 @@ class MultiQuestion(QuestionSpec[MultiAnswer]):
 
 
 class ToolQuestion(QuestionSpec[ToolAnswer]):
-    """Select tools from OpenAI, MCP or Anthropic definitions; never executes them."""
+    """Select tools without executing them. description_chars=0 disables server-side description truncation."""
 
     def __init__(self, instructions: str, tools: Sequence[Mapping[str, JsonValue]], *,
                  extra: Sequence[Literal["answer_directly", "ask_user", "none"]] | None = None, rank: int | None = None,
                  multi: bool = False, max_error: float | None = None, objective: MultiObjective = "threshold",
                  threshold: float | None = None, min: int | None = None, max: int | None = None,
-                 exclusive: Sequence[str] | None = None, fallback: str | None = None, fallback_threshold: float | None = None):
+                 exclusive: Sequence[str] | None = None, fallback: str | None = None, fallback_threshold: float | None = None,
+                 description_chars: int | None = None):
         if isinstance(tools, (str, bytes)) or not all(isinstance(item, Mapping) for item in tools):
             raise ValueError("tools must contain definition objects")
         if not isinstance(multi, bool):
             raise ValueError("multi must be boolean")
         fields: dict[str, JsonValue] = {"tools": [deepcopy(dict(item)) for item in tools]}
+        if description_chars is not None:
+            if isinstance(description_chars, bool) or not isinstance(description_chars, int) or description_chars < 0:
+                raise ValueError("description_chars must be a non-negative integer")
+            fields["description_chars"] = description_chars
         # Omitted extras keep the server default: all non-tool choices for a single tool, none for multi.
         if extra is not None:
             if isinstance(extra, str) or any(item not in ("answer_directly", "ask_user", "none") for item in extra):

@@ -30,7 +30,7 @@ public sealed record MultiOptions(double? Threshold = null, int? Min = null, int
     string Objective = "threshold", IReadOnlyList<string>? Exclusive = null, string? Fallback = null, double? FallbackThreshold = null);
 /// <summary>Tool routing; definitions are normalized by the server and never executed by the SDK.</summary>
 public sealed record ToolOptions(IReadOnlyList<string>? Extra = null, int? Rank = null, bool Multi = false,
-    double? MaxError = null, MultiOptions? Selection = null);
+    double? MaxError = null, MultiOptions? Selection = null, int? DescriptionChars = null);
 /// <summary>Act options; omitted criteria use true/false outcomes.</summary>
 public sealed record ActOptions(IReadOnlyDictionary<string, string>? Criteria = null, bool Evidence = false,
     string? DeferAction = null, double? MaxError = null);
@@ -253,6 +253,10 @@ public sealed class ToolQuestion : QuestionSpec<ToolResult>
     {
         ArgumentNullException.ThrowIfNull(tools);
         var fields=new JsonObject { ["tools"]=new JsonArray(tools.Select(t=>(JsonNode)(t?.DeepClone()??throw new ArgumentException("Null tool"))).ToArray()) };
+        if(options.DescriptionChars is int cap) {
+            if(cap<0)throw new ArgumentException("DescriptionChars must be non-negative");
+            fields["description_chars"]=cap;
+        }
         if(options.Extra is not null) {
             if(options.Extra.Any(k=>k is not ("answer_directly" or "ask_user" or "none")))throw new ArgumentException("Invalid extra tool option");
             fields["extra"]=new JsonArray(options.Extra.Select(k=>(JsonNode)JsonValue.Create(k)!).ToArray());

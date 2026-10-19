@@ -93,6 +93,8 @@ pub struct ToolOptions<'a> {
     pub extra: Option<&'a [ToolExtra]>,
     /// Number of ranked candidates.
     pub rank: Option<usize>,
+    /// Tool-description truncation cap. `None` keeps the server default (300); `Some(0)` disables truncation.
+    pub description_chars: Option<usize>,
     /// Select a set of tools.
     pub multi: bool,
     /// Certified error target.
@@ -548,6 +550,9 @@ pub fn tool_with_options(instructions: &str, tools: &[Value], options: ToolOptio
     }
     let mut q = base(QuestionType::Tool, instructions, false)?;
     q.extra.insert("tools".into(), Value::Array(tools.to_vec()));
+    if let Some(cap) = options.description_chars {
+        q.extra.insert("description_chars".into(), cap.into());
+    }
     if let Some(extra) = options.extra {
         q.extra.insert("extra".into(), serde_json::to_value(extra).map_err(Error::Encode)?);
     }

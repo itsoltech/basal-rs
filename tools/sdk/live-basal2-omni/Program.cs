@@ -56,7 +56,7 @@ static QuestionSpec Definition(JsonObject q) {
         "score"=>Score(instruction,q["criteria"]!.Deserialize<string[]>()!),
         "multi"=>Multi(instruction,Criteria(q),Selection(q)),
         "act"=>Act(instruction,q["costs"]!.Deserialize<Dictionary<string,Dictionary<string,double>>>()!,new ActOptions(q["criteria"]?.Deserialize<Dictionary<string,string>>(),DeferAction:q["defer_action"]?.GetValue<string>(),MaxError:q["max_error"]?.GetValue<double>())),
-        "tool"=>Tool(instruction,q["tools"]!.AsArray().Select(v=>v!.AsObject()).ToArray(),new ToolOptions(q["extra"]?.Deserialize<string[]>(),q["rank"]?.GetValue<int>(),q["multi"]?.GetValue<bool>()??false,q["max_error"]?.GetValue<double>(),Selection(q))),
+        "tool"=>Tool(instruction,q["tools"]!.AsArray().Select(v=>v!.AsObject()).ToArray(),new ToolOptions(q["extra"]?.Deserialize<string[]>(),q["rank"]?.GetValue<int>(),q["multi"]?.GetValue<bool>()??false,q["max_error"]?.GetValue<double>(),Selection(q),q["description_chars"]?.GetValue<int>())),
         "classify"=>Classify(instruction,q["labels"]!,new ClassifyOptions(q["multi_label"]?.GetValue<bool>()??false,q["none"]?.GetValue<bool>()??false,Risks(q),q["option_keys"]?.GetValue<string>()=="hide"?OptionKeys.Hide:OptionKeys.Show,Selection(q))),
         "verify"=>Verify(instruction,q["claims"]!,new VerifyOptions(q["binary"]?.GetValue<bool>()??false,Risks(q))),
         "compress"=>Compress(instruction,new CompressOptions(q["unit"]?.GetValue<string>()??"sentence",q["keep_ratio"]?.GetValue<double>(),q["threshold"]?.GetValue<double>(),q["min_keep"]?.GetValue<int>())),

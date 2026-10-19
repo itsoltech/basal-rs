@@ -222,16 +222,22 @@ Usage exposes `longest_prompt_tokens`, `second_order_branches` and media counts,
 soft tokens and detail. Discovery exposes `prompt_format`, `orders`, enabled
 media and calibration temperatures. Model names remain strings: use exact names
 from model discovery, not a hardcoded model enumeration. Keep old models and
-raw JSON access available. These SDKs cover server-supported format-2 decisions;
-upstream 2.1 task types are not implemented by this server.
+raw JSON access available. The server validates each model’s capabilities.
+Basal 2.1 task helpers are described below.
 
 ```csharp
 var response = await client.DecideAsync("Inspect the supplied material.", q => new {
-    Route = q.Tool("Choose a tool.", new[] { JsonNode.Parse("""{"name":"inspect","description":"Inspect material","inputSchema":{"type":"object"}}""")!.AsObject() }, new ToolOptions(Extra: ["none"], Rank: 2)),
+    Route = q.Tool("Choose a tool.", new[] { JsonNode.Parse("""{"name":"inspect","description":"Inspect material","inputSchema":{"type":"object"}}""")!.AsObject() }, new ToolOptions(Extra: ["none"], Rank: 2, DescriptionChars: 120)),
     Labels = q.Multi("Select visible objects.", new Dictionary<string,string> { ["animal"]="An animal", ["vehicle"]="A vehicle" }, new MultiOptions(Objective:"f1")),
 }, new DecisionOptions(Model:"basal-omni-1.0-mini", Lang:"en", Media:[Media.Image(File.ReadAllBytes("photo.jpg"))]));
 Console.WriteLine(response.Answers.Route.Tool);
 ```
+
+Tool descriptions are normalized by the server. Omit `description_chars`
+(`DescriptionChars` in .NET) to keep the default cap of 300 Unicode code points;
+use `0` to disable truncation. Descriptions longer than a positive cap are
+shortened at a word boundary where possible, with an ellipsis appended. The SDK forwards this option
+without changing the supplied tool definitions.
 
 ## Experimental Basal 2.1 tasks
 
@@ -240,3 +246,14 @@ Unicode code point offsets and nested JSON extraction values. Task answers do no
 the primitive probabilities field. See [task semantics](../../docs/TASKS.md) and
 [SDK examples](../../docs/SDK.md#zadania-basal-21). These source changes require a server
 with the experimental task layer; installing an SDK does not update the inference server.
+
+The raw `Question.MaxError` property is now `JsonNode?` to support both a scalar
+and the list accepted by `classify`/`verify`. Scalar initializers still work:
+
+```csharp
+var scalar = new Question { Type = "verify", MaxError = 0.05 };
+var multiple = new Question { Type = "verify", MaxError = new JsonArray(0.05, 0.1) };
+```
+
+When reading a scalar, use `question.MaxError?.GetValue<double>()`; for lists use
+`AsArray()`. The typed `ClassifyOptions`/`VerifyOptions` already accept lists.

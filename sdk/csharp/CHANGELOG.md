@@ -1,12 +1,15 @@
 # Changelog
 
-## 0.3.0
+## Unreleased
+
+## 0.3.0 — 2026-10-19
 
 - Add experimental Basal 2.1 classify, verify, compress and extract tasks with typed results.
 - Preserve nullable task automation, source offsets in Unicode code points and nested JSON extraction values.
 - Task answers no longer require the primitive-only probabilities field.
-
-## Unreleased
+- Expose tool `description_chars` in typed factories and raw request types; omission keeps the server default and zero disables truncation.
+- Correct outdated documentation about task support.
+- Raw `Question.MaxError` is now `JsonNode?`, allowing scalar or list targets for classify/verify. Scalar initializers remain valid; read scalars with `GetValue<double>()`.
 
 ## 0.2.0 — 2026-10-17
 

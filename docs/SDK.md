@@ -37,6 +37,10 @@ Przy celach innych niż threshold odpowiedź nie wymaga `threshold`; zwraca
 ranking albo zbiór narzędzi i odroczenie; SDK nie wykonuje narzędzi.
 Pominięte `extra` zostawia domyślne opcje serwera: `answer_directly`, `ask_user`
 i `none` dla jednego narzędzia, brak w trybie multi. Pusta lista je wyłącza.
+`description_chars` (`DescriptionChars` w .NET) steruje skracaniem opisów narzędzi
+po normalizacji białych znaków. Pominięcie zachowuje limit serwera 300 punktów
+kodowych Unicode; `0` wyłącza skracanie. Dodatni limit skraca na granicy słowa,
+gdy jest to możliwe, i dopisuje wielokropek. SDK przekazuje oryginalne definicje.
 
 Opcje żądania obejmują `lang`, `media` i `detail`. Pomocniki kodują bajty do
 base64; nie czytają plików ani nie pobierają URL. Obraz i audio wymagają serwera
@@ -44,7 +48,7 @@ Omni z CUDA i włączonymi mediami. Status kalibracji `text` jest akceptowany,
 ale nie oznacza potwierdzonej kalibracji mediów. Typowane usage i metadane
 obejmują liczbę tokenów/mediów, kolejności oraz format promptu.
 
-Nowe wersje źródłowe: Python/npm/.NET **0.3.0**, Rust **0.4.0**. Zmiany modeli
+Wersje tej aktualizacji: Python/npm/.NET **0.3.0**, Rust **0.4.0**. Zmiany modeli
 odpowiedzi (opcjonalny threshold i nowe warianty) są opisane w changelogach.
 Samo scalenie kodu nie publikuje paczek. Runtime nadal sprawdza możliwości
 starszych modeli; SDK nie uruchamiają inferencji lokalnie.
@@ -85,6 +89,11 @@ W .NET użyj `q.Classify(...)`/`q.Extract(...)` w fabryce; wynik jest w `.Result
 W Rust `questions!` przyjmuje `classify(..., ClassifyOptions::default())`,
 `verify`, `compress` i `extract`; `.answers()?.category` jest typowanym widokiem.
 Rust przechowuje wielkości schematu i wartości jako `serde_json::Value`.
+
+Surowe `Question.MaxError` w .NET ma typ `JsonNode?`: przyjmuje liczbę, np.
+`MaxError = 0.05`, oraz listę, np. `MaxError = new JsonArray(0.05, 0.1)`,
+dla `classify`/`verify`. Przy odczycie liczby użyj `GetValue<double>()`,
+a przy liście `AsArray()`. Typowane opcje zadań nadal przyjmują listy.
 
 Te wersje są aktualizacją źródeł; nie oznacza to publikacji nowych paczek.
 

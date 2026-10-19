@@ -32,6 +32,7 @@ export interface Question {
   tools?: readonly ToolDefinition[];
   extra?: readonly ("answer_directly" | "ask_user" | "none")[];
   rank?: number;
+  description_chars?: number;
   multi?: boolean;
   labels?: Record<string,JsonValue> | JsonValue[];
   multi_label?: boolean; none?: boolean;

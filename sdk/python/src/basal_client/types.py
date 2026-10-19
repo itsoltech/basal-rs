@@ -48,6 +48,7 @@ class Question(TypedDict, total=False):
     tools: list[dict[str, JsonValue]]
     extra: list[Literal["answer_directly", "ask_user", "none"]]
     rank: int
+    description_chars: int
     multi: bool
     labels: dict[str, JsonValue] | list[JsonValue]
     multi_label: bool

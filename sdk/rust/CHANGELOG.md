@@ -1,12 +1,15 @@
 # Changelog
 
-## 0.4.0
+## Unreleased
+
+## 0.4.0 — 2026-10-19
 
 - Add experimental Basal 2.1 classify, verify, compress and extract tasks with typed results.
 - Preserve nullable task automation, source offsets in Unicode code points and nested JSON extraction values.
 - Task answers no longer require the primitive-only probabilities field.
-
-## Unreleased
+- Expose tool `description_chars` in typed factories and raw request types; omission keeps the server default and zero disables truncation.
+- Correct outdated documentation about task support.
+- `ToolOptions` gains an optional field; use `..Default::default()` in struct literals.
 
 ## 0.3.0 — 2026-10-17
 

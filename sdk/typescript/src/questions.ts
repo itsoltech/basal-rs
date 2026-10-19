@@ -16,6 +16,8 @@ export interface MultiOptions<K extends string = string> {
 export interface ToolOptions extends MultiOptions {
   extra?: readonly ("answer_directly" | "ask_user" | "none")[];
   rank?: number; multi?: boolean; max_error?: number;
+  /** Tool-description truncation cap; omitted keeps the server default (300), zero disables truncation. */
+  description_chars?: number;
 }
 export interface ActOptions<K extends string = string, A extends string = string> extends EvidenceOptions {
   criteria?: Record<K, string>;
@@ -163,6 +165,11 @@ export class ToolQuestion extends QuestionSpec<ToolAnswer> {
     if(options.extra!==undefined&&(!Array.isArray(options.extra)||options.extra.some(k=>!['answer_directly','ask_user','none'].includes(k))))throw new TypeError('invalid extra tool option');
     if(options.multi!==undefined&&typeof options.multi!=='boolean')throw new TypeError('invalid multi');
     const fields: Question={tools,...(options.extra===undefined?{}:{extra:options.extra})};
+    if(options.description_chars!==undefined){
+      if(!Number.isSafeInteger(options.description_chars)||options.description_chars<0)
+        throw new TypeError('description_chars must be a non-negative safe integer');
+      fields.description_chars=options.description_chars;
+    }
     if(options.rank!==undefined){if(!Number.isSafeInteger(options.rank)||options.rank<1)throw new TypeError('rank must be a positive integer');fields.rank=options.rank;}
     if(options.max_error!==undefined)fields.max_error=number(options.max_error,'max_error',true);
     const selection=selectionOptions(options);

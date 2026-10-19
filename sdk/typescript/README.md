@@ -103,17 +103,23 @@ Usage exposes `longest_prompt_tokens`, `second_order_branches` and media counts,
 soft tokens and detail. Discovery exposes `prompt_format`, `orders`, enabled
 media and calibration temperatures. Model names remain strings: use exact names
 from model discovery, not a hardcoded model enumeration. Keep old models and
-raw JSON access available. These SDKs cover server-supported format-2 decisions;
-upstream 2.1 task types are not implemented by this server.
+raw JSON access available. The server validates each model’s capabilities.
+Basal 2.1 task helpers are described below.
 
 ```typescript
 import { BasalClient, image, tool, multi } from "@itsoltech/basal-client";
 const response = await new BasalClient().decide("Inspect the supplied material.", {
-  route: tool("Choose a tool.", [{name:"inspect", description:"Inspect material", inputSchema:{type:"object"}}], {extra:["none"], rank:2}),
+  route: tool("Choose a tool.", [{name:"inspect", description:"Inspect material", inputSchema:{type:"object"}}], {extra:["none"], rank:2, description_chars:120}),
   labels: multi("Select visible objects.", {animal:"An animal", vehicle:"A vehicle"}, {objective:"f1"}),
 }, {model:"basal-omni-1.0-mini", lang:"en", media:[image(new Uint8Array(await file.arrayBuffer()))]});
 console.log(response.answers.route, response.answers.labels.expected_score);
 ```
+
+Tool descriptions are normalized by the server. Omit `description_chars`
+(`DescriptionChars` in .NET) to keep the default cap of 300 Unicode code points;
+use `0` to disable truncation. Descriptions longer than a positive cap are
+shortened at a word boundary where possible, with an ellipsis appended. The SDK forwards this option
+without changing the supplied tool definitions.
 
 ## Experimental Basal 2.1 tasks
 

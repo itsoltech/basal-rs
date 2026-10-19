@@ -128,13 +128,13 @@ Usage exposes `longest_prompt_tokens`, `second_order_branches` and media counts,
 soft tokens and detail. Discovery exposes `prompt_format`, `orders`, enabled
 media and calibration temperatures. Model names remain strings: use exact names
 from model discovery, not a hardcoded model enumeration. Keep old models and
-raw JSON access available. These SDKs cover server-supported format-2 decisions;
-upstream 2.1 task types are not implemented by this server.
+raw JSON access available. The server validates each model’s capabilities.
+Basal 2.1 task helpers are described below.
 
 ```rust,no_run
 use basal_client::{tool_with_options, ToolOptions, ToolExtra, DecisionOptions, Language, MediaInput, questions};
 let definitions = [serde_json::json!({"name":"inspect","description":"Inspect material","inputSchema":{"type":"object"}})];
-let routing = tool_with_options("Choose a tool.", &definitions, ToolOptions { extra: Some(&[ToolExtra::None]), rank: Some(2), ..Default::default() })?;
+let routing = tool_with_options("Choose a tool.", &definitions, ToolOptions { extra: Some(&[ToolExtra::None]), rank: Some(2), description_chars: Some(120), ..Default::default() })?;
 let questions = questions! { route: &routing }?;
 let media = [MediaInput::image(&std::fs::read("photo.jpg")?)];
 let response = client.decide_with_options("Inspect the supplied material.", &questions, DecisionOptions {
@@ -147,6 +147,12 @@ Rust 0.3 adds a `Tool` question/answer variant and fields to request options and
 metadata. When constructing option structs use `..Default::default()`; multi
 threshold is now `Option<f64>`. `MultiOptions` borrows constraint keys. Existing
 request factories and raw response access remain available.
+
+Tool descriptions are normalized by the server. Omit `description_chars`
+(`DescriptionChars` in .NET) to keep the default cap of 300 Unicode code points;
+use `0` to disable truncation. Descriptions longer than a positive cap are
+shortened at a word boundary where possible, with an ellipsis appended. The SDK forwards this option
+without changing the supplied tool definitions.
 
 ## Experimental Basal 2.1 tasks
 

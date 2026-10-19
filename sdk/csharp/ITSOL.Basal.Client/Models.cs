@@ -7,7 +7,7 @@ namespace ITSOL.Basal;
 /// <summary>Native Basal question. The server validates fields and model capabilities.</summary>
 public sealed class Question
 {
-    /// <summary>choice (default), noul, score, multi or act.</summary>
+    /// <summary>choice (default), noul, score, multi, act, tool, classify, verify, compress or extract.</summary>
     [JsonPropertyName("type")] public string? Type { get; init; }
     /// <summary>Instruction text or another native JSON value.</summary>
     [JsonPropertyName("instructions")] public JsonNode? Instructions { get; init; }
@@ -31,8 +31,8 @@ public sealed class Question
     [JsonPropertyName("costs")] public JsonNode? Costs { get; init; }
     /// <summary>Act defer action name.</summary>
     [JsonPropertyName("defer_action")] public string? DeferAction { get; init; }
-    /// <summary>Act certified error target, requiring model calibration.</summary>
-    [JsonPropertyName("max_error")] public double? MaxError { get; init; }
+    /// <summary>Certified error target: a number for primitives, a number or array for classify/verify.</summary>
+    [JsonPropertyName("max_error")] public JsonNode? MaxError { get; init; }
     /// <summary>threshold, exact, iou or f1.</summary>
     [JsonPropertyName("objective")] public string? Objective { get; init; }
     /// <summary>Mutually exclusive labels.</summary>
@@ -47,6 +47,8 @@ public sealed class Question
     [JsonPropertyName("extra")] public IReadOnlyList<string>? ExtraOptions { get; init; }
     /// <summary>Number of ranked candidates.</summary>
     [JsonPropertyName("rank")] public int? Rank { get; init; }
+    /// <summary>Tool-description truncation cap; omitted keeps the server default (300), zero disables truncation.</summary>
+    [JsonPropertyName("description_chars")] public int? DescriptionChars { get; init; }
     /// <summary>Select a set of tools.</summary>
     [JsonPropertyName("multi")] public bool? Multi { get; init; }
     /// <summary>Task labels.</summary>
@@ -108,7 +110,7 @@ public sealed class EvidenceSpan
 /// <summary>Native answer; fields for other question types are null.</summary>
 public sealed class Answer
 {
-    /// <summary>choice, noul, score, multi, act or tool.</summary>
+    /// <summary>choice, noul, score, multi, act, tool, classify, verify, compress or extract.</summary>
     [JsonPropertyName("type")] public required string Type { get; init; }
     /// <summary>Native probabilities; independent P(yes) values for multi.</summary>
     [JsonPropertyName("probabilities")] public Dictionary<string, double> Probabilities { get; init; } = [];
