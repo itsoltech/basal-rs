@@ -239,7 +239,7 @@ dependencies = [
 
 [[package]]
 name = "basal-cli"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "axum",
@@ -277,7 +277,7 @@ dependencies = [
 
 [[package]]
 name = "basal-core"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -295,7 +295,7 @@ dependencies = [
 
 [[package]]
 name = "basal-gpu"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "ash",
