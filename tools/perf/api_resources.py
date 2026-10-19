@@ -91,32 +91,35 @@ class ServerResources:
             row.update(memory, cpu_seconds=self.cpu_total)
             row['root_lifetime_peak_rss_bytes'] = next(
                 p['lifetime_peak_rss_bytes'] for p in row['processes'] if p['pid'] == self.pid)
-            commands = [
-                ['nvidia-smi', '--query-compute-apps=pid,used_gpu_memory', '--format=csv,noheader,nounits'],
-                ['nvidia-smi', '--query-gpu=memory.used,utilization.gpu,power.draw,temperature.gpu,clocks.current.sm',
-                 '--format=csv,noheader,nounits']]
-            app_lines, device_lines = [subprocess.check_output(cmd, text=True, timeout=5).strip().splitlines()
-                                       for cmd in commands]
-            if len(device_lines) != 1:
-                raise RuntimeError('resource campaign requires exactly one visible GPU')
-            gpu = {}
-            for line in app_lines:
-                pid, memory_mib = line.split(',')
-                pid = int(pid)
-                if pid in {p['pid'] for p in processes}:
-                    if pid in gpu:
-                        raise RuntimeError('duplicate GPU process entry')
-                    gpu[pid] = float(memory_mib) * (1 << 20)
-            memory_mib, util, power, temperature, sm = map(float, device_lines[0].split(','))
-            row.update(process_vram_bytes=sum(gpu.values()), device_vram_bytes=memory_mib * (1 << 20),
-                       gpu_util_percent=util, gpu_power_w=power, gpu_temperature_c=temperature,
-                       gpu_sm_mhz=sm)
+            row.update(self._gpu_resources({p['pid'] for p in processes}))
         except (OSError, ValueError, KeyError, StopIteration, RuntimeError, subprocess.SubprocessError) as error:
             row['errors'].append(type(error).__name__ + ': ' + str(error))
         row['sample_finished_monotonic_s'] = time.monotonic()
         self.output.write(json.dumps(row) + '\n')
         self.output.flush()
         return row
+
+    def _gpu_resources(self, pids):
+        commands = [
+            ['nvidia-smi', '--query-compute-apps=pid,used_gpu_memory', '--format=csv,noheader,nounits'],
+            ['nvidia-smi', '--query-gpu=memory.used,utilization.gpu,power.draw,temperature.gpu,clocks.current.sm',
+             '--format=csv,noheader,nounits']]
+        app_lines, device_lines = [subprocess.check_output(cmd, text=True, timeout=5).strip().splitlines()
+                                   for cmd in commands]
+        if len(device_lines) != 1:
+            raise RuntimeError('resource campaign requires exactly one visible GPU')
+        gpu = {}
+        for line in app_lines:
+            pid, memory_mib = line.split(',')
+            pid = int(pid)
+            if pid in pids:
+                if pid in gpu:
+                    raise RuntimeError('duplicate GPU process entry')
+                gpu[pid] = float(memory_mib) * (1 << 20)
+        memory_mib, util, power, temperature, sm = map(float, device_lines[0].split(','))
+        return dict(process_vram_bytes=sum(gpu.values()), device_vram_bytes=memory_mib * (1 << 20),
+                    gpu_util_percent=util, gpu_power_w=power, gpu_temperature_c=temperature,
+                    gpu_sm_mhz=sm)
 
     def _run(self):
         while not self.stop.is_set():

@@ -282,3 +282,20 @@ sum. Dane są pod `reports/ultra-long-documents-2026-10-18/`; raport i archiwaln
 źródła trzech wariantów, wszystkie próby, odpowiedzi, czasy, zasoby, audyty oraz
 rzeczywista kontrola YAML na GPU. Publiczny replay jest identyczny z prywatnym;
 pełne archiwum pozostaje też lokalnie.
+
+
+## Ultra: repliki i podział warstw
+
+[Raport](../reports/ultra-multigpu-2026-10-18/README.md) opisuje ABBA jednej i dwóch
+replik H100 przy C1/C2/C8/C16/C32/C128 oraz podział Ultra dla tekstu i obrazów na
+dwóch RTX 6000 Ada 48 GB. Zachowuje FAIL niezmienności bitowej C128 bez zmian
+decyzji, FAIL jednej decyzji Ada względem FP32, 529 i błędny timer pierwszej próby.
+
+Archiwum: `hf://buckets/itsoltech/basal-rs/measurements/ultra-multigpu-2026-10-18/2411d4f8eb1761fdb0a7caf54b57831f8ce566b75651c6ea465afd4a76d5e982/measurement-data.tar.gz`,
+SHA-256 `2411d4f8eb1761fdb0a7caf54b57831f8ce566b75651c6ea465afd4a76d5e982`,
+8 472 492 B. Pobranie z autoryzacją i anonimowo potwierdziło **950/950 sum plików**.
+Dane są pod `reports/ultra-multigpu-2026-10-18/`; raport i archiwalny `REPRODUCE.md`
+podają pobranie, weryfikację i replay. Archiwum zawiera dokładne źródła trzech
+wariantów, obserwacje, zasoby per GPU, referencje FP32/BF16, kontrole H100 i Llama,
+nieudane próby i audyty. Obrazy pozostają zewnętrzne i przypięte hashami; prywatne
+dane maszyn, biblioteki, checkpointy i binarki nie są publikowane.
