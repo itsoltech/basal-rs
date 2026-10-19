@@ -1,6 +1,7 @@
 //! Gemma 4 / Gemma 4 Unified typed readout, ported from Transformers 5.17.0 (Apache-2.0).
 //! Separate causal prompts and bounded query tiles avoid relying on Llama trie kernels or a batch-dependent mask.
 
+use std::ops::Range;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -12,7 +13,7 @@ use basal_core::Backend;
 use candle_core::{DType, Device, Tensor, D};
 use serde_json::{json, Value};
 
-use crate::{Precision, Readout};
+use crate::{GateOwners, Lineage, OnStage, Precision, Readout, StageGates};
 
 #[derive(Clone)]
 struct Layer {
@@ -39,14 +40,16 @@ struct Layer {
 struct Weights {
     #[cfg(feature = "cuda")]
     empty_mask_group: Tensor,
-    embed: Tensor,
-    norm: Tensor,
+    embed: Option<Tensor>,
+    norm: Option<Tensor>,
     unit_norm: Tensor,
     layers: Vec<Layer>,
     ple_embed: Option<Tensor>,
     ple_projection: Option<Tensor>,
     ple_norm: Option<Tensor>,
     encoders: Option<crate::gemma_encoders::Encoders>,
+    #[cfg(feature = "cuda")]
+    lt: Option<Arc<crate::cublaslt::Lt>>,
 }
 
 #[derive(Clone)]
@@ -61,7 +64,12 @@ pub struct GemmaBackend {
     /// The CUDA ordinal `dev` was opened with ([`crate::gpu_device`]).
     pub(crate) device: usize,
     cfg: GemmaConfig,
-    weights: Arc<Weights>,
+    weights: Arc<OnStage<Weights>>,
+    /// Only the controller owns following stages; their helpers use their local weights and device.
+    following: Vec<GemmaBackend>,
+    range: Range<usize>,
+    lineage: Lineage,
+    transfers: Option<Arc<crate::TransferStats>>,
     precision: Precision,
     attention_dtype: DType,
     optimized: bool,
@@ -69,9 +77,7 @@ pub struct GemmaBackend {
     gate: Option<(Arc<Gate>, bool)>,
     pub load_s: f64,
     processor: Option<Arc<basal_core::media::Processor>>,
-    media_slot: Option<Vec<(basal_core::media::Kind, Tensor)>>,
-    #[cfg(feature = "cuda")]
-    lt: Option<Arc<crate::cublaslt::Lt>>,
+    media_slot: Option<OnStage<Vec<(basal_core::media::Kind, Tensor)>>>,
 }
 
 struct MediaSpan {
@@ -79,10 +85,6 @@ struct MediaSpan {
     features: Tensor,
 }
 struct MediaPrompt {
-    #[cfg(feature = "cuda")]
-    groups_device: Tensor,
-    #[cfg(feature = "cuda")]
-    has_image_groups: bool,
     spans: Vec<MediaSpan>,
     groups: Vec<Option<usize>>,
 }
@@ -157,9 +159,10 @@ impl GemmaBackend {
         ensure!(cfg!(feature = "cuda"), "basal-omni currently requires the CUDA backend");
         let dev = crate::gpu_device(device)?;
         ensure!(dev.is_cuda(), "basal-omni currently requires the CUDA backend");
-        Self::load_on(dir, cfg, precision, readout, dev, device, media)
+        Self::load_on(dir, cfg, precision, readout, dev, device, media, 0..cfg.layers.len(), Lineage::default())
     }
 
+    #[expect(clippy::too_many_arguments, reason = "validated per-stage load placement and arithmetic")]
     fn load_on(
         dir: &std::path::Path,
         cfg: &GemmaConfig,
@@ -168,6 +171,8 @@ impl GemmaBackend {
         dev: Device,
         device: usize,
         media: bool,
+        range: Range<usize>,
+        lineage: Lineage,
     ) -> Result<Self> {
         let start = Instant::now();
         let processor = if media {
@@ -220,8 +225,8 @@ impl GemmaBackend {
         };
         let load = |name: &str, shape: &[usize]| load_as(name, shape, precision.storage());
         let h = cfg.hidden;
-        let mut layers = Vec::with_capacity(cfg.layers.len());
-        for (i, c) in cfg.layers.iter().enumerate() {
+        let mut layers = Vec::with_capacity(range.len());
+        for (i, c) in cfg.layers.iter().enumerate().skip(range.start).take(range.len()) {
             let prefix = format!("model.language_model.layers.{i}");
             let get = |name: &str, shape: &[usize]| load(&format!("{prefix}.{name}"), shape);
             let qd = c.heads.checked_mul(c.head_dim).context("query dimension overflow")?;
@@ -280,10 +285,24 @@ impl GemmaBackend {
         };
         let weights = Weights {
             #[cfg(feature = "cuda")]
+            lt: match (&dev, precision.compute()) {
+                (Device::Cuda(d), DType::F16 | DType::BF16) => Some(Arc::new(crate::cublaslt::Lt::new(d)?)),
+                _ => None,
+            },
+            #[cfg(feature = "cuda")]
             empty_mask_group: Tensor::from_vec(vec![u32::MAX], 1, &dev)?,
             encoders,
-            embed: load("model.language_model.embed_tokens.weight", &[cfg.vocab, h])?,
-            norm: load("model.language_model.norm.weight", &[h])?,
+            // Tied embedding: input on the first stage, code rows on the last. Middle stages need neither.
+            embed: if range.start == 0 || range.end == cfg.layers.len() {
+                Some(load("model.language_model.embed_tokens.weight", &[cfg.vocab, h])?)
+            } else {
+                None
+            },
+            norm: if range.end == cfg.layers.len() {
+                Some(load("model.language_model.norm.weight", &[h])?)
+            } else {
+                None
+            },
             unit_norm: Tensor::ones(
                 cfg.layers.iter().map(|layer| layer.head_dim).max().context("Gemma has no layers")?,
                 precision.compute(),
@@ -307,16 +326,15 @@ impl GemmaBackend {
             },
         };
         drop(buffer);
-        #[cfg(feature = "cuda")]
-        let lt = match (&dev, precision.compute()) {
-            (Device::Cuda(d), DType::F16 | DType::BF16) => Some(Arc::new(crate::cublaslt::Lt::new(d)?)),
-            _ => None,
-        };
         Ok(Self {
+            weights: Arc::new(OnStage::new(&dev, true, &lineage.health, weights)),
+            following: Vec::new(),
+            range,
+            lineage,
+            transfers: None,
             dev,
             device,
             cfg: cfg.clone(),
-            weights: Arc::new(weights),
             precision,
             attention_dtype: DType::F32,
             optimized: false,
@@ -325,9 +343,114 @@ impl GemmaBackend {
             load_s: start.elapsed().as_secs_f64(),
             processor,
             media_slot: None,
-            #[cfg(feature = "cuda")]
-            lt,
         })
+    }
+
+    /// Conservative FP16/BF16 resident checkpoint bytes for one stage; encoder bounds/scalars may occupy less.
+    pub fn estimated_stage_bytes(
+        dir: &std::path::Path,
+        cfg: &GemmaConfig,
+        range: Range<usize>,
+        media: bool,
+    ) -> Result<u64> {
+        cfg.validate()?;
+        Self::check_split_config(cfg)?;
+        ensure!(range.start < range.end && range.end <= cfg.layers.len(), "Gemma stage range outside decoder");
+        let mut total = 0u64;
+        for path in basal_core::checkpoint::files(dir)? {
+            let reader = crate::TensorReader::open(&path)?;
+            for (name, (start, end)) in &reader.ranges {
+                let selected = if let Some(tail) = name.strip_prefix("model.language_model.layers.") {
+                    let (index, _) = tail.split_once('.').context("Gemma layer tensor name")?;
+                    range.contains(&index.parse::<usize>().context("Gemma layer tensor index")?)
+                } else if name == "model.language_model.embed_tokens.weight" {
+                    range.start == 0 || range.end == cfg.layers.len()
+                } else if name == "model.language_model.norm.weight" {
+                    range.end == cfg.layers.len()
+                } else {
+                    media && range.start == 0 && !name.starts_with("model.language_model.")
+                };
+                if selected {
+                    total = total
+                        .checked_add(end.checked_sub(*start).context("reversed tensor byte range")?)
+                        .context("Gemma stage byte count overflow")?;
+                }
+            }
+        }
+        // Small generated unit norms/head maps are bounded separately from checkpoint weights.
+        let generated = cfg.layers[range]
+            .iter()
+            .try_fold(0u64, |sum, c| sum.checked_add((c.heads as u64).checked_mul(4)?))
+            .context("Gemma generated weight byte count overflow")?;
+        total
+            .checked_add(generated)
+            .and_then(|n| n.checked_add((cfg.layers.iter().map(|l| l.head_dim).max().unwrap_or(0) as u64) * 2 + 4))
+            .context("Gemma stage byte count overflow")
+    }
+
+    pub fn check_split_config(cfg: &GemmaConfig) -> Result<()> {
+        ensure!(cfg.per_layer_input == 0, "Gemma layer split does not support per-layer input embeddings");
+        ensure!(cfg.layers.iter().all(|c| !c.shared_kv), "Gemma layer split does not support cross-layer KV sharing");
+        Ok(())
+    }
+
+    pub fn load_split(
+        dir: &std::path::Path,
+        cfg: &GemmaConfig,
+        precision: Precision,
+        readout: Readout,
+        kernels: crate::Kernels,
+        split: &crate::LayerSplit,
+        media: bool,
+    ) -> Result<Self> {
+        cfg.validate()?;
+        Self::check_split_config(cfg)?;
+        split.check(precision, kernels, cfg!(feature = "cuda"))?;
+        let ranges = split.ranges(cfg.layers.len())?;
+        let devices = split.devices();
+        let identity = crate::gpu_identity(devices[0])?;
+        for &device in &devices[1..] {
+            ensure!(crate::gpu_identity(device)? == identity, "Gemma layer split needs GPUs of one type");
+        }
+        let start = Instant::now();
+        let lineage = Lineage::default();
+        let mut built = Vec::new();
+        for (stage, range) in split.stages().iter().zip(ranges) {
+            let dev = crate::gpu_device(stage.device)?;
+            built.push(Self::load_on(
+                dir,
+                cfg,
+                precision,
+                readout,
+                dev,
+                stage.device,
+                media && range.start == 0,
+                range,
+                lineage.clone(),
+            )?);
+        }
+        let mut first = built.remove(0);
+        first.following = built;
+        first.transfers = Some(Arc::new(crate::TransferStats::for_devices(&devices)));
+        first.load_s = start.elapsed().as_secs_f64();
+        Ok(first)
+    }
+
+    fn stages(&self) -> impl Iterator<Item = &Self> {
+        std::iter::once(self).chain(self.following.iter())
+    }
+
+    fn owners(&self) -> GateOwners {
+        GateOwners {
+            gates: self.stages().map(|s| s.gate.clone()).collect(),
+            devs: self.stages().map(|s| s.dev.clone()).collect(),
+            health: self.lineage.health.clone(),
+            split: !self.following.is_empty(),
+        }
+    }
+
+    pub fn stage_transfers(&self) -> Option<crate::StageTransfers> {
+        self.transfers.clone().map(crate::StageTransfers)
     }
 
     pub fn configure_inference(
@@ -335,7 +458,7 @@ impl GemmaBackend {
         mode: crate::InferenceMode,
         model_name: &str,
     ) -> Result<(), crate::InferenceConfigError> {
-        if self.gate.is_some() || self.media_slot.is_some() {
+        if self.stages().any(|stage| stage.gate.is_some() || stage.media_slot.is_some()) {
             return Err(crate::InferenceConfigError::CacheInitialized);
         }
         if mode == crate::InferenceMode::Balanced {
@@ -370,13 +493,19 @@ impl GemmaBackend {
         #[cfg(not(feature = "cuda"))]
         let measured = false;
         self.optimized = measured;
+        for stage in &mut self.following {
+            stage.configure_inference(mode, model_name)?;
+        }
         Ok(())
     }
 
     fn decoder_norm(&self, x: &Tensor, weight: Option<&Tensor>, eps: f64) -> Result<Tensor> {
         if self.optimized && x.dtype() == DType::F16 {
-            let unit =
-                if weight.is_none() { Some(self.weights.unit_norm.narrow(0, 0, x.dim(D::Minus1)?)?) } else { None };
+            let unit = if weight.is_none() {
+                Some(self.weights.get().unit_norm.narrow(0, 0, x.dim(D::Minus1)?)?)
+            } else {
+                None
+            };
             if let Some(w) = weight.or(unit.as_ref()).filter(|w| w.dtype() == DType::F16) {
                 // Candle's CUDA FP16 kernel converts both operands to FP32 internally,
                 // with the same reduction and affine multiplication as its FP32 kernel.
@@ -414,7 +543,7 @@ impl GemmaBackend {
     fn linear(&self, x: &Tensor, w: &Tensor) -> Result<Tensor> {
         let (batch, _, _) = x.dims3()?;
         #[cfg(feature = "cuda")]
-        if let Some(lt) = &self.lt {
+        if let Some(lt) = &self.weights.get().lt {
             let (_, n, k) = x.dims3()?;
             let out = w.dim(0)?;
             if lt.is_invariant() && lt.covers(out, k, x.dtype()) {
@@ -429,12 +558,20 @@ impl GemmaBackend {
     }
 
     pub fn gemm_table_missing(&self) -> Vec<(usize, usize)> {
+        self.stages()
+            .flat_map(Self::local_gemm_table_missing)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    fn local_gemm_table_missing(&self) -> Vec<(usize, usize)> {
         #[cfg(feature = "cuda")]
-        if let Some(lt) = &self.lt {
+        if let Some(lt) = &self.weights.get().lt {
             if lt.is_invariant() {
                 // The configuration was validated at load time; enumerate the actual resident projections.
                 let mut shapes = std::collections::BTreeSet::new();
-                for layer in &self.weights.layers {
+                for layer in &self.weights.get().layers {
                     for weight in [&layer.q, &layer.o, &layer.gate, &layer.up, &layer.down].into_iter().chain(
                         [&layer.k, &layer.v, &layer.ple_gate, &layer.ple_projection]
                             .into_iter()
@@ -445,7 +582,7 @@ impl GemmaBackend {
                         }
                     }
                 }
-                if let Some(weight) = &self.weights.ple_projection {
+                if let Some(weight) = &self.weights.get().ple_projection {
                     if let Ok(shape) = weight.dims2() {
                         shapes.insert(shape);
                     }
@@ -458,8 +595,29 @@ impl GemmaBackend {
 
     /// Accept only an invariant table for this GPU/library/dtype; uncovered shapes use fixed GEMMs.
     pub fn load_gemm_table(&mut self, path: &std::path::Path) -> Result<usize> {
+        let mut total = 0;
+        for stage in std::iter::once(&*self).chain(self.following.iter()) {
+            stage.bind()?;
+            total += stage.load_local_gemm_table(path)?;
+        }
+        Ok(total)
+    }
+
+    fn bind(&self) -> Result<()> {
+        ensure!(!self.lineage.health.is_lost(), crate::LOST);
+        match crate::bind_twice(&self.dev) {
+            crate::Twice::First => Ok(()),
+            crate::Twice::Second(e) => anyhow::bail!("binding Gemma stage {}: first attempt failed ({e})", self.device),
+            crate::Twice::Neither(a, b) => {
+                self.lineage.health.mark_lost();
+                anyhow::bail!("binding Gemma stage {} failed twice ({a}; {b})", self.device)
+            }
+        }
+    }
+
+    fn load_local_gemm_table(&self, path: &std::path::Path) -> Result<usize> {
         #[cfg(feature = "cuda")]
-        if let Some(lt) = &self.lt {
+        if let Some(lt) = &self.weights.get().lt {
             let value: Value = serde_json::from_str(&std::fs::read_to_string(path)?)?;
             crate::check_gemm_table(&value, self.device)?;
             let entries = crate::table_entries(&value)?;
@@ -472,14 +630,6 @@ impl GemmaBackend {
             return Ok(entries.len());
         }
         anyhow::bail!("Gemma GEMM tables require CUDA half precision ({})", path.display())
-    }
-
-    fn checkpoint(&self) -> Result<()> {
-        if let Some((gate, false)) = &self.gate {
-            self.dev.synchronize()?;
-            gate.checkpoint();
-        }
-        Ok(())
     }
 
     // This cache belongs to one step: every rotation uses the same offset, token count and dtype.
@@ -701,80 +851,159 @@ impl GemmaBackend {
             .reshape((batch, n, c.heads * c.head_dim))?)
     }
 
+    #[expect(clippy::too_many_arguments, reason = "validated prompt dimensions, continuation and stage execution")]
     fn step(
         &self,
         ids: &[u32],
         offset: usize,
-        cache: &mut [Option<Kv>],
+        cache: &mut [OnStage<Vec<Option<Kv>>>],
         media: Option<&MediaPrompt>,
         readouts: &[usize],
         cache_next: bool,
+        gates: &mut StageGates<'_>,
     ) -> Result<Tensor> {
+        gates.switch_to(0)?;
         let batch = readouts.len();
         ensure!(batch > 0 && !ids.is_empty() && ids.len().is_multiple_of(batch), "invalid Gemma batch");
         ensure!(media.is_none() || batch == 1, "media batches are separate");
         let n = ids.len() / batch;
         ensure!(readouts.iter().all(|pos| *pos < n), "Gemma batch readout bounds");
-        let dt = self.precision.compute();
-        let indices = Tensor::from_slice(ids, ids.len(), &self.dev)?;
-        let mut x = self.weights.embed.index_select(&indices, 0)?.to_dtype(dt)?.reshape((batch, n, self.cfg.hidden))?;
-        x = (x * rounded((self.cfg.hidden as f64).sqrt(), dt))?;
-        let mut ple_ids = ids.to_vec();
-        if let Some(media) = media {
-            let mut parts = Vec::new();
-            let mut cursor = 0;
-            for span in &media.spans {
-                let end = span.start + span.features.dim(0)?;
-                if end <= offset || span.start >= offset + n {
-                    continue;
+        let (mut x, ple) = {
+            let dt = self.precision.compute();
+            let indices = Tensor::from_slice(ids, ids.len(), &self.dev)?;
+            let mut x = self
+                .weights
+                .get()
+                .embed
+                .as_ref()
+                .context("Gemma embedding missing on this stage")?
+                .index_select(&indices, 0)?
+                .to_dtype(dt)?
+                .reshape((batch, n, self.cfg.hidden))?;
+            x = (x * rounded((self.cfg.hidden as f64).sqrt(), dt))?;
+            let mut ple_ids = ids.to_vec();
+            if let Some(media) = media {
+                let mut parts = Vec::new();
+                let mut cursor = 0;
+                for span in &media.spans {
+                    let end = span.start + span.features.dim(0)?;
+                    if end <= offset || span.start >= offset + n {
+                        continue;
+                    }
+                    let start = span.start.max(offset) - offset;
+                    let stop = end.min(offset + n) - offset;
+                    if cursor < start {
+                        parts.push(x.narrow(1, cursor, start - cursor)?);
+                    }
+                    parts.push(
+                        span.features
+                            .narrow(0, offset + start - span.start, stop - start)?
+                            .to_dtype(dt)?
+                            .unsqueeze(0)?,
+                    );
+                    ple_ids[start..stop].fill(self.cfg.pad_token);
+                    cursor = stop;
                 }
-                let start = span.start.max(offset) - offset;
-                let stop = end.min(offset + n) - offset;
-                if cursor < start {
-                    parts.push(x.narrow(1, cursor, start - cursor)?);
+                if cursor < n {
+                    parts.push(x.narrow(1, cursor, n - cursor)?);
                 }
-                parts.push(
-                    span.features.narrow(0, offset + start - span.start, stop - start)?.to_dtype(dt)?.unsqueeze(0)?,
-                );
-                ple_ids[start..stop].fill(self.cfg.pad_token);
-                cursor = stop;
+                if !parts.is_empty() {
+                    x = Tensor::cat(&parts, 1)?;
+                }
             }
-            if cursor < n {
-                parts.push(x.narrow(1, cursor, n - cursor)?);
+            let ple_indices = Tensor::from_vec(ple_ids, ids.len(), &self.dev)?;
+
+            let ple = if let (Some(embed), Some(proj), Some(w)) =
+                (&self.weights.get().ple_embed, &self.weights.get().ple_projection, &self.weights.get().ple_norm)
+            {
+                let identity = (embed.index_select(&ple_indices, 0)?.to_dtype(dt)?
+                    * rounded((self.cfg.per_layer_input as f64).sqrt(), dt))?
+                .reshape((batch, n, self.cfg.layers.len(), self.cfg.per_layer_input))?;
+                let context = (self.linear(&x, proj)? / (self.cfg.hidden as f64).sqrt())?.reshape(identity.shape())?;
+                Some(
+                    ((self.decoder_norm(&context, Some(w), self.cfg.rms_eps)? + identity)?
+                        * std::f64::consts::FRAC_1_SQRT_2)?,
+                )
+            } else {
+                None
+            };
+            (x, ple)
+        };
+        #[cfg(feature = "cuda")]
+        let mut from_device = self.device;
+        for (index, stage) in self.stages().enumerate() {
+            if index > 0 {
+                #[cfg(feature = "cuda")]
+                {
+                    x = crate::transfer_activation(
+                        gates,
+                        index - 1,
+                        (from_device, stage.device),
+                        x,
+                        &self.lineage,
+                        self.transfers.as_deref(),
+                    )?;
+                }
+                #[cfg(not(feature = "cuda"))]
+                anyhow::bail!("Gemma layer split needs CUDA");
             }
-            if !parts.is_empty() {
-                x = Tensor::cat(&parts, 1)?;
+            x = stage.layers(x, offset, cache[index].get_mut(), media, ple.as_ref(), cache_next, gates)?;
+            #[cfg(feature = "cuda")]
+            {
+                from_device = stage.device;
             }
         }
-        let ple_indices = Tensor::from_vec(ple_ids, ids.len(), &self.dev)?;
+        let last = self.following.last().unwrap_or(self);
+        let states: Vec<Tensor> = readouts
+            .iter()
+            .enumerate()
+            .map(|(i, pos)| x.narrow(0, i, 1)?.narrow(1, *pos, 1)?.squeeze(1))
+            .collect::<candle_core::Result<_>>()?;
+        last.decoder_norm(&Tensor::cat(&states, 0)?, last.weights.get().norm.as_ref(), self.cfg.rms_eps)
+    }
 
-        let ple = if let (Some(embed), Some(proj), Some(w)) =
-            (&self.weights.ple_embed, &self.weights.ple_projection, &self.weights.ple_norm)
-        {
-            let identity = (embed.index_select(&ple_indices, 0)?.to_dtype(dt)?
-                * rounded((self.cfg.per_layer_input as f64).sqrt(), dt))?
-            .reshape((batch, n, self.cfg.layers.len(), self.cfg.per_layer_input))?;
-            let context = (self.linear(&x, proj)? / (self.cfg.hidden as f64).sqrt())?.reshape(identity.shape())?;
-            Some(
-                ((self.decoder_norm(&context, Some(w), self.cfg.rms_eps)? + identity)?
-                    * std::f64::consts::FRAC_1_SQRT_2)?,
-            )
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one stage of the existing Gemma forward, preserving operation order"
+    )]
+    fn layers(
+        &self,
+        mut x: Tensor,
+        offset: usize,
+        cache: &mut [Option<Kv>],
+        media: Option<&MediaPrompt>,
+        ple: Option<&Tensor>,
+        cache_next: bool,
+        gates: &mut StageGates<'_>,
+    ) -> Result<Tensor> {
+        let (batch, n, _) = x.dims3()?;
+        #[cfg(feature = "cuda")]
+        let device_groups = if let Some(m) = media.filter(|m| m.groups.iter().any(Option::is_some)) {
+            let groups = m
+                .groups
+                .iter()
+                .map(|g| match g {
+                    Some(id) => u32::try_from(*id).context("image group index exceeds u32"),
+                    None => Ok(u32::MAX),
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Tensor::from_vec(groups, m.groups.len(), &self.dev)?
         } else {
-            None
+            self.weights.get().empty_mask_group.clone()
         };
         let mask = AttentionMask {
             groups: media.map_or(&[], |m| m.groups.as_slice()),
             #[cfg(feature = "cuda")]
-            device_groups: media.map_or(&self.weights.empty_mask_group, |m| &m.groups_device),
+            device_groups: &device_groups,
             #[cfg(feature = "cuda")]
-            has_image_groups: media.is_some_and(|m| m.has_image_groups),
+            has_image_groups: media.is_some_and(|m| m.groups.iter().any(Option::is_some)),
         };
         let mut rotations = Vec::new();
         // A model without cross-layer KV sharing needs no completed layer's KV in this
         // forward. Only an actual continuation chunk needs the cache after step returns.
         let discard_kv = self.discard_unused_kv();
         let mut active: Vec<Option<Kv>> = vec![None; self.cfg.layers.len()];
-        for (i, (c, l)) in self.cfg.layers.iter().zip(&self.weights.layers).enumerate() {
+        for (i, (c, l)) in self.cfg.layers[self.range.clone()].iter().zip(&self.weights.get().layers).enumerate() {
             let input = self.decoder_norm(&x, Some(&l.input_norm), self.cfg.rms_eps)?;
             let query = self.linear(&input, &l.q)?.reshape((batch, n, c.heads, c.head_dim))?;
             let query =
@@ -810,7 +1039,7 @@ impl GemmaBackend {
             let input = self.decoder_norm(&x, Some(&l.pre_mlp_norm), self.cfg.rms_eps)?;
             let mlp = self.mlp(&input, l)?;
             x = (x + self.decoder_norm(&mlp, Some(&l.post_mlp_norm), self.cfg.rms_eps)?)?;
-            if let (Some(ple), Some(gate), Some(proj), Some(w)) = (&ple, &l.ple_gate, &l.ple_projection, &l.ple_norm) {
+            if let (Some(ple), Some(gate), Some(proj), Some(w)) = (ple, &l.ple_gate, &l.ple_projection, &l.ple_norm) {
                 let signal = (self.linear(&x, gate)?.gelu()? * ple.narrow(2, i, 1)?.squeeze(2)?)?;
                 x = (x + self.decoder_norm(&self.linear(&signal, proj)?, Some(w), self.cfg.rms_eps)?)?;
             }
@@ -830,28 +1059,32 @@ impl GemmaBackend {
             if !discard_kv {
                 active[i] = Some(kv);
             }
-            self.checkpoint()?;
+            gates.checkpoint()?;
         }
-        let states: Vec<Tensor> = readouts
-            .iter()
-            .enumerate()
-            .map(|(i, pos)| x.narrow(0, i, 1)?.narrow(1, *pos, 1)?.squeeze(1))
-            .collect::<candle_core::Result<_>>()?;
-        self.decoder_norm(&Tensor::cat(&states, 0)?, Some(&self.weights.norm), self.cfg.rms_eps)
+        Ok(x)
     }
 
-    fn read_prompt(&self, ids: &[u32], codes: &[u32]) -> Result<Vec<f32>> {
-        self.read_prompt_with_media(ids, codes, None)
+    fn read_prompt(&self, ids: &[u32], codes: &[u32], gates: &mut StageGates<'_>) -> Result<Vec<f32>> {
+        self.read_prompt_with_media(ids, codes, None, gates)
     }
 
-    fn read_prompt_with_media(&self, ids: &[u32], codes: &[u32], media: Option<&MediaPrompt>) -> Result<Vec<f32>> {
+    fn read_prompt_with_media(
+        &self,
+        ids: &[u32],
+        codes: &[u32],
+        media: Option<&MediaPrompt>,
+        gates: &mut StageGates<'_>,
+    ) -> Result<Vec<f32>> {
         ensure!(
             !ids.is_empty()
                 && ids.len() <= self.cfg.max_positions
                 && ids.iter().chain(codes).all(|id| (*id as usize) < self.cfg.vocab),
             "Gemma token/context bounds"
         );
-        let mut cache = vec![None; self.cfg.layers.len()];
+        let mut cache = self
+            .stages()
+            .map(|s| OnStage::new(&s.dev, true, &self.lineage.health, vec![None; s.range.len()]))
+            .collect::<Vec<_>>();
         let mut hidden = None;
         let mut offset = 0;
         while offset < ids.len() {
@@ -868,17 +1101,31 @@ impl GemmaBackend {
                     }
                 }
             }
-            hidden =
-                Some(self.step(&ids[offset..end], offset, &mut cache, media, &[end - offset - 1], end < ids.len())?);
+            hidden = Some(self.step(
+                &ids[offset..end],
+                offset,
+                &mut cache,
+                media,
+                &[end - offset - 1],
+                end < ids.len(),
+                gates,
+            )?);
             offset = end;
         }
-        self.readout_hidden(&hidden.context("Gemma empty prompt")?, codes)
+        self.following.last().unwrap_or(self).readout_hidden(&hidden.context("Gemma empty prompt")?, codes)
     }
 
     fn readout_hidden(&self, h: &Tensor, codes: &[u32]) -> Result<Vec<f32>> {
         let h = h.to_dtype(DType::F32)?;
         let code_ids = Tensor::from_slice(codes, codes.len(), &self.dev)?;
-        let head = self.weights.embed.index_select(&code_ids, 0)?.to_dtype(DType::F32)?;
+        let head = self
+            .weights
+            .get()
+            .embed
+            .as_ref()
+            .context("Gemma embedding missing on this stage")?
+            .index_select(&code_ids, 0)?
+            .to_dtype(DType::F32)?;
         let logits = ((h.matmul(&head.t()?)? / self.cfg.softcap)?.tanh()? * self.cfg.softcap)?;
         let mut logits: Vec<f32> = logits.squeeze(0)?.to_vec1()?;
         ensure!(logits.iter().all(|v| v.is_finite()), "non-finite Gemma code logits");
@@ -908,7 +1155,7 @@ impl GemmaBackend {
         Ok(ids)
     }
 
-    fn read_batch(&self, prompts: &[(&[u32], &[u32])]) -> Result<Vec<Vec<f32>>> {
+    fn read_batch(&self, prompts: &[(&[u32], &[u32])], gates: &mut StageGates<'_>) -> Result<Vec<Vec<f32>>> {
         ensure!(!prompts.is_empty() && prompts.len() <= 32, "Gemma batch size");
         let alignment = if self.optimized { 8 } else { 32 };
         let n = prompts.iter().map(|(ids, _)| ids.len()).max().context("empty Gemma batch")?.div_ceil(alignment)
@@ -928,142 +1175,25 @@ impl GemmaBackend {
             readouts.push(tokens.len() - 1);
             ids.resize(readouts.len() * n, self.cfg.pad_token);
         }
-        let mut cache = vec![None; self.cfg.layers.len()];
-        let hidden = self.step(&ids, 0, &mut cache, None, &readouts, false)?;
-        prompts.iter().enumerate().map(|(i, (_, codes))| self.readout_hidden(&hidden.narrow(0, i, 1)?, codes)).collect()
+        let mut cache = self
+            .stages()
+            .map(|s| OnStage::new(&s.dev, true, &self.lineage.health, vec![None; s.range.len()]))
+            .collect::<Vec<_>>();
+        let hidden = self.step(&ids, 0, &mut cache, None, &readouts, false, gates)?;
+        prompts
+            .iter()
+            .enumerate()
+            .map(|(i, (_, codes))| {
+                self.following.last().unwrap_or(self).readout_hidden(&hidden.narrow(0, i, 1)?, codes)
+            })
+            .collect()
     }
-}
-
-impl Backend for GemmaBackend {
-    fn media_kinds(&self) -> Vec<basal_core::media::Kind> {
-        if self.processor.is_some() {
-            let mut kinds = vec![basal_core::media::Kind::Image];
-            if self.cfg.audio.is_some() {
-                kinds.push(basal_core::media::Kind::Audio);
-            }
-            kinds
-        } else {
-            vec![]
-        }
-    }
-    fn prepare_media(&self, entries: &Value, detail: &str) -> Result<Arc<basal_core::media::ProcessedMedia>> {
-        Ok(Arc::new(self.processor.as_ref().context("media not enabled")?.process(entries, detail)?))
-    }
-    fn begin_media(&mut self, media: &basal_core::media::ProcessedMedia) -> Result<()> {
-        self.media_slot = None;
-        let gate = self.gate.clone();
-        let _guard = gate.as_ref().map(|(g, urgent)| g.enter(*urgent));
-        let encoders = self.weights.encoders.as_ref().context("media encoders not enabled")?;
-        let mut encoded = Vec::with_capacity(media.items.len());
-        for item in &media.items {
-            let values = match item {
-                basal_core::media::Input::Image(x) => &x.patches,
-                basal_core::media::Input::Audio(x) => &x.features,
-            };
-            ensure!(values.iter().all(|v| v.is_finite()), "non-finite media features");
-            encoded.push((
-                item.kind(),
-                encoders.encode(
-                    item,
-                    if self.precision == Precision::F16 { DType::BF16 } else { self.precision.compute() },
-                    &self.dev,
-                    self.attention_dtype,
-                )?,
-            ));
-            self.checkpoint()?;
-        }
-        self.media_slot = Some(encoded);
-        Ok(())
-    }
-    fn end_media(&mut self) {
-        self.media_slot = None;
-    }
-    fn media_logits(&mut self, prompts: &[&[u32]], codes: &[&[u32]]) -> Result<Vec<Vec<f32>>> {
-        let gate = self.gate.clone();
-        let _guard = gate.as_ref().map(|(g, urgent)| g.enter(*urgent));
-        ensure!(prompts.len() == codes.len(), "media prompt/code counts differ");
-        let encoded = self.media_slot.as_ref().context("media session not started")?;
-        let mut output = Vec::with_capacity(prompts.len());
-        for (ids, codes) in prompts.iter().zip(codes) {
-            let mut spans = Vec::new();
-            let mut groups = vec![None; ids.len()];
-            let mut cursor = 0;
-            for (group, (kind, features)) in encoded.iter().enumerate() {
-                let id = match kind {
-                    basal_core::media::Kind::Image => self.cfg.image_token,
-                    basal_core::media::Kind::Audio => self.cfg.audio_token,
-                };
-                let start = ids[cursor..]
-                    .iter()
-                    .position(|token| *token == id)
-                    .map(|i| i + cursor)
-                    .context("media token span missing")?;
-                let len = features.dim(0)?;
-                ensure!(
-                    len > 0 && start + len <= ids.len() && ids[start..start + len].iter().all(|token| *token == id),
-                    "media token/embedding counts differ"
-                );
-                if self.cfg.unified && *kind == basal_core::media::Kind::Image {
-                    groups[start..start + len].fill(Some(group));
-                }
-                spans.push(MediaSpan { start, features: features.clone() });
-                cursor = start + len;
-            }
-            let expected: usize =
-                encoded.iter().map(|(_, x)| x.dim(0)).collect::<candle_core::Result<Vec<_>>>()?.iter().sum();
-            ensure!(
-                ids.iter().filter(|id| **id == self.cfg.image_token || **id == self.cfg.audio_token).count()
-                    == expected,
-                "extra media placeholders in the state/question"
-            );
-            #[cfg(feature = "cuda")]
-            let has_image_groups = groups.iter().any(Option::is_some);
-            #[cfg(feature = "cuda")]
-            let groups_device = if has_image_groups {
-                let ids = groups
-                    .iter()
-                    .map(|group| match group {
-                        Some(id) => u32::try_from(*id).context("image group index exceeds u32"),
-                        None => Ok(u32::MAX),
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                Tensor::from_vec(ids, groups.len(), &self.dev)?
-            } else {
-                self.weights.empty_mask_group.clone()
-            };
-            output.push(self.read_prompt_with_media(
-                ids,
-                codes,
-                Some(&MediaPrompt {
-                    spans,
-                    groups,
-                    #[cfg(feature = "cuda")]
-                    groups_device,
-                    #[cfg(feature = "cuda")]
-                    has_image_groups,
-                }),
-            )?);
-        }
-        Ok(output)
-    }
-    fn describe(&self) -> Value {
-        json!({"backend":"cuda", "device": self.device, "architecture":if self.cfg.unified {"gemma4_unified"} else {"gemma4"},
-            "precision":format!("{:?}",self.precision), "attention_products":format!("{:?}",self.attention_dtype),
-            "fused_weighted_norm":self.optimized, "fused_rope":self.optimized,
-            "fused_value_norm":self.optimized, "fused_gelu_mul":self.optimized,
-            "fused_layer_scale":self.optimized, "text_padding_multiple":if self.optimized {8} else {32},
-            "chunk_kv_retention":if self.discard_unused_kv() {"continuation chunks only"} else {"original"},
-            "attention_accumulation":"F32", "softmax":"F32 with positional masks on CUDA", "query_tile_max":QUERY_TILE,
-            "score_workspace_mib":128, "long_attention":"unique GQA K/V", "prefill_chunk":2048,
-            "short_attention_batch":if self.optimized {32} else {1}, "text_bucket_tokens":32,
-            "text_batch_max":32, "text_batch_tokens_max":8192,
-            "gemm":"covered invariant table shapes share a GEMM; otherwise fixed per-prompt GEMMs",
-            "readout":"FP32 code rows, final logit softcap", "state_cache":false,
-            "encoder_weights":"BF16", "encoder_compute":if self.precision==Precision::F32 {"F32"} else {"BF16"}})
-    }
-    fn letter_logits(&mut self, rows: &[&Packed], letters: &[&[Vec<u32>]]) -> Result<Vec<Vec<Vec<f32>>>> {
-        let gate = self.gate.clone();
-        let _guard = gate.as_ref().map(|(g, urgent)| g.enter(*urgent));
+    fn letter_logits_on(
+        &self,
+        rows: &[&Packed],
+        letters: &[&[Vec<u32>]],
+        gates: &mut StageGates<'_>,
+    ) -> Result<Vec<Vec<Vec<f32>>>> {
         ensure!(rows.len() == letters.len(), "Gemma row/readout count mismatch");
         let mut out: Vec<Vec<Vec<f32>>> = letters.iter().map(|row| vec![Vec::new(); row.len()]).collect();
         let mut jobs = Vec::new();
@@ -1104,7 +1234,7 @@ impl Backend for GemmaBackend {
                         (ids.as_slice(), *codes)
                     })
                     .collect();
-                for (&index, logits) in indexes.iter().zip(self.read_batch(&prompts)?) {
+                for (&index, logits) in indexes.iter().zip(self.read_batch(&prompts, gates)?) {
                     let (row, code, _, _) = &jobs[index];
                     out[*row][*code] = logits;
                 }
@@ -1115,16 +1245,155 @@ impl Backend for GemmaBackend {
         for indexes in long.values() {
             for &(row, code) in indexes {
                 let ids = Self::prompt_ids(rows[row], rows[row].last[code])?;
-                out[row][code] = self.read_prompt(&ids, &letters[row][code])?;
+                out[row][code] = self.read_prompt(&ids, &letters[row][code], gates)?;
             }
         }
         Ok(out)
+    }
+    fn media_logits_on(
+        &self,
+        prompts: &[&[u32]],
+        codes: &[&[u32]],
+        gates: &mut StageGates<'_>,
+    ) -> Result<Vec<Vec<f32>>> {
+        ensure!(prompts.len() == codes.len(), "media prompt/code counts differ");
+        let encoded = self.media_slot.as_ref().context("media session not started")?.get();
+        let mut output = Vec::with_capacity(prompts.len());
+        for (ids, codes) in prompts.iter().zip(codes) {
+            gates.switch_to(0)?;
+            let mut spans = Vec::new();
+            let mut groups = vec![None; ids.len()];
+            let mut cursor = 0;
+            for (group, (kind, features)) in encoded.iter().enumerate() {
+                let id = match kind {
+                    basal_core::media::Kind::Image => self.cfg.image_token,
+                    basal_core::media::Kind::Audio => self.cfg.audio_token,
+                };
+                let start = ids[cursor..]
+                    .iter()
+                    .position(|token| *token == id)
+                    .map(|i| i + cursor)
+                    .context("media token span missing")?;
+                let len = features.dim(0)?;
+                ensure!(
+                    len > 0 && start + len <= ids.len() && ids[start..start + len].iter().all(|token| *token == id),
+                    "media token/embedding counts differ"
+                );
+                if self.cfg.unified && *kind == basal_core::media::Kind::Image {
+                    groups[start..start + len].fill(Some(group));
+                }
+                spans.push(MediaSpan { start, features: features.clone() });
+                cursor = start + len;
+            }
+            let expected: usize =
+                encoded.iter().map(|(_, x)| x.dim(0)).collect::<candle_core::Result<Vec<_>>>()?.iter().sum();
+            ensure!(
+                ids.iter().filter(|id| **id == self.cfg.image_token || **id == self.cfg.audio_token).count()
+                    == expected,
+                "extra media placeholders in the state/question"
+            );
+            let prompt = OnStage::new(&self.dev, true, &self.lineage.health, MediaPrompt { spans, groups });
+            output.push(self.read_prompt_with_media(ids, codes, Some(prompt.get()), gates)?);
+        }
+        Ok(output)
+    }
+    fn begin_media_on(&mut self, media: &basal_core::media::ProcessedMedia, gates: &mut StageGates<'_>) -> Result<()> {
+        gates.switch_to(0)?;
+        let encoders = self.weights.get().encoders.as_ref().context("media encoders not enabled")?;
+        let mut encoded = Vec::with_capacity(media.items.len());
+        for item in &media.items {
+            let values = match item {
+                basal_core::media::Input::Image(x) => &x.patches,
+                basal_core::media::Input::Audio(x) => &x.features,
+            };
+            ensure!(values.iter().all(|v| v.is_finite()), "non-finite media features");
+            encoded.push((
+                item.kind(),
+                encoders.encode(
+                    item,
+                    if self.precision == Precision::F16 { DType::BF16 } else { self.precision.compute() },
+                    &self.dev,
+                    self.attention_dtype,
+                )?,
+            ));
+            gates.checkpoint()?;
+        }
+        self.media_slot = Some(OnStage::new(&self.dev, true, &self.lineage.health, encoded));
+        Ok(())
+    }
+}
+
+impl Backend for GemmaBackend {
+    fn media_kinds(&self) -> Vec<basal_core::media::Kind> {
+        if self.processor.is_some() {
+            let mut kinds = vec![basal_core::media::Kind::Image];
+            if self.cfg.audio.is_some() {
+                kinds.push(basal_core::media::Kind::Audio);
+            }
+            kinds
+        } else {
+            vec![]
+        }
+    }
+    fn prepare_media(&self, entries: &Value, detail: &str) -> Result<Arc<basal_core::media::ProcessedMedia>> {
+        Ok(Arc::new(self.processor.as_ref().context("media not enabled")?.process(entries, detail)?))
+    }
+    fn begin_media(&mut self, media: &basal_core::media::ProcessedMedia) -> Result<()> {
+        ensure!(!self.lineage.health.is_lost(), crate::LOST);
+        self.media_slot = None;
+        let owners = self.owners();
+        let mut gates = StageGates::new(&owners);
+        let result = self.begin_media_on(media, &mut gates);
+        gates.end(result)
+    }
+    fn end_media(&mut self) {
+        self.media_slot = None;
+    }
+    fn media_logits(&mut self, prompts: &[&[u32]], codes: &[&[u32]]) -> Result<Vec<Vec<f32>>> {
+        ensure!(!self.lineage.health.is_lost(), crate::LOST);
+        let owners = self.owners();
+        let mut gates = StageGates::new(&owners);
+        let result = self.media_logits_on(prompts, codes, &mut gates);
+        gates.end(result)
+    }
+    fn describe(&self) -> Value {
+        let mut description = json!({"backend":"cuda", "device": self.device, "architecture":if self.cfg.unified {"gemma4_unified"} else {"gemma4"},
+            "precision":format!("{:?}",self.precision), "attention_products":format!("{:?}",self.attention_dtype),
+            "fused_weighted_norm":self.optimized, "fused_rope":self.optimized,
+            "fused_value_norm":self.optimized, "fused_gelu_mul":self.optimized,
+            "fused_layer_scale":self.optimized, "text_padding_multiple":if self.optimized {8} else {32},
+            "chunk_kv_retention":if self.discard_unused_kv() {"continuation chunks only"} else {"original"},
+            "attention_accumulation":"F32", "softmax":"F32 with positional masks on CUDA", "query_tile_max":QUERY_TILE,
+            "score_workspace_mib":128, "long_attention":"unique GQA K/V", "prefill_chunk":2048,
+            "short_attention_batch":if self.optimized {32} else {1}, "text_bucket_tokens":32,
+            "text_batch_max":32, "text_batch_tokens_max":8192,
+            "gemm":"covered invariant table shapes share a GEMM; otherwise fixed per-prompt GEMMs",
+            "readout":"FP32 code rows, final logit softcap", "state_cache":false,
+            "encoder_weights":"BF16", "encoder_compute":if self.precision==Precision::F32 {"F32"} else {"BF16"}});
+        if !self.following.is_empty() {
+            description["layer_split"] = json!({"stages": self.stages().map(|s| json!({"device":s.device,
+                "layers":[s.range.start,s.range.end], "embedding":s.weights.get().embed.is_some(),
+                "media_encoders":s.processor.is_some()})).collect::<Vec<_>>(),
+                "transfer": crate::STAGE_TRANSFER, "execution":"sequential layers; independent gates per GPU"});
+        }
+        description
+    }
+    fn letter_logits(&mut self, rows: &[&Packed], letters: &[&[Vec<u32>]]) -> Result<Vec<Vec<Vec<f32>>>> {
+        ensure!(!self.lineage.health.is_lost(), crate::LOST);
+        let owners = self.owners();
+        let mut gates = StageGates::new(&owners);
+        let result = self.letter_logits_on(rows, letters, &mut gates);
+        gates.end(result)
     }
     fn fork(&self) -> Result<Self> {
         Ok(Self {
             dev: self.dev.clone(),
             device: self.device,
             cfg: self.cfg.clone(),
+            following: self.following.iter().map(Self::fork).collect::<Result<_>>()?,
+            range: self.range.clone(),
+            lineage: self.lineage.clone(),
+            transfers: self.transfers.clone(),
             weights: self.weights.clone(),
             precision: self.precision,
             attention_dtype: self.attention_dtype,
@@ -1134,11 +1403,24 @@ impl Backend for GemmaBackend {
             load_s: 0.0,
             processor: self.processor.clone(),
             media_slot: None,
-            #[cfg(feature = "cuda")]
-            lt: self.lt.clone(),
         })
     }
+    fn set_device_gate(&mut self, device: usize, gate: Arc<Gate>, urgent: bool) -> Result<()> {
+        let stage = if device == self.device {
+            self
+        } else {
+            self.following.iter_mut().find(|s| s.device == device).context("gate device is not a Gemma stage")?
+        };
+        stage.gate = Some((gate, urgent));
+        Ok(())
+    }
+    fn device_health(&self) -> Option<basal_core::DeviceHealth> {
+        Some(self.lineage.health.clone())
+    }
     fn set_gate(&mut self, gate: Arc<Gate>, urgent: bool) {
-        self.gate = Some((gate, urgent));
+        self.gate = Some((gate.clone(), urgent));
+        for stage in &mut self.following {
+            stage.gate = Some((gate.clone(), urgent));
+        }
     }
 }

@@ -540,13 +540,26 @@ jawnym błędem po odczytaniu `config.json`, przed tabelą GEMM i ładowaniem wa
 |---|---|---|---|---|---|
 | basal-1.5 mini/4.5B/max (Llama) | tak | tak, wspólna tabela niezależna od partii | tak, `f16` + `fused` | tak, `f16` + `fused` | `auto`/`accurate`/`balanced` |
 | Basal 2.0 mini/4.5B/max (Llama) | tak | tak, wspólna tabela niezależna od partii | tak, `f16` + `fused` | tak, `f16` + `fused`; `q4_k` wymaga `K % 256 == 0` | `auto` wybiera `balanced` na RTX 6000 Ada |
-| Omni 1.0 mini/max, Omni 1.1 max i Ultra (Gemma 4) | tak | tak; bez pasującej tabeli stałe GEMM per prompt | nie (odmowa) | nie (odmowa, tylko `none`) | `auto`/`accurate`; `balanced` odmowa |
+| Omni 1.0 mini/max, Omni 1.1 max i Ultra (Gemma 4) | tak | tak; bez pasującej tabeli stałe GEMM per prompt | Gemma bez shared KV/PLE, jawne `f16` + `fused`; tekst i obrazy | nie (odmowa, tylko `none`) | `auto`/`accurate`; `balanced` odmowa |
 
-Kombinacje Basal 2.0 i Omni z umieszczeniem na GPU innym niż 0, z replikami, Basal 2.0 z
-podziałem warstw lub kwantyzacją oraz `auto`/`balanced` razem z kwantyzacją lub podziałem
-warstw są złożeniem mechanizmów sprawdzonych osobno; po integracji z `main` nie mają jeszcze
-pomiaru zgodności ani wydajności na sprzęcie. Wyniki pomiarów opisane niżej dotyczą basal-1.5.
-`auto` wybiera `balanced` dla podziału warstw tylko, gdy każda karta etapu jest RTX 6000 Ada.
+Podział Gemma ładuje kolejne zakresy warstw na oddzielne karty. Enkodery mediów i
+embedding wejściowy są na pierwszej; końcowa norma oraz powiązany embedding
+odczytu na ostatniej. Powiązany embedding ma dwie rezydentne kopie. Cache KV,
+rotary, mapy GQA, maski obrazu i uchwyty cuBLASLt należą do karty etapu.
+Granice korzystają z tej samej synchronizacji, kopiowania i retencji po błędzie co
+Llama. Jedno wywołanie trzyma najwyżej gate jednej karty, a health jest współdzielone
+przez wszystkie etapy i forki. Modele z cross-layer KV lub PLE są jawnie odrzucane.
+
+[Kampania Ultra](../reports/ultra-multigpu-2026-10-18/README.md) potwierdza podział
+tekstu i obrazów na dwóch RTX 6000 Ada, bitową kontrolę umieszczenia na H100 oraz
+skalowanie jednej do dwóch replik H100. Zachowuje FAIL jednej decyzji względem FP32
+na Ada i 226 różnic liczbowych replik przy C128 bez zmian decyzji. Nie obejmuje
+pozostałych modeli Omni, audio ani trzech lub większej liczby kart.
+Kombinacje Basal 2.0 z umieszczeniem na GPU innym niż 0, replikami, podziałem warstw
+lub kwantyzacją oraz `auto`/`balanced` razem z kwantyzacją lub podziałem są złożeniem
+mechanizmów sprawdzonych osobno; po integracji nie mają jeszcze własnego pomiaru
+zgodności ani wydajności na sprzęcie. Wyniki niżej dotyczą basal-1.5.
+`auto` wybiera `balanced` dla podziału Llama tylko, gdy każda karta etapu jest RTX 6000 Ada.
 
 - Score powyżej 10 poziomów i pytania z jedną opcją kończą się jawnym błędem.
 - Tabela GEMM jest specyficzna dla karty i wersji cuBLASLt. Plik w

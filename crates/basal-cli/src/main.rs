@@ -615,7 +615,7 @@ fn gpu_engine_at(dir: &Path, g: &GpuArgs) -> Result<Engine<GpuBackend>> {
     anyhow::ensure!(g.state_cache_mb == 0, "Intel state cache is not implemented; use --state-cache-mb 0");
     let manifest = ModelManifest::load_with_orders(dir, g.orders.as_deref())?;
     let quantization = g.quantization(&manifest.name)?;
-    // quantization and layer split exist for Llama only: refused for Omni (Gemma) before any weight is read
+    // Validate architecture-specific quantization and split constraints before any weight is read.
     config::check_architecture(&manifest, quantization, g.layer_split.is_some())?;
     let readout = match g.readout.as_str() {
         "f32" => Readout::F32,
@@ -629,16 +629,25 @@ fn gpu_engine_at(dir: &Path, g: &GpuArgs) -> Result<Engine<GpuBackend>> {
             .with_context(|| format!("loading {}", manifest.name))?,
         Some(split) => {
             // the stages must cover the model's layers exactly: checked before any weight is read
-            let layers = manifest.config.llama()?.num_layers;
+            let layers = manifest.config.num_layers();
             config::check_split_coverage(&manifest.name, split, layers)?;
-            GpuBackend::load_split(dir, &manifest.config, precision, readout, kernels, quantization, split)
-                .with_context(|| format!("loading {} with layer split {split}", manifest.name))?
+            GpuBackend::load_split_with_media(
+                dir,
+                &manifest.config,
+                precision,
+                readout,
+                kernels,
+                quantization,
+                split,
+                g.media,
+            )
+            .with_context(|| format!("loading {} with layer split {split}", manifest.name))?
         }
     };
     match &g.layer_split {
         None => crate::done!("{} loaded on GPU {} in {:.1}s", manifest.name, g.device(), backend.load_s()),
         Some(split) => {
-            let ranges = split.ranges(manifest.config.llama()?.num_layers)?;
+            let ranges = split.ranges(manifest.config.num_layers())?;
             let stages: Vec<String> = split
                 .devices()
                 .iter()
@@ -1057,14 +1066,13 @@ fn run() -> Result<()> {
                     m.name
                 );
             }
-            // quantization and layer split exist for Llama only (Omni/Gemma refuses them); a layer split covers exactly
-            // the model's layers (config.json); both before any GEMM table or load
+            // Validate architecture-specific placement and exact layer coverage before any GEMM table or load.
             for ((mc, manifest), placement) in c.models.iter().zip(&manifests).zip(&placements) {
                 let quantization: Quantization =
                     mc.quantization.parse().with_context(|| format!("model {}", manifest.name))?;
                 config::check_architecture(manifest, quantization, placement.split().is_some())?;
                 if let Some(split) = placement.split() {
-                    config::check_split_coverage(&manifest.name, split, manifest.config.llama()?.num_layers)?;
+                    config::check_split_coverage(&manifest.name, split, manifest.config.num_layers())?;
                 }
             }
             // one table per model, resolved on its first device; the table of a replica group or a layer split is

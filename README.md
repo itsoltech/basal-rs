@@ -363,8 +363,9 @@ jednocześnie, za tym samym API i z tymi samymi nazwami modeli. Bez
 `replica_devices` i `layer_split` (opis niżej) model jest ładowany raz, na
 jednym GPU. Numer to indeks CUDA widoczny dla procesu.
 `device` i `replica_devices` obsługują wszystkie modele (basal-1.5, Basal 2.0,
-Omni); `layer_split` i `quantization` tylko modele Llama (basal-1.5 i Basal 2.0),
-a dla Omni są odrzucane przed ładowaniem
+Omni). `layer_split` obsługuje Llama oraz Gemma bez współdzielenia KV między
+warstwami i bez per-layer input embeddings (w tym Ultra); `quantization`
+pozostaje dostępne dla Llama
 ([macierz](docs/ARCHITECTURE.md#ograniczenia)).
 Kolejność wszystkich kart ustala `CUDA_DEVICE_ORDER` (domyślna może różnić się
 od `nvidia-smi`, `PCI_BUS_ID` daje kolejność PCI jak `nvidia-smi`), a
@@ -412,6 +413,22 @@ models:
       - {device: 0, layers: 30}   # warstwy 0–29 i embedding
       - {device: 1, layers: 30}   # warstwy 30–59, końcowa norma, lm_head, głowica evidence
 ```
+
+Ultra również ma 60 warstw dekodera. Tekst i obrazy można uruchomić z podziałem:
+
+```sh
+basal serve --model omni-ultra --dtype f16 --media --layer-split 0:30,1:30
+```
+
+Enkoder obrazu i embedding wejściowy leżą na pierwszej karcie. Ostatnia karta
+ma końcową normę oraz drugą kopię powiązanego embeddingu do odczytu kodów.
+Maski obrazu, rotary i cache KV są lokalne dla etapu. Podział zachowuje kolejność
+obliczeń. [Pomiar Ultra](reports/ultra-multigpu-2026-10-18/README.md) potwierdza
+tekst i obrazy na dwóch Ada 48 GB oraz zgodność umieszczenia na H100; opisuje
+również skalowanie replik i zachowane różnice względem FP32.
+Gemma ze współdzielonym KV między warstwami lub per-layer input embeddings
+jest odrzucana przed ładowaniem. Gemma z podziałem wymaga `dtype: f16`,
+`quantization: none` i CUDA. Enkodery mediów zachowują BF16.
 
 Etapy liczą po kolei: po warstwach etapu aktywacje granicy są kopiowane na
 kartę następnego etapu, a odczyt liter i głowica evidence działają na
@@ -683,7 +700,7 @@ wiersza poleceń, np. `--max-batch-tokens`):
 | `quantization` | `none` | format wag projekcji modeli Llama (basal-1.5, Basal 2.0 mini/4.5B/max): `none` (gęste wagi `dtype`), `q8_0` (8-bitowe wagi z aktywacjami f16) albo `q4_k` (4-bitowe wagi z aktywacjami f16, eksperymentalne; K projekcji wielokrotnością 256); tylko CUDA z `dtype` f16 (`auto` dla Llamy to f16); Omni (Gemma) odrzuca inne wartości niż `none` po odczytaniu `config.json`, przed ładowaniem; opis niżej |
 | `device` | 0 | GPU modelu: indeks urządzenia CUDA widoczny dla procesu; modele z tym samym `device` dzielą GPU, z różnymi liczą jednocześnie; Metal i Intel: tylko 0 |
 | `replica_devices` | | CUDA: repliki modelu pod jedną nazwą, po jednej na każdy podany indeks (różne karty jednego typu); zamiast `device`; kilka wymaga `gemm_table` `auto` albo ścieżki: Llama wspólnej tabeli niezależnej od partii, Omni bez pasującej tabeli używa stałych GEMM per prompt |
-| `layer_split` | | CUDA, tylko modele Llama: jeden model na kilku kartach jednego typu, lista `{device, layers}` w kolejności warstw (co najmniej dwa etapy na różnych kartach, suma równa liczbie warstw modelu); wymaga `dtype` f16 (`auto` dla Llamy to f16); zamiast `device` i `replica_devices`; Omni odrzuca po odczytaniu `config.json`; opis wyżej |
+| `layer_split` | | CUDA, Llama oraz Gemma bez współdzielonego KV/PLE: jeden model na kilku kartach jednego typu, lista `{device, layers}` w kolejności warstw (co najmniej dwa etapy na różnych kartach, suma równa liczbie warstw modelu); wymaga `dtype` f16 (`auto` dla Llamy to f16); zamiast `device` i `replica_devices`; Gemma wymaga jawnego f16 i dense `none`; tekst i obrazy z enkoderem na pierwszej karcie; opis wyżej |
 | `max_batch_tokens` | 8192 | tokeny jednej partii, liczone po współdzieleniu prefiksów |
 | `schedule` | `hrrn` | kolejność przyjmowania żądań: `hrrn` (krótkie przed długimi, bez zagłodzenia) albo `fifo` |
 | `long_tokens` | 4096 | żądania powyżej tej liczby tokenów idą do toru długich żądań, który oddaje GPU krótkim partiom między warstwami; `0` wyłącza |

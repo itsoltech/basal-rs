@@ -300,9 +300,9 @@ fn execute(
         .as_ref()
         .map(|split| {
             let files = model_files(model, report)?;
-            // layer split exists for Llama only: an Omni (Gemma) model is refused before the preflight
+            // Refuse unsupported architecture-specific split options before the preflight.
             crate::config::check_architecture(&files.2, quantization, true)?;
-            crate::config::check_split_coverage(&files.2.name, split, files.2.config.llama()?.num_layers)?;
+            crate::config::check_split_coverage(&files.2.name, split, files.2.config.num_layers())?;
             anyhow::Ok(files)
         })
         .transpose()?;
@@ -372,21 +372,31 @@ fn execute(
             let last = stages.len() - 1;
             let mut checks = Vec::with_capacity(stages.len());
             for (i, stage) in stages.iter().enumerate() {
-                let bytes = basal_gpu::estimated_stage_weight_bytes(
-                    manifest.config.llama()?,
-                    checkpoint_bytes,
-                    quantization,
-                    stage.layers,
-                    i == 0,
-                    i == last,
-                )? + if i == last { evidence } else { 0 };
+                let bytes = match &manifest.config {
+                    basal_core::architecture::Architecture::Llama(cfg) => {
+                        basal_gpu::estimated_stage_weight_bytes(
+                            cfg,
+                            checkpoint_bytes,
+                            quantization,
+                            stage.layers,
+                            i == 0,
+                            i == last,
+                        )? + if i == last { evidence } else { 0 }
+                    }
+                    basal_core::architecture::Architecture::Gemma4(cfg) => GpuBackend::estimated_gemma_stage_bytes(
+                        &dir,
+                        cfg,
+                        split.ranges(cfg.layers.len())?[i].clone(),
+                        g.media,
+                    )?,
+                };
                 let stage_guard = if i == 0 { &mut guard } else { &mut others[i - 1].2 };
                 let checked = stage_guard
                     .check(&host_memory()?, &basal_gpu::gpu_memory(stage.device)?, bytes)
                     .with_context(|| format!("stage {i} on device {}", stage.device));
                 let entry = &mut report["layer_split"]["devices"][i];
                 entry["estimated_weight_bytes"] = json!({"bytes": bytes, "layers": stage.layers,
-                    "method": "estimate from format arithmetic: the stage's share of the decoder layers, plus the embedding on the first stage and lm_head, final norm and the evidence head file on the last; not a measurement"});
+                    "method": "resident checkpoint estimate for the stage: decoder layers, input embedding on the first, tied code embedding and final norm on the last, optional media encoders on the first; Llama projection format arithmetic and evidence head apply where present; not a runtime measurement"});
                 entry["resources"] = stage_guard.report();
                 checks.push(checked);
             }

@@ -829,12 +829,34 @@ fn split_bytes(
             })
             .collect::<Vec<_>>()
     };
-    let Ok(cfg) = model_config(dir) else { return proportional() };
-    if let Err(e) = config::check_split_coverage(&config::describe(m), split, cfg.num_layers) {
+    let cfg = dir.context("not downloaded yet").and_then(|d| {
+        let text = std::fs::read_to_string(d.join("config.json"))?;
+        basal_core::architecture::Architecture::parse(&serde_json::from_str(&text)?)
+    });
+    let Ok(cfg) = cfg else { return proportional() };
+    if let basal_core::architecture::Architecture::Gemma4(gemma) = &cfg {
+        if q != basal_gpu::Quantization::None {
+            r.fail(
+                "models",
+                format!("{}: Gemma layer split needs quantization none", config::describe(m)),
+                "use `quantization: none`",
+            );
+            return proportional();
+        }
+        if let Err(e) = basal_gpu::RuntimeBackend::check_gemma_split(gemma) {
+            r.fail(
+                "models",
+                format!("{}: {e:#}", config::describe(m)),
+                "use one device or replicas for this Gemma configuration",
+            );
+            return proportional();
+        }
+    }
+    if let Err(e) = config::check_split_coverage(&config::describe(m), split, cfg.num_layers()) {
         r.fail(
             "models",
             format!("{e:#}"),
-            format!("give `layer_split` layer counts that add up to the model's {} layers", cfg.num_layers),
+            format!("give `layer_split` layer counts that add up to the model's {} layers", cfg.num_layers()),
         );
         return proportional();
     }
@@ -843,8 +865,20 @@ fn split_bytes(
         .iter()
         .enumerate()
         .map(|(i, s)| {
-            basal_gpu::estimated_stage_weight_bytes(&cfg, checkpoint, q, s.layers, i == 0, i == last)
-                .map(|b| (s.device, b))
+            match &cfg {
+                basal_core::architecture::Architecture::Llama(c) => {
+                    basal_gpu::estimated_stage_weight_bytes(c, checkpoint, q, s.layers, i == 0, i == last)
+                }
+                basal_core::architecture::Architecture::Gemma4(c) => {
+                    basal_gpu::RuntimeBackend::estimated_gemma_stage_bytes(
+                        dir.context("downloaded model directory")?,
+                        c,
+                        split.ranges(c.layers.len())?[i].clone(),
+                        m.media,
+                    )
+                }
+            }
+            .map(|b| (s.device, b))
         })
         .collect::<Result<Vec<_>>>();
     match estimates {

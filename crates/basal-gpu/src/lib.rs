@@ -814,12 +814,11 @@ struct StageCopy<'a> {
 #[cfg(feature = "cuda")]
 impl StageCopy<'_> {
     /// The conditions cudarc leaves to the caller (it asserts the lengths): one contiguous f16 storage of `n` values
-    /// from offset 0, shaped `[2, M, H]`. Returns the shape.
+    /// from offset 0. Returns the shape; each architecture validates its activation dimensions.
     fn check(&self, n: usize) -> Result<Vec<usize>> {
         let src = self.src.as_ref().context("the source buffer")?;
         ensure!(src.dtype() == DType::F16, "boundary buffer of dtype {:?}, f16 expected", src.dtype());
         let dims = src.dims().to_vec();
-        ensure!(dims.len() == 3 && dims[0] == 2, "boundary buffer of shape {dims:?}, [2, M, H] expected");
         let (st, l) = src.storage_and_layout();
         ensure!(l.is_contiguous() && l.start_offset() == 0, "boundary buffer is not contiguous from offset 0");
         let candle_core::Storage::Cuda(cs) = &*st else { bail!("boundary buffer is not on a CUDA device") };
@@ -901,6 +900,131 @@ impl Drop for StageCopy<'_> {
     }
 }
 
+/// Copy one complete FP16 activation between adjacent stages, with the same drain, binding and quarantine rules
+/// for every architecture. Gates and devices are borrowed from the same call's owners.
+#[cfg(feature = "cuda")]
+fn transfer_activation(
+    gates: &mut StageGates<'_>,
+    s: usize,
+    devices: (usize, usize),
+    buf: Tensor,
+    lineage: &Lineage,
+    stats: Option<&TransferStats>,
+) -> Result<Tensor> {
+    let from = gates.owners.devs[s].clone();
+    let to = gates.owners.devs[s + 1].clone();
+    use candle_core::cuda_backend::CudaStorage;
+    let n = buf.elem_count();
+    let bytes = n * DType::F16.size_in_bytes();
+    let what = format!("stage transfer {s}→{}, CUDA device {}→{}, {bytes} B", s + 1, devices.0, devices.1);
+    let (Device::Cuda(src_dev), Device::Cuda(dst_dev)) = (&from, &to) else {
+        bail!("{what}: both stages must be CUDA devices");
+    };
+    // step 1
+    match twice(|| from.synchronize()) {
+        Twice::First => {}
+        Twice::Second(e) => {
+            // drained after an earlier stored error surfaced: free the source (its context is current), fail
+            drop(buf);
+            gates.mark_drained();
+            return Err(anyhow::Error::new(e).context(format!("{what}: draining stage {s}: first attempt failed")));
+        }
+        Twice::Neither(a, b) => {
+            lineage.retain(buf);
+            lineage.health.mark_lost();
+            bail!(
+                "{what}: draining stage {s} failed twice ({a}; {b}): buffers retained, model disabled until it is \
+                     loaded again"
+            );
+        }
+    }
+    let mut copy = StageCopy {
+        state: CopyState::Drained,
+        src: Some(buf),
+        dst: None,
+        src_ctx: src_dev.cuda_stream().context().clone(),
+        dst_ctx: dst_dev.cuda_stream().context().clone(),
+        lineage,
+        what,
+    };
+    let shape = match copy.check(n) {
+        Ok(shape) => shape,
+        Err(e) => return Err(copy.fail(e)),
+    };
+    // steps 2–3
+    let waited = Instant::now();
+    gates.mark_drained();
+    if let Err(e) = gates.switch_to(s + 1) {
+        return Err(copy.fail(e));
+    }
+    let gate_wait = waited.elapsed();
+    let started = Instant::now();
+    // step 4
+    match dst_dev.alloc_zeros::<half::f16>(n) {
+        Ok(d) => {
+            copy.dst = Some(d);
+            copy.state = CopyState::Allocated;
+        }
+        Err(e) => return Err(copy.fail(e.into())),
+    }
+    // step 5
+    match twice(|| to.synchronize()) {
+        Twice::First => copy.state = CopyState::Initialized,
+        Twice::Second(e) => {
+            return Err(copy.fail(anyhow::Error::new(e).context("draining the destination's initialisation")))
+        }
+        Twice::Neither(a, b) => {
+            return Err(copy.retain(format!("initialisation of the destination not confirmed ({a}; {b})")))
+        }
+    }
+    // step 6 (from here until both confirmations the copy may be queued on either GPU)
+    copy.state = CopyState::MaybeInFlight;
+    let copied = copy.copy_on(dst_dev);
+    // step 7
+    let on_dst = twice(|| to.synchronize());
+    let on_src = twice(|| from.synchronize());
+    let report = |t: &Twice<candle_core::Error>, stage: usize| match t {
+        Twice::First => None,
+        Twice::Second(e) => Some(format!("confirmation on stage {stage}: first attempt failed ({e})")),
+        Twice::Neither(a, b) => Some(format!("confirmation on stage {stage} failed twice ({a}; {b})")),
+    };
+    let problems: Vec<String> = copied
+        .as_ref()
+        .err()
+        .map(|e| format!("copy: {e:#}"))
+        .into_iter()
+        .chain(report(&on_dst, s + 1))
+        .chain(report(&on_src, s))
+        .collect();
+    if matches!(on_dst, Twice::Neither(..)) || matches!(on_src, Twice::Neither(..)) {
+        return Err(copy.retain(format!("end of the copy not confirmed ({})", problems.join("; "))));
+    }
+    copy.state = CopyState::Completed;
+    if !problems.is_empty() {
+        return Err(copy.fail(anyhow::anyhow!("{}", problems.join("; "))));
+    }
+    // step 8: stage s is current: its confirmation bound it
+    drop(copy.src.take());
+    // step 9
+    match bind_twice(&to) {
+        Twice::First => {}
+        Twice::Second(e) => {
+            return Err(copy.fail(anyhow::anyhow!("binding stage {} after the copy: first attempt failed ({e})", s + 1)))
+        }
+        Twice::Neither(a, b) => {
+            return Err(copy.retain(format!("binding stage {} after the copy failed twice ({a}; {b})", s + 1)))
+        }
+    }
+    let dst = copy.dst.take().context("the destination of the transfer")?;
+    copy.state = CopyState::Done;
+    let storage = candle_core::Storage::Cuda(CudaStorage::wrap_cuda_slice(dst, dst_dev.clone()));
+    let out = Tensor::from_storage(storage, shape, candle_core::op::BackpropOp::none(), false);
+    if let Some(stats) = stats {
+        stats.record(s, bytes, gate_wait, started.elapsed());
+    }
+    Ok(out)
+}
+
 /// Counters of one stage boundary (host clock, relaxed atomics: independent counters read for reports).
 struct BoundaryStats {
     from_device: usize,
@@ -922,12 +1046,16 @@ struct TransferStats {
 
 impl TransferStats {
     fn new(stages: &[Stage]) -> Self {
+        Self::for_devices(&stages.iter().map(|s| s.device).collect::<Vec<_>>())
+    }
+
+    fn for_devices(devices: &[usize]) -> Self {
         Self {
-            boundaries: stages
+            boundaries: devices
                 .windows(2)
                 .map(|p| BoundaryStats {
-                    from_device: p[0].device,
-                    to_device: p[1].device,
+                    from_device: p[0],
+                    to_device: p[1],
                     copies: AtomicU64::new(0),
                     bytes: AtomicU64::new(0),
                     transfer_ns: AtomicU64::new(0),
@@ -1028,10 +1156,15 @@ impl<'g> StageGates<'g> {
                 g.enter(false)
             });
         }
+        // A lane may have marked the model lost while this call waited for the next gate.
+        // No GPU work was started here: release it without assigning a stage that error cleanup would drain.
+        if o.health.is_lost() {
+            drop(self.guard.take());
+            bail!(LOST);
+        }
         self.started = true;
         self.current = Some(s);
         self.drained = false;
-        ensure!(!o.health.is_lost(), LOST);
         if o.split {
             match bind_twice(&o.devs[s]) {
                 Twice::Neither(a, b) => bail!("binding stage {s} failed twice ({a}; {b})"),
@@ -1243,6 +1376,8 @@ impl TensorReader {
         let mut n = [0u8; 8];
         file.read_exact(&mut n)?;
         let n = u64::from_le_bytes(n);
+        let file_bytes = file.metadata()?.len();
+        ensure!(n <= 100_000_000 && n <= file_bytes.saturating_sub(8), "invalid safetensors header length {n}");
         let mut header = vec![0u8; usize::try_from(n)?];
         file.read_exact(&mut header)?;
         let header: Value = serde_json::from_slice(&header).context("safetensors header")?;
@@ -1252,7 +1387,9 @@ impl TensorReader {
                 continue;
             }
             let r = t["data_offsets"].as_array().context("data_offsets")?;
+            ensure!(r.len() == 2, "tensor {name}: expected two data_offsets");
             let (s, e) = (r[0].as_u64().context("data_offsets")?, r[1].as_u64().context("data_offsets")?);
+            ensure!(s <= e && e <= file_bytes - 8 - n, "tensor {name}: data_offsets outside the checkpoint");
             ranges.insert(name.clone(), (s, e));
         }
         Ok(Self { file, base: 8 + n, ranges })
@@ -2390,119 +2527,16 @@ impl GpuBackend {
     /// known to be idle are freed with their owner's context bound ([`StageCopy`]).
     #[cfg(feature = "cuda")]
     fn transfer(&self, gates: &mut StageGates<'_>, s: usize, buf: Tensor) -> Result<Tensor> {
-        use candle_core::cuda_backend::CudaStorage;
-        let (from, to) = (&self.stages[s], &self.stages[s + 1]);
-        let n = buf.elem_count();
-        let bytes = n * DType::F16.size_in_bytes();
-        let what = format!("stage transfer {s}→{}, CUDA device {}→{}, {bytes} B", s + 1, from.device, to.device);
-        let (Device::Cuda(src_dev), Device::Cuda(dst_dev)) = (&from.dev, &to.dev) else {
-            bail!("{what}: both stages must be CUDA devices");
-        };
-        // step 1
-        match twice(|| from.dev.synchronize()) {
-            Twice::First => {}
-            Twice::Second(e) => {
-                // drained after an earlier stored error surfaced: free the source (its context is current), fail
-                drop(buf);
-                gates.mark_drained();
-                return Err(anyhow::Error::new(e).context(format!("{what}: draining stage {s}: first attempt failed")));
-            }
-            Twice::Neither(a, b) => {
-                self.lineage.retain(buf);
-                self.lineage.health.mark_lost();
-                bail!(
-                    "{what}: draining stage {s} failed twice ({a}; {b}): buffers retained, model disabled until it is \
-                     loaded again"
-                );
-            }
-        }
-        let mut copy = StageCopy {
-            state: CopyState::Drained,
-            src: Some(buf),
-            dst: None,
-            src_ctx: src_dev.cuda_stream().context().clone(),
-            dst_ctx: dst_dev.cuda_stream().context().clone(),
-            lineage: &self.lineage,
-            what,
-        };
-        let shape = match copy.check(n) {
-            Ok(shape) => shape,
-            Err(e) => return Err(copy.fail(e)),
-        };
-        // steps 2–3
-        let waited = Instant::now();
-        gates.mark_drained();
-        if let Err(e) = gates.switch_to(s + 1) {
-            return Err(copy.fail(e));
-        }
-        let gate_wait = waited.elapsed();
-        let started = Instant::now();
-        // step 4
-        match dst_dev.alloc_zeros::<half::f16>(n) {
-            Ok(d) => {
-                copy.dst = Some(d);
-                copy.state = CopyState::Allocated;
-            }
-            Err(e) => return Err(copy.fail(e.into())),
-        }
-        // step 5
-        match twice(|| to.dev.synchronize()) {
-            Twice::First => copy.state = CopyState::Initialized,
-            Twice::Second(e) => {
-                return Err(copy.fail(anyhow::Error::new(e).context("draining the destination's initialisation")))
-            }
-            Twice::Neither(a, b) => {
-                return Err(copy.retain(format!("initialisation of the destination not confirmed ({a}; {b})")))
-            }
-        }
-        // step 6 (from here until both confirmations the copy may be queued on either GPU)
-        copy.state = CopyState::MaybeInFlight;
-        let copied = copy.copy_on(dst_dev);
-        // step 7
-        let on_dst = twice(|| to.dev.synchronize());
-        let on_src = twice(|| from.dev.synchronize());
-        let report = |t: &Twice<candle_core::Error>, stage: usize| match t {
-            Twice::First => None,
-            Twice::Second(e) => Some(format!("confirmation on stage {stage}: first attempt failed ({e})")),
-            Twice::Neither(a, b) => Some(format!("confirmation on stage {stage} failed twice ({a}; {b})")),
-        };
-        let problems: Vec<String> = copied
-            .as_ref()
-            .err()
-            .map(|e| format!("copy: {e:#}"))
-            .into_iter()
-            .chain(report(&on_dst, s + 1))
-            .chain(report(&on_src, s))
-            .collect();
-        if matches!(on_dst, Twice::Neither(..)) || matches!(on_src, Twice::Neither(..)) {
-            return Err(copy.retain(format!("end of the copy not confirmed ({})", problems.join("; "))));
-        }
-        copy.state = CopyState::Completed;
-        if !problems.is_empty() {
-            return Err(copy.fail(anyhow::anyhow!("{}", problems.join("; "))));
-        }
-        // step 8: stage s is current: its confirmation bound it
-        drop(copy.src.take());
-        // step 9
-        match bind_twice(&to.dev) {
-            Twice::First => {}
-            Twice::Second(e) => {
-                return Err(
-                    copy.fail(anyhow::anyhow!("binding stage {} after the copy: first attempt failed ({e})", s + 1))
-                )
-            }
-            Twice::Neither(a, b) => {
-                return Err(copy.retain(format!("binding stage {} after the copy failed twice ({a}; {b})", s + 1)))
-            }
-        }
-        let dst = copy.dst.take().context("the destination of the transfer")?;
-        copy.state = CopyState::Done;
-        let storage = candle_core::Storage::Cuda(CudaStorage::wrap_cuda_slice(dst, dst_dev.clone()));
-        let out = Tensor::from_storage(storage, shape, candle_core::op::BackpropOp::none(), false);
-        if let Some(stats) = &self.transfers {
-            stats.record(s, bytes, gate_wait, started.elapsed());
-        }
-        Ok(out)
+        let dims = buf.dims();
+        ensure!(dims.len() == 3 && dims[0] == 2, "boundary buffer of shape {dims:?}, [2, M, H] expected");
+        transfer_activation(
+            gates,
+            s,
+            (self.stages[s].device, self.stages[s + 1].device),
+            buf,
+            &self.lineage,
+            self.transfers.as_deref(),
+        )
     }
 
     /// `x + (y + b)` and its RMSNorm with `ln`: one fused kernel on CUDA, the two separate ops elsewhere (bitwise the

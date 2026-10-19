@@ -24,6 +24,21 @@ pub enum RuntimeBackend {
 }
 
 impl RuntimeBackend {
+    /// Refuse Gemma configurations whose cross-layer state is not placed by the layer-split implementation.
+    pub fn check_gemma_split(cfg: &basal_core::architecture::GemmaConfig) -> Result<()> {
+        crate::gemma::GemmaBackend::check_split_config(cfg)
+    }
+
+    /// Conservative resident FP16/BF16 checkpoint estimate for a Gemma stage, including first-stage media.
+    pub fn estimated_gemma_stage_bytes(
+        dir: &Path,
+        cfg: &basal_core::architecture::GemmaConfig,
+        range: std::ops::Range<usize>,
+        media: bool,
+    ) -> Result<u64> {
+        crate::gemma::GemmaBackend::estimated_stage_bytes(dir, cfg, range, media)
+    }
+
     /// Select arithmetic before prefix warmup or lane creation. Explicit balanced mode requires a CUDA FP16 Llama.
     pub fn configure_inference(&mut self, mode: InferenceMode, model_name: &str) -> Result<(), InferenceConfigError> {
         match self {
@@ -87,8 +102,7 @@ impl RuntimeBackend {
         }
     }
 
-    /// Load a model split by consecutive layer ranges over several CUDA devices ([`crate::GpuBackend::load_split`]).
-    /// Llama on the CUDA backend only: Gemma and the Intel backend are refused before anything is opened.
+    /// Load consecutive decoder layer ranges over several CUDA devices, without media encoders.
     pub fn load_split(
         dir: &Path,
         cfg: &Architecture,
@@ -98,11 +112,29 @@ impl RuntimeBackend {
         quantization: Quantization,
         split: &LayerSplit,
     ) -> Result<Self> {
-        let Architecture::Llama(c) = cfg else {
-            anyhow::bail!(
-                "layer split {split} is implemented for Llama models only; serve Gemma on one GPU or as replicas"
-            )
-        };
+        Self::load_split_with_media(dir, cfg, precision, readout, kernels, quantization, split, false)
+    }
+
+    /// Load consecutive decoder layer ranges on CUDA FP16, with optional Gemma media encoders on the first stage.
+    #[expect(clippy::too_many_arguments, reason = "the validated load options of each architecture and media mode")]
+    pub fn load_split_with_media(
+        dir: &Path,
+        cfg: &Architecture,
+        precision: Precision,
+        readout: Readout,
+        kernels: Kernels,
+        quantization: Quantization,
+        split: &LayerSplit,
+        media: bool,
+    ) -> Result<Self> {
+        if let Architecture::Gemma4(c) = cfg {
+            anyhow::ensure!(quantization == Quantization::None, "Gemma layer split needs quantization none");
+            return Ok(Self::Gemma(Box::new(crate::gemma::GemmaBackend::load_split(
+                dir, c, precision, readout, kernels, split, media,
+            )?)));
+        }
+        anyhow::ensure!(!media, "media requires a Gemma omni model");
+        let c = cfg.llama()?;
         #[cfg(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos")))]
         {
             let _ = (dir, c, precision, readout, kernels, quantization);
@@ -124,7 +156,9 @@ impl RuntimeBackend {
     pub fn stage_transfers(&self) -> Option<StageTransfers> {
         match self {
             Self::Llama(b) => b.stage_transfers(),
-            _ => None,
+            Self::Gemma(b) => b.stage_transfers(),
+            #[cfg(all(feature = "intel", not(target_os = "macos")))]
+            Self::Intel(_) => None,
         }
     }
 
@@ -346,15 +380,7 @@ impl Backend for RuntimeBackend {
     fn set_device_gate(&mut self, device: usize, gate: Arc<Gate>, urgent: bool) -> Result<()> {
         match self {
             Self::Llama(b) => b.set_device_gate(device, gate, urgent),
-            Self::Gemma(b) => {
-                anyhow::ensure!(
-                    device == b.device,
-                    "a gate for device {device}, this model runs on device {}",
-                    b.device
-                );
-                b.set_gate(gate, urgent);
-                Ok(())
-            }
+            Self::Gemma(b) => b.set_device_gate(device, gate, urgent),
             #[cfg(all(feature = "intel", not(target_os = "macos")))]
             Self::Intel(b) => b.set_device_gate(device, gate, urgent),
         }
@@ -362,7 +388,7 @@ impl Backend for RuntimeBackend {
     fn device_health(&self) -> Option<DeviceHealth> {
         match self {
             Self::Llama(b) => b.device_health(),
-            Self::Gemma(_) => None,
+            Self::Gemma(b) => b.device_health(),
             #[cfg(all(feature = "intel", not(target_os = "macos")))]
             Self::Intel(b) => b.device_health(),
         }

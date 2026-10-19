@@ -14,10 +14,18 @@ Metal i Intel Vulkan nie uruchamiają omni.
 
 Na wielu GPU omni działa na wskazanej karcie (`device`) albo jako niezależne repliki
 (`replica_devices`, karty jednego typu). Przy replikach bez pasującej tabeli GEMM każda
-replika używa stałych GEMM per prompt. Podział warstw (`layer_split`) i kwantyzacja wag
-(`quantization` inna niż `none`) są zaimplementowane tylko dla modeli Llama; dla omni
-start odmawia po odczytaniu `config.json`, przed ładowaniem wag. Umieszczenie na GPU
-innym niż 0 i repliki omni nie mają jeszcze pomiaru zgodności ani wydajności.
+replika używa stałych GEMM per prompt. Podział warstw (`layer_split`) obsługuje Gemma bez
+współdzielonego KV między warstwami i bez per-layer input embeddings, w tym Ultra.
+Działa dla tekstu i obrazów: enkodery mediów na pierwszej karcie, lokalne maski i KV
+na kartach etapów, końcowa norma i powiązany embedding odczytu na ostatniej.
+Wymaga CUDA, kart jednego typu, jawnego `dtype: f16`, `quantization: none`
+i pokrycia wszystkich warstw. Dla Ultra: `--media --layer-split 0:30,1:30`.
+Inne konfiguracje Gemma oraz kwantyzacja inna niż `none` kończą start jawnym błędem
+przed wagami. Samo wsparcie w kodzie nie potwierdza numeryki ani wydajności;
+referencją pozostają raporty z konkretnych kart i wersji.
+[Pomiar Ultra na dwóch GPU](../reports/ultra-multigpu-2026-10-18/README.md)
+obejmuje tekst/obrazy na dwóch Ada 48 GB, kontrolę umieszczenia na H100 i repliki.
+Zachowuje jedną różną decyzję względem FP32 na Ada oraz różnice liczbowe C128.
 
 `inference_mode: auto` wybiera iloczyny attention FP16 tylko dla tych dwóch modeli,
 dekodera FP16 i rozpoznanej RTX 6000 Ada. Softmax i akumulacja pozostają FP32.

@@ -112,7 +112,7 @@ pub struct ModelConfig {
     /// CUDA: one model on several GPUs by consecutive layer ranges, `[{device, layers}, ...]` in layer order (at least
     /// two stages on distinct GPUs of one type, every stage with at least one layer, together exactly the model's
     /// layers); stage 0 also holds the embedding, the last stage the final norm, lm_head and evidence head. Llama
-    /// models only (Omni/Gemma refuses it); needs `dtype` f16 (`auto` for Llama) and the fused kernels;
+    /// models and Gemma without shared KV or per-layer input embeddings; needs explicit `dtype` f16 and fused kernels;
     /// `quantization` applies to every stage. Not together with `device` or `replica_devices`. Results are the same
     /// computations as on one GPU; the stages run one after another.
     #[serde(default)]
@@ -313,7 +313,7 @@ pub fn check_quantization(
 }
 
 /// Precision of `dtype` for the checks before the model's config is read: `auto` is f16 for every Llama model; an
-/// Omni (Gemma) model is refused quantization and layer split by [`check_architecture`] once its config is read.
+/// Omni (Gemma) compatibility is checked by [`check_architecture`] once its config is read.
 fn static_precision(model: &str, dtype: &str) -> Result<Precision> {
     if dtype == "auto" {
         return Ok(Precision::F16);
@@ -322,22 +322,19 @@ fn static_precision(model: &str, dtype: &str) -> Result<Precision> {
 }
 
 /// Combinations this runtime does not implement for the model's architecture, refused once its config is read and
-/// before any GEMM table or load: projection quantization and layer split exist for Llama models only (basal-1.5,
-/// Basal 2.0 mini/4.5B/max). Omni (Gemma 4) runs on one GPU (`device`) or as `replica_devices`.
+/// before any GEMM table or load. Gemma needs dense weights; a split additionally requires independent KV layers
+/// and no per-layer input embeddings.
 pub fn check_architecture(manifest: &ModelManifest, quantization: Quantization, split: bool) -> Result<()> {
-    if matches!(manifest.config, basal_core::architecture::Architecture::Gemma4(_)) {
+    if let basal_core::architecture::Architecture::Gemma4(cfg) = &manifest.config {
         ensure!(
             quantization == Quantization::None,
             "model {}: quantization {quantization} is implemented for Llama models only; an Omni (Gemma 4) model \
              needs `quantization: none`",
             manifest.name
         );
-        ensure!(
-            !split,
-            "model {}: layer_split is implemented for Llama models only; serve an Omni (Gemma 4) model on one GPU \
-             (`device`) or as `replica_devices`",
-            manifest.name
-        );
+        if split {
+            basal_gpu::RuntimeBackend::check_gemma_split(cfg).with_context(|| format!("model {}", manifest.name))?;
+        }
     }
     Ok(())
 }
