@@ -316,6 +316,12 @@ impl Backend for RuntimeBackend {
             _ => anyhow::bail!("this backend does not take media"),
         }
     }
+    fn asset_logits(&mut self, prompts: &[&[u32]], codes: &[&[u32]], order: &[&[usize]]) -> Result<Vec<Vec<f32>>> {
+        match self {
+            Self::Gemma(b) => b.asset_logits(prompts, codes, order),
+            _ => anyhow::bail!("this backend does not take image assets"),
+        }
+    }
     fn end_media(&mut self) {
         if let Self::Gemma(b) = self {
             b.end_media();

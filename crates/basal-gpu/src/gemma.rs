@@ -1254,17 +1254,24 @@ impl GemmaBackend {
         &self,
         prompts: &[&[u32]],
         codes: &[&[u32]],
+        mapping: Option<&[&[usize]]>,
         gates: &mut StageGates<'_>,
     ) -> Result<Vec<Vec<f32>>> {
         ensure!(prompts.len() == codes.len(), "media prompt/code counts differ");
+        ensure!(mapping.is_none_or(|m| m.len() == prompts.len()), "asset mapping count differs");
         let encoded = self.media_slot.as_ref().context("media session not started")?.get();
         let mut output = Vec::with_capacity(prompts.len());
-        for (ids, codes) in prompts.iter().zip(codes) {
+        for (prompt_index, (ids, codes)) in prompts.iter().zip(codes).enumerate() {
             gates.switch_to(0)?;
             let mut spans = Vec::new();
             let mut groups = vec![None; ids.len()];
             let mut cursor = 0;
-            for (group, (kind, features)) in encoded.iter().enumerate() {
+            let order = mapping.map(|m| m[prompt_index]);
+            let count = order.map_or(encoded.len(), |v| v.len());
+            let mut expected = 0usize;
+            for group in 0..count {
+                let index = order.map_or(group, |v| v[group]);
+                let (kind, features) = encoded.get(index).context("invalid asset image index")?;
                 let id = match kind {
                     basal_core::media::Kind::Image => self.cfg.image_token,
                     basal_core::media::Kind::Audio => self.cfg.audio_token,
@@ -1275,6 +1282,7 @@ impl GemmaBackend {
                     .map(|i| i + cursor)
                     .context("media token span missing")?;
                 let len = features.dim(0)?;
+                expected += len;
                 ensure!(
                     len > 0 && start + len <= ids.len() && ids[start..start + len].iter().all(|token| *token == id),
                     "media token/embedding counts differ"
@@ -1285,8 +1293,6 @@ impl GemmaBackend {
                 spans.push(MediaSpan { start, features: features.clone() });
                 cursor = start + len;
             }
-            let expected: usize =
-                encoded.iter().map(|(_, x)| x.dim(0)).collect::<candle_core::Result<Vec<_>>>()?.iter().sum();
             ensure!(
                 ids.iter().filter(|id| **id == self.cfg.image_token || **id == self.cfg.audio_token).count()
                     == expected,
@@ -1353,7 +1359,14 @@ impl Backend for GemmaBackend {
         ensure!(!self.lineage.health.is_lost(), crate::LOST);
         let owners = self.owners();
         let mut gates = StageGates::new(&owners);
-        let result = self.media_logits_on(prompts, codes, &mut gates);
+        let result = self.media_logits_on(prompts, codes, None, &mut gates);
+        gates.end(result)
+    }
+    fn asset_logits(&mut self, prompts: &[&[u32]], codes: &[&[u32]], order: &[&[usize]]) -> Result<Vec<Vec<f32>>> {
+        ensure!(!self.lineage.health.is_lost(), crate::LOST);
+        let owners = self.owners();
+        let mut gates = StageGates::new(&owners);
+        let result = self.media_logits_on(prompts, codes, Some(order), &mut gates);
         gates.end(result)
     }
     fn describe(&self) -> Value {

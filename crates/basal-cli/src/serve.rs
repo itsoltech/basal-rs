@@ -57,6 +57,7 @@ use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot, Semaphore};
 
 mod metrics;
+mod systemone;
 use metrics::{LaneMetrics, Metrics, ReplicaMetrics, RequestModel};
 
 pub(crate) const DEFAULT_MAX_LARGE_INFLIGHT: usize = 4;
@@ -104,6 +105,9 @@ struct Timing {
 }
 
 type LargeBodyPermit = Arc<tokio::sync::OwnedSemaphorePermit>;
+
+#[derive(Clone)]
+struct SystemOneDecodePermit(LargeBodyPermit);
 
 type Reply = (std::result::Result<Value, DecideError>, Option<Timing>);
 
@@ -281,6 +285,7 @@ struct App {
     large_bodies: Arc<Semaphore>,
     jobs: Arc<Semaphore>,
     media_requests: Arc<Semaphore>,
+    systemone_decoders: Arc<Semaphore>,
     default_model: String,
     inflight: AtomicUsize,
     max_inflight: usize,
@@ -501,17 +506,15 @@ async fn systemone(
     State(app): State<Arc<App>>,
     label: Option<Extension<RequestModel>>,
     large: Option<Extension<LargeBodyPermit>>,
+    Extension(SystemOneDecodePermit(decoding)): Extension<SystemOneDecodePermit>,
+    headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
     let arrived = Instant::now();
     let large = large.map(|Extension(permit)| permit);
-    match decode_body(body, Dialect::TypeSafe, large.clone()).await {
-        Ok(Ok(v)) => decide(app, v, Dialect::TypeSafe, arrived, label.map(|Extension(l)| l), large).await,
-        Ok(Err(e)) => error_response(StatusCode::UNPROCESSABLE_ENTITY, e),
-        Err(e) => error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            json!({"error":"JSON decode worker failed","detail":e.to_string()}),
-        ),
+    match systemone::decode(body, headers, systemone::Permits::new(large.clone(), decoding)).await {
+        Ok(v) => decide(app, v, Dialect::TypeSafe, arrived, label.map(|Extension(l)| l), large).await,
+        Err(error) => error.response(),
     }
 }
 
@@ -648,7 +651,9 @@ async fn decide(
         }
     }
     let (tx, rx) = oneshot::channel();
-    let media_permit = if body.get("media").is_some_and(|v| !v.is_null()) {
+    let media_permit = if body.get("media").is_some_and(|v| !v.is_null())
+        || (dialect == Dialect::TypeSafe && body.get("assets").is_some())
+    {
         match app.media_requests.clone().try_acquire_owned() {
             Ok(permit) => Some(permit),
             Err(_) => {
@@ -730,12 +735,27 @@ async fn models_list(State(app): State<Arc<App>>) -> Json<Value> {
 
 /// Admit large or chunked inference bodies before reading/allocating them.
 async fn large_body_admission(State(app): State<Arc<App>>, mut request: Request, next: Next) -> Response {
+    if request.uri().path() == "/v1/systemone" {
+        let permit = match app.systemone_decoders.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                return overloaded(
+                    Dialect::TypeSafe,
+                    "Too many System One requests decoding. Retry after a short delay.",
+                    "overloaded: too many requests decoding",
+                )
+            }
+        };
+        request.extensions_mut().insert(SystemOneDecodePermit(Arc::new(permit)));
+    }
     let large = request
         .headers()
         .get(axum::http::header::CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok())
-        .is_none_or(|n| n > 2 * 1024 * 1024);
+        .is_none_or(|n| n > 2 * 1024 * 1024)
+        || (request.uri().path() == "/v1/systemone"
+            && request.headers().get(axum::http::header::CONTENT_ENCODING).is_some_and(|v| v != "identity"));
     let _permit = if large {
         match app.large_bodies.clone().try_acquire_owned() {
             Ok(permit) => Some(Arc::new(permit)),
@@ -1031,19 +1051,23 @@ fn serve_inner<B: Backend + Send + 'static>(
             large_bodies: Arc::new(Semaphore::new(opts.max_large_inflight)),
             jobs: Arc::new(Semaphore::new(opts.max_inflight)),
             media_requests: Arc::new(Semaphore::new(4)),
+            systemone_decoders: Arc::new(Semaphore::new(opts.max_inflight)),
             default_model,
             inflight: AtomicUsize::new(0),
             max_inflight: opts.max_inflight,
             release_date: opts.release_date.clone(),
         });
-        let router = Router::new().route("/v1/systemone", post(systemone)).route("/v1/basal", post(basal));
-        let router = if supports_media {
-            router
+        let systemone = post(systemone)
+            .layer(axum::extract::DefaultBodyLimit::max(basal_core::systemone::MAX_BODY_BYTES))
+            .layer(axum::middleware::from_fn_with_state(app.clone(), large_body_admission));
+        let basal = if supports_media {
+            post(basal)
                 .layer(axum::extract::DefaultBodyLimit::max(256 * 1024 * 1024))
-                .route_layer(axum::middleware::from_fn_with_state(app.clone(), large_body_admission))
+                .layer(axum::middleware::from_fn_with_state(app.clone(), large_body_admission))
         } else {
-            router
+            post(basal)
         };
+        let router = Router::new().route("/v1/systemone", systemone).route("/v1/basal", basal);
         let router = if opts.metrics {
             router
                 .route_layer(axum::middleware::from_fn_with_state(app.clone(), metrics::observe))

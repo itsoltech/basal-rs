@@ -71,6 +71,8 @@ impl Input {
 pub struct ProcessedMedia {
     pub items: Vec<Input>,
     pub high_detail: bool,
+    /// Internal, collision-free markers for positioned System One assets. Native media leave this absent.
+    pub(crate) asset_markers: Option<Vec<String>>,
 }
 
 impl std::fmt::Debug for ProcessedMedia {
@@ -210,7 +212,7 @@ impl Processor {
             ensure!(processed_bytes <= 256 * 1024 * 1024, "media processed features exceed 256 MiB");
             items.push(item);
         }
-        Ok(ProcessedMedia { items, high_detail: detail == "high" })
+        Ok(ProcessedMedia { items, high_detail: detail == "high", asset_markers: None })
     }
 }
 

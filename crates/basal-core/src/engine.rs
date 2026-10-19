@@ -75,6 +75,11 @@ pub trait Backend {
     fn media_logits(&mut self, _prompts: &[&[u32]], _codes: &[&[u32]]) -> Result<Vec<Vec<f32>>> {
         bail!("this backend does not take media")
     }
+    /// System One assets in prompt occurrence order; indices address the session's encoded images.
+    /// An empty mapping is a text-only question in a request that also contains images.
+    fn asset_logits(&mut self, _prompts: &[&[u32]], _codes: &[&[u32]], _order: &[&[usize]]) -> Result<Vec<Vec<f32>>> {
+        bail!("this backend does not support positioned image assets")
+    }
     fn end_media(&mut self) {}
 }
 
@@ -100,6 +105,9 @@ pub struct OrderJob {
     pub prompt: String,
     pub input_ids: Vec<u32>,
     pub letter_ids: Vec<u32>,
+    /// Present only for System One assets; one index per image occurrence in this option order.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asset_order: Option<Vec<usize>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -392,9 +400,13 @@ impl<B: Backend> Engine<B> {
 
     /// Parse, validate and prepare a System One request without running the model.
     pub fn prepare_request(&self, body: &Value) -> Result<Vec<Prepared>, DecideError> {
-        if self.manifest.prompt_format == PromptFormat::Two || body.get("media").is_some_and(|v| !v.is_null()) {
+        if self.manifest.prompt_format == PromptFormat::Two
+            || body.get("media").is_some_and(|v| !v.is_null())
+            || body.get("assets").is_some()
+        {
             return self.plan_request(body).map(|p| p.prepared);
         }
+        crate::systemone::check_features(body)?;
         let req = crate::request::parse_request_for_format(
             body,
             crate::request::Dialect::TypeSafe,
@@ -415,6 +427,13 @@ impl<B: Backend> Engine<B> {
 
     /// [`Engine::plan_request`] for an endpoint dialect (upstream: no model check, 2..10 options only).
     pub fn plan_request_as(&self, body: &Value, dialect: crate::request::Dialect) -> Result<RequestPlan, DecideError> {
+        if dialect == crate::request::Dialect::TypeSafe {
+            crate::systemone::check_features(body)?;
+            // Asset questions are restricted to the TypeSafe primitives before native task expansion.
+            if body.get("assets").is_some() {
+                return self.plan_decision_request_as(body, dialect);
+            }
+        }
         if let Some(expansion) = crate::tasks::expand(body, self.manifest.prompt_format.max_options())? {
             let mut plan = self.plan_decision_request_as(&expansion.request, dialect)?;
             plan.tasks = Some(expansion.plan);
@@ -438,7 +457,25 @@ impl<B: Backend> Engine<B> {
                 )]));
             }
         }
-        let media = if let Some(entries) = body.get("media").filter(|v| !v.is_null()) {
+        let assets =
+            if dialect == crate::request::Dialect::TypeSafe { crate::systemone::Assets::parse(body)? } else { None };
+        let media = if let Some(assets) = &assets {
+            if !self.backend.media_kinds().contains(&crate::media::Kind::Image) {
+                return Err(crate::systemone::unsupported(
+                    vec!["body".into(), "assets".into()],
+                    "this model/backend does not support images; enable media on an omni CUDA model",
+                ));
+            }
+            let mut processed = self.backend.prepare_media(&assets.entries, "default").map_err(|e| {
+                DecideError::Validation(vec![crate::request::FieldError::new(
+                    vec!["body".into(), "assets".into()],
+                    format!("{e:#}"),
+                    "value_error",
+                )])
+            })?;
+            Arc::make_mut(&mut processed).asset_markers = Some(assets.markers.clone());
+            Some(processed)
+        } else if let Some(entries) = body.get("media").filter(|v| !v.is_null()) {
             if self.backend.media_kinds().is_empty() {
                 return Err(DecideError::Unsupported(vec![crate::request::FieldError::new(
                     vec!["body".into(), "media".into()],
@@ -463,7 +500,19 @@ impl<B: Backend> Engine<B> {
         } else {
             None
         };
-        let req = crate::request::parse_request_for_format(body, dialect, self.manifest.prompt_format)?;
+        let mut req = crate::request::parse_request_for_format(body, dialect, self.manifest.prompt_format)?;
+        if let Some(assets) = &assets {
+            assets.apply(body, &mut req.items, self.manifest.prompt_format)?;
+            if let Some(media) = &media {
+                assets.check_prompt_budget(body, &req.items, media, self.manifest.config.max_positions())?;
+            }
+            if self.manifest.prompt_format != PromptFormat::Two || self.manifest.chat_style == ChatStyle::Llama {
+                return Err(crate::systemone::unsupported(
+                    vec!["body".into(), "assets".into()],
+                    "image assets require an omni prompt format",
+                ));
+            }
+        }
         if dialect == crate::request::Dialect::TypeSafe && req.model != self.manifest.name {
             return Err(crate::request::api_usage_error(format!("Unknown model: {}", req.model)));
         }
@@ -514,8 +563,13 @@ impl<B: Backend> Engine<B> {
                 .sum();
             for p in &plan.prepared {
                 for order in &p.orders {
-                    if order.input_ids.iter().filter(|id| **id == cfg.image_token).count() != image_tokens
-                        || order.input_ids.iter().filter(|id| **id == cfg.audio_token).count() != audio_tokens
+                    let expected_images = order
+                        .asset_order
+                        .as_ref()
+                        .map_or(image_tokens, |indices| indices.iter().map(|&i| media.items[i].soft_tokens()).sum());
+                    let expected_audio = if order.asset_order.is_some() { 0 } else { audio_tokens };
+                    if order.input_ids.iter().filter(|id| **id == cfg.image_token).count() != expected_images
+                        || order.input_ids.iter().filter(|id| **id == cfg.audio_token).count() != expected_audio
                     {
                         return Err(DecideError::Validation(vec![crate::request::FieldError::new(
                             vec!["body".into(), "questions".into(), p.item.name.clone().into()],
@@ -698,7 +752,8 @@ impl<B: Backend> Engine<B> {
                 prepared.iter().flat_map(|p| p.orders.iter().map(|o| o.input_ids.as_slice())).collect();
             let codes: Vec<_> =
                 prepared.iter().flat_map(|p| p.orders.iter().map(|o| o.letter_ids.as_slice())).collect();
-            let logits = self.backend.media_logits(&prompts, &codes)?;
+            let orders: Vec<_> = prepared.iter().flat_map(|p| &p.orders).collect();
+            let logits = media_readout(&mut self.backend, &orders, &prompts, &codes)?;
             anyhow::ensure!(logits.len() == prompts.len(), "media readout count mismatch");
             let mut logits = logits.into_iter();
             Ok(prepared.iter().map(|p| self.finish(p, logits.by_ref().take(p.orders.len()).collect())).collect())
@@ -948,6 +1003,7 @@ impl<B: Backend> Engine<B> {
             outs.push(PlanOutput {
                 task_response: None,
                 task_error: None,
+                asset_media_tokens: None,
                 longest_prompt_tokens,
                 finals,
                 final_round_tokens,
@@ -969,7 +1025,9 @@ impl<B: Backend> Engine<B> {
                 plan.prepared.iter().flat_map(|p| p.orders.iter().map(|o| o.input_ids.as_slice())).collect();
             let codes: Vec<&[u32]> =
                 plan.prepared.iter().flat_map(|p| p.orders.iter().map(|o| o.letter_ids.as_slice())).collect();
-            let logits = self.backend.media_logits(&prompts, &codes)?;
+            let orders: Vec<_> = plan.prepared.iter().flat_map(|p| &p.orders).collect();
+            let mut asset_media_tokens = media.asset_markers.as_ref().map(|_| asset_tokens(&orders, media));
+            let logits = media_readout(&mut self.backend, &orders, &prompts, &codes)?;
             anyhow::ensure!(logits.len() == prompts.len(), "media backend readout count mismatch");
             let mut logits = logits.into_iter();
             let mut results: Vec<ItemResult> =
@@ -1004,7 +1062,11 @@ impl<B: Backend> Engine<B> {
                 let prompts: Vec<&[u32]> = redo.iter().map(|p| p.orders[0].input_ids.as_slice()).collect();
                 let codes: Vec<&[u32]> = redo.iter().map(|p| p.orders[0].letter_ids.as_slice()).collect();
                 longest_prompt_tokens = longest_prompt_tokens.max(prompts.iter().map(|p| p.len()).max().unwrap_or(0));
-                let logits = self.backend.media_logits(&prompts, &codes)?;
+                let orders: Vec<_> = redo.iter().map(|p| &p.orders[0]).collect();
+                if let Some(tokens) = &mut asset_media_tokens {
+                    *tokens += asset_tokens(&orders, media);
+                }
+                let logits = media_readout(&mut self.backend, &orders, &prompts, &codes)?;
                 anyhow::ensure!(logits.len() == redo.len(), "media backend reverse readout count mismatch");
                 for ((i, p2), logits) in owners.into_iter().zip(&redo).zip(logits) {
                     extra_tokens += p2.orders[0].input_ids.len();
@@ -1031,6 +1093,7 @@ impl<B: Backend> Engine<B> {
             Ok(PlanOutput {
                 task_response: None,
                 task_error: None,
+                asset_media_tokens,
                 longest_prompt_tokens,
                 finals,
                 final_round_tokens: extra_tokens,
@@ -1128,7 +1191,18 @@ fn prepare_protocol(
     let mut orders = Vec::new();
     for perm in decision::orders(k) {
         let opts: Vec<&str> = perm.iter().map(|&j| item.options[j].as_str()).collect();
+        let mut asset_order = None;
         let prompt = match media {
+            Some(media) if media.asset_markers.is_some() => {
+                let raw = render_model(chat, fmt, bos, &item.state, &item.question, &opts, item.lang)?;
+                let (prompt, indices) = crate::systemone::substitute(
+                    &raw,
+                    media.asset_markers.as_deref().unwrap_or_default(),
+                    &media.placeholders(),
+                )?;
+                asset_order = Some(indices);
+                prompt
+            }
             Some(media) => {
                 crate::prompt::render_media(chat, fmt, bos, &item.state, &item.question, &opts, item.lang, media)?
             }
@@ -1138,7 +1212,7 @@ fn prepare_protocol(
         let Some(letter_ids) = tok.code_ids(fmt, &prompt, &input_ids, k)? else {
             bail!("option letters are not single tokens for this tokenizer ({k} options)");
         };
-        orders.push(OrderJob { perm, prompt, input_ids, letter_ids });
+        orders.push(OrderJob { perm, prompt, input_ids, letter_ids, asset_order });
     }
     let packed = pack(&orders.iter().map(|o| o.input_ids.clone()).collect::<Vec<_>>());
     Ok(Prepared { item, orders, packed, state_len: 0 })
@@ -1164,6 +1238,7 @@ struct Large {
 pub struct PlanOutput {
     task_response: Option<Value>,
     task_error: Option<String>,
+    asset_media_tokens: Option<usize>,
     pub finals: Vec<(Item, Vec<f64>)>,
     pub second_order_branches: Option<usize>,
     /// Longest executed prompt, including an adaptive reversed order.
@@ -1254,7 +1329,7 @@ pub fn plan_response(model: &str, plan: &RequestPlan, out: &PlanOutput) -> Resul
             answer["calibration"] = if plan.calibration_unvalidated { "unvalidated" } else { "text" }.into();
         }
         let prompts = plan.prepared.iter().map(|p| p.orders.len()).sum::<usize>() + out.extra_prompts;
-        response["usage"]["media"] = json!({"images":media.image_count(),"audio":media.audio_count(),"media_tokens":media.items.iter().map(crate::media::Input::soft_tokens).sum::<usize>()*prompts,"detail":if media.high_detail {"high"} else {"default"}});
+        response["usage"]["media"] = json!({"images":media.image_count(),"audio":media.audio_count(),"media_tokens":out.asset_media_tokens.unwrap_or_else(|| media.items.iter().map(crate::media::Input::soft_tokens).sum::<usize>()*prompts),"detail":if media.high_detail {"high"} else {"default"}});
     }
     Ok(response)
 }
@@ -1265,4 +1340,29 @@ pub fn response(model: &str, prepared: &[Prepared], results: &[ItemResult]) -> V
     // Upstream counts the tokens of every option-order prompt; no text is generated.
     let input_tokens: usize = prepared.iter().flat_map(|p| &p.orders).map(|o| o.input_ids.len()).sum();
     json!({"model": model, "answers": answers, "usage": {"input_tokens": input_tokens, "output_tokens": 0}})
+}
+
+fn media_readout<B: Backend>(
+    backend: &mut B,
+    orders: &[&OrderJob],
+    prompts: &[&[u32]],
+    codes: &[&[u32]],
+) -> Result<Vec<Vec<f32>>> {
+    if orders.is_empty() {
+        return Ok(Vec::new());
+    }
+    if orders.iter().any(|o| o.asset_order.is_some()) {
+        let mapping: Vec<&[usize]> = orders
+            .iter()
+            .map(|o| o.asset_order.as_deref())
+            .collect::<Option<_>>()
+            .ok_or_else(|| anyhow::anyhow!("cannot mix native and positioned media in one session"))?;
+        backend.asset_logits(prompts, codes, &mapping)
+    } else {
+        backend.media_logits(prompts, codes)
+    }
+}
+
+fn asset_tokens(orders: &[&OrderJob], media: &crate::media::ProcessedMedia) -> usize {
+    orders.iter().flat_map(|o| o.asset_order.iter().flatten()).map(|&i| media.items[i].soft_tokens()).sum()
 }

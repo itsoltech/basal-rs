@@ -35,6 +35,68 @@ konwencjach żądań oraz odpowiedzi:
   poziom: score 0, confidence 1, bez modelu); jak w upstream także mapa
   nazwa → opis (odpowiedź po nazwach) i alias `levels`.
 
+### Obrazy TypeSafe
+
+`/v1/systemone` przyjmuje `assets` zgodnie z kontraktem obrazów TypeSafe.
+Każdy obraz ma niepustą referencję, używaną w wartościach `state`,
+`instructions` lub `criteria`, także w środku zdania i w zagnieżdżonym JSON.
+Klucze obiektów pozostają tekstem. Każde wystąpienie referencji umieszcza
+obraz w danym miejscu promptu; asset użyty tylko w jednym pytaniu nie
+trafia do pozostałych. Permutacja kryteriów zachowuje powiązania obrazów.
+Legenda score zawiera oryginalne referencje.
+
+Wymagany jest nagłówek `TypeSafe-Danger-Zone-Images: true`. Można wysłać:
+
+- JSON z `assets: {"photo-id": {"type": "image", "format": "png",
+  "data_base64": "..."}}`. `type` jest opcjonalne; `format` to png/jpg/jpeg.
+  Base64 ma standardowy alfabet i padding, bez białych znaków i prefiksu `data:`.
+- Multipart: pierwsza część `request` ma typ `application/json`; asset
+  wskazuje plik przez `part`. Nazwy części muszą być unikatowe, a każda
+  część obrazu musi należeć do jednego assetu. `part` ma pierwszeństwo
+  przed `data_base64`.
+
+```sh
+curl localhost:8000/v1/systemone \
+  -H 'TypeSafe-Danger-Zone-Images: true' \
+  -F 'request={"model":"basal-omni-1.0-mini","state":{"photo":"camera-frame-01"},"assets":{"camera-frame-01":{"type":"image","part":"photo"}},"questions":{"visible":{"type":"noul","instructions":"Czy na zdjęciu jest człowiek?"}}};type=application/json' \
+  -F 'photo=@photo.png;type=image/png'
+```
+
+Wybierz nazwę modelu serwowanego przez tę instancję. Obrazy wymagają backendu
+Omni z włączonymi mediami. Model tekstowy lub backend bez vision zwraca
+`422 {"error":"unsupported","detail":[...]}`. Tak samo odpowiada każdy
+obecny model na rozpoznany typ `box`: basal-rs nie implementuje odczytu
+współrzędnych. Żądanie jest odrzucane w całości, bez częściowych odpowiedzi.
+
+Obecne ograniczenia adaptera:
+
+- Statyczne PNG/JPEG, plik do 16 MiB, każdy bok 280–1568 pikseli.
+  Format jest sprawdzany na podstawie bajtów; animowane PNG są odrzucane.
+- Do ośmiu różnych obrazów. Budżet rozwinięcia wynosi 32 MiB tekstu
+  i bajtów źródłowych obrazów po dekodowaniu base64, z powtórzeniami
+  i użyciem wspólnego stanu przez każde pytanie. Przekroczenie możliwości
+  runtime'u zwraca `422 unsupported`; nie dopasowujemy obrazu przez obcięcie
+  lub pominięcie referencji. TypeSafe stosuje własne przetwarzanie obrazów,
+  więc nie deklarujemy identycznych granic jego rozmiaru po przetworzeniu.
+- Z assetami obsługiwane są `choice`, `noul` i `score`. Natywne typy zadań,
+  `facts: "auto"`, `evidence` i łączenie `assets` z natywnym `media` zwracają
+  `422 unsupported`. Natywny kontrakt mediów nadal działa przez `/v1/basal`.
+- Obrazy przechodzą istniejący procesor Omni z budżetem `default`.
+  Odpowiedzi zachowują `calibration: "text"` (lub `unvalidated`) oraz
+  `usage.media`; nie oznacza to potwierdzonej kalibracji obrazów.
+
+Całe ciało `/v1/systemone` ma limit 32 MiB, także po dekompresji.
+Obsługiwane jest jedno `Content-Encoding`: gzip/x-gzip lub zstd z oknem
+do 8 MiB. Za duże ciało daje 413, niepoprawna kompresja lub multipart 400,
+a nieobsługiwane kodowanie 415. Obowiązują też skończone liczby JSON
+i maksymalnie 64 poziomy obiektów/tablic w treści stanu i pytań.
+Nagłówek długiego kontekstu TypeSafe nie zwiększa limitu pozycji modelu;
+przekroczenie tego limitu nadal daje `422 unsupported`.
+
+SDK basal-rs i endpoint `/v1/basal` zachowują dotychczasowy kontrakt.
+Ta zmiana umożliwia przesłanie kontraktu obrazów z klienta TypeSafe;
+nie deklaruje zgodności wyników różnych modeli z Jev.
+
 Błędy mają postać i statusy API TypeSafe (sprawdzone na 38 przypadkach
 brzegowych, [raport](../reports/typesafe-api-edge-cases/README.md)):
 
@@ -146,7 +208,9 @@ SDK tego endpointu dla Python, TypeScript/JavaScript, C# i Rust:
 
 - [TypeSafe HTTP API](https://docs.typesafe.ai/api), [OpenAPI](https://api.typesafe.ai/openapi.json);
   migawka w [contracts/typesafe/openapi.json](../contracts/typesafe/openapi.json)
-  (`info.version` 0.2.0, SHA-256 `a191f8a7…c0360d5`).
+  (`info.version` 0.2.0, aktualizacja 2026-10-19,
+  SHA-256 `ee599512…5c057c3`; [opis migawki](../contracts/typesafe/README.md)).
+- [Obrazy](https://docs.typesafe.ai/images), [Box](https://docs.typesafe.ai/primitives/box).
 - [Confidence](https://docs.typesafe.ai/confidence), [Score](https://docs.typesafe.ai/primitives/score).
 - [basal v1.5.0](https://github.com/rkinas/basal/tree/cd63c083636f94ce492ec1e6cc1e02144723b9b5):
   `basal/server.py`, `basal/prompt.py`, `basal/facts.py`.

@@ -17,6 +17,7 @@ pub mod prompt;
 pub mod pyjson;
 pub mod request;
 pub mod sets;
+pub mod systemone;
 pub mod tasks;
 pub mod tokenize;
 pub mod tools;
