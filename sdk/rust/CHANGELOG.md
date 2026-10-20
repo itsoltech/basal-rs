@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.6.0 — 2026-10-20
+
+- Add `files()` and `batches()` resource facades, retaining all existing flat methods.
+- Accept uploaded files or `CreateBatchFromRequests` in `batches().create`; the latter prepares
+  and uploads bounded JSONL and exposes file/key recovery context on post-upload creation failure.
+- Add explicit bounded `wait`, terminal-state `results` cursor (output and error files),
+  contextual result errors and per-download success byte limits. No automatic retries or cancellation.
+
 ## 0.5.0 — 2026-10-20
 
 - Add typed Batch and Files API: upload JSONL, create/list/retrieve/cancel batches,

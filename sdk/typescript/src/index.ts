@@ -5,13 +5,19 @@ import {
   type CreateBatchRequest, type DeletedFile, type DownloadOptions, type FileList, type FileObject, type ListFilesOptions,
   type ListOptions, type RequestOptions, type TransferOptions, type UploadFileRequest,
 } from "./batches.js";
+import { Batches, Files } from "./resources.js";
 export * from "./questions.js";
 export * from "./media.js";
 export * from "./tasks.js";
 export * from "./errors.js";
-export { batchInput, parseBatchResults } from "./batches.js";
+export {
+  batchInput, MAX_BATCH_INPUT_BYTES, MAX_BATCH_REQUESTS, parseBatchResults, TERMINAL_BATCH_STATUSES,
+} from "./batches.js";
+export { Batches, Files } from "./resources.js";
 export type {
-  Batch, BatchErrorCode, BatchErrorEntry, BatchErrors, BatchInputLine, BatchList, BatchResultLine, BatchStatus,
+  Batch, BatchCreateCommonParams, BatchCreateFromFileParams, BatchCreateFromRequestsParams, BatchCreateOptions,
+  BatchCreateParams, BatchErrorCode, BatchErrorEntry, BatchErrors, BatchInputLine, BatchList, BatchResultLine,
+  BatchResultsOptions, BatchStatus, BatchWaitOptions,
   CreateBatchOptions, CreateBatchRequest, DeletedFile, DownloadOptions, ExpiresAfter, FileList, FileObject, FilePurpose,
   ListFilesOptions, ListOptions, ListPage, Metadata, RequestCounts, RequestOptions, TransferOptions, UploadContent,
   UploadFileRequest,
@@ -179,6 +185,10 @@ export class BasalClient {
   private readonly timeoutMs: number;
   private readonly maxResponseBytes: number;
   private readonly fetch: Fetch;
+  /** Files API under resource names: `create`, `retrieve`, `list`, `delete`, `content`. */
+  readonly files: Files;
+  /** Batch API under resource names, with `create({requests})`, `wait` and `results`. */
+  readonly batches: Batches;
 
   constructor(options: BasalClientOptions = {}) {
     const url = new URL(options.baseUrl ?? "http://127.0.0.1:8000");
@@ -203,6 +213,8 @@ export class BasalClient {
       if (!options.apiKey || /[\r\n]/.test(options.apiKey)) throw new TypeError("apiKey must be a nonempty, single-line token");
       this.headers.Authorization = `Bearer ${options.apiKey}`;
     }
+    this.files = new Files(this);
+    this.batches = new Batches(this);
   }
 
   private request<T>(method: string, path: string, body?: DecisionRequest, signal?: AbortSignal): Promise<T> {

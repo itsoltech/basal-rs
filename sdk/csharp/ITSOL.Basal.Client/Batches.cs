@@ -410,15 +410,19 @@ public sealed partial class BasalClient
     {
         ArgumentNullException.ThrowIfNull(request);
         Questions.Text(request.InputFileId, nameof(request.InputFileId));
-        if (idempotencyKey is not null && (idempotencyKey.Length is 0 or > MaxIdempotencyKeyLength
-            || !idempotencyKey.All(c => c is > ' ' and < '\x7f')))
-            throw new ArgumentException("Expected 1–128 visible ASCII characters", nameof(idempotencyKey));
+        if (idempotencyKey is not null) IdempotencyKey(idempotencyKey, nameof(idempotencyKey));
         var message = new HttpRequestMessage(HttpMethod.Post, new Uri(baseUrl, "v1/batches"))
         {
             Content = new StringContent(JsonSerializer.Serialize(request, JsonOptions), Encoding.UTF8, "application/json")
         };
         if (idempotencyKey is not null) message.Headers.Add("Idempotency-Key", idempotencyKey);
         return SendJsonAsync<Batch>(message, cancellationToken);
+    }
+
+    private static void IdempotencyKey(string key, string name)
+    {
+        if (key.Length is 0 or > MaxIdempotencyKeyLength || !key.All(c => c is > ' ' and < '\x7f'))
+            throw new ArgumentException("Expected 1–128 visible ASCII characters", name);
     }
 
     /// <summary>GET /v1/batches, newest first.</summary>

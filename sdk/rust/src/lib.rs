@@ -8,6 +8,8 @@ mod media;
 pub use media::*;
 mod batches;
 pub use batches::*;
+mod batch_resources;
+pub use batch_resources::*;
 mod tasks;
 pub use tasks::*;
 mod questions;
@@ -483,6 +485,18 @@ impl Client {
         content_type: Option<&str>,
         extra_headers: HeaderMap,
     ) -> Result<Vec<u8>, Error> {
+        self.request_bytes_bounded(method, path, (body, content_type), extra_headers, self.max_response_bytes).await
+    }
+
+    async fn request_bytes_bounded(
+        &self,
+        method: Method,
+        path: &str,
+        payload: (Option<Vec<u8>>, Option<&str>),
+        extra_headers: HeaderMap,
+        success_limit: usize,
+    ) -> Result<Vec<u8>, Error> {
+        let (body, content_type) = payload;
         let work = async {
             // SDK paths are relative constants with validated resource ids and encoded query values.
             // They cannot select another origin or remove a configured proxy prefix.
@@ -500,6 +514,8 @@ impl Client {
                 .map_err(|source| Error::Transport(Box::new(source)))?;
             let response = self.http.request(request).await.map_err(|source| Error::Transport(Box::new(source)))?;
             let status = response.status();
+            // A larger artifact allowance never enlarges the bound on an HTTP error body.
+            let limit = if status.is_success() { success_limit } else { self.max_response_bytes };
             let retry_after = response.headers().get(RETRY_AFTER).and_then(|v| v.to_str().ok()).map(String::from);
             if response
                 .headers()
@@ -513,7 +529,7 @@ impl Client {
             while let Some(frame) = body.frame().await {
                 let frame = frame.map_err(|source| Error::Transport(Box::new(source)))?;
                 if let Ok(data) = frame.into_data() {
-                    if data.len() > self.max_response_bytes.saturating_sub(bytes.len()) {
+                    if data.len() > limit.saturating_sub(bytes.len()) {
                         return Err(Error::ResponseTooLarge);
                     }
                     bytes.extend_from_slice(&data);

@@ -30,6 +30,104 @@ nie zależy od `basal-core`, `basal-gpu` ani `basal-cli`.
 
 ## Batch i Files API
 
+### Dwie ścieżki tworzenia batcha
+
+Nowe zasoby `client.files` i `client.batches` udostępniają przepływ podobny do OpenAI
+oraz uproszczone `create` z listą requestów. Dotychczasowe metody pozostają dostępne.
+Ta warstwa wymaga SDK Python, TypeScript/JavaScript lub C# **0.5.0+**, albo Rust **0.6.0+**.
+Zgodność dotyczy nazw zasobów i przepływu: `body` nadal ma format
+Basala, a nie Chat Completions ani Responses API OpenAI.
+
+Przykład TypeScript/JavaScript — wspólne przygotowanie zwykłych payloadów Basala:
+
+```typescript
+import { BasalClient, batchInput, buildRequest, choice } from "@itsoltech/basal-client";
+
+const client = new BasalClient({
+  baseUrl: "http://127.0.0.1:8000",
+  apiKey: "<key_id>.<secret>",
+});
+const questions = {
+  department: choice("Dział?", { returns: "Zwroty", support: "Wsparcie" }),
+};
+const requests = [
+  { custom_id: "ticket-1", body: buildRequest("Chcę zwrócić telefon.", questions, {}) },
+  { custom_id: "ticket-2", body: buildRequest("Nie mogę się zalogować.", questions, {}) },
+];
+```
+
+Wybierz jedną ze ścieżek. Pierwsza daje jawny dostęp do pliku:
+
+```typescript
+const file = await client.files.create({
+  file: batchInput(requests), filename: "tickets.jsonl", purpose: "batch",
+});
+const batch = await client.batches.create({ input_file_id: file.id });
+const current = await client.batches.retrieve(batch.id);
+if (current.output_file_id) {
+  const bytes = await client.files.content(current.output_file_id);
+}
+```
+
+Druga sama przygotowuje JSONL, przesyła plik i tworzy batch:
+
+```typescript
+const batch = await client.batches.create({ requests });
+console.log(batch.id); // zachowaj, aby wznowić odczyt po restarcie aplikacji
+```
+
+Obie ścieżki przyjmują metadane i retencję wyników. Domyślne i obecnie jedyne wartości
+endpointu/okna to `/v1/basal` i `24h`. Podaj **dokładnie jedno** z pól `input_file_id`
+albo `requests`. Wspólne, opcjonalne oczekiwanie i parsowanie wyników:
+
+```typescript
+const done = await client.batches.wait(batch.id, {
+  timeoutMs: 10 * 60_000, pollIntervalMs: 5_000,
+});
+console.log(done.status, done.request_counts, done.errors);
+
+for await (const record of client.batches.results(batch.id, {
+  maxBytes: 64 * 1024 * 1024,
+})) {
+  console.log(record.custom_id, record.response?.body, record.error);
+}
+```
+
+`create` zwraca przyjęte zadanie i nie czeka na inferencję. `wait` domyślnie czeka
+600 sekund, odpytując co 5 sekund; zwraca także terminalne `failed`, `expired`
+i `cancelled`. Timeout lub przerwanie oczekiwania nie anuluje zadania na serwerze.
+Błąd timeoutu zawiera ID i ostatni zaobserwowany stan. Błędy HTTP nie są automatycznie
+ponawiane. `cancel` pozostaje jawną operacją.
+
+`results` wymaga stanu terminalnego i samo nie czeka. Odczytuje najpierw plik wyników,
+potem plik błędów, także po wygaśnięciu/anulowaniu; identyczne ID plików odczytuje raz.
+Wyniki kojarz po `custom_id`, bez zakładania kolejności. Błędy walidacji całego batcha
+pozostają w `done.errors`; brak plików oznacza pustą iterację.
+
+Każdy plik jest **buforowany z limitem** (domyślnie 8 MiB lub limit klienta), a następnie
+parsowany po jednym wierszu. To nie jest pobieranie pliku dowolnej wielkości w stałej
+pamięci. Limit można jawnie zmienić. Błędny UTF-8, JSON lub koperta wyniku przerywa
+iterację błędem z ID pliku i numerem wiersza. Uproszczone `create` również buforuje
+wejście: do 50 000 rekordów i 200 000 000 bajtów JSONL; serwer może mieć niższe limity.
+
+Przy błędzie tworzenia **po udanym uploadzie** błąd zgłoszenia zachowuje ID pliku,
+klucz idempotencji i przyczynę. Wznów tworzenie przez `input_file_id` z tym samym
+kluczem, metadanymi i retencją. Ponowne `create({requests})` przesłałoby kolejny plik.
+SDK nie usuwa pliku po niepewnym wyniku operacji i nie ponawia tworzenia automatycznie.
+
+| SDK | Zasoby | Oczekiwanie | Odczyt rekordów |
+|---|---|---|---|
+| Python sync/async | `client.files`, `client.batches` | `wait(id, timeout=600, poll_interval=5)` | `results(id)`; `for` / `async for` |
+| TypeScript/JavaScript | `client.files`, `client.batches` | `wait(id, {timeoutMs, pollIntervalMs})` | `results(id)`; `for await` |
+| C# | `client.Files`, `client.Batches` | `WaitAsync(id, timeout, pollInterval)` | `ResultsAsync(id)`; `await foreach` |
+| Rust | `client.files()`, `client.batches()` | `wait(id, BatchWaitOptions)` | `results(id)`; `cursor.next().await` |
+
+W Rust `create` przyjmuje `CreateBatchRequest` albo `CreateBatchFromRequests` przez
+konwersje typów. W C# `CreateAsync` ma przeciążenia dla `CreateBatchRequest` i listy
+`BatchInputLine`. Szczegóły, typy błędów i przykłady znajdują się w README każdego SDK.
+
+### Wcześniejsze metody i wymagania serwera
+
 Obsługa wymaga serwera basal-rs **0.1.12+** z włączonymi batchami oraz SDK:
 Python, TypeScript/JavaScript i C# **0.4.0+**, Rust **0.5.0+**. Token Batch API
 przekaż przez istniejące ustawienie tokenu klienta (`api_key` w Pythonie/Rust
@@ -50,8 +148,9 @@ SDK udostępniają upload, listowanie, odczyt metadanych, usuwanie i pobieranie
 plików oraz tworzenie, listowanie, odczyt i anulowanie batchy. DTO obejmują
 statusy, liczniki, metadane, błędy walidacji i opcje retencji. Python ma
 wariant synchroniczny i asynchroniczny. Transport zachowuje token, prefiks
-proxy, limity odpowiedzi, timeouty, status HTTP i `Retry-After`; SDK nie
-ponawiają żądań ani nie odpytują statusu automatycznie.
+proxy, limity odpowiedzi, timeouty, status HTTP i `Retry-After`; dotychczasowe metody nie
+ponawiają żądań ani nie odpytują statusu automatycznie. Nowe `wait` jawnie uruchamia
+odpytywanie ograniczone czasowo.
 
 Pobieranie zwraca surowe bajty JSONL, z jawnym limitem wielkości odpowiedzi.
 Dla metod zwracających bufor zwiększaj limit świadomie: odpowiedź jest
@@ -86,7 +185,7 @@ Omni z CUDA i włączonymi mediami. Status kalibracji `text` jest akceptowany,
 ale nie oznacza potwierdzonej kalibracji mediów. Typowane usage i metadane
 obejmują liczbę tokenów/mediów, kolejności oraz format promptu.
 
-Aktualne wersje z tym API i obsługą batchy: Python/npm/.NET **0.4.0**, Rust **0.5.0**. Zmiany modeli
+Aktualne wersje z tym API i obsługą batchy: Python/npm/.NET **0.5.0**, Rust **0.6.0**. Zmiany modeli
 odpowiedzi (opcjonalny threshold i nowe warianty) są opisane w changelogach.
 Samo scalenie kodu nie publikuje paczek. Runtime nadal sprawdza możliwości
 starszych modeli; SDK nie uruchamiają inferencji lokalnie.

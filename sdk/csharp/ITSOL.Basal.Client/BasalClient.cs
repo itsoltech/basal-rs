@@ -45,6 +45,7 @@ public sealed partial class BasalClient : IDisposable
         this.maxResponseBytes = ValidateLimit(maxResponseBytes);
         http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false, UseProxy = false }) { Timeout = Timeout.InfiniteTimeSpan };
         ownsHttp = true;
+        (Files, Batches) = (new BasalFiles(this), new BasalBatches(this));
     }
 
     /// <summary>Use an externally owned HttpClient, including IHttpClientFactory clients.
@@ -56,6 +57,7 @@ public sealed partial class BasalClient : IDisposable
         (this.baseUrl, this.apiKey, this.timeout) = Validate(baseUrl, apiKey, timeout);
         this.maxResponseBytes = ValidateLimit(maxResponseBytes);
         http = httpClient;
+        (Files, Batches) = (new BasalFiles(this), new BasalBatches(this));
     }
 
     private static (Uri Url, string? Key, TimeSpan Timeout) Validate(string baseUrl, string? apiKey, TimeSpan? timeout)

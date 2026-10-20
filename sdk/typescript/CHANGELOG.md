@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 0.5.0 — 2026-10-20
+
+- Add `client.files` (`create`, `retrieve`, `list`, `delete`, `content`) and `client.batches` (`create`, `retrieve`,
+  `list`, `cancel`, `wait`, `results`) with OpenAI resource names; the flat methods are unchanged.
+- `batches.create` takes `input_file_id` or `requests`. With `requests` the SDK checks the records (nonempty, unique
+  `custom_id`, envelope, 50 000 records, 200 000 000 bytes) before building JSONL in memory, uploads it and creates the
+  batch with a caller or generated idempotency key. A failure after the upload raises `BasalBatchSubmissionError` with
+  the file id and key for resuming; nothing is retried or deleted.
+- `batches.wait` polls until a terminal status (default timeout 600 s, interval 5 s), bounds in-flight retrieves by its
+  deadline and raises `BasalBatchTimeoutError` with the last batch without cancelling it.
+- `batches.results` yields records of the output and error files of a terminal batch (`BasalBatchNotReadyError`
+  otherwise). Each file is buffered up to `maxBytes` and parsed one line at a time; malformed lines raise
+  `BasalBatchResultError` with the file id and line number.
+- Export `MAX_BATCH_REQUESTS`, `MAX_BATCH_INPUT_BYTES` and `TERMINAL_BATCH_STATUSES`.
+
 ## 0.4.0 — 2026-10-20
 
 - Add the Batch and Files API: `uploadFile` (multipart, `purpose=batch`, optional `expires_after`),

@@ -57,3 +57,11 @@ __all__ += [
     "BatchResponse", "BatchResultLine", "BatchStatus", "CreateBatchRequest", "DeletedFile", "ExpiresAfter", "FileList",
     "FileObject", "FilePurpose", "RequestCounts", "UploadContent",
 ]
+
+from .batches import BatchRequest, TERMINAL_STATUSES
+from .errors import BasalBatchNotReadyError, BasalBatchResultError, BasalBatchSubmissionError, BasalBatchTimeoutError
+from .resources import AsyncBatches, AsyncFiles, Batches, Files
+__all__ += [
+    "BatchRequest", "TERMINAL_STATUSES", "BasalBatchNotReadyError", "BasalBatchResultError",
+    "BasalBatchSubmissionError", "BasalBatchTimeoutError", "AsyncBatches", "AsyncFiles", "Batches", "Files",
+]

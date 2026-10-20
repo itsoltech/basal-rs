@@ -162,6 +162,8 @@ without changing the supplied tool definitions.
 
 ## Batch and Files API
 
+Resource helpers (`create`, `wait`, `results`) require SDK 0.5.0+.
+
 Requires basal-rs 0.1.12+ started with batches enabled, and SDK 0.4.0+. Every Batch/Files
 route needs the bearer token, also on loopback: pass it as `api_key`. Both `BasalClient` and
 `AsyncBasalClient` provide the same methods:
@@ -220,6 +222,113 @@ The SDK has no automatic retries and does not poll: `create_batch` returns at on
 `cancel_batch` does not wait for running work. A server refusing an upload early (413) may surface as
 `BasalTransportError` while the body is still being sent. Expired or cancelled batches may have partial
 results. See [BATCHES.md](https://github.com/itsoltech/basal-rs/blob/main/docs/BATCHES.md) for the JSONL format.
+
+### Resources: `client.files` and `client.batches`
+
+Both clients also expose resource namespaces named like the OpenAI Batch API. The compatibility is
+in resource names and workflow only: records still carry native `/v1/basal` requests and answers, not
+OpenAI chat payloads. The flat methods above are unchanged.
+
+| Resource method | Same as / adds |
+|---|---|
+| `files.create(content, ...)`, `files.retrieve(id)`, `files.list(...)`, `files.delete(id)`, `files.content(id, *, max_bytes=None)` | `upload_file`, `get_file`, `list_files`, `delete_file`, `download_file` |
+| `batches.create(*, input_file_id=... \| requests=..., metadata=None, output_expires_after=None, idempotency_key=None)` | `create_batch`, or upload + create |
+| `batches.retrieve(id)`, `batches.list(...)`, `batches.cancel(id)` | `get_batch`, `list_batches`, `cancel_batch` |
+| `batches.wait(id, *, timeout=600, poll_interval=5)` | polls until a terminal state |
+| `batches.results(id, *, max_bytes=None)` | iterates output and error records |
+
+The OpenAI-shaped flow uploads a prepared JSONL file:
+
+```python
+with BasalClient("http://127.0.0.1:8000", api_key=token) as client:
+    file = client.files.create(jsonl, filename="tickets.jsonl")
+    batch = client.batches.create(input_file_id=file["id"], idempotency_key="tickets-2026-10-20")
+    batch = client.batches.retrieve(batch["id"])
+    if batch["output_file_id"] is not None:
+        data = client.files.content(batch["output_file_id"], max_bytes=256 * 1024 * 1024)
+```
+
+The simplified flow builds the file from requests, waits and reads the records:
+
+```python
+from basal_client import BasalClient, BasalBatchSubmissionError
+
+requests = [{"custom_id": f"ticket-{i}",
+             "body": {"state": text, "questions": {"urgent": {"type": "noul", "instructions": "Is this urgent?"}}}}
+            for i, text in enumerate(["The service is down.", "Please send an invoice."])]
+
+with BasalClient("http://127.0.0.1:8000", api_key=token) as client:
+    try:
+        batch = client.batches.create(requests=requests, metadata={"job": "tickets"})
+    except BasalBatchSubmissionError as error:   # uploaded, but creating the batch failed
+        batch = client.batches.create(input_file_id=error.file_id, idempotency_key=error.idempotency_key,
+                                      metadata={"job": "tickets"})
+    batch = client.batches.wait(batch["id"], timeout=3600)
+    for record in client.batches.results(batch["id"], max_bytes=256 * 1024 * 1024):
+        if record["response"] is not None and record["response"]["status_code"] == 200:
+            print(record["custom_id"], record["response"]["body"]["answers"])
+        else:
+            print(record["custom_id"], "failed:", record["error"] or record["response"])
+```
+
+`AsyncBasalClient` has the same resources: `await client.batches.create(...)`, `await client.batches.wait(...)`
+and `async for record in client.batches.results(...)`.
+
+`batches.create` takes exactly one of `input_file_id` and `requests`. `endpoint="/v1/basal"` and
+`completion_window="24h"` may be passed for OpenAI-style code; other values are rejected. Each request
+is a `BatchRequest`: `custom_id` (1–256 UTF-8 bytes, unique) and `body` (a native `/v1/basal`
+request, not streaming: `body["stream"] is True` is rejected); `method` and `url` may be omitted or must
+be `POST` and `/v1/basal`. Other fields are rejected.
+Before anything is sent, the SDK checks the requests, options and `idempotency_key`, and serializes the
+requests as strict JSON (no NaN/Infinity, no lone surrogates) into **one in-memory buffer** of at most 50000 records and
+200000000 bytes; the server still validates bodies, models and its own, possibly lower, limits. The
+buffer is uploaded as `requests.jsonl` with purpose `batch`, then the batch is created. Without an
+`idempotency_key` the SDK generates one for the call. The async client yields to the event loop while
+preparing large inputs. The uploaded input file remains after the batch; delete it with
+`files.delete(batch["input_file_id"])` when no longer needed.
+
+If the upload fails, its error propagates and no batch exists. If creating the batch fails after the
+upload, `BasalBatchSubmissionError` keeps `file_id`, `file` and `idempotency_key`, with the original
+error as `__cause__`. The SDK neither retries nor deletes the file: resume with `input_file_id` and the
+same key and options. If the first attempt did create the batch (e.g. the response was lost), the server
+replays it instead of creating another. Interrupting the call after the upload (`KeyboardInterrupt`,
+`asyncio.CancelledError`) propagates that exact exception, never converted or swallowed; it carries the
+same context, which `BasalBatchSubmissionError.find(error)` returns (also from the `CancelledError` of
+an awaited cancelled task). An interruption during the upload has no known file id; check `files.list()`.
+
+`batches.wait` returns the batch once it is `completed`, `failed`, `expired` or `cancelled` (`TERMINAL_STATUSES`); check
+`status`, `errors` and `request_counts` yourself. The first retrieve is immediate, then it sleeps
+`poll_interval` seconds between retrieves. `timeout` and `poll_interval` must be finite and positive.
+Unknown statuses are treated as not terminal. HTTP and transport errors propagate without retries.
+At the deadline `BasalBatchTimeoutError` carries `batch_id` and `batch`, the last batch observed (or
+`None`); the server job keeps running and is never cancelled by the SDK. One deadline covers every
+request, including slow headers and a slowly trickling body, and every sleep. The client `timeout`
+still applies to each HTTPX phase; a phase timing out before the deadline is a `BasalTransportError`.
+In `AsyncBasalClient` cancelling the awaiting task stops the wait. HTTPX has no total-request timeout
+for its sync client, so `BasalClient.batches.wait` runs the async polling on a private event loop in a
+worker thread, with **its own connections** (same URL, authentication, TLS verification, timeout and
+`trust_env`) that are closed before it returns; it does not use or close the caller's connection pool.
+The calling thread blocks until the worker is joined; nothing is left running. `KeyboardInterrupt`
+cancels the polling, waits for the worker to close its connections and then propagates. Name resolution
+by the operating system cannot be interrupted, so with a host name (not an IP address) a slow resolver
+can delay the return beyond the deadline.
+
+`batches.results` retrieves the batch when iteration starts, without waiting: a non-terminal batch
+raises `BasalBatchNotReadyError` (`batch_id`, `status`, `batch`). It then yields the records of
+`output_file_id`, followed by those of `error_file_id` (once if both ids are equal), as
+`BatchResultLine` dictionaries with `custom_id`, the native `response` and `error`; unknown fields are
+kept. A batch without result files yields nothing; batch-level validation errors are in `batch["errors"]`
+from `retrieve`/`wait`. Expired or cancelled batches may have partial results, and a completed batch may
+contain failed records — read both files. **Each file is downloaded whole into memory**, bounded by
+`max_bytes` (default `max_response_bytes`, 8 MiB; larger files raise `BasalResponseTooLargeError`), and
+then parsed one line at a time without building a second list. This is buffered, not unbounded
+streaming: set `max_bytes` to what your process can hold. Records are not reordered; match them by
+`custom_id`. An empty (also inside the file), non-UTF-8 or non-JSON line, a NaN/Infinity constant, or a
+line breaking the result envelope raises `BasalBatchResultError`
+(a `BasalProtocolError`) with `file_id`, the 1-based `line` and `reason`; earlier records were already
+yielded. The envelope needs nonempty `id` and `custom_id` and both `response` and `error` keys with
+exactly one of them non-null; `response` has `status_code` 100–599, a nonempty `request_id` and an
+object `body`; `error` has a nonempty `code` and a string `message`.
 
 ## Experimental Basal 2.1 tasks
 

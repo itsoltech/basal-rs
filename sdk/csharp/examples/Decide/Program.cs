@@ -1,5 +1,13 @@
 using ITSOL.Basal;
 
+if (args is ["batch", ..])
+{
+    // The Batch API requires a bearer token.
+    using var batchClient = new BasalClient(apiKey: Environment.GetEnvironmentVariable("BASAL_BATCH_TOKEN"));
+    await BatchFlows.RunAsync(batchClient);
+    return;
+}
+
 using var client = new BasalClient();
 // These criteria may be loaded asynchronously from a database before preparation.
 var criteria = new Dictionary<string, string> { ["returns"] = "Zwroty", ["support"] = "Wsparcie techniczne" };

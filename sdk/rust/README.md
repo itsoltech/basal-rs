@@ -8,6 +8,67 @@ This package is versioned independently. Release tag: `sdk-rust-vX.Y.Z`.
 
 ## Batch and Files API (0.5+)
 
+### Resource helpers (0.6+)
+
+The resource facades add the OpenAI-shaped workflow and a simplified create path. This is resource/
+workflow compatibility: records are native `/v1/basal` payloads. Existing flat methods below remain available.
+
+```rust,no_run
+use basal_client::{BatchInputLine, BatchWaitOptions, Client, CreateBatchFromRequests,
+    CreateBatchRequest, FileUploadOptions};
+# async fn example(client: &Client, input: &[u8], requests: &[BatchInputLine]) -> Result<(), Box<dyn std::error::Error>> {
+// Path A: explicitly upload, then create using the uploaded file id.
+let file = client.files().create("input.jsonl", input, FileUploadOptions::default()).await?;
+let batch = client.batches().create(&CreateBatchRequest::new(file.id), None).await?;
+let current = client.batches().retrieve(&batch.id).await?;
+if let Some(output) = &current.output_file_id {
+    let bytes = client.files().content(output).await?;
+}
+
+// Path B: submit normal native requests wrapped with custom_id; upload is automatic.
+let batch = client.batches().create(&CreateBatchFromRequests::new(requests), None).await?;
+let done = client.batches().wait(&batch.id, BatchWaitOptions::default()).await?;
+let mut results = client.batches().results(&done.id).await?;
+while let Some(record) = results.next().await? {
+    println!("{}", record.custom_id);
+}
+# Ok(()) }
+```
+
+The complete, compile-checked example is [`examples/batches.rs`](examples/batches.rs).
+Configure `BASAL_BATCH_TOKEN` and optionally `BASAL_BASE_URL`, then run
+`cargo run --example batches -p basal-client` (simplified path), or append `-- input.jsonl` for path A.
+It requires an enabled server and an explicit background execution profile for the selected model.
+
+`wait` defaults to a 600-second whole-operation timeout and a 5-second polling interval. It returns
+any terminal state (`completed`, `failed`, `expired`, `cancelled`); inspect `errors` and counters.
+HTTP failures propagate without retry. `BatchOperationError::WaitTimeout` retains the id and last
+observed batch. Timeout or dropping the future stops local I/O/polling; server work continues.
+
+`results` requires a terminal state, otherwise `BatchOperationError::NotReady` carries the current
+batch. Its async `next()` cursor reads output then error files, including partial expired/cancelled
+results, retaining native bodies and caller ids. Use `cursor.batch()` for batch validation errors.
+Rows are not input ordered. Each file is buffered within the client's byte cap (default 8 MiB),
+then parsed one line at a time; this is not an unbounded file stream. Use `results_with_options`
+and `BatchResultsOptions { max_bytes: Some(...) }` to explicitly change the per-file cap. Malformed
+UTF-8/JSON/result envelopes stop iteration with a contextual `ResultLine` error. No file means an
+empty cursor, including failed validation batches whose errors are on the batch itself.
+
+The requests path buffers JSONL (up to 50,000 records/200 MB), plus a multipart copy during upload.
+The server can impose stricter limits. It rejects empty lists, duplicate/invalid ids and unsupported
+record envelopes before upload. The SDK generates an idempotency key when none was supplied.
+If creation fails after upload, `BatchOperationError::Submission` provides `input_file_id`,
+`idempotency_key` and the original error. Resume using `CreateBatchRequest::new(input_file_id)` with
+the same metadata, retention and key; do not resubmit the requests path, which uploads a different file.
+It never retries or deletes a possibly referenced file. Dropping the entire create future cannot
+return recovery context; use the explicit Files path when the application must persist each stage.
+
+`files().content_with_limit(id, bytes)` overrides only successful download bounds; HTTP errors
+keep the ordinary client-wide byte cap. Resource `list`, `retrieve`, `delete` and `cancel` delegate
+to their flat equivalents and share the same authentication, prefix, TLS and timeout policy.
+
+### Existing flat methods
+
 Use a server with batches enabled (basal-rs 0.1.12+) and its Batch bearer token:
 
 ```rust,no_run

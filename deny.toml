@@ -22,7 +22,7 @@ confidence-threshold = 0.93
 # Keep these narrow: upgrades require checking the dependency licenses again.
 exceptions = [
     { name = "tiny-keccak", version = "=2.0.2", allow = ["CC0-1.0"] },
-    { name = "webpki-roots", version = "=1.0.9", allow = ["CDLA-Permissive-2.0"] },
+    { name = "webpki-roots", version = "=1.0.10", allow = ["CDLA-Permissive-2.0"] },
 ]
 
 [bans]

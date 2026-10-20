@@ -196,6 +196,8 @@ and a cancellation token to either the dictionary or object-factory overload; th
 
 ## Batch API
 
+Resource helpers (`create`, `wait`, `results`) require SDK 0.5.0+.
+
 Requires a server with the Batch API enabled ([docs/BATCHES.md](https://github.com/itsoltech/basal-rs/blob/main/docs/BATCHES.md)). The same client,
 bearer token, proxy prefix, HTTPS rule, redirect refusal, timeout, cancellation and error types apply.
 Batches run native `/v1/basal` records only; each JSONL line is one `BatchInputLine`.
@@ -256,6 +258,78 @@ if (batch.OutputFileId is string outputId)
   as `DecisionResponse`.
 - `Batch.Status` is a string (see `BatchStatus`); DTOs keep unknown fields in `Extra`. IDs and query values are
   percent-escaped. Errors are `BasalHttpException` with the `{"error": {...}}` body and raw `Retry-After` (429/503).
+
+### Resources: `client.Files` and `client.Batches`
+
+The same operations are also available under OpenAI-style resource names. The flat methods above remain with
+unchanged signatures and behavior. "OpenAI-style" refers only to resource names and the
+upload → create → retrieve → content workflow: records are still native `/v1/basal` requests, not chat payloads.
+
+| Resource method | Flat method |
+|---|---|
+| `Files.CreateAsync(bytes or stream, filename, expiresAfter)` | `UploadFileAsync` |
+| `Files.RetrieveAsync`, `ListAsync`, `DeleteAsync` | `GetFileAsync`, `ListFilesAsync`, `DeleteFileAsync` |
+| `Files.ContentAsync(fileId, maxBytes)` / `(fileId, destination, maxBytes)` | `DownloadFileContentAsync` |
+| `Batches.CreateAsync(CreateBatchRequest, idempotencyKey)` | `CreateBatchAsync` |
+| `Batches.RetrieveAsync`, `ListAsync`, `CancelAsync` | `GetBatchAsync`, `ListBatchesAsync`, `CancelBatchAsync` |
+
+```csharp
+// 1. Existing input file: files.create -> batches.create -> retrieve -> files.content.
+var file = await client.Files.CreateAsync(Encoding.UTF8.GetBytes(jsonl), "tickets.jsonl");
+var created = await client.Batches.CreateAsync(new CreateBatchRequest { InputFileId = file.Id }, idempotencyKey: "tickets-1");
+var current = await client.Batches.RetrieveAsync(created.Id);
+if (current.OutputFileId is string id) { byte[] raw = await client.Files.ContentAsync(id); }
+
+// 2. Records: validate, upload and create in one call; then wait and read the results.
+Batch batch;
+try
+{
+    batch = await client.Batches.CreateAsync(
+        [new BatchInputLine { CustomId = "ticket-1", Body = JsonNode.Parse("""{"state":"A damaged phone.","questions":{"urgent":{"type":"noul","instructions":"Is it urgent?"}}}""")! }],
+        new CreateBatchOptions { Metadata = new Dictionary<string, string> { ["job"] = "tickets" } });
+}
+catch (Exception error) when (error is IBatchSubmissionFailure failure)
+{
+    // The input file was uploaded but creation was not confirmed: resume with the same file and key.
+    batch = await client.Batches.CreateAsync(failure.Request, failure.IdempotencyKey);
+}
+batch = await client.Batches.WaitAsync(batch.Id, timeout: TimeSpan.FromMinutes(30));
+await foreach (var line in client.Batches.ResultsAsync(batch.Id))
+    Console.WriteLine($"{line.CustomId}: {line.Response?.StatusCode.ToString() ?? line.Error?.Code}");
+```
+
+- `Batches.CreateAsync(IEnumerable<BatchInputLine>, CreateBatchOptions?)` checks every record before any HTTP:
+  at least one and at most 50,000 (`BasalBatches.MaxRequests`), no null record, `custom_id` of 1–256 UTF-8 bytes
+  and unique byte for byte, `method` `POST`, `url` `/v1/basal`, a `JsonObject` body and no `Extra` fields; the
+  generated JSONL may not exceed 200,000,000 bytes (`MaxInputBytes`). The server may be configured lower. The file
+  name, idempotency key and options are also checked first. Invalid input raises `ArgumentException`.
+- That JSONL is built **in memory** in one growing buffer (while it grows, transiently up to about three times the
+  JSONL size, plus one serialized record) and uploaded as one file
+  (`purpose=batch`, `CreateBatchOptions.Filename`/`InputExpiresAfter`). The client timeout covers the whole upload.
+  For larger or streamed inputs, upload a file yourself and use the input-file overload.
+- `CreateBatchOptions` holds `Endpoint` (`/v1/basal`), `CompletionWindow` (`24h`), `Metadata`,
+  `OutputExpiresAfter` and `IdempotencyKey`. Without a key, a fresh `basal-sdk-…` key is generated for the call.
+  The key protects only the create request, not the upload.
+- An upload failure propagates unchanged. If creation then fails, `BatchSubmissionException` (with the HTTP,
+  transport or response error in `InnerException`) is raised; caller cancellation raises
+  `BatchSubmissionCanceledException`, which is still an `OperationCanceledException` for your token. Both implement
+  `IBatchSubmissionFailure` with `InputFile`, `FileId`, `IdempotencyKey` and the `Request` to resend. The SDK never
+  retries, deletes the uploaded file or cancels a batch.
+- `Batches.WaitAsync(batchId, timeout, pollInterval)` retrieves immediately, then every `pollInterval` (default
+  5 s) until `completed`, `failed`, `expired` or `cancelled`, and returns that `Batch` (a `failed` batch carries its
+  `Errors`). One monotonic deadline (default 600 s; positive values up to 4294967294 ms) covers the whole wait,
+  including in-flight HTTP requests, through a linked `CancellationToken`. Unknown statuses keep polling until it.
+  On timeout `BatchWaitTimeoutException` has `BatchId` and `LastBatch` (null if no retrieval finished); the server
+  batch keeps running. Your `cancellationToken` raises `OperationCanceledException`. HTTP errors propagate, no retry.
+- `Batches.ResultsAsync(batchId, maxBytesPerFile)` is an `IAsyncEnumerable<BatchResultLine>`. Enumeration first
+  retrieves the batch; a non-terminal batch raises `BatchNotReadyException` (`Batch`) without waiting. It then reads
+  `OutputFileId` and `ErrorFileId` (once if equal). Each file is **downloaded whole into memory** within
+  `maxBytesPerFile` (default `maxResponseBytes`, 8 MiB) and parsed one line at a time; this is not unbounded
+  streaming, so raise the cap for large result files or use `Files.ContentAsync` with a destination stream. Lines
+  keep `custom_id`, the native `Response` and the record `Error`: completed batches can contain failed records,
+  expired or cancelled batches partial results. A batch without result files yields nothing; batch-level validation
+  errors are in `Batch.Errors`. Invalid UTF-8, JSON or envelopes raise `BatchResultFormatException` with `FileId` and
+  1-based `Line`, never the line content. Each enumeration repeats the requests.
 
 [Full documentation and publication setup](https://github.com/itsoltech/basal-rs/blob/main/docs/SDK.md).
 

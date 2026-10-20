@@ -1,4 +1,4 @@
-import { BasalProtocolError } from "./errors.js";
+import { BasalBatchResultError, BasalProtocolError } from "./errors.js";
 import type { DecisionRequest, JsonValue } from "./index.js";
 
 /** Batch and Files wire types (`contracts/batches/openapi.json`). Times are Unix seconds.
@@ -106,6 +106,44 @@ export interface UploadFileRequest {
   /** File lifetime (server default 30 days). */
   expires_after?: ExpiresAfter;
 }
+
+/** Parameters shared by both `batches.create` forms. Defaults: `endpoint: "/v1/basal"`, `completion_window: "24h"`. */
+export interface BatchCreateCommonParams {
+  endpoint?: "/v1/basal";
+  completion_window?: "24h";
+  metadata?: Metadata | null;
+  /** Lifetime of each result file, anchored at its creation. */
+  output_expires_after?: ExpiresAfter | null;
+}
+/** Create a batch from an uploaded input file; the same request as `createBatch`. */
+export interface BatchCreateFromFileParams extends BatchCreateCommonParams { input_file_id: string; requests?: never }
+/** Create a batch from records: the SDK writes JSONL in memory, uploads it (`purpose=batch`), then creates the batch. */
+export interface BatchCreateFromRequestsParams extends BatchCreateCommonParams {
+  /** 1–50 000 records, unique `custom_id` (1–256 UTF-8 bytes), at most 200 000 000 bytes of JSONL in total. */
+  requests: Iterable<BatchInputLine>;
+  input_file_id?: never;
+}
+/** Exactly one of `input_file_id` or `requests`. */
+export type BatchCreateParams = BatchCreateFromFileParams | BatchCreateFromRequestsParams;
+export interface BatchCreateOptions extends CreateBatchOptions {
+  /** Deadline of the input upload (`requests` form only); defaults to the client `timeoutMs`. */
+  uploadTimeoutMs?: number;
+}
+export interface BatchWaitOptions extends RequestOptions {
+  /** Deadline of the whole wait, including in-flight retrieves and sleeps; default 600 000 ms. */
+  timeoutMs?: number;
+  /** Delay between retrieves; default 5000 ms. The first retrieve is immediate. */
+  pollIntervalMs?: number;
+}
+/** Each result file is downloaded whole into memory (up to `maxBytes`, default the client `maxResponseBytes`) and
+ * parsed one line at a time; `timeoutMs` is the deadline of each download.
+ */
+export type BatchResultsOptions = DownloadOptions;
+
+/** Client-side bounds of `batches.create({requests})`, equal to the server defaults; a server may be configured lower. */
+export const MAX_BATCH_REQUESTS = 50_000;
+export const MAX_BATCH_INPUT_BYTES = 200_000_000;
+export const TERMINAL_BATCH_STATUSES: readonly BatchStatus[] = Object.freeze(["completed", "failed", "expired", "cancelled"]);
 
 const encoder = new TextEncoder();
 
@@ -268,4 +306,91 @@ export function parseBatchResults(content: Uint8Array): BatchResultLine[] {
     }
     return value as BatchResultLine;
   });
+}
+
+const LINE_KEYS = new Set(["custom_id", "method", "url", "body"]);
+
+/** Validated JSONL of `batches.create({requests})`: nonempty, supported envelope, unique ids and the bounds above.
+ * The result is held in memory (at most `MAX_BATCH_INPUT_BYTES`). Never sends anything.
+ */
+export function serializeBatchRequests(requests: Iterable<BatchInputLine>): Blob {
+  if (!requests || typeof requests !== "object" || typeof (requests as Iterable<unknown>)[Symbol.iterator] !== "function") {
+    throw new TypeError("requests must be an iterable of batch records");
+  }
+  const parts: Uint8Array[] = [];
+  const seen = new Set<string>();
+  let bytes = 0;
+  for (const line of requests) {
+    const at = `requests[${parts.length}]`;
+    if (parts.length >= MAX_BATCH_REQUESTS) throw new TypeError(`requests must have at most ${MAX_BATCH_REQUESTS} records`);
+    if (!line || typeof line !== "object" || Array.isArray(line)) throw new TypeError(`${at} must be an object`);
+    for (const key of Object.keys(line)) {
+      if (!LINE_KEYS.has(key)) throw new TypeError(`${at} has unsupported field ${JSON.stringify(key)}`);
+    }
+    const { custom_id: id, body } = line;
+    // Lone surrogates have no UTF-8 form; the server compares ids byte for byte.
+    if (typeof id !== "string" || !id || /\p{Cs}/u.test(id) || encoder.encode(id).length > 256) {
+      throw new TypeError(`${at}.custom_id must be a string of 1-256 UTF-8 bytes`);
+    }
+    if (seen.has(id)) throw new TypeError(`${at}.custom_id duplicates an earlier record`);
+    seen.add(id);
+    if (line.method !== undefined && line.method !== "POST") throw new TypeError(`${at}.method must be POST`);
+    if (line.url !== undefined && line.url !== "/v1/basal") throw new TypeError(`${at}.url must be /v1/basal`);
+    if (!body || typeof body !== "object" || Array.isArray(body)) throw new TypeError(`${at}.body must be a native request object`);
+    if ((body as unknown as Record<string, unknown>).stream === true) throw new TypeError(`${at}.body.stream must not be true`);
+    let json: string;
+    try { json = JSON.stringify({ custom_id: id, method: "POST", url: "/v1/basal", body }); }
+    catch (cause) { throw new TypeError(`${at}.body is not serializable as JSON`, { cause }); }
+    const encoded = encoder.encode(json + "\n");
+    bytes += encoded.byteLength;
+    if (bytes > MAX_BATCH_INPUT_BYTES) throw new TypeError(`requests exceed ${MAX_BATCH_INPUT_BYTES} bytes of JSONL`);
+    parts.push(encoded);
+  }
+  if (!parts.length) throw new TypeError("requests must contain at least one record");
+  return new Blob(parts as Uint8Array<ArrayBuffer>[], { type: "application/jsonl" });
+}
+
+/** Result lines of one downloaded file, decoded and checked one line at a time (no list of all lines). A final LF is
+ * optional; any other empty line, invalid UTF-8 (a BOM included), JSON or envelope raises `BasalBatchResultError`.
+ * Unknown fields are preserved.
+ */
+export function* readBatchResultLines(content: Uint8Array, fileId: string): Generator<BatchResultLine, void, undefined> {
+  const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+  let start = 0;
+  for (let number = 1; start < content.byteLength; number++) {
+    // UTF-8 never encodes another code point with byte 0x0A, so splitting bytes at LF is exact.
+    let end = content.indexOf(0x0a, start);
+    if (end < 0) end = content.byteLength;
+    const bytes = content.subarray(start, end);
+    start = end + 1;
+    let text: string;
+    try { text = decoder.decode(bytes); }
+    catch (cause) { throw new BasalBatchResultError(fileId, number, "is not UTF-8", { cause }); }
+    let value: unknown;
+    try { value = JSON.parse(text); }
+    catch (cause) { throw new BasalBatchResultError(fileId, number, "is not JSON", { cause }); }
+    const problem = envelopeProblem(value);
+    if (problem) throw new BasalBatchResultError(fileId, number, problem);
+    yield value as BatchResultLine;
+  }
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+function envelopeProblem(value: unknown): string | undefined {
+  if (!isObject(value)) return "is not a JSON object";
+  if (typeof value.id !== "string" || !value.id) return "has no string id";
+  if (typeof value.custom_id !== "string" || !value.custom_id) return "has no string custom_id";
+  const { response, error } = value;
+  if (response === undefined || error === undefined) return "lacks response or error";
+  if (response !== null && (!isObject(response) || !Number.isSafeInteger(response.status_code)
+      || (response.status_code as number) < 100 || (response.status_code as number) > 599
+      || typeof response.request_id !== "string" || !response.request_id || !isObject(response.body))) return "has an invalid response";
+  if (error !== null && (!isObject(error) || typeof error.code !== "string" || !error.code || typeof error.message !== "string")) {
+    return "has an invalid error";
+  }
+  if (response === null && error === null) return "has neither response nor error";
+  if (response !== null && error !== null) return "has both response and error";
+  return undefined;
 }

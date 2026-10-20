@@ -1,5 +1,5 @@
 //! Durable Batch/Files API. Resources require a bearer token configured through `ClientOptions`.
-//! Input and output content stays raw JSONL bytes; the SDK never executes tasks or polls automatically.
+//! Flat methods retain raw JSONL bytes. Resource helpers add opt-in encoding, polling and result parsing.
 
 use std::hash::{BuildHasher, Hasher};
 
@@ -286,7 +286,7 @@ pub struct BatchResultError {
     pub extra: Map<String, Value>,
 }
 
-fn id_component(id: &str, prefix: &str) -> Result<(), Error> {
+pub(super) fn id_component(id: &str, prefix: &str) -> Result<(), Error> {
     let suffix = id.strip_prefix(prefix).ok_or(Error::InvalidRequest("invalid resource id"))?;
     if suffix.len() != 32 || !suffix.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
         return Err(Error::InvalidRequest("invalid resource id"));

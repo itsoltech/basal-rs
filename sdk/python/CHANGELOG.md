@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+## 0.5.0 — 2026-10-20
+
+- Add resource namespaces `client.files` (`create`, `retrieve`, `list`, `delete`, `content`) and
+  `client.batches` (`create`, `retrieve`, `list`, `cancel`, `wait`, `results`) to `BasalClient` and
+  `AsyncBasalClient`. Flat methods are unchanged.
+- `batches.create` takes `input_file_id`, or `requests` (`custom_id` and native `body`): the SDK
+  validates them, builds the JSONL in memory (at most 50000 records and 200000000 bytes), uploads it and
+  creates the batch with a caller or generated `Idempotency-Key`. A failure after the upload raises
+  `BasalBatchSubmissionError` with the file id and key for resuming; nothing is retried or deleted.
+  Cancellation or `KeyboardInterrupt` after the upload propagates unchanged and
+  `BasalBatchSubmissionError.find(error)` returns the same context. `body.stream == true` is rejected.
+- `batches.wait` polls (default timeout 600 s, interval 5 s) until a terminal state;
+  `BasalBatchTimeoutError` keeps the last observed batch and never cancels the job. One deadline covers
+  requests and sleeps; the sync client polls on a private event loop in a joined worker thread with its
+  own connections.
+- `batches.results` iterates output, then error records of a terminal batch (`BasalBatchNotReadyError`
+  otherwise). Each file is buffered within `max_bytes` and parsed line by line; malformed lines and
+  envelopes (same rules as the Rust SDK) raise `BasalBatchResultError` with the line number.
+- Exceptions now live in `basal_client.errors`; imports from `basal_client` and `basal_client.client`
+  keep working.
+
 ## 0.4.0 — 2026-10-20
 
 - Add the Batch and Files API to `BasalClient` and `AsyncBasalClient`: `upload_file`, `list_files`,

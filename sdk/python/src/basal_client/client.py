@@ -17,7 +17,13 @@ from .batches import (
     FilePurpose, Multipart, UploadContent, batch_path, create_body, file_path, idempotency_headers, list_params,
     response_limit,
 )
+# Errors live in errors.py; the "as" form keeps them exported from basal_client.client as before.
+from .errors import (
+    BasalError as BasalError, BasalHTTPError as BasalHTTPError, BasalProtocolError as BasalProtocolError,
+    BasalResponseTooLargeError as BasalResponseTooLargeError, BasalTransportError as BasalTransportError,
+)
 from .media import _media
+from .resources import AsyncBatches, AsyncFiles, Batches, Files
 from .questions import (
     Questions, QuestionSet, TSchema, TypedDecisionResponse, SchemaDecisionResponse,
     build_questions, schema_questions,
@@ -26,33 +32,6 @@ from .questions import (
 
 # Result files are JSONL; error answers stay JSON.
 _CONTENT_HEADERS = {"Accept": "application/jsonl, application/json"}
-
-
-class BasalError(Exception):
-    """Base SDK error. Transport errors retain their original exception as cause."""
-
-
-class BasalHTTPError(BasalError):
-    """Non-2xx response, retaining the body and unmodified Retry-After header."""
-
-    def __init__(self, status_code: int, body: Any, retry_after: str | None):
-        # Keep server bodies accessible explicitly; do not include state or secrets in logs.
-        super().__init__(f"Basal HTTP {status_code}")
-        self.status_code = status_code
-        self.body = body
-        self.retry_after = retry_after
-
-
-class BasalTransportError(BasalError):
-    """Connection, timeout or response-body transport failure."""
-
-
-class BasalResponseTooLargeError(BasalError):
-    """Actual streamed response exceeds the configured byte limit."""
-
-
-class BasalProtocolError(BasalError):
-    """Invalid JSON envelope or unsupported response encoding."""
 
 
 def _options(base_url: str, api_key: str | None, timeout: float) -> dict[str, Any]:
@@ -176,7 +155,30 @@ class BasalClient:
                  api_key: str | None = None, timeout: float = 120.0,
                  max_response_bytes: int = 8 * 1024 * 1024, trust_env: bool = False):
         self._max_response_bytes = _validate_limit(max_response_bytes)
-        self._http = httpx.Client(**_options(base_url, api_key, timeout), trust_env=trust_env)
+        self._options = _options(base_url, api_key, timeout)
+        self._trust_env = trust_env
+        self._http = httpx.Client(**self._options, trust_env=trust_env)
+
+    @property
+    def files(self) -> Files:
+        """Files API resource: create, retrieve, list, delete, content."""
+        return Files(self)
+
+    @property
+    def batches(self) -> Batches:
+        """Batch API resource: create, retrieve, list, cancel, wait, results."""
+        return Batches(self)
+
+    def _async_twin(self) -> "AsyncBasalClient":
+        """A new async client with the same validated URL, authentication, timeout, limit and trust_env.
+
+        batches.wait drives it on its own event loop and closes it there.
+        """
+        if self._http.is_closed:
+            # Same failure as any other call on a closed client.
+            raise RuntimeError("Cannot send a request, as the client has been closed.")
+        return AsyncBasalClient._with(httpx.AsyncClient(**self._options, trust_env=self._trust_env),
+                                      self._max_response_bytes)
 
     def _request(self, method: str, path: str, body: Mapping[str, Any] | None = None, *,
                  params: dict[str, str] | None = None, headers: dict[str, str] | None = None,
@@ -283,6 +285,24 @@ class AsyncBasalClient:
                  max_response_bytes: int = 8 * 1024 * 1024, trust_env: bool = False):
         self._max_response_bytes = _validate_limit(max_response_bytes)
         self._http = httpx.AsyncClient(**_options(base_url, api_key, timeout), trust_env=trust_env)
+
+    @classmethod
+    def _with(cls, http: httpx.AsyncClient, max_response_bytes: int) -> Self:
+        # Internal: wraps an already configured HTTPX client (see BasalClient._async_twin).
+        client = cls.__new__(cls)
+        client._max_response_bytes = max_response_bytes
+        client._http = http
+        return client
+
+    @property
+    def files(self) -> AsyncFiles:
+        """Files API resource: create, retrieve, list, delete, content."""
+        return AsyncFiles(self)
+
+    @property
+    def batches(self) -> AsyncBatches:
+        """Batch API resource: create, retrieve, list, cancel, wait, results."""
+        return AsyncBatches(self)
 
     async def _request(self, method: str, path: str, body: Mapping[str, Any] | None = None, *,
                        params: dict[str, str] | None = None, headers: dict[str, str] | None = None,

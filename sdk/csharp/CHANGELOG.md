@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 0.5.0 — 2026-10-20
+
+- Add `client.Files` (`CreateAsync`, `RetrieveAsync`, `ListAsync`, `DeleteAsync`, `ContentAsync`) and
+  `client.Batches` (`CreateAsync`, `RetrieveAsync`, `ListAsync`, `CancelAsync`) resources delegating to the
+  existing flat methods, which keep their signatures and behavior.
+- Add `Batches.CreateAsync(IEnumerable<BatchInputLine>, CreateBatchOptions?)`: validates records, bounds and the
+  idempotency key before HTTP, builds the JSONL in memory, uploads it and creates the batch. A key is generated when
+  omitted. Failures after the upload raise `BatchSubmissionException` or `BatchSubmissionCanceledException`
+  (`IBatchSubmissionFailure`: file ID, key, request, original cause); no retry or file deletion.
+- Add `Batches.WaitAsync` (default timeout 600 s, poll 5 s, deadline including HTTP, `BatchWaitTimeoutException`
+  with the last batch, no server cancellation) and `Batches.ResultsAsync` (`IAsyncEnumerable<BatchResultLine>` over
+  output then error file of a terminal batch, per-file in-memory cap, `BatchNotReadyException`,
+  `BatchResultFormatException` with file ID and line).
+- The C# example compiles both batch flows (`dotnet run -- batch`).
+
 ## 0.4.0 — 2026-10-20
 
 - Add the Batch/Files API: `UploadFileAsync` (multipart, purpose `batch`, optional expiry sent before the file part,

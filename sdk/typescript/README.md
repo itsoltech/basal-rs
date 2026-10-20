@@ -77,10 +77,83 @@ retains the native JSON without those defaults. The one-argument raw `decide(req
 
 ## Batch API
 
+Resource helpers (`create`, `wait`, `results`) require SDK 0.5.0+.
+
 Requires a Basal server with the Batch API enabled ([docs/BATCHES.md](https://github.com/itsoltech/basal-rs/blob/main/docs/BATCHES.md)).
 Every Batch and Files route needs `apiKey` set to a batch token `<key_id>.<secret>`, also on loopback; the owner
-of every file and batch comes from that token. Records are native `/v1/basal` requests; the SDK only transfers files and controls batches. It never polls:
-call `getBatch` at an interval your application chooses and stop on `completed`, `failed`, `expired` or `cancelled`.
+of every file and batch comes from that token. Records are native `/v1/basal` requests; the SDK only transfers files and controls batches.
+`client.files` and `client.batches` follow the OpenAI resource names and workflow (upload, create, retrieve, download).
+That compatibility is in naming and workflow only: records are native Basal requests, not OpenAI chat payloads.
+
+```typescript
+import { BasalBatchSubmissionError, BasalClient, batchInput, buildRequest, choice, parseBatchResults } from "@itsoltech/basal-client";
+
+const client = new BasalClient({ baseUrl: "https://basal.example.com", apiKey: "<key_id>.<secret>" });
+const body = buildRequest("Klient prosi o zwrot.", { department: choice("Dział?", { returns: "Zwroty", support: "Wsparcie" }) }, {});
+
+// Simplified: records in, terminal batch and records out.
+const batch = await client.batches.create({ requests: [{ custom_id: "ticket-1", body }], metadata: { source: "tickets" } });
+const done = await client.batches.wait(batch.id);           // completed, failed, expired or cancelled
+for await (const line of client.batches.results(done.id)) { // output file, then error file
+  console.log(line.custom_id, line.response?.status_code ?? line.error?.code);
+}
+```
+
+```typescript
+// Same steps as separate calls: upload, create, retrieve, download.
+const file = await client.files.create({ file: batchInput([{ custom_id: "ticket-1", body }]), filename: "tickets.jsonl" });
+const created = await client.batches.create({ input_file_id: file.id }, { idempotencyKey: "tickets-2026-10-20" });
+const current = await client.batches.retrieve(created.id);
+const lines = current.output_file_id ? parseBatchResults(await client.files.content(current.output_file_id)) : [];
+```
+
+| Resource method | Same as |
+|---|---|
+| `files.create`, `files.retrieve`, `files.list`, `files.delete`, `files.content` | `uploadFile`, `getFile`, `listFiles`, `deleteFile`, `downloadFile` |
+| `batches.create({input_file_id, ...})`, `batches.retrieve`, `batches.list`, `batches.cancel` | `createBatch`, `getBatch`, `listBatches`, `cancelBatch` |
+| `batches.create({requests, ...}, {idempotencyKey?, uploadTimeoutMs?, signal?})` | validate, `uploadFile`, `createBatch` |
+| `batches.wait(id, {timeoutMs?, pollIntervalMs?, signal?})` | `getBatch` until a terminal status |
+| `batches.results(id, {maxBytes?, timeoutMs?, signal?})` → async iterator | `getBatch`, `downloadFile`, line parsing |
+
+`batches.create` takes exactly one of `input_file_id` and `requests` (a type error otherwise, and a `TypeError` at runtime).
+`requests` is an iterable of `{custom_id, body, method?, url?}`; the SDK checks it before uploading anything: at least one
+record, no other fields, unique `custom_id` of 1–256 UTF-8 bytes, `method` POST, `url` /v1/basal, an object `body`, at most
+`MAX_BATCH_REQUESTS` (50 000) records and `MAX_BATCH_INPUT_BYTES` (200 000 000) bytes of JSONL. These are the server
+defaults; a server configured lower refuses the upload or fails the batch. The JSONL is built in memory, so for a short
+time memory holds up to about twice its size; `body` contents are checked by the server. Unknown top-level parameters
+are refused locally in this form. The upload uses the client `timeoutMs` unless `uploadTimeoutMs` is set.
+Without `idempotencyKey` the SDK generates one for the call. If the upload succeeds and creating the batch then fails
+(HTTP, transport or abort), `BasalBatchSubmissionError` gives `fileId`, `idempotencyKey` and the original error in
+`cause`. The file is not deleted and nothing is retried. The create may have succeeded on the server, so resume
+with the file instead of uploading again:
+
+```typescript
+try { await client.batches.create({ requests, metadata }); }
+catch (error) {
+  if (!(error instanceof BasalBatchSubmissionError)) throw error;
+  await client.batches.create({ input_file_id: error.fileId, metadata }, { idempotencyKey: error.idempotencyKey });
+}
+```
+
+`batches.wait` retrieves immediately, then every `pollIntervalMs` (default 5000) until `completed`, `failed`, `expired`
+or `cancelled`, and returns that batch. Check `status`, `errors` (validation errors of a `failed` batch) and
+`request_counts`. Other and unknown statuses keep it waiting. `timeoutMs` (default 600 000) bounds the whole wait, including an
+in-flight retrieve, which is aborted. It then raises `BasalBatchTimeoutError` with `batchId` and `lastBatch` (null if no
+retrieve finished). The batch is not cancelled. HTTP and transport errors propagate without retries. Aborting
+`signal` rejects with `BasalTransportError` (the reason in `cause`). Timers and listeners are removed when the wait ends;
+nothing keeps running in the background.
+
+`batches.results` does not wait: a batch that is not terminal raises `BasalBatchNotReadyError` (`batchId`, `status`).
+It yields the records of `output_file_id`, then `error_file_id` (once if they are equal). Match records by `custom_id`, not by order. An
+expired or cancelled batch yields its partial results; a completed batch can yield failed records (`response.status_code`
+other than 200, or `error`). A batch without result files yields nothing. Each file is downloaded whole into memory,
+bounded by `maxBytes` (default `maxResponseBytes`, 8 MiB); raise it for large results. `timeoutMs` is the deadline of each
+download. The downloaded bytes are then decoded and checked one line at a time. A line that is not UTF-8 (including a BOM), not JSON, or not a
+result envelope (`id`, `custom_id`, `response` or `error`) raises `BasalBatchResultError` (`fileId`, 1-based `line`, a
+`BasalProtocolError`) after the earlier records were yielded; no record is skipped. Invalid arguments throw when
+`results` is called; nothing is sent until iteration starts.
+
+The flat methods below remain available with unchanged behavior. They never poll.
 
 ```typescript
 import { BasalClient, batchInput, buildRequest, choice, parseBatchResults } from "@itsoltech/basal-client";
@@ -124,7 +197,8 @@ metadata is retained. The SDK does not retry on its own. Resource ids and cursor
 the server answers malformed ids like missing resources (404). `cancelBatch` returns the batch in
 `cancelling`; cancellation ends asynchronously.
 
-Errors use the same classes as the online API: `BasalHTTPError` with the
+`BasalBatchTimeoutError.lastBatch` and `BasalBatchNotReadyError.batch` are non-enumerable, like `BasalHTTPError.body`,
+so default inspection does not log batch metadata. Errors use the same classes as the online API: `BasalHTTPError` with the
 `{"error": {message, type, param, code}}` body and `retryAfter` (429/503), and
 `BasalResponseTooLargeError` above the byte cap. Resource types preserve unknown fields at runtime, and
 status/code enumerations accept future string values.
