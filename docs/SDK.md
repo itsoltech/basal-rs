@@ -1,8 +1,8 @@
 # SDK natywnego API Basala
 
-Cztery klienty HTTP obsługują **`POST /v1/basal`**. Nie korzystają z kontraktu
-TypeSafe System One. Nie wymagają GPU ani wag modelu po stronie aplikacji.
-Serwer uruchamiasz osobno przez `basal serve`.
+Cztery klienty HTTP obsługują **`POST /v1/basal`** oraz **Batch/Files API**.
+Nie korzystają z kontraktu TypeSafe System One. Nie wymagają GPU ani wag
+modelu po stronie aplikacji. Serwer uruchamiasz osobno przez `basal serve`.
 
 Pierwsze wydanie każdego SDK ma wersję `0.1.0`. Kolejne wersje i wydania
 są niezależne dla każdej paczki. Paczki instaluje się z rejestrów poniższymi
@@ -28,6 +28,44 @@ nie zależy od `basal-core`, `basal-gpu` ani `basal-cli`.
 | C# | `sdk/csharp/ITSOL.Basal.Client/ITSOL.Basal.Client.csproj` | `sdk-csharp-vX.Y.Z` | [NuGet](../sdk/csharp/CHANGELOG.md) |
 | Rust | `sdk/rust/Cargo.toml` | `sdk-rust-vX.Y.Z` | [crates.io](../sdk/rust/CHANGELOG.md) |
 
+## Batch i Files API
+
+Obsługa wymaga serwera basal-rs **0.1.12+** z włączonymi batchami oraz SDK:
+Python, TypeScript/JavaScript i C# **0.4.0+**, Rust **0.5.0+**. Token Batch API
+przekaż przez istniejące ustawienie tokenu klienta (`api_key` w Pythonie/Rust
+lub `apiKey` w TypeScripcie/C#).
+
+Przepływ aplikacji jest taki sam w każdym języku:
+
+1. Przygotuj bajty pliku JSONL: każda linia zawiera `custom_id`, `method: POST`,
+   `url: /v1/basal` i natywne `body`.
+2. Wyślij plik przez Files API. Zachowaj zwrócony identyfikator pliku.
+3. Utwórz batch z tym identyfikatorem i oknem `24h`. Opcjonalny
+   `Idempotency-Key` chroni przed podwójnym utworzeniem po ponowieniu.
+4. Odczytuj status w odstępach wybranych przez aplikację.
+5. Pobierz pliki wskazane przez `output_file_id` oraz `error_file_id`.
+   Także wygaśnięty lub anulowany batch może mieć częściowe wyniki.
+
+SDK udostępniają upload, listowanie, odczyt metadanych, usuwanie i pobieranie
+plików oraz tworzenie, listowanie, odczyt i anulowanie batchy. DTO obejmują
+statusy, liczniki, metadane, błędy walidacji i opcje retencji. Python ma
+wariant synchroniczny i asynchroniczny. Transport zachowuje token, prefiks
+proxy, limity odpowiedzi, timeouty, status HTTP i `Retry-After`; SDK nie
+ponawiają żądań ani nie odpytują statusu automatycznie.
+
+Pobieranie zwraca surowe bajty JSONL, z jawnym limitem wielkości odpowiedzi.
+Dla metod zwracających bufor zwiększaj limit świadomie: odpowiedź jest
+przechowywana w pamięci. C# udostępnia również pobieranie do strumienia
+z jawnym limitem bajtów. Biblioteka nie pobiera adresów URL podanych w rekordach. Batch API
+obsługuje obecnie wyłącznie format `/v1/basal`; System One nie jest formatem
+rekordów batchowych. Online ma pierwszeństwo, a okno `24h` jest terminem
+wygaśnięcia, nie gwarancją ukończenia.
+
+Przykłady dla każdego języka: [Python](../sdk/python/README.md),
+[TypeScript](../sdk/typescript/README.md), [C#](../sdk/csharp/README.md),
+[Rust](../sdk/rust/README.md). Kontrakt: [Batch OpenAPI](../contracts/batches/openapi.json).
+Konfiguracja serwera i format JSONL: [BATCHES.md](BATCHES.md).
+
 ## Basal 2.0 i Omni
 
 SDK obsługują typowane `tool`, 2–255 opcji choice/score/act (zależnie od modelu),
@@ -48,7 +86,7 @@ Omni z CUDA i włączonymi mediami. Status kalibracji `text` jest akceptowany,
 ale nie oznacza potwierdzonej kalibracji mediów. Typowane usage i metadane
 obejmują liczbę tokenów/mediów, kolejności oraz format promptu.
 
-Wersje tej aktualizacji: Python/npm/.NET **0.3.0**, Rust **0.4.0**. Zmiany modeli
+Aktualne wersje z tym API i obsługą batchy: Python/npm/.NET **0.4.0**, Rust **0.5.0**. Zmiany modeli
 odpowiedzi (opcjonalny threshold i nowe warianty) są opisane w changelogach.
 Samo scalenie kodu nie publikuje paczek. Runtime nadal sprawdza możliwości
 starszych modeli; SDK nie uruchamiają inferencji lokalnie.
@@ -369,7 +407,8 @@ zachowują tekst. Natywna walidacja daje 422, przeciążenie 529 z `Retry-After:
 Brak połączenia, timeout i niepoprawna odpowiedź JSON są oddzielone od błędów
 HTTP. Nie ma automatycznych retry: ponowienie może uruchomić kolejną inferencję.
 Domyślne transporty nie podążają za przekierowaniami. Opcjonalny klucz API
-ustawia `Authorization: Bearer ...` dla proxy; basal-rs nie implementuje uwierzytelniania.
+ustawia `Authorization: Bearer ...` dla proxy oraz uwierzytelniania Batch/Files API.
+Zwykłe endpointy inferencji basal-rs pozostają bez własnej autoryzacji.
 
 Domyślny limit odpowiedzi wynosi 8 MiB i obejmuje również body błędów. Klienty
 liczą rzeczywiste bajty strumienia; parametr limitu opisują README paczek.

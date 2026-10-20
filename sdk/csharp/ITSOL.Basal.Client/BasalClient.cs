@@ -22,8 +22,8 @@ public sealed class BasalHttpException(int statusCode, JsonNode? body, string? r
     public string? RetryAfter { get; } = retryAfter;
 }
 
-/// <summary>Reusable asynchronous client for /v1/basal. No automatic retries.</summary>
-public sealed class BasalClient : IDisposable
+/// <summary>Reusable asynchronous client for /v1/basal and the Batch/Files API. No automatic retries.</summary>
+public sealed partial class BasalClient : IDisposable
 {
     private const string SynchronousFactoryRequired = "The answer factory must be synchronous. Await asynchronous work before calling DecideAsync.";
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -79,14 +79,45 @@ public sealed class BasalClient : IDisposable
 
     private async Task<T> SendAsync<T>(HttpMethod method, string path, object? body, CancellationToken cancellationToken)
     {
-        using var request = new HttpRequestMessage(method, new Uri(baseUrl, path));
-        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+        var request = new HttpRequestMessage(method, new Uri(baseUrl, path));
+        try
+        {
+            if (body is not null) request.Content = new StringContent(JsonSerializer.Serialize(body, JsonOptions), Encoding.UTF8, "application/json");
+        }
+        catch
+        {
+            request.Dispose();
+            throw;
+        }
+        return await SendJsonAsync<T>(request, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Send a request (disposing it) and deserialize its JSON answer, read within maxResponseBytes.</summary>
+    private async Task<T> SendJsonAsync<T>(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        string raw;
+        using (request)
+        using (var buffer = new MemoryStream())
+        {
+            await ExchangeAsync(request, buffer, maxResponseBytes, cancellationToken, "application/json").ConfigureAwait(false);
+            raw = Decode(buffer);
+        }
+        try { return JsonSerializer.Deserialize<T>(raw, JsonOptions) ?? throw new BasalException("Basal returned null JSON"); }
+        catch (JsonException error) { throw new BasalException("Invalid Basal JSON response", error); }
+    }
+
+    /// <summary>Send a request and copy a 2xx body into sink, at most successLimit bytes. Non-2xx bodies are
+    /// read within maxResponseBytes and raised as BasalHttpException. Returns the number of bytes copied.</summary>
+    private async Task<long> ExchangeAsync(HttpRequestMessage request, Stream sink, long successLimit,
+        CancellationToken cancellationToken, params string[] accept)
+    {
+        foreach (var type in accept) request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue(type));
+        request.Headers.AcceptEncoding.Clear();
+        request.Headers.AcceptEncoding.Add(new StringWithQualityHeaderValue("identity"));
         if (apiKey is not null) request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
-        if (body is not null) request.Content = new StringContent(JsonSerializer.Serialize(body, JsonOptions), Encoding.UTF8, "application/json");
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(timeout);
         HttpResponseMessage response;
-        string raw;
         try
         {
             response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token).ConfigureAwait(false);
@@ -94,41 +125,62 @@ public sealed class BasalClient : IDisposable
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (OperationCanceledException error) { throw new BasalException("Basal HTTP request timed out", error); }
         catch (HttpRequestException error) { throw new BasalException("Basal HTTP transport failed", error); }
+        catch (IOException error) { throw new BasalException("Basal HTTP transport failed", error); }
         using (response)
         {
+            var success = response.IsSuccessStatusCode;
+            using var errorBuffer = success ? null : new MemoryStream();
+            long copied;
             try
             {
+                if (response.Content.Headers.ContentEncoding.Any(value =>
+                    !string.Equals(value, "identity", StringComparison.OrdinalIgnoreCase)))
+                    throw new BasalException("Basal requires an uncompressed response");
                 if (response.RequestMessage?.RequestUri is Uri effectiveUri && effectiveUri != request.RequestUri)
                     throw new BasalException("Basal HTTP transport followed a redirect");
+                if (success && response.Content.Headers.ContentLength > successLimit)
+                    throw new BasalException("Basal response exceeded the configured byte limit");
                 using var stream = await response.Content.ReadAsStreamAsync(deadline.Token).ConfigureAwait(false);
-                using var buffer = new MemoryStream();
-                var chunk = new byte[8192];
-                for (;;)
-                {
-                    var count = await stream.ReadAsync(chunk, deadline.Token).ConfigureAwait(false);
-                    if (count == 0) break;
-                    if (count > maxResponseBytes - buffer.Length)
-                        throw new BasalException("Basal response exceeded the configured byte limit");
-                    buffer.Write(chunk, 0, count);
-                }
-                raw = new UTF8Encoding(false, true).GetString(buffer.GetBuffer(), 0, checked((int)buffer.Length));
+                copied = await CopyBoundedAsync(stream, errorBuffer ?? sink, success ? successLimit : maxResponseBytes,
+                    deadline.Token).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
             catch (OperationCanceledException error) { throw new BasalException("Basal HTTP request timed out", error); }
             catch (HttpRequestException error) { throw new BasalException("Basal HTTP transport failed", error); }
             catch (IOException error) { throw new BasalException("Basal HTTP response read failed", error); }
-            catch (DecoderFallbackException error) { throw new BasalException("Invalid Basal response encoding", error); }
-            if (!response.IsSuccessStatusCode)
+            if (errorBuffer is not null)
             {
+                var raw = Decode(errorBuffer);
                 JsonNode? errorBody;
                 try { errorBody = JsonNode.Parse(raw); }
                 catch (JsonException) { errorBody = JsonValue.Create(raw); }
                 var retryAfter = response.Headers.TryGetValues("Retry-After", out var values) ? string.Join(", ", values) : null;
                 throw new BasalHttpException((int)response.StatusCode, errorBody, retryAfter);
             }
-            try { return JsonSerializer.Deserialize<T>(raw, JsonOptions) ?? throw new BasalException("Basal returned null JSON"); }
-            catch (JsonException error) { throw new BasalException("Invalid Basal JSON response", error); }
+            return copied;
         }
+    }
+
+    private static async Task<long> CopyBoundedAsync(Stream source, Stream sink, long limit, CancellationToken cancellationToken)
+    {
+        var chunk = new byte[8192];
+        long total = 0;
+        for (;;)
+        {
+            var count = await source.ReadAsync(chunk, cancellationToken).ConfigureAwait(false);
+            if (count == 0) return total;
+            if (count > limit - total)
+                throw new BasalException("Basal response exceeded the configured byte limit");
+            try { await sink.WriteAsync(chunk.AsMemory(0, count), cancellationToken).ConfigureAwait(false); }
+            catch (IOException error) { throw new BasalException("Writing the response body failed", error); }
+            total += count;
+        }
+    }
+
+    private static string Decode(MemoryStream buffer)
+    {
+        try { return new UTF8Encoding(false, true).GetString(buffer.GetBuffer(), 0, checked((int)buffer.Length)); }
+        catch (DecoderFallbackException error) { throw new BasalException("Invalid Basal response encoding", error); }
     }
 
     /// <summary>Decide from a non-null JSON state and typed question map.</summary>

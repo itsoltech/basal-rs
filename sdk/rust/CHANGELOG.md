@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.5.0 — 2026-10-20
+
+- Add typed Batch and Files API: upload JSONL, create/list/retrieve/cancel batches,
+  list/retrieve/delete files and download bounded raw result bytes.
+- Reuse bearer authentication, proxy prefixes, response bounds and cancellation;
+  support owner-scoped idempotency keys and file/output retention options.
+- Preserve unknown response fields and future batch statuses. No automatic retries or polling.
+
 ## 0.4.0 — 2026-10-19
 
 - Add experimental Basal 2.1 classify, verify, compress and extract tasks with typed results.

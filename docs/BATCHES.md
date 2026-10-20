@@ -6,6 +6,10 @@ obsługiwanym endpointem rekordu jest obecnie wyłącznie `POST /v1/basal`.
 `/v1/systemone` w batchu zwraca jawny błąd. Kontrakt maszynowy:
 [contracts/batches/openapi.json](../contracts/batches/openapi.json).
 
+Klienty Python, TypeScript/JavaScript i C# od 0.4.0 oraz Rust od 0.5.0
+udostępniają Batch/Files API. Przepływ aplikacji i przykłady:
+[SDK — Batch i Files](SDK.md#batch-i-files-api).
+
 Ruch online `/v1/basal` i `/v1/systemone` ma pierwszeństwo przed batchami,
 także przed ich zbliżającym się terminem. Okno wynosi 24 godziny od utworzenia
 batcha i obejmuje walidację oraz oczekiwanie w kolejce. To termin wygaśnięcia,

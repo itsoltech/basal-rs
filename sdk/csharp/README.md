@@ -1,6 +1,6 @@
 # ITSOL.Basal.Client
 
-Asynchronous C# SDK for the native Basal API (`POST /v1/basal`). .NET 8+; no external runtime dependencies
+Asynchronous C# SDK for the native Basal API (`POST /v1/basal`) and its Batch/Files API. .NET 8+; no external runtime dependencies
 or GPU requirement.
 This package is versioned independently. Release tag: `sdk-csharp-vX.Y.Z`.
 [Changelog](https://github.com/itsoltech/basal-rs/blob/main/sdk/csharp/CHANGELOG.md).
@@ -193,6 +193,69 @@ map without generic annotations. The object factory retains exact field types in
 `response.Raw` retains native DTOs/extensions. Add `DecisionOptions(Model: ..., Facts: ...)`
 and a cancellation token to either the dictionary or object-factory overload; the raw DTO/JsonObject overloads remain.
 
+
+## Batch API
+
+Requires a server with the Batch API enabled ([docs/BATCHES.md](https://github.com/itsoltech/basal-rs/blob/main/docs/BATCHES.md)). The same client,
+bearer token, proxy prefix, HTTPS rule, redirect refusal, timeout, cancellation and error types apply.
+Batches run native `/v1/basal` records only; each JSONL line is one `BatchInputLine`.
+
+```csharp
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using ITSOL.Basal;
+
+using var client = new BasalClient("http://127.0.0.1:8000", apiKey: token);
+var lines = new[]
+{
+    new BatchInputLine { CustomId = "ticket-1", Body = JsonNode.Parse("""{"state":"A damaged phone.","questions":{"urgent":{"type":"noul","instructions":"Is it urgent?"}}}""")! },
+};
+var jsonl = string.Join("\n", lines.Select(line => JsonSerializer.Serialize(line))) + "\n";
+var input = await client.UploadFileAsync(Encoding.UTF8.GetBytes(jsonl), "tickets.jsonl",
+    new ExpiresAfter { Seconds = 7 * 24 * 3600 });
+var batch = await client.CreateBatchAsync(new CreateBatchRequest
+{
+    InputFileId = input.Id,
+    Metadata = new Dictionary<string, string> { ["job"] = "tickets" },
+    OutputExpiresAfter = new ExpiresAfter { Seconds = 7 * 24 * 3600 },
+}, idempotencyKey: "tickets-2026-10-20");
+
+using var deadline = new CancellationTokenSource(TimeSpan.FromHours(25));
+while (!BatchStatus.IsTerminal(batch.Status))
+{
+    await Task.Delay(TimeSpan.FromSeconds(30), deadline.Token);
+    batch = await client.GetBatchAsync(batch.Id, deadline.Token);
+}
+if (batch.OutputFileId is string outputId)
+{
+    var bytes = await client.DownloadFileContentAsync(outputId, maxBytes: 64 * 1024 * 1024);
+    foreach (var line in Encoding.UTF8.GetString(bytes).Split('\n', StringSplitOptions.RemoveEmptyEntries))
+    {
+        var result = JsonSerializer.Deserialize<BatchResultLine>(line)!;
+        Console.WriteLine($"{result.CustomId}: {result.Response?.StatusCode}");
+    }
+}
+```
+
+- `UploadFileAsync` accepts caller-owned bytes (`ReadOnlyMemory<byte>`/`byte[]`) or a readable `Stream`; it never
+  fetches URLs. A stream is read once from its current position and is not disposed or rewound, so the upload is
+  never retried. The form sends `expires_after[...]` before the file part and `purpose=batch`. File names need
+  1–255 UTF-8 bytes without control characters, `"` or `\`. The client timeout covers the whole upload; use a
+  client with a longer timeout for large files.
+- `CreateBatchAsync` sends `endpoint=/v1/basal` and `completion_window=24h` by default. Without an
+  `idempotencyKey` (1–128 visible ASCII characters) each call creates a new batch; with one, repeating the same
+  request after a lost answer returns the existing batch and different data gives HTTP 409.
+- `ListFilesAsync(after, limit, purpose)` and `ListBatchesAsync(after, limit)` return one `ListPage<T>`; continue
+  with `after: page.LastId` while `page.HasMore`. The SDK does not page or poll on its own: `GetBatchAsync` is one
+  request, so use your own interval and deadline. `CancelBatchAsync` requests cancellation and returns the batch.
+- `DownloadFileContentAsync(fileId)` returns raw bytes without JSON parsing, limited by `maxResponseBytes`. Raise
+  the limit for one call with `maxBytes`, or stream into a caller-owned file with
+  `DownloadFileContentAsync(fileId, destination, maxBytes)`; the destination is not disposed and may hold a partial
+  copy after a failure. The client timeout also covers reading the whole body. Result lines can be parsed with `BatchResultLine`; a status-200 `Response.Body` deserializes
+  as `DecisionResponse`.
+- `Batch.Status` is a string (see `BatchStatus`); DTOs keep unknown fields in `Extra`. IDs and query values are
+  percent-escaped. Errors are `BasalHttpException` with the `{"error": {...}}` body and raw `Retry-After` (429/503).
 
 [Full documentation and publication setup](https://github.com/itsoltech/basal-rs/blob/main/docs/SDK.md).
 

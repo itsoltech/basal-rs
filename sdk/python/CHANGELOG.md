@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.4.0 — 2026-10-20
+
+- Add the Batch and Files API to `BasalClient` and `AsyncBasalClient`: `upload_file`, `list_files`,
+  `get_file`, `delete_file`, `download_file`, `create_batch`, `list_batches`, `get_batch` and
+  `cancel_batch`. Requires basal-rs 0.1.12+ with batches enabled.
+- Uploads stream caller-owned bytes, binary file objects or (async) iterables as multipart with
+  `purpose` and `expires_after[...]` before the file. The SDK never reads paths or fetches URLs.
+- `download_file` returns raw bytes without JSON parsing, bounded by `max_bytes` or `max_response_bytes`.
+- Batch creation supports metadata, output file expiry and a validated `Idempotency-Key`. Resource ids
+  are escaped as one path segment; header values that could split a request are rejected.
+- Typed dictionaries for files, batches, lists, request counts, validation errors and JSONL lines keep
+  fields added by newer servers. No automatic retries or polling. The online API is unchanged.
+
 ## 0.3.0 — 2026-10-19
 
 - Add experimental Basal 2.1 classify, verify, compress and extract tasks with typed results.

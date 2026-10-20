@@ -1,6 +1,6 @@
 """Connection-pooled synchronous and asynchronous clients for the Basal API."""
 
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 
 import ipaddress
 import json
@@ -12,11 +12,20 @@ from urllib.parse import urlsplit
 import httpx
 
 from .types import DecisionRequest, DecisionResponse, ModelsResponse, JsonValue, MediaInput
+from .batches import (
+    AsyncUploadContent, Batch, BatchList, CreateBatchRequest, DeletedFile, ExpiresAfter, FileList, FileObject,
+    FilePurpose, Multipart, UploadContent, batch_path, create_body, file_path, idempotency_headers, list_params,
+    response_limit,
+)
 from .media import _media
 from .questions import (
     Questions, QuestionSet, TSchema, TypedDecisionResponse, SchemaDecisionResponse,
     build_questions, schema_questions,
 )
+
+
+# Result files are JSONL; error answers stay JSON.
+_CONTENT_HEADERS = {"Accept": "application/jsonl, application/json"}
 
 
 class BasalError(Exception):
@@ -90,6 +99,18 @@ def _decode(response: httpx.Response, raw: bytes) -> dict[str, Any]:
     return body
 
 
+def _body(response: httpx.Response, raw: bytes, binary: bool) -> Any:
+    # File content is returned as received; only error answers are decoded as JSON.
+    if binary and response.is_success:
+        return raw
+    return _decode(response, raw)
+
+
+def _answer_limit(response: httpx.Response, limit: int, default: int) -> int:
+    # A per-call download cap applies to file bytes; error answers keep the client limit.
+    return limit if response.is_success else default
+
+
 def _validate_limit(limit: int) -> int:
     if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
         raise ValueError("max_response_bytes must be a positive integer")
@@ -157,16 +178,20 @@ class BasalClient:
         self._max_response_bytes = _validate_limit(max_response_bytes)
         self._http = httpx.Client(**_options(base_url, api_key, timeout), trust_env=trust_env)
 
-    def _request(self, method: str, path: str, body: DecisionRequest | None = None) -> dict[str, Any]:
+    def _request(self, method: str, path: str, body: Mapping[str, Any] | None = None, *,
+                 params: dict[str, str] | None = None, headers: dict[str, str] | None = None,
+                 content: Iterator[bytes] | None = None, limit: int | None = None, binary: bool = False) -> Any:
+        limit = self._max_response_bytes if limit is None else limit
         try:
-            with self._http.stream(method, path, json=body) as response:
+            with self._http.stream(method, path, json=body, params=params, headers=headers, content=content) as response:
                 _check_encoding(response)
+                limit = _answer_limit(response, limit, self._max_response_bytes)
                 raw = bytearray()
                 for chunk in response.iter_bytes():
-                    if len(chunk) > self._max_response_bytes - len(raw):
+                    if len(chunk) > limit - len(raw):
                         raise BasalResponseTooLargeError("Basal response exceeds the configured byte limit")
                     raw.extend(chunk)
-                return _decode(response, bytes(raw))
+                return _body(response, bytes(raw), binary)
         except httpx.RequestError as error:
             raise BasalTransportError("Basal HTTP transport failed") from error
 
@@ -197,6 +222,48 @@ class BasalClient:
         """GET /v1/models."""
         return cast(ModelsResponse, self._request("GET", "v1/models"))
 
+    # Batch and Files API: the server must run with batches enabled and usually requires api_key.
+
+    def upload_file(self, content: UploadContent, *, filename: str = "input.jsonl",
+                    purpose: Literal["batch"] = "batch", expires_after: ExpiresAfter | None = None) -> FileObject:
+        """POST /v1/files, streaming caller-owned bytes, a binary file object or an iterable of bytes."""
+        form = Multipart(filename, purpose, expires_after)
+        stream, size = form.stream(content)
+        return cast(FileObject, self._request("POST", "v1/files", content=stream, headers=form.headers(size)))
+
+    def list_files(self, *, after: str | None = None, limit: int | None = None,
+                   purpose: FilePurpose | None = None) -> FileList:
+        """GET /v1/files: one page; pass the previous page's last_id as after."""
+        return cast(FileList, self._request("GET", "v1/files", params=list_params(after, limit, purpose)))
+
+    def get_file(self, file_id: str) -> FileObject:
+        return cast(FileObject, self._request("GET", file_path(file_id)))
+
+    def delete_file(self, file_id: str) -> DeletedFile:
+        return cast(DeletedFile, self._request("DELETE", file_path(file_id)))
+
+    def download_file(self, file_id: str, *, max_bytes: int | None = None) -> bytes:
+        """GET /v1/files/{id}/content as unparsed bytes, bounded by max_bytes (default max_response_bytes)."""
+        limit = response_limit(max_bytes, self._max_response_bytes)
+        return cast(bytes, self._request("GET", file_path(file_id, "/content"), headers=_CONTENT_HEADERS,
+                                         limit=limit, binary=True))
+
+    def create_batch(self, input_file_id: str | CreateBatchRequest, *, metadata: Mapping[str, str] | None = None,
+                     output_expires_after: ExpiresAfter | None = None, idempotency_key: str | None = None) -> Batch:
+        """POST /v1/batches for /v1/basal with the 24h window; returns at once, without waiting for results."""
+        body = create_body(input_file_id, metadata, output_expires_after)
+        return cast(Batch, self._request("POST", "v1/batches", body, headers=idempotency_headers(idempotency_key)))
+
+    def list_batches(self, *, after: str | None = None, limit: int | None = None) -> BatchList:
+        return cast(BatchList, self._request("GET", "v1/batches", params=list_params(after, limit)))
+
+    def get_batch(self, batch_id: str) -> Batch:
+        return cast(Batch, self._request("GET", batch_path(batch_id)))
+
+    def cancel_batch(self, batch_id: str) -> Batch:
+        """Start cancelling without waiting; a terminal batch is returned unchanged."""
+        return cast(Batch, self._request("POST", batch_path(batch_id, "/cancel")))
+
     def close(self) -> None:
         self._http.close()
 
@@ -217,16 +284,22 @@ class AsyncBasalClient:
         self._max_response_bytes = _validate_limit(max_response_bytes)
         self._http = httpx.AsyncClient(**_options(base_url, api_key, timeout), trust_env=trust_env)
 
-    async def _request(self, method: str, path: str, body: DecisionRequest | None = None) -> dict[str, Any]:
+    async def _request(self, method: str, path: str, body: Mapping[str, Any] | None = None, *,
+                       params: dict[str, str] | None = None, headers: dict[str, str] | None = None,
+                       content: AsyncIterator[bytes] | None = None, limit: int | None = None,
+                       binary: bool = False) -> Any:
+        limit = self._max_response_bytes if limit is None else limit
         try:
-            async with self._http.stream(method, path, json=body) as response:
+            async with self._http.stream(method, path, json=body, params=params, headers=headers,
+                                         content=content) as response:
                 _check_encoding(response)
+                limit = _answer_limit(response, limit, self._max_response_bytes)
                 raw = bytearray()
                 async for chunk in response.aiter_bytes():
-                    if len(chunk) > self._max_response_bytes - len(raw):
+                    if len(chunk) > limit - len(raw):
                         raise BasalResponseTooLargeError("Basal response exceeds the configured byte limit")
                     raw.extend(chunk)
-                return _decode(response, bytes(raw))
+                return _body(response, bytes(raw), binary)
         except httpx.RequestError as error:
             raise BasalTransportError("Basal HTTP transport failed") from error
 
@@ -255,6 +328,45 @@ class AsyncBasalClient:
 
     async def models(self) -> ModelsResponse:
         return cast(ModelsResponse, await self._request("GET", "v1/models"))
+
+    async def upload_file(self, content: AsyncUploadContent, *, filename: str = "input.jsonl",
+                          purpose: Literal["batch"] = "batch", expires_after: ExpiresAfter | None = None) -> FileObject:
+        """POST /v1/files, streaming caller-owned bytes or an async iterable of bytes."""
+        form = Multipart(filename, purpose, expires_after)
+        stream, size = form.astream(content)
+        return cast(FileObject, await self._request("POST", "v1/files", content=stream, headers=form.headers(size)))
+
+    async def list_files(self, *, after: str | None = None, limit: int | None = None,
+                         purpose: FilePurpose | None = None) -> FileList:
+        return cast(FileList, await self._request("GET", "v1/files", params=list_params(after, limit, purpose)))
+
+    async def get_file(self, file_id: str) -> FileObject:
+        return cast(FileObject, await self._request("GET", file_path(file_id)))
+
+    async def delete_file(self, file_id: str) -> DeletedFile:
+        return cast(DeletedFile, await self._request("DELETE", file_path(file_id)))
+
+    async def download_file(self, file_id: str, *, max_bytes: int | None = None) -> bytes:
+        """GET /v1/files/{id}/content as unparsed bytes, bounded by max_bytes (default max_response_bytes)."""
+        limit = response_limit(max_bytes, self._max_response_bytes)
+        return cast(bytes, await self._request("GET", file_path(file_id, "/content"), headers=_CONTENT_HEADERS,
+                                               limit=limit, binary=True))
+
+    async def create_batch(self, input_file_id: str | CreateBatchRequest, *,
+                           metadata: Mapping[str, str] | None = None, output_expires_after: ExpiresAfter | None = None,
+                           idempotency_key: str | None = None) -> Batch:
+        body = create_body(input_file_id, metadata, output_expires_after)
+        return cast(Batch, await self._request("POST", "v1/batches", body,
+                                               headers=idempotency_headers(idempotency_key)))
+
+    async def list_batches(self, *, after: str | None = None, limit: int | None = None) -> BatchList:
+        return cast(BatchList, await self._request("GET", "v1/batches", params=list_params(after, limit)))
+
+    async def get_batch(self, batch_id: str) -> Batch:
+        return cast(Batch, await self._request("GET", batch_path(batch_id)))
+
+    async def cancel_batch(self, batch_id: str) -> Batch:
+        return cast(Batch, await self._request("POST", batch_path(batch_id, "/cancel")))
 
     async def aclose(self) -> None:
         await self._http.aclose()

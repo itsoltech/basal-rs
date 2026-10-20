@@ -1,6 +1,6 @@
 # @itsoltech/basal-client
 
-TypeScript/JavaScript SDK for the native Basal API (`POST /v1/basal`). ESM and CommonJS, with type declarations.
+TypeScript/JavaScript SDK for the native Basal API (`POST /v1/basal`) and the Batch API. ESM and CommonJS, with type declarations.
 Node.js 22+ or modern browsers with `fetch` and `AbortController`. No runtime dependencies or GPU requirement.
 
 This package is versioned independently. Release tag: `sdk-typescript-vX.Y.Z`.
@@ -74,6 +74,60 @@ a key, not a question object (changed before the initial release). Required fiel
 validated before the promise resolves. Typed evidence defaults to an empty array; `response.raw`
 retains the native JSON without those defaults. The one-argument raw `decide(request, signal)` remains available.
 
+
+## Batch API
+
+Requires a Basal server with the Batch API enabled ([docs/BATCHES.md](https://github.com/itsoltech/basal-rs/blob/main/docs/BATCHES.md)).
+Every Batch and Files route needs `apiKey` set to a batch token `<key_id>.<secret>`, also on loopback; the owner
+of every file and batch comes from that token. Records are native `/v1/basal` requests; the SDK only transfers files and controls batches. It never polls:
+call `getBatch` at an interval your application chooses and stop on `completed`, `failed`, `expired` or `cancelled`.
+
+```typescript
+import { BasalClient, batchInput, buildRequest, choice, parseBatchResults } from "@itsoltech/basal-client";
+
+const client = new BasalClient({ baseUrl: "https://basal.example.com", apiKey: "<key_id>.<secret>" });
+const body = buildRequest("Klient prosi o zwrot.", { department: choice("Dział?", { returns: "Zwroty", support: "Wsparcie" }) }, {});
+const file = await client.uploadFile({ file: batchInput([{ custom_id: "ticket-1", body }]), filename: "tickets.jsonl" });
+const batch = await client.createBatch({ input_file_id: file.id, metadata: { source: "tickets" } }, { idempotencyKey: "tickets-2026-10-20" });
+// Later:
+const current = await client.getBatch(batch.id);
+if (current.status === "completed" && current.output_file_id) {
+  const lines = parseBatchResults(await client.downloadFile(current.output_file_id, { maxBytes: 256 * 1024 * 1024 }));
+}
+```
+
+| Method | Route |
+|---|---|
+| `uploadFile({file, filename, expires_after?}, {signal?, timeoutMs?})` | `POST /v1/files` |
+| `listFiles({after?, limit?, purpose?, signal?})`, `getFile(id)`, `deleteFile(id)` | `/v1/files[/{id}]` |
+| `downloadFile(id, {signal?, timeoutMs?, maxBytes?})` → `Uint8Array` | `GET /v1/files/{id}/content` |
+| `createBatch({input_file_id, metadata?, output_expires_after?}, {idempotencyKey?, signal?})` | `POST /v1/batches` |
+| `listBatches({after?, limit?, signal?})`, `getBatch(id)`, `cancelBatch(id)` | `/v1/batches[/{id}[/cancel]]` |
+
+Uploads accept `Uint8Array`, `ArrayBuffer`, `Blob` (a browser `File`, or Node's `fs.openAsBlob`) or a
+`ReadableStream<Uint8Array>`. They never fetch URLs or read paths. The form sends `expires_after[...]`
+and `purpose=batch` before the file part, as the server requires. Bytes and Blobs are sent with a
+Content-Length; a stream is sent chunked and needs streaming request bodies (`duplex: "half"`): Node.js,
+or Chromium over HTTP/2. Otherwise pass a Blob. The SDK takes ownership of a stream: it is
+consumed and cancelled on abort, timeout or an early server answer (e.g. 413). The filename (1–255 UTF-8 bytes)
+must not contain control characters or backslashes; it is stored by the server as given.
+
+`downloadFile` returns the raw bytes and never parses JSON. It buffers the body in memory and is bounded by
+`maxResponseBytes` (8 MiB by default). For larger result files, raise `maxBytes` for that call, and
+`timeoutMs` if needed, instead of raising the client-wide limit. `parseBatchResults` turns the bytes into result lines; their
+`response.body` is the native answer (`DecisionResponse` for status 200, the native error body otherwise).
+
+`createBatch` fills `endpoint: "/v1/basal"` and `completion_window: "24h"` (the only accepted values).
+`metadata` keeps insertion order, except integer-like keys, which JavaScript enumerates first.
+`idempotencyKey` (1–128 visible ASCII characters) makes a retried create return the same batch while its
+metadata is retained. The SDK does not retry on its own. Resource ids and cursors are URL-encoded;
+the server answers malformed ids like missing resources (404). `cancelBatch` returns the batch in
+`cancelling`; cancellation ends asynchronously.
+
+Errors use the same classes as the online API: `BasalHTTPError` with the
+`{"error": {message, type, param, code}}` body and `retryAfter` (429/503), and
+`BasalResponseTooLargeError` above the byte cap. Resource types preserve unknown fields at runtime, and
+status/code enumerations accept future string values.
 
 [Full documentation and publication setup](https://github.com/itsoltech/basal-rs/blob/main/docs/SDK.md).
 

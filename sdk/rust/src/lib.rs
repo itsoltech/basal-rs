@@ -6,6 +6,8 @@
 
 mod media;
 pub use media::*;
+mod batches;
+pub use batches::*;
 mod tasks;
 pub use tasks::*;
 mod questions;
@@ -377,7 +379,7 @@ impl std::error::Error for Error {
 pub struct ClientOptions<'a> {
     /// Server root, optionally with a proxy prefix, without `/v1`.
     pub base_url: &'a str,
-    /// Optional bearer token for a reverse proxy; basal-rs itself does not authenticate.
+    /// Optional bearer token; required by the server's Batch/Files API or an authenticating proxy.
     pub api_key: Option<&'a str>,
     /// Whole HTTP request timeout, including response-body reading.
     pub timeout: Duration,
@@ -468,14 +470,30 @@ impl Client {
     }
 
     async fn send<T: DeserializeOwned>(&self, method: Method, path: &str, body: Option<Vec<u8>>) -> Result<T, Error> {
+        let content_type = body.as_ref().map(|_| "application/json");
+        let bytes = self.request_bytes(method, path, body, content_type, HeaderMap::new()).await?;
+        serde_json::from_slice(&bytes).map_err(Error::Protocol)
+    }
+
+    async fn request_bytes(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Vec<u8>>,
+        content_type: Option<&str>,
+        extra_headers: HeaderMap,
+    ) -> Result<Vec<u8>, Error> {
         let work = async {
-            // Endpoint paths are fixed SDK constants; question data cannot choose another origin.
+            // SDK paths are relative constants with validated resource ids and encoded query values.
+            // They cannot select another origin or remove a configured proxy prefix.
             let mut request = Request::builder().method(method).uri(format!("{}{path}", self.base_url));
             if let Some(headers) = request.headers_mut() {
                 *headers = self.headers.clone();
+                headers.extend(extra_headers);
             }
-            if body.is_some() {
-                request = request.header(CONTENT_TYPE, "application/json");
+            request = request.header(http::header::ACCEPT_ENCODING, "identity");
+            if let Some(content_type) = content_type {
+                request = request.header(CONTENT_TYPE, content_type);
             }
             let request = request
                 .body(Full::new(Bytes::from(body.unwrap_or_default())))
@@ -483,6 +501,13 @@ impl Client {
             let response = self.http.request(request).await.map_err(|source| Error::Transport(Box::new(source)))?;
             let status = response.status();
             let retry_after = response.headers().get(RETRY_AFTER).and_then(|v| v.to_str().ok()).map(String::from);
+            if response
+                .headers()
+                .get(http::header::CONTENT_ENCODING)
+                .is_some_and(|v| !v.as_bytes().is_empty() && !v.as_bytes().eq_ignore_ascii_case(b"identity"))
+            {
+                return Err(Error::InvalidResponse("unsupported response content encoding"));
+            }
             let mut body = response.into_body();
             let mut bytes = Vec::new();
             while let Some(frame) = body.frame().await {
@@ -499,7 +524,7 @@ impl Client {
                     .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned()));
                 return Err(Error::Http { status: status.as_u16(), body, retry_after });
             }
-            serde_json::from_slice(&bytes).map_err(Error::Protocol)
+            Ok(bytes)
         };
         tokio::time::timeout(self.timeout, work).await.map_err(|_| Error::Timeout)?
     }

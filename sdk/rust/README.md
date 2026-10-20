@@ -6,6 +6,44 @@ No dependency on the inference engine or GPU libraries. Rust 1.95+; a Tokio runt
 This package is versioned independently. Release tag: `sdk-rust-vX.Y.Z`.
 [Changelog](https://github.com/itsoltech/basal-rs/blob/main/sdk/rust/CHANGELOG.md).
 
+## Batch and Files API (0.5+)
+
+Use a server with batches enabled (basal-rs 0.1.12+) and its Batch bearer token:
+
+```rust,no_run
+use basal_client::{Client, ClientOptions, CreateBatchRequest, FileUploadOptions};
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+let token = std::env::var("BASAL_BATCH_TOKEN")?;
+let client = Client::with_options(ClientOptions {
+    api_key: Some(&token), ..Default::default()
+})?;
+let input = std::fs::read("input.jsonl")?;
+let file = client.upload_file("input.jsonl", &input, FileUploadOptions::default()).await?;
+let batch = client.create_batch(&CreateBatchRequest::new(file.id), Some("import-1")).await?;
+let state = client.get_batch(&batch.id).await?;
+// Call get_batch later at your chosen interval; the SDK does not poll or retry automatically.
+if let Some(output_id) = state.output_file_id {
+    std::fs::write("results.jsonl", client.download_file(&output_id).await?)?;
+}
+# Ok(()) }
+```
+
+`list_files`, `get_file`, `delete_file`, `list_batches`, `get_batch`, `cancel_batch`
+and `batch_health` cover the remaining routes. `BatchListOptions` exposes cursor/limit;
+`FileUploadOptions` and `BatchExpiresAfter` expose retention. `BatchInputLine` wraps
+a native `DecisionRequest` for one JSONL line, and `BatchResultLine` decodes a result.
+Only `/v1/basal` records and a `24h` completion window are supported by the current server.
+Inspect output and error file ids, including after expiry or cancellation.
+
+Uploads accept bytes owned by the caller (at most 200 MB) and allocate a multipart copy;
+they do not read local files or fetch URLs. Downloads return exact bytes with the same
+timeout and `max_response_bytes` bound as other requests (default 8 MiB). Increase that
+explicit cap to download larger artifacts. The whole response is buffered within that cap.
+No redirects or automatic retries; `Error::Http` retains status/body/Retry-After.
+Batch statuses are strings and unknown response fields are retained for compatibility.
+See [the server's Batch contract](../../docs/BATCHES.md) for authentication, input format
+and the best-effort 24-hour window with online traffic priority.
+
 ```sh
 cargo add basal-client
 cargo add tokio --features macros,rt-multi-thread

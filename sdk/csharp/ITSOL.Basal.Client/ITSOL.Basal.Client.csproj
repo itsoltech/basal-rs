@@ -8,15 +8,15 @@
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <PackageId>ITSOL.Basal.Client</PackageId>
-    <Version>0.3.0</Version>
+    <Version>0.4.0</Version>
     <Authors>IT SOL</Authors>
-    <Description>HTTP client for the native Basal API, with typed decisions and asynchronous requests.</Description>
+    <Description>HTTP client for the native Basal API and its Batch/Files API, with typed decisions and asynchronous requests.</Description>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <RepositoryUrl>https://github.com/itsoltech/basal-rs</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageProjectUrl>https://github.com/itsoltech/basal-rs/blob/main/docs/SDK.md</PackageProjectUrl>
-    <PackageTags>basal;inference;sdk;client</PackageTags>
+    <PackageTags>basal;inference;sdk;client;batch</PackageTags>
   </PropertyGroup>
   <ItemGroup>
     <None Include="../README.md" Pack="true" PackagePath="/" />

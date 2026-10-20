@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.4.0 — 2026-10-20
+
+- Add the Batch/Files API: `UploadFileAsync` (multipart, purpose `batch`, optional expiry sent before the file part,
+  from caller-owned bytes or a caller-owned stream), `ListFilesAsync`, `GetFileAsync`, `DeleteFileAsync`,
+  `DownloadFileContentAsync`, `CreateBatchAsync` (metadata, 24h window, result expiry, `Idempotency-Key`),
+  `ListBatchesAsync`, `GetBatchAsync` and `CancelBatchAsync`.
+- File content downloads return raw bytes without JSON parsing. The in-memory overload is bounded by
+  `maxResponseBytes` or an explicit `maxBytes`; the stream overload copies into a caller-owned stream within a
+  required byte limit.
+- Typed `FileObject`, `Batch`, `ListPage<T>`, `BatchInputLine` and `BatchResultLine` DTOs keep unknown fields in
+  `Extra`; batch status stays a string with `BatchStatus` constants.
+- Resource IDs and query values are percent-escaped; dot-segment IDs, header-unsafe idempotency keys and
+  unframeable file names are refused before HTTP. No automatic retries or polling.
+
 ## 0.3.0 — 2026-10-19
 
 - Add experimental Basal 2.1 classify, verify, compress and extract tasks with typed results.

@@ -46,3 +46,14 @@ __all__ += [
     "ClassifyQuestion", "VerifyQuestion", "CompressQuestion", "ExtractQuestion",
     "classify", "verify", "compress", "extract",
 ]
+
+from .batches import (
+    AsyncUploadContent, Batch, BatchErrorEntry, BatchErrors, BatchInputLine, BatchList, BatchRecordError,
+    BatchResponse, BatchResultLine, BatchStatus, CreateBatchRequest, DeletedFile, ExpiresAfter, FileList,
+    FileObject, FilePurpose, RequestCounts, UploadContent,
+)
+__all__ += [
+    "AsyncUploadContent", "Batch", "BatchErrorEntry", "BatchErrors", "BatchInputLine", "BatchList", "BatchRecordError",
+    "BatchResponse", "BatchResultLine", "BatchStatus", "CreateBatchRequest", "DeletedFile", "ExpiresAfter", "FileList",
+    "FileObject", "FilePurpose", "RequestCounts", "UploadContent",
+]

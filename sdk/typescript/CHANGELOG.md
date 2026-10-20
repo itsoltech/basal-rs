@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.4.0 — 2026-10-20
+
+- Add the Batch and Files API: `uploadFile` (multipart, `purpose=batch`, optional `expires_after`),
+  `listFiles`, `getFile`, `deleteFile`, `downloadFile` (raw bytes), `createBatch` (metadata,
+  `output_expires_after`, `Idempotency-Key`), `listBatches`, `getBatch` and `cancelBatch`.
+- Typed wire types for files, batches, lists, batch errors and result lines; `batchInput` builds
+  JSONL input locally and `parseBatchResults` parses downloaded result bytes.
+- Uploads accept caller-owned bytes, Blob or `ReadableStream`; they never fetch URLs or read paths.
+  A streamed source is cancelled on abort, timeout or an early server answer.
+- Downloads are bounded by `maxResponseBytes` or a per-call `maxBytes`; uploads and downloads take a per-call `timeoutMs`.
+- Resource ids and query values are escaped; `.`/`..` ids, multiline or non-ASCII idempotency keys and
+  filenames with control characters or backslashes are refused before sending.
+- Error classes moved to an internal module; exports are unchanged.
+
 ## 0.3.0 — 2026-10-19
 
 - Add experimental Basal 2.1 classify, verify, compress and extract tasks with typed results.

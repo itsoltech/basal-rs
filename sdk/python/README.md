@@ -1,6 +1,7 @@
 # basal-client (Python)
 
-HTTP SDK for the native Basal API (`POST /v1/basal`). Python 3.11+; no GPU required on the client.
+HTTP SDK for the native Basal API (`POST /v1/basal`) and the Batch/Files API. Python 3.11+; no GPU
+required on the client.
 
 This package is versioned independently. Release tag: `sdk-python-vX.Y.Z`.
 [Changelog](https://github.com/itsoltech/basal-rs/blob/main/sdk/python/CHANGELOG.md).
@@ -158,6 +159,67 @@ Tool descriptions are normalized by the server. Omit `description_chars`
 use `0` to disable truncation. Descriptions longer than a positive cap are
 shortened at a word boundary where possible, with an ellipsis appended. The SDK forwards this option
 without changing the supplied tool definitions.
+
+## Batch and Files API
+
+Requires basal-rs 0.1.12+ started with batches enabled, and SDK 0.4.0+. Every Batch/Files
+route needs the bearer token, also on loopback: pass it as `api_key`. Both `BasalClient` and
+`AsyncBasalClient` provide the same methods:
+
+```python
+import json
+from basal_client import BasalClient
+
+lines = [{"custom_id": f"ticket-{i}", "method": "POST", "url": "/v1/basal",
+          "body": {"state": text, "questions": {"urgent": {"type": "noul", "instructions": "Is this urgent?"}}}}
+         for i, text in enumerate(["The service is down.", "Please send an invoice."])]
+jsonl = "".join(json.dumps(line, ensure_ascii=False) + "\n" for line in lines).encode()
+
+with BasalClient("http://127.0.0.1:8000", api_key=token) as client:
+    file = client.upload_file(jsonl, filename="tickets.jsonl")
+    batch = client.create_batch(file["id"], metadata={"job": "tickets"}, idempotency_key="tickets-2026-10-20")
+    batch = client.get_batch(batch["id"])          # poll at an interval chosen by the application
+    if batch["output_file_id"] is not None:
+        results = client.download_file(batch["output_file_id"], max_bytes=256 * 1024 * 1024)
+        for line in results.splitlines():
+            record = json.loads(line)              # BatchResultLine: custom_id, response.body, error
+```
+
+| Method | Route |
+|---|---|
+| `upload_file(content, *, filename="input.jsonl", purpose="batch", expires_after=None)` | `POST /v1/files` |
+| `list_files(*, after=None, limit=None, purpose=None)` / `get_file(id)` / `delete_file(id)` | `/v1/files[/{id}]` |
+| `download_file(id, *, max_bytes=None)` | `GET /v1/files/{id}/content` |
+| `create_batch(input_file_id, *, metadata=None, output_expires_after=None, idempotency_key=None)` | `POST /v1/batches` |
+| `list_batches(*, after=None, limit=None)` / `get_batch(id)` / `cancel_batch(id)` | `/v1/batches[/{id}[/cancel]]` |
+
+Upload content is caller-owned: `bytes`, `bytearray` or `memoryview` (sent with `Content-Length`,
+64 KiB at a time, without a full copy; do not modify it during the call), a binary file object or an
+iterable of bytes (sent chunked). `AsyncBasalClient.upload_file` accepts bytes-like content or an
+async iterable of bytes, so it never blocks the event loop on file reads. The SDK never opens paths
+or fetches URLs. The form sends `purpose`, then `expires_after[anchor]`/`expires_after[seconds]`, then
+the file, as the server requires. Filenames have 1–255 UTF-8 bytes without control characters,
+quotes or backslashes.
+
+`create_batch` sends endpoint `/v1/basal` and window `24h`, the only values the server accepts; a
+full raw `CreateBatchRequest` dictionary is also accepted. `ExpiresAfter` is
+`{"anchor": "created_at", "seconds": n}` (the server checks 3600–2592000). `idempotency_key` must have
+1–128 visible ASCII characters: a replay with the same data returns the same batch, different data is
+a 409. Lists return one page; pass `last_id` as `after` while `has_more` is true.
+
+`download_file` returns the file bytes without parsing them. The whole body is buffered, bounded by
+`max_bytes`, or `max_response_bytes` (8 MiB) when omitted; a larger body raises
+`BasalResponseTooLargeError`. Result files can be much larger than 8 MiB: raise `max_bytes` for that
+call to a size your process can hold. Resource ids are escaped as one path segment; `.`/`..` are
+rejected. Responses are typed dictionaries (`FileObject`, `Batch`, `FileList`, `BatchList`, ...) that
+keep fields added by newer servers; JSONL lines can be typed with `BatchInputLine` and `BatchResultLine`.
+
+Errors, TLS, proxy prefix, redirect refusal, timeouts and `trust_env` behave as for `decide`.
+`BasalHTTPError.body` keeps the `{"error": {...}}` answer and `retry_after` the raw header of 429/503.
+The SDK has no automatic retries and does not poll: `create_batch` returns at once (`validating`) and
+`cancel_batch` does not wait for running work. A server refusing an upload early (413) may surface as
+`BasalTransportError` while the body is still being sent. Expired or cancelled batches may have partial
+results. See [BATCHES.md](https://github.com/itsoltech/basal-rs/blob/main/docs/BATCHES.md) for the JSONL format.
 
 ## Experimental Basal 2.1 tasks
 

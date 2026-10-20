@@ -9,7 +9,7 @@ exclude = ["vendor/candle-core"]
 candle-core = { path = "vendor/candle-core" }
 
 [workspace.package]
-version = "0.1.11"
+version = "0.1.12"
 edition = "2021"
 rust-version = "1.95"
 license = "Apache-2.0"

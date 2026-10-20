@@ -12,7 +12,7 @@ compile("tsconfig.json");
 // .cts gives CommonJS output and matching .d.cts declarations under NodeNext.
 const temporary = mkdtempSync(join(tmpdir(), "basal-client-build-"));
 try {
-  for (const name of ["index", "questions", "media", "tasks"]) {
+  for (const name of ["index", "questions", "media", "tasks", "errors", "batches"]) {
     const source = readFileSync(`src/${name}.ts`, "utf8").replace(/(from\s+["']\.\/[^"']+)\.js(["'])/g, "$1.cjs$2");
     writeFileSync(join(temporary, `${name}.cts`), source);
   }
