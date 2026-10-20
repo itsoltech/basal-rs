@@ -27,6 +27,26 @@ pozostaje w `basal-core`. Interfejs i przykłady: [CLIENT.md](CLIENT.md).
 Nowe rodziny, format 2, wybór kolejności i kalibracja: [UPSTREAM_2.0.md](UPSTREAM_2.0.md).
 Natywne architektury i lifecycle mediów omni: [OMNI.md](OMNI.md).
 
+Opcjonalna sekcja `database:` i moduł `basal-cli/src/database/` posiadają konfigurację
+bazy, opcje połączeń, wybór konta oraz moment migracji schematu
+([DATABASE.md](DATABASE.md)). Bez tej sekcji i bez konsumenta serwer nie otwiera bazy.
+Opcjonalna usługa batchy w `basal-cli/src/serve/batches/` ma osobne planowanie CPU,
+trwały magazyn metadanych (w bazie z `database:` albo lokalnym domyślnym SQLite)
+oraz artefakty FS/S3. `store::Store` udostępnia typowane
+operacje domenowe: SQLite, PostgreSQL i SQL Server korzystają ze wspólnych operacji
+z jawnym dialektem SQL, a MongoDB z natywnych transakcji replica set. Lease,
+generation i ledger operacji chronią zapis wyników po przejęciu pracy; nie zastępują
+wyłączności procesu na fizycznym GPU.
+
+Dedykowany wątek tła posiada osobny fork silnika. `WorkClass`, `StopToken`
+i bramki urządzeń w `basal-core` zapewniają kooperacyjne ustępowanie online
+między bezpiecznymi checkpointami. Ogłoszenie `OnlineDemand` obejmuje cały lifecycle
+żądania online i wszystkie urządzenia instancji. Rezerwacje hosta i urządzeń są
+przenoszone razem z pracą; niepotwierdzone cleanup urządzenia blokuje dalsze użycie.
+Licznik `StopToken::device_time` mierzy czas posiadania bramki, nie sprzętowy czas
+aktywności kerneli. Konfiguracja, kontrakt, granice kwalifikacji i procedury:
+[BATCHES.md](BATCHES.md). Wykonanie tła pozostaje domyślnie wyłączone.
+
 Loader Gemma czyta kolejne wagi do jednego ponownie używanego bufora. BF16
 przesyła bez pośredniego własnego tensora CPU; przed nadpisaniem bufora czeka
 na zakończenie transferu. F16 zachowuje konwersję na GPU przy wystarczającym

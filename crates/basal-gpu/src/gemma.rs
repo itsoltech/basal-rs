@@ -7,6 +7,7 @@ use std::time::Instant;
 
 use anyhow::{ensure, Context, Result};
 use basal_core::architecture::{GemmaConfig, GemmaLayerConfig};
+use basal_core::execution::{BackgroundSupport, ExecutionError, StopToken, WorkClass};
 use basal_core::gate::Gate;
 use basal_core::pack::Packed;
 use basal_core::Backend;
@@ -74,7 +75,9 @@ pub struct GemmaBackend {
     attention_dtype: DType,
     optimized: bool,
     readout: Readout,
-    gate: Option<(Arc<Gate>, bool)>,
+    gate: Option<(Arc<Gate>, WorkClass)>,
+    /// Stop token of background work (the controller's; following stages are driven by it).
+    stop: Option<StopToken>,
     pub load_s: f64,
     processor: Option<Arc<basal_core::media::Processor>>,
     media_slot: Option<OnStage<Vec<(basal_core::media::Kind, Tensor)>>>,
@@ -340,6 +343,7 @@ impl GemmaBackend {
             optimized: false,
             readout,
             gate: None,
+            stop: None,
             load_s: start.elapsed().as_secs_f64(),
             processor,
             media_slot: None,
@@ -442,6 +446,7 @@ impl GemmaBackend {
 
     fn owners(&self) -> GateOwners {
         GateOwners {
+            stop: self.stop.clone(),
             gates: self.stages().map(|s| s.gate.clone()).collect(),
             devs: self.stages().map(|s| s.dev.clone()).collect(),
             health: self.lineage.health.clone(),
@@ -1313,19 +1318,235 @@ impl GemmaBackend {
                 basal_core::media::Input::Audio(x) => &x.features,
             };
             ensure!(values.iter().all(|v| v.is_finite()), "non-finite media features");
-            encoded.push((
-                item.kind(),
-                encoders.encode(
-                    item,
-                    if self.precision == Precision::F16 { DType::BF16 } else { self.precision.compute() },
-                    &self.dev,
-                    self.attention_dtype,
-                )?,
-            ));
+            // background work may stop or yield between encoder blocks; online classes keep one checkpoint per item
+            let mut between_blocks = || gates.background_checkpoint();
+            let features = encoders.encode(
+                item,
+                if self.precision == Precision::F16 { DType::BF16 } else { self.precision.compute() },
+                &self.dev,
+                self.attention_dtype,
+                &mut between_blocks,
+            )?;
+            encoded.push((item.kind(), features));
             gates.checkpoint()?;
         }
         self.media_slot = Some(OnStage::new(&self.dev, true, &self.lineage.health, encoded));
         Ok(())
+    }
+}
+
+/// One `GemmaBackend::step` for the device work bound: `batch` rows of `tokens`, after `past` cached positions.
+#[derive(Clone, Copy)]
+struct StepWork {
+    batch: u64,
+    tokens: u64,
+    past: u64,
+    /// More chunks follow (the K/V cache is kept).
+    cache_next: bool,
+    /// Media positions in the step (span features cast to the compute dtype).
+    media_tokens: u64,
+    /// Letter ids of one readout.
+    codes: u64,
+}
+
+impl GemmaBackend {
+    fn bytes(dtype: DType) -> u64 {
+        dtype.size_in_bytes() as u64
+    }
+
+    /// `decoder_norm` of `n` elements: the larger of the fused FP16 path (contiguous copy, output) and `norm`
+    /// (f32 copy, reduction or squares, mean, two products, cast).
+    fn norm_work(&self, t: &mut crate::Tally, n: u64) {
+        t.add_n(5, crate::prod(&[n, 4]));
+        t.add(crate::prod(&[n, Self::bytes(self.precision.compute())]));
+    }
+
+    /// `GemmaBackend::linear` on `rows` rows: the contiguous input copy, the weight widened to the compute dtype when
+    /// stored in another one (one at a time), the output and, on the per-row fallback, the concatenation.
+    fn linear_work(&self, t: &mut crate::Tally, rows: u64, out: u64, input: u64) {
+        let e = Self::bytes(self.precision.compute());
+        t.add(crate::prod(&[rows, input, e]));
+        if self.precision.storage() != self.precision.compute() {
+            t.add(crate::prod(&[out, input, e]));
+        }
+        t.add_n(2, crate::prod(&[rows, out, e]));
+    }
+
+    /// One score tile of `GemmaBackend::attention` / `attention_long` over `groups` matrices: the query slice, the
+    /// scores in the attention dtype, their f32 copy, the probabilities (with the dense mask and its sum outside
+    /// CUDA), their cast, the value product and its cast. Earlier tiles keep only their output.
+    fn tile_work(&self, t: &mut crate::Tally, groups: u64, len: u64, keys: u64, hd: u64) {
+        let (e, ea) = (Self::bytes(self.precision.compute()), Self::bytes(self.attention_dtype));
+        t.add(crate::prod(&[groups, len, hd, ea]));
+        t.add(crate::prod(&[groups, len, keys, ea]));
+        t.add_n(2, crate::prod(&[groups, len, keys, 4]));
+        if !(cfg!(feature = "cuda") && self.dev.is_cuda()) {
+            t.add(crate::prod(&[len, keys, 4]));
+            t.add(crate::prod(&[groups, len, keys, 4]));
+        }
+        t.add(crate::prod(&[groups, len, keys, ea]));
+        t.add(crate::prod(&[groups, len, hd, ea]));
+        t.add(crate::prod(&[groups, len, hd, e]));
+    }
+
+    /// `GemmaBackend::attention` of `b` rows of `n` queries over `keys` positions, with the same tile sizes as the
+    /// source (score tiles bounded to 128 MiB of f32 where one query row fits).
+    fn attention_work(&self, b: u64, n: u64, keys: u64, c: &GemmaLayerConfig) -> crate::Tally {
+        let (e, ea) = (Self::bytes(self.precision.compute()), Self::bytes(self.attention_dtype));
+        let (heads, kvh, hd) = (c.heads as u64, c.kv_heads as u64, c.head_dim as u64);
+        let mut t = crate::Tally::default();
+        if b == 1 && keys > 4096 {
+            // attention_long: query (cast, contiguous), one K/V head at a time (casts, transposed copy), per-head tiles
+            // and their concatenation, all heads, their concatenation and transposed copy
+            let group = heads / kvh.max(1);
+            t.add_n(2, crate::prod(&[n, heads, hd, ea]));
+            t.add_n(4, crate::prod(&[keys, hd, ea]));
+            let tile = (512u64).min((128u64 << 20) / crate::prod(&[keys, group, 4]).max(1)).max(1);
+            self.tile_work(&mut t, group, tile.min(n), keys, hd);
+            t.add_n(2, crate::prod(&[group, n, hd, e]));
+            t.add_n(3, crate::prod(&[n, heads, hd, e]));
+            return t;
+        }
+        if cfg!(feature = "cuda") && self.dev.is_cuda() && self.optimized {
+            // attention_pack: K and V with GQA heads repeated, Q, all f32; contiguous copies of the inputs
+            t.add_n(2, crate::prod(&[b, heads, keys, hd, 4]));
+            t.add(crate::prod(&[b, heads, n, hd, 4]));
+            t.add_n(2, crate::prod(&[b, keys, kvh, hd, e]));
+            t.add(crate::prod(&[b, n, heads, hd, e]));
+        } else {
+            // attention_inputs: K (gather, contiguous permute, cast, transposed copy), V (gather, permute, cast),
+            // Q (permute, cast)
+            t.add_n(4, crate::prod(&[b, heads, keys, hd, e]));
+            t.add_n(3, crate::prod(&[b, heads, keys, hd, ea]));
+            t.add(crate::prod(&[b, heads, n, hd, e]));
+            t.add(crate::prod(&[b, heads, n, hd, ea]));
+        }
+        let tile = (512u64).min((128u64 << 20) / crate::prod(&[keys, heads, b, 4]).max(1)).max(1);
+        self.tile_work(&mut t, b * heads, tile.min(n), keys, hd);
+        // accumulated tiles, their concatenation, the contiguous permute
+        t.add_n(3, crate::prod(&[b, heads, n, hd, e]));
+        t
+    }
+
+    /// Transient device bytes of one `step` on this stage (`first`: embedding, per-layer inputs and media spans;
+    /// `last`: readout). Every tensor of one layer iteration is counted as live until its end; the residual
+    /// stream, the per-layer inputs, rotation tables, the K/V cache (before and after) and, when kept, every
+    /// layer's K/V of the forward are counted for the whole step.
+    fn step_work(&self, first: bool, last: bool, w: StepWork) -> crate::Tally {
+        let cfg = &self.cfg;
+        let (e, st) = (Self::bytes(self.precision.compute()), Self::bytes(self.precision.storage()));
+        let (b, n) = (w.batch, w.tokens);
+        let t_rows = b.saturating_mul(n);
+        let h = cfg.hidden as u64;
+        let window = cfg.sliding_window.saturating_sub(1) as u64;
+        let discard = self.discard_unused_kv();
+        let layers = &cfg.layers[self.range.clone()];
+        let mut t = crate::Tally::default();
+        if first {
+            // ids, embedding rows, cast, scaled; media span casts and concatenation; per-layer-input ids
+            t.add(crate::prod(&[t_rows, 4]));
+            t.add(crate::prod(&[t_rows, h, st]));
+            t.add_n(2, crate::prod(&[t_rows, h, e]));
+            if w.media_tokens > 0 {
+                t.add(crate::prod(&[w.media_tokens, h, e]));
+                t.add(crate::prod(&[t_rows, h, e]));
+            }
+            t.add(crate::prod(&[t_rows, 4]));
+            if self.weights.get().ple_embed.is_some() {
+                let lp = (cfg.layers.len() as u64).saturating_mul(cfg.per_layer_input as u64);
+                t.add(crate::prod(&[t_rows, lp, st]));
+                t.add_n(2, crate::prod(&[t_rows, lp, e]));
+                self.linear_work(&mut t, t_rows, lp, h);
+                t.add(crate::prod(&[t_rows, lp, e]));
+                self.norm_work(&mut t, t_rows * lp);
+                t.add_n(2, crate::prod(&[t_rows, lp, e]));
+            }
+        } else {
+            // the activation received from the previous stage (`transfer_activation`, f16)
+            t.add(crate::prod(&[t_rows, h, 2]));
+        }
+        // image groups for the masks; the residual stream
+        t.add(crate::prod(&[t_rows, 4]));
+        t.add(crate::prod(&[t_rows, h, e]));
+        // rotation tables per distinct (head dim, theta, fraction): f32 cos/sin and their casts, per position
+        let mut rotary: Vec<(usize, u64, u64)> = Vec::new();
+        for c in layers {
+            let key = (c.head_dim, c.rope_theta.to_bits(), c.rotary_fraction.to_bits());
+            if !rotary.contains(&key) {
+                rotary.push(key);
+                t.add_n(2, crate::prod(&[n, c.head_dim as u64, 4]));
+                t.add_n(2, crate::prod(&[n, c.head_dim as u64, e]));
+            }
+        }
+        let past_of = |c: &GemmaLayerConfig| if c.sliding && !c.shared_kv { w.past.min(window) } else { w.past };
+        for c in layers.iter().filter(|c| !c.shared_kv) {
+            let hk = (c.kv_heads * c.head_dim) as u64;
+            let past = past_of(c);
+            let keys = past + n;
+            // the cache of the previous chunk, the cache kept for the next one, the K/V kept for sharing layers
+            t.add_n(2, crate::prod(&[b, past, hk, e]));
+            if !discard || w.cache_next {
+                let keep = if c.sliding { keys.min(window) } else { keys };
+                t.add_n(2, crate::prod(&[b, keep, hk, e]));
+            }
+            if !discard {
+                t.add_n(2, crate::prod(&[b, keys, hk, e]));
+            }
+        }
+        let ple = self.weights.get().layers.first().is_some_and(|l| l.ple_gate.is_some());
+        let mut layer_peak = crate::Tally::default();
+        for c in layers {
+            let (hq, hk) = ((c.heads * c.head_dim) as u64, (c.kv_heads * c.head_dim) as u64);
+            let i = c.intermediate as u64;
+            // shared K/V come from an earlier layer of any kind: bound them by the full length
+            let keys = past_of(c) + n;
+            let mut l = crate::Tally::default();
+            self.norm_work(&mut l, t_rows * h);
+            self.linear_work(&mut l, t_rows, hq, h);
+            self.norm_work(&mut l, t_rows * hq);
+            l.add_n(5, crate::prod(&[t_rows, hq, e]));
+            if !c.shared_kv {
+                self.linear_work(&mut l, t_rows, hk, h);
+                self.linear_work(&mut l, t_rows, hk, h);
+                self.norm_work(&mut l, t_rows * hk);
+                l.add_n(5, crate::prod(&[t_rows, hk, e]));
+                self.norm_work(&mut l, t_rows * hk);
+                l.add_n(2, crate::prod(&[b, keys, hk, e]));
+            }
+            l = l.plus(self.attention_work(b, n, keys, c));
+            self.linear_work(&mut l, t_rows, h, hq);
+            self.norm_work(&mut l, t_rows * h);
+            l.add(crate::prod(&[t_rows, h, e]));
+            self.norm_work(&mut l, t_rows * h);
+            self.linear_work(&mut l, t_rows, i, h);
+            self.linear_work(&mut l, t_rows, i, h);
+            l.add_n(3, crate::prod(&[t_rows, i, e]));
+            self.linear_work(&mut l, t_rows, h, i);
+            self.norm_work(&mut l, t_rows * h);
+            l.add(crate::prod(&[t_rows, h, e]));
+            if ple {
+                let p = cfg.per_layer_input as u64;
+                self.linear_work(&mut l, t_rows, p, h);
+                l.add_n(2, crate::prod(&[t_rows, p, e]));
+                self.linear_work(&mut l, t_rows, h, p);
+                self.norm_work(&mut l, t_rows * h);
+                l.add(crate::prod(&[t_rows, h, e]));
+            }
+            // layer scale (contiguous copy, output)
+            l.add_n(2, crate::prod(&[t_rows, h, e]));
+            layer_peak = layer_peak.peak(l);
+        }
+        t = t.plus(layer_peak);
+        if last {
+            // readout states, final norm, one readout at a time (f32 state, code rows and their f32 copy, logits)
+            t.add(crate::prod(&[b, h, e]));
+            self.norm_work(&mut t, b * h);
+            t.add(crate::prod(&[h, 4]));
+            t.add(crate::prod(&[w.codes, h, st]));
+            t.add(crate::prod(&[w.codes, h, 4]));
+            t.add_n(5, crate::prod(&[w.codes, 4]));
+        }
+        t
     }
 }
 
@@ -1413,27 +1634,177 @@ impl Backend for GemmaBackend {
             optimized: self.optimized,
             readout: self.readout,
             gate: None,
+            stop: None,
             load_s: 0.0,
             processor: self.processor.clone(),
             media_slot: None,
         })
     }
     fn set_device_gate(&mut self, device: usize, gate: Arc<Gate>, urgent: bool) -> Result<()> {
+        Ok(self.set_device_work_class(device, gate, WorkClass::from_urgent(urgent))?)
+    }
+    fn set_device_work_class(
+        &mut self,
+        device: usize,
+        gate: Arc<Gate>,
+        class: WorkClass,
+    ) -> std::result::Result<(), ExecutionError> {
+        let devices: Vec<usize> = self.stages().map(|s| s.device).collect();
         let stage = if device == self.device {
             self
         } else {
-            self.following.iter_mut().find(|s| s.device == device).context("gate device is not a Gemma stage")?
+            self.following
+                .iter_mut()
+                .find(|s| s.device == device)
+                .ok_or(ExecutionError::NoSuchDevice { device, devices })?
         };
-        stage.gate = Some((gate, urgent));
+        stage.gate = Some((gate, class));
         Ok(())
+    }
+    /// Drained gate releases and stop checks at every stage entry, decoder layer, encoder block and media item.
+    /// Only invariant GEMM tables are accepted and uncovered shapes use fixed GEMMs, so background never tunes.
+    fn background_support(&self, _max_forward_tokens: usize) -> BackgroundSupport {
+        BackgroundSupport::Supported
+    }
+    /// Per stage, the largest of: a bucket of short prompts (at most 32 rows, 512 positions, 8192 tokens), the last
+    /// 2048-token chunk of the longest prompt with its whole K/V cache, and per media plan its encoders (items in
+    /// order, earlier outputs kept) and its prompts (chunks extended over a unified image span) with the media
+    /// session held. Gemma has no evidence head.
+    fn device_work_bound(&self, shape: &basal_core::planner::DeviceWorkShape) -> basal_core::planner::DeviceWorkBound {
+        use basal_core::planner::{DeviceBytes, DeviceWorkBound, DeviceWorkEstimate, MediaItemShape};
+        let stages: Vec<&GemmaBackend> = self.stages().collect();
+        let count = stages.len();
+        let mut peaks = vec![crate::Tally::default(); count];
+        let mut run = |w: StepWork, stage0: crate::Tally| {
+            for (i, stage) in stages.iter().enumerate() {
+                let mut t = stage.step_work(i == 0, i + 1 == count, w);
+                if i == 0 {
+                    t = t.plus(stage0);
+                }
+                peaks[i] = peaks[i].peak(t);
+            }
+        };
+        let longest = shape.longest_prompt.max(1);
+        let codes = shape.prompt_letters;
+        if shape.short_prompts {
+            let tokens = longest.min(512).div_ceil(32) * 32;
+            let batch = (8192 / tokens).clamp(1, 32);
+            run(
+                StepWork { batch, tokens, past: 0, cache_next: false, media_tokens: 0, codes },
+                crate::Tally::default(),
+            );
+        }
+        if longest > 512 {
+            let tokens = longest.min(2048);
+            let past = longest - tokens;
+            run(StepWork { batch: 1, tokens, past, cache_next: true, media_tokens: 0, codes }, crate::Tally::default());
+        }
+        let mut encode_peak = crate::Tally::default();
+        if !shape.media.is_empty() {
+            let Some(encoders) = self.weights.get().encoders.as_ref() else {
+                return DeviceWorkBound::Unknown("media encoders are not loaded on this model".into());
+            };
+            let dt = if self.precision == Precision::F16 { DType::BF16 } else { self.precision.compute() };
+            let dims = crate::gemma_encoders::EncoderDims {
+                d: Self::bytes(dt),
+                ea: Self::bytes(self.attention_dtype),
+                w: Self::bytes(encoders.weight_dtype()),
+                widen: encoders.weight_dtype() != dt,
+                cuda: cfg!(feature = "cuda") && self.dev.is_cuda(),
+            };
+            let h = self.cfg.hidden as u64;
+            for m in &shape.media {
+                // the media session: every encoded item (soft tokens x hidden in the encoder dtype)
+                let mut slot = crate::Tally::default();
+                for item in &m.items {
+                    encode_peak = encode_peak.peak(slot.plus(encoders.work(item, &dims)));
+                    slot.add(crate::prod(&[item.soft_tokens(), h, dims.d]));
+                }
+                let span = if self.cfg.unified {
+                    m.items
+                        .iter()
+                        .filter(|x| matches!(x, MediaItemShape::Image { .. }))
+                        .map(MediaItemShape::soft_tokens)
+                        .max()
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
+                let prompt = m.longest_prompt.max(1);
+                let tokens = prompt.min(2048 + span);
+                let media_tokens = m.items.iter().map(MediaItemShape::soft_tokens).sum::<u64>().min(tokens);
+                let step = StepWork { batch: 1, tokens, past: prompt - tokens, cache_next: true, media_tokens, codes };
+                run(step, slot);
+            }
+        }
+        peaks[0] = peaks[0].peak(encode_peak);
+        let devices = stages
+            .iter()
+            .zip(&peaks)
+            .map(|(s, t)| DeviceBytes { device: s.device, bytes: t.bytes, allocations: t.allocations })
+            .collect();
+        DeviceWorkBound::Estimate(DeviceWorkEstimate {
+            devices,
+            basis: format!(
+                "Gemma {} {:?}, attention {:?}, optimized {}, {} stage(s); longest prompt {} tokens, short buckets {}, \
+                 {} media plan(s); later rounds worst case: {}",
+                if self.cfg.unified { "unified" } else { "towers" },
+                self.precision,
+                self.attention_dtype,
+                self.optimized,
+                count,
+                shape.longest_prompt,
+                shape.short_prompts,
+                shape.media.len(),
+                shape.worst_case_rounds
+            ),
+        })
+    }
+    /// Background forks: Gemma keeps no state cache; the media slot is ended. Chunk K/V caches are per call.
+    fn configure_background(&mut self) -> std::result::Result<(), ExecutionError> {
+        self.media_slot = None;
+        Ok(())
+    }
+    /// A token is accepted only when every stage is gated as background work.
+    fn set_stop_token(&mut self, stop: Option<StopToken>) -> std::result::Result<(), ExecutionError> {
+        if stop.is_some() && !self.stages().all(|s| matches!(s.gate, Some((_, WorkClass::Background)))) {
+            return Err(ExecutionError::InvalidState {
+                reason: "background work needs the background gate of every GPU of the model".into(),
+            });
+        }
+        self.stop = stop;
+        Ok(())
+    }
+    fn media_processor(&self) -> Option<Arc<basal_core::media::Processor>> {
+        self.processor.clone()
+    }
+    fn host_staging(&self) -> Option<basal_core::planner::HostStaging> {
+        let head_dim = self.cfg.layers.iter().map(|l| l.head_dim).max().unwrap_or(0);
+        // per token: ids, per-layer-input ids, media groups and the RoPE cos/sin tables of every distinct head size
+        // (two f32 tables of head_dim per token each); per readout the code logits; media features are copied to
+        // the device from the plan's buffers (one host staging copy counted)
+        #[cfg(not(feature = "cuda"))]
+        let mask = (QUERY_TILE * 4) as u64;
+        #[cfg(feature = "cuda")]
+        let mask = 0u64;
+        Some(basal_core::planner::HostStaging {
+            fixed: 1 << 20,
+            per_token: (2 * 2 * head_dim * 4 * 2 + 64) as u64 + mask,
+            per_row: 1024,
+            per_readout: 128,
+            per_letter: 16,
+            per_media_value: 4,
+            per_evidence_token: 0,
+        })
     }
     fn device_health(&self) -> Option<basal_core::DeviceHealth> {
         Some(self.lineage.health.clone())
     }
     fn set_gate(&mut self, gate: Arc<Gate>, urgent: bool) {
-        self.gate = Some((gate.clone(), urgent));
+        let class = WorkClass::from_urgent(urgent);
+        self.gate = Some((gate.clone(), class));
         for stage in &mut self.following {
-            stage.gate = Some((gate.clone(), urgent));
+            stage.gate = Some((gate.clone(), class));
         }
     }
 }

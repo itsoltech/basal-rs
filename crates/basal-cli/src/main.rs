@@ -15,12 +15,15 @@
 //!   basal init          [--model REF]...                               basal-serve.yml for `basal serve`
 //!   basal serve         [--model REF]... | [--config FILE]             HTTP server (default: ./basal-serve.yml)
 
+mod batches;
 mod bench;
 mod benchmark;
 mod choice_set;
 mod client;
 mod compare;
 mod config;
+mod config_support;
+mod database;
 mod doctor;
 mod export;
 mod gemm_share;
@@ -215,6 +218,10 @@ impl GpuArgs {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Manage durable batch storage without loading a model or a GPU.
+    Batches(batches::Args),
+    /// Manage the configured database (`database:`) without loading a model or a GPU.
+    Database(database::cli::Args),
     /// Use decisions in pipes and scripts: HTTP by default, --local loads a model once
     Client(Box<client::ClientArgs>),
     /// Measure sequential and mixed concurrent HTTP traffic on this hardware
@@ -496,6 +503,12 @@ enum Cmd {
         /// Enable Prometheus metrics at GET /metrics (also `metrics: true` in the configuration; default: off)
         #[arg(long)]
         metrics: bool,
+        /// Enable the durable Batch/Files API (local SQLite profile by default).
+        #[arg(long)]
+        batches: bool,
+        /// Directory of durable batch data (with --batches or batches.enabled in YAML).
+        #[arg(long)]
+        batch_data_dir: Option<PathBuf>,
         /// `release_date` reported by GET /v1/models (default: the release date upstream basal v1.5.0 reports)
         #[arg(long, default_value = "2026-10-05")]
         release_date: String,
@@ -745,6 +758,8 @@ fn run() -> Result<()> {
     let cli = Cli::parse();
     term::set_mode(cli.color);
     match cli.cmd {
+        Cmd::Batches(args) => batches::run(args)?,
+        Cmd::Database(args) => database::cli::run(args)?,
         Cmd::Client(args) => {
             let code = match client::run(*args) {
                 Ok(code) => code,
@@ -958,6 +973,8 @@ fn run() -> Result<()> {
             long_slice_ms,
             access_log,
             metrics,
+            batches,
+            batch_data_dir,
             release_date,
         } => {
             let access_log = access_log || std::env::var("BASAL_ACCESS_LOG").is_ok_and(|v| !v.is_empty() && v != "0");
@@ -1029,6 +1046,31 @@ fn run() -> Result<()> {
                 c.release_date = release_date;
             }
             serve::check_admission_limits(c.max_inflight, c.max_large_inflight)?;
+            // Validate database and Batch settings before downloading weights or loading a GPU.
+            let addr = match (addr, std::env::var("BASAL_ADDR")) {
+                (Some(a), _) => a,
+                (None, Ok(v)) => v.parse().with_context(|| format!("BASAL_ADDR {v:?}"))?,
+                (None, Err(_)) => c.addr,
+            };
+            let database_section = database::DatabaseConfig::section(c.database.as_ref())?;
+            c.batches.apply_cli(batches, batch_data_dir);
+            let batch_settings = c.batches.validate(&serve::batches::config::ValidateContext {
+                listen: addr,
+                default_data_dir: paths::data_dir(),
+            })?;
+            // The Batch API uses the root database, or without one its local SQLite default. An enabled root
+            // database without an enabled consumer is only migrated at start (with auto_migrate), never otherwise
+            // connected.
+            let database = match (&batch_settings, database_section) {
+                (Some(batches), section) => Some(batches.database(&section)?),
+                (None, database::DatabaseSection::Enabled(settings)) => Some(settings),
+                (None, database::DatabaseSection::Absent | database::DatabaseSection::Disabled) => None,
+            };
+            let batch_qualifications = c
+                .models
+                .iter()
+                .map(|model| model.batch_profile.validate(&config::describe(model)))
+                .collect::<Result<Vec<_>, _>>()?;
             // devices of every model's instances, its weight format and layer split; the GPUs of a replica group or
             // a layer split are compared before any download
             let placements: Vec<config::Placement> = c
@@ -1084,7 +1126,9 @@ fn run() -> Result<()> {
                 tables.push(table);
             }
             let mut served = Vec::new();
-            for (((mc, table), dir), placement) in c.models.iter().zip(tables).zip(dirs).zip(placements) {
+            for ((((mc, table), dir), placement), batch_qualification) in
+                c.models.iter().zip(tables).zip(dirs).zip(placements).zip(batch_qualifications)
+            {
                 let instances = placement.instances();
                 let mut replicas = Vec::with_capacity(instances.len());
                 for devices in instances {
@@ -1103,25 +1147,30 @@ fn run() -> Result<()> {
                         device: placement.split().is_none().then(|| devices[0]),
                         layer_split: placement.split().cloned(),
                     };
-                    let engine = gpu_engine_at(&dir, &mg)?;
+                    let mut engine = gpu_engine_at(&dir, &mg)?;
+                    engine.forward_max_tokens = mc.max_batch_tokens;
                     if let Some(t) = &table {
                         config::check_gemm_coverage(&engine.manifest.name, &engine.backend.gemm_table_missing(), t)?;
                     }
                     replicas.push(serve::Replica { engine, devices });
                 }
+                let batch_profile = if batch_settings.is_some() {
+                    Some(
+                        serve::batches::ModelProfile::from_engine(&replicas[0].engine, table.as_deref())?
+                            .with_background(batch_qualification.clone()),
+                    )
+                } else {
+                    None
+                };
                 served.push(serve::ServedModel {
                     replicas,
                     max_batch_tokens: mc.max_batch_tokens,
                     schedule: mc.schedule,
                     long_tokens: mc.long_tokens,
+                    batch_profile,
+                    batch_qualification,
                 });
             }
-            // --addr, else BASAL_ADDR (0.0.0.0:8000 in the container image), else the configuration's
-            let addr = match (addr, std::env::var("BASAL_ADDR")) {
-                (Some(a), _) => a,
-                (None, Ok(v)) => v.parse().with_context(|| format!("BASAL_ADDR {v:?}"))?,
-                (None, Err(_)) => c.addr,
-            };
             let opts = serve::ServeOptions {
                 addr,
                 release_date: c.release_date,
@@ -1131,6 +1180,8 @@ fn run() -> Result<()> {
                 long_slice_ms: c.long_slice_ms,
                 access_log: access_log || c.access_log,
                 metrics: metrics || c.metrics,
+                database: database.map(database::Database::new),
+                batches: batch_settings,
             };
             serve::serve(served, opts)?;
         }

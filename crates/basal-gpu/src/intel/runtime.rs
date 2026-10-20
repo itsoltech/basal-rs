@@ -238,15 +238,33 @@ impl Gpu {
 
     pub fn sync(&self) -> Result<()> {
         ensure!(!self.health.is_lost(), "Intel Vulkan device lost; restart the model");
+        self.poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(Duration::from_secs(60)) })
+            .context("waiting for Intel Vulkan GPU")?;
+        ensure!(!self.health.is_lost(), "Intel Vulkan device lost; restart the model");
+        Ok(())
+    }
+
+    /// Non-blocking device maintenance: frees the buffers dropped since the last poll whose submissions completed.
+    /// Waits for nothing (no device synchronisation); a lost device is left alone.
+    pub fn maintain(&self) -> Result<()> {
+        if self.health.is_lost() {
+            return Ok(());
+        }
+        self.poll(wgpu::PollType::Poll).context("polling the Intel Vulkan device")?;
+        Ok(())
+    }
+
+    fn poll(&self, kind: wgpu::PollType) -> Result<()> {
         // wgpu 30 routes DeviceLost from poll to a fatal handler instead of returning PollError.
         // Its loss callback marks this device unusable before the fatal-handler panic, which occurs
         // after core locks have been released. The callback itself only sets an atomic flag.
         // Only translate that pinned-version fatal-handler payload; unrelated panics keep unwinding
         // even if a concurrent fork lost the device. No partially completed GPU work is reused.
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(Duration::from_secs(60)) })
-        })) {
-            Ok(result) => result.context("waiting for Intel Vulkan GPU")?,
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.device.poll(kind))) {
+            Ok(result) => {
+                result?;
+                Ok(())
+            }
             Err(payload) => {
                 let message = payload
                     .downcast_ref::<String>()
@@ -260,9 +278,7 @@ impl Gpu {
                 }
                 std::panic::resume_unwind(payload);
             }
-        };
-        ensure!(!self.health.is_lost(), "Intel Vulkan device lost; restart the model");
-        Ok(())
+        }
     }
 
     pub fn read(&self, buffer: &wgpu::Buffer, bytes: usize) -> Result<Vec<u8>> {

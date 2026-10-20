@@ -1,0 +1,47 @@
+# Template, not a qualified GPU profile. Configure secrets, paths and catalog before deployment.
+# See ../../docs/BATCHES.md and ../../docs/DATABASE.md. This starts with batch admission and execution paused.
+# MongoDB URI must name a database and a replica set. MSSQL uses an ADO.NET connection string.
+addr: 127.0.0.1:8000
+models:
+  - path: /models/basal-1.5-mini    # replace with the deployed model directory
+    # batch_profile is deliberately absent until GPU qualification is recorded.
+database:
+  backend: postgresql
+  auto_migrate: false               # run `basal database migrate` once during deployment
+  connection_string_env: BASAL_DATABASE_URL
+  migration_connection_string_env: BASAL_DATABASE_MIGRATION_URL
+  tls:
+    mode: verify_full
+    ca_file: /run/secrets/basal-db-ca.pem
+  pool:
+    max_connections: 16
+batches:
+  enabled: true
+  profile: production
+  accepting: false
+  processing: false
+  artifacts:
+    backend: s3
+    bucket: basal-batches           # replace with a private bucket owned by this deployment
+    prefix: production
+    region: eu-central-1
+    credentials:
+      source: aws_default_chain
+  auth:
+    mode: tokens
+    tokens_file: /run/secrets/basal-batch-tokens.json
+  quota:
+    revision: 1
+    installation:
+      max_bytes: 107374182400
+      max_active_batches: 100
+      max_retained_batches: 10000
+      max_files: 10000
+      max_open_upload_sessions: 20
+    owners:
+      acme:
+        max_bytes: 107374182400
+        max_active_batches: 100
+        max_retained_batches: 10000
+        max_files: 10000
+        max_open_upload_sessions: 20

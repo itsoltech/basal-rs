@@ -21,6 +21,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{bail, ensure, Context, Result};
+use basal_core::execution::{BackgroundSupport, ExecutionError, Interrupted, StopToken, WorkClass};
 use basal_core::gate::{Gate, GateGuard};
 use basal_core::manifest::LlamaConfig;
 use basal_core::pack::Packed;
@@ -530,6 +531,8 @@ pub struct GpuBackend {
     pub residual_max: Option<std::cell::RefCell<Vec<f32>>>,
     /// Timing of the last call in milliseconds: host preparation, GPU forward + readout (synchronised).
     pub last_timing: (f64, f64),
+    /// Stop token of background work ([`Backend::set_stop_token`]); never inherited by forks.
+    stop: Option<StopToken>,
 }
 
 /// One consecutive range of decoder layers on one GPU.
@@ -542,9 +545,8 @@ struct Stage {
     layers: Range<usize>,
     /// Device memory of the stage (weights, its cuBLASLt handle), freed with the stage's context bound.
     w: OnStage<StageWeights>,
-    /// Device shared with other engines ([`Backend::set_device_gate`]): the gate and whether this one is the urgent
-    /// lane.
-    gate: Option<(Arc<Gate>, bool)>,
+    /// Device shared with other engines ([`Backend::set_device_work_class`]): the gate and this engine's work class.
+    gate: Option<(Arc<Gate>, WorkClass)>,
 }
 
 /// Weights of one stage, all on its GPU.
@@ -693,6 +695,45 @@ impl<T> Drop for OnStage<T> {
             }
         }
     }
+}
+
+/// Transient device allocations of one device for [`Backend::device_work_bound`]: bytes and the number of
+/// allocations (the caller adds its allocator's per-allocation granularity). Saturating arithmetic; sizes come from
+/// the shapes the source allocates, never from measurements.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Tally {
+    pub(crate) bytes: u64,
+    pub(crate) allocations: u64,
+}
+
+impl Tally {
+    /// One allocation of `bytes`.
+    pub(crate) fn add(&mut self, bytes: u64) {
+        self.add_n(1, bytes);
+    }
+
+    /// `count` allocations of `bytes` each.
+    pub(crate) fn add_n(&mut self, count: u64, bytes: u64) {
+        self.bytes = self.bytes.saturating_add(count.saturating_mul(bytes));
+        self.allocations = self.allocations.saturating_add(count);
+    }
+
+    /// Both sets live at once.
+    pub(crate) fn plus(mut self, other: Tally) -> Tally {
+        self.bytes = self.bytes.saturating_add(other.bytes);
+        self.allocations = self.allocations.saturating_add(other.allocations);
+        self
+    }
+
+    /// One of two sequential peaks (the larger bytes; the larger allocation count, conservatively).
+    pub(crate) fn peak(self, other: Tally) -> Tally {
+        Tally { bytes: self.bytes.max(other.bytes), allocations: self.allocations.max(other.allocations) }
+    }
+}
+
+/// `a * b * c ...`, saturating.
+pub(crate) fn prod(values: &[u64]) -> u64 {
+    values.iter().fold(1u64, |n, v| n.saturating_mul(*v))
 }
 
 /// Last-resort diagnostic of a destructor, written after its cleanup (free, retention, lost marking) is done. A failed
@@ -1114,15 +1155,22 @@ impl StageTransfers {
 /// Owners a call borrows its gates from, cloned at the call's start, so that the guards do not borrow the backend
 /// (helpers taking `&mut self` can carry them).
 struct GateOwners {
-    gates: Vec<Option<(Arc<Gate>, bool)>>,
+    gates: Vec<Option<(Arc<Gate>, WorkClass)>>,
     devs: Vec<Device>,
     health: DeviceHealth,
     split: bool,
+    /// Stop token of background work: observed at every stage entry, resume and checkpoint.
+    stop: Option<StopToken>,
 }
 
 /// The stage gates of one call: at most one held at a time (no hold-and-wait between GPUs). Leaving a stage releases
 /// its gate only after this thread's work on that GPU was drained with `Ok` (a synchronisation, or a synchronous host
 /// readout marked with [`StageGates::mark_drained`]). With a split, entering a stage binds its context.
+///
+/// Background work ([`WorkClass::Background`]) drains only this thread's work on the current stage before it parks or
+/// stops at a checkpoint, marks that state, and after an [`Interrupted`] following the release it leaves no current
+/// stage, so the error path never synchronises a GPU that online work may already use. An unconfirmed drain marks
+/// the lineage lost ([`DeviceHealth`]); an interruption alone does not.
 struct StageGates<'g> {
     owners: &'g GateOwners,
     /// Stage entered last (its gate held when it has one).
@@ -1147,14 +1195,17 @@ impl<'g> StageGates<'g> {
         }
         self.leave()?;
         let o = self.owners;
-        if let Some((g, urgent)) = &o.gates[s] {
-            self.guard = Some(if *urgent {
-                g.enter(true)
-            } else if self.started {
-                g.resume()
+        if let Some(stop) = &o.stop {
+            stop.check()?;
+        }
+        if let Some((g, class)) = &o.gates[s] {
+            // online main: always a new entry; online long and background continue a started task in FIFO order
+            let taken = if self.started {
+                g.resume_class(*class, o.stop.as_ref())
             } else {
-                g.enter(false)
-            });
+                g.enter_class(*class, o.stop.as_ref())
+            };
+            self.guard = Some(taken?);
         }
         // A lane may have marked the model lost while this call waited for the next gate.
         // No GPU work was started here: release it without assigning a stage that error cleanup would drain.
@@ -1180,19 +1231,84 @@ impl<'g> StageGates<'g> {
         self.drained = true;
     }
 
-    /// Preemptible lane between two layers: drain the current stage, then let an urgent caller run if one waits.
-    /// After it yielded, the lineage's health is checked again (the urgent caller may have marked it lost before
+    /// Preemptible lane between two layers: drain the current stage, then let an online caller run if one waits.
+    /// After it yielded, the lineage's health is checked again (the other caller may have marked it lost before
     /// releasing the gate), as on every gate entry.
+    ///
+    /// Online long lane: as before (one synchronisation, then [`Gate::checkpoint`] under `min_slice`). Background:
+    /// a confirmed drain (two attempts), marked before parking; a stop releases the gate and returns
+    /// [`Interrupted`] with no current stage. A stage without a gate observes only the background stop token.
     fn checkpoint(&mut self) -> Result<()> {
-        if let Some(c) = self.current {
-            if let Some((g, false)) = &self.owners.gates[c] {
-                self.owners.devs[c].synchronize()?;
-                if g.checkpoint() {
-                    ensure!(!self.owners.health.is_lost(), LOST);
+        let Some(c) = self.current else { return Ok(()) };
+        let o = self.owners;
+        match &o.gates[c] {
+            Some((_, WorkClass::OnlineMain)) => Ok(()),
+            Some((g, WorkClass::OnlineLong)) => {
+                o.devs[c].synchronize()?;
+                let Some(guard) = self.guard.take() else { return Ok(()) };
+                let cp = g.checkpoint(guard, None)?;
+                self.guard = Some(cp.guard);
+                if cp.yielded {
+                    ensure!(!o.health.is_lost(), LOST);
+                }
+                Ok(())
+            }
+            Some((g, WorkClass::Background)) => {
+                self.drain_current(c)?;
+                let Some(guard) = self.guard.take() else { return Ok(()) };
+                match g.checkpoint(guard, o.stop.as_ref()) {
+                    Ok(cp) => {
+                        self.guard = Some(cp.guard);
+                        // the caller queues more work on this stage
+                        self.drained = false;
+                        if cp.yielded {
+                            ensure!(!o.health.is_lost(), LOST);
+                        }
+                        Ok(())
+                    }
+                    Err(stopped) => {
+                        // drained and released: nothing of this thread is pending on a GPU online work may use now
+                        self.current = None;
+                        Err(stopped.into())
+                    }
                 }
             }
+            None => match o.stop.as_ref().and_then(StopToken::reason) {
+                Some(reason) => {
+                    self.drain_current(c)?;
+                    self.current = None;
+                    Err(Interrupted { reason }.into())
+                }
+                None => Ok(()),
+            },
         }
-        Ok(())
+    }
+
+    /// Background checkpoint inside an encoder or between media items: a no-op for online classes (their existing
+    /// checkpoints are unchanged), [`StageGates::checkpoint`] for background work.
+    fn background_checkpoint(&mut self) -> Result<()> {
+        let Some(c) = self.current else { return Ok(()) };
+        match &self.owners.gates[c] {
+            Some((_, WorkClass::Background)) => self.checkpoint(),
+            None if self.owners.stop.is_some() => self.checkpoint(),
+            _ => Ok(()),
+        }
+    }
+
+    /// Confirm the end of this thread's work on stage `c` (two attempts) and mark it drained; unconfirmed, the
+    /// lineage is marked lost and the error path keeps its rules.
+    fn drain_current(&mut self, c: usize) -> Result<()> {
+        match twice(|| self.owners.devs[c].synchronize()) {
+            Twice::First => {
+                self.drained = true;
+                Ok(())
+            }
+            Twice::Second(e) => bail!("draining stage {c} at a checkpoint: first attempt failed ({e})"),
+            Twice::Neither(a, b) => {
+                self.owners.health.mark_lost();
+                bail!("draining stage {c} at a checkpoint failed twice ({a}; {b}): {LOST}")
+            }
+        }
     }
 
     /// Success-path exit from the current stage: drain unless drained (`Ok` required), then release the gate. Two
@@ -1904,6 +2020,7 @@ impl GpuBackend {
             dequant: std::cell::Cell::new((0.0, 0)),
             residual_max: None,
             last_timing: (0.0, 0.0),
+            stop: None,
         })
     }
 
@@ -1941,6 +2058,7 @@ impl GpuBackend {
     /// Owners of this call's stage gates (see [`StageGates`]).
     fn gate_owners(&self) -> GateOwners {
         GateOwners {
+            stop: self.stop.clone(),
             gates: self.stages.iter().map(|s| s.gate.clone()).collect(),
             devs: self.stages.iter().map(|s| s.dev.clone()).collect(),
             health: self.lineage.health.clone(),
@@ -2734,6 +2852,30 @@ impl GpuBackend {
 impl GpuBackend {
     /// Projection weight shapes (N, K) that the loaded GEMM table does not cover on some stage (CUDA with cuBLASLt;
     /// empty otherwise). Such shapes use algorithms timed at first use, whose results may depend on the batch.
+    /// Projection shapes for which a background forward of up to `max_m` tokens could reach an M class the
+    /// cuBLASLt table does not hold (and so tune at run time). Empty without cuBLASLt (no run-time tuning) and for a
+    /// batch-invariant table covering the shape.
+    pub fn background_gemm_missing(&self, max_m: usize) -> Vec<(usize, usize)> {
+        #[cfg(feature = "cuda")]
+        {
+            let dt = self.precision.compute();
+            let mut missing = Vec::new();
+            for lt in self.stages.iter().filter_map(|s| s.w.get().lt.as_ref()) {
+                for (n, k) in projection_shapes(&self.cfg) {
+                    if !lt.covers_classes(n, k, dt, max_m) && !missing.contains(&(n, k)) {
+                        missing.push((n, k));
+                    }
+                }
+            }
+            missing
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            let _ = max_m;
+            Vec::new()
+        }
+    }
+
     pub fn gemm_table_missing(&self) -> Vec<(usize, usize)> {
         #[cfg(feature = "cuda")]
         {
@@ -3124,7 +3266,184 @@ impl GpuBackend {
     }
 }
 
+/// One forward of [`GpuBackend::stage_work`]: tokens, readouts, distinct letter ids, and the evidence head's
+/// dimension when the readout is the evidence head instead of the letter rows.
+#[derive(Clone, Copy)]
+struct ForwardWork {
+    tokens: u64,
+    readouts: u64,
+    letters: u64,
+    evidence: Option<u64>,
+}
+
+impl GpuBackend {
+    /// Transient device bytes of one forward on stage `s` (`stage_layers` and the readout scope of
+    /// `letter_logits_gated` / `evidence_gated`), read from the allocations of the source. Every tensor of one layer
+    /// iteration is counted as live until the end of the iteration (the bindings of the loop body), with the residual
+    /// stream and its normalised copy carried from the previous layer.
+    fn stage_work(&self, s: usize, f: ForwardWork) -> Tally {
+        let c = &self.cfg;
+        let u = |n: usize| n as u64;
+        let (m, r, l) = (f.tokens, f.readouts, f.letters);
+        let (h, hd, nh, nkv, i) = (u(c.hidden), u(c.head_dim), u(c.heads), u(c.kv_heads), u(c.intermediate));
+        let q = (nh + 2 * nkv) * hd;
+        let e = u(self.precision.compute().size_in_bytes());
+        let w = u(self.precision.storage().size_in_bytes());
+        let cuda = self.is_cuda();
+        let first = s == 0;
+        let last = s + 1 == self.stages.len();
+        let mut t = Tally::default();
+        if first {
+            // token ids; embedding rows (`index_select` in the storage dtype) and their compute-dtype copy
+            t.add(prod(&[m, 4]));
+            t.add(prod(&[m, h, w]));
+            t.add(prod(&[m, h, e]));
+        } else {
+            // the boundary buffer [2, M, H] f16 received from the previous stage (`transfer_activation`)
+            t.add(prod(&[2, m, h, 2]));
+        }
+        // RoPE cos/sin (every stage uploads them) and the readout indices (last stage)
+        t.add(prod(&[m, hd, 4]));
+        if last && r > 0 {
+            t.add(prod(&[r, 4]));
+        }
+        // one layer: carried residual stream and norm, the input norm, qkv projection
+        t.add_n(3, prod(&[m, h, e]));
+        t.add(prod(&[m, q, e]));
+        // qkv_rope: the f32 q/k/v buffer; CUDA tensor-core attention also K/V hi/lo f16 planes (4 * NKV*M*HD)
+        t.add(prod(&[m, q, 4]));
+        if cuda && self.tc_attention() {
+            t.add(prod(&[4, nkv, m, hd, 2]));
+        }
+        // attention: f32 output (Metal, SIMT, tc_pipe) and the merged output in the compute dtype
+        t.add(prod(&[m, nh, hd, 4]));
+        t.add(prod(&[m, nh, hd, e]));
+        if last {
+            // only the readout rows after the last attention: attention output and residual stream
+            t.add(prod(&[r, nh, hd, e]));
+            t.add(prod(&[r, h, e]));
+        }
+        // o projection, residual + norm, gate/up, SiLU*up, down projection
+        t.add(prod(&[m, h, e]));
+        t.add_n(2, prod(&[m, h, e]));
+        t.add(prod(&[m, 2, i, e]));
+        t.add(prod(&[m, i, e]));
+        t.add(prod(&[m, h, e]));
+        if last {
+            // residual + next norm (or the final norm)
+            t.add_n(2, prod(&[m, h, e]));
+        } else {
+            // boundary_norm: the [2, M, H] f16 buffer sent to the next stage
+            t.add(prod(&[2, m, h, 2]));
+        }
+        let largest_projection = [q * h, h * nh * hd, 2 * i * h, h * i].into_iter().max().unwrap_or(0);
+        if self.precision == Precision::F32 {
+            // bf16 weights widened to f32 per use: one projection at a time, plus the layer's biases and norms
+            t.add(prod(&[largest_projection, 4]));
+            t.add(prod(&[q + h + 2 * i + 4 * h, 4]));
+        }
+        if self.quantization != Quantization::None {
+            // one projection dequantized to f16 at a time
+            t.add(prod(&[largest_projection, 2]));
+        }
+        if last {
+            // final norm when it was not carried
+            t.add(prod(&[r, h, e]));
+            match f.evidence {
+                Some(k) => {
+                    // evidence head: f32 hidden rows, both normalisations, and per side three products and the
+                    // log-softmax
+                    t.add(prod(&[r, h, 4]));
+                    t.add_n(4, prod(&[r + 1, h, 4]));
+                    t.add_n(2, prod(&[r + 1, k, 4]));
+                    t.add_n(8, prod(&[r, 4]));
+                }
+                None if cuda => {
+                    // letter ids and the fused readout [R, U] f32
+                    t.add(prod(&[l, 4]));
+                    t.add(prod(&[r, l, 4]));
+                }
+                None => {
+                    // letter ids, gathered lm_head rows and their f32 copy, f32 hidden, [R, U] product
+                    t.add(prod(&[l, 4]));
+                    t.add(prod(&[l, h, w]));
+                    t.add(prod(&[l, h, 4]));
+                    t.add(prod(&[r, h, 4]));
+                    t.add(prod(&[r, l, 4]));
+                }
+            }
+        }
+        t
+    }
+}
+
 impl Backend for GpuBackend {
+    /// Per stage, the larger of the letter forward and (with an evidence head) the evidence forward, from
+    /// `GpuBackend::stage_work`. Unknown for the paths without a source-derived bound: the candle reference
+    /// kernels (padded rows with dense masks), the dense-mask SDPA attention (`BASAL_ATT=sdpa`), the state cache
+    /// (single-row captures) and diagnostics.
+    fn device_work_bound(&self, shape: &basal_core::planner::DeviceWorkShape) -> basal_core::planner::DeviceWorkBound {
+        use basal_core::planner::{DeviceBytes, DeviceWorkBound, DeviceWorkEstimate};
+        if self.kernels != Kernels::Fused {
+            return DeviceWorkBound::Unknown(
+                "the candle reference kernels (padded rows, dense masks) have no device work bound".into(),
+            );
+        }
+        if !self.tree_attention() {
+            return DeviceWorkBound::Unknown(
+                "dense-mask SDPA attention (BASAL_ATT=sdpa) has no device work bound".into(),
+            );
+        }
+        if self.state_cache_bytes > 0 {
+            return DeviceWorkBound::Unknown(
+                "state-cache captures are not modelled; run background without one".into(),
+            );
+        }
+        if self.profile.is_some() || self.residual_max.is_some() {
+            return DeviceWorkBound::Unknown("diagnostics allocate per layer; not modelled".into());
+        }
+        if !shape.media.is_empty() {
+            return DeviceWorkBound::Unknown("this backend takes no media".into());
+        }
+        let letter = ForwardWork {
+            tokens: shape.forward_tokens,
+            readouts: shape.forward_readouts,
+            letters: shape.forward_letters,
+            evidence: None,
+        };
+        let evidence = match (shape.evidence, self.head().ok().and_then(|h| h.evidence.as_ref())) {
+            (Some(e), Some(head)) => {
+                Some(ForwardWork { tokens: e.tokens, readouts: e.readouts, letters: 0, evidence: Some(head.k as u64) })
+            }
+            _ => None,
+        };
+        let devices = (0..self.stages.len())
+            .map(|s| {
+                let mut t = self.stage_work(s, letter);
+                if let Some(e) = evidence {
+                    t = t.peak(self.stage_work(s, e));
+                }
+                DeviceBytes { device: self.stages[s].device, bytes: t.bytes, allocations: t.allocations }
+            })
+            .collect();
+        DeviceWorkBound::Estimate(DeviceWorkEstimate {
+            devices,
+            basis: format!(
+                "Llama fused {:?} ({}), quantization {:?}, {} stage(s); forward <= {} tokens, {} readouts, {} letters; \
+                 evidence {:?}; later rounds worst case: {}",
+                self.precision,
+                if self.is_cuda() { self.attention_kernel().unwrap_or("cuda") } else { "metal tree attention" },
+                self.quantization,
+                self.stages.len(),
+                shape.forward_tokens,
+                shape.forward_readouts,
+                shape.forward_letters,
+                shape.evidence.map(|e| e.tokens),
+                shape.worst_case_rounds
+            ),
+        })
+    }
+
     fn has_evidence(&self) -> bool {
         self.head().is_ok_and(|h| h.evidence.is_some())
     }
@@ -3174,6 +3493,7 @@ impl Backend for GpuBackend {
             dequant: std::cell::Cell::new((0.0, 0)),
             residual_max: None,
             last_timing: (0.0, 0.0),
+            stop: None,
         })
     }
 
@@ -3181,19 +3501,91 @@ impl Backend for GpuBackend {
     /// here, every stage uses it (one at a time, as with separate gates), which serialises its GPUs.
     fn set_gate(&mut self, gate: Arc<Gate>, urgent: bool) {
         for s in &mut self.stages {
-            s.gate = Some((gate.clone(), urgent));
+            s.gate = Some((gate.clone(), WorkClass::from_urgent(urgent)));
         }
     }
 
     fn set_device_gate(&mut self, device: usize, gate: Arc<Gate>, urgent: bool) -> Result<()> {
+        Ok(self.set_device_work_class(device, gate, WorkClass::from_urgent(urgent))?)
+    }
+
+    fn set_device_work_class(
+        &mut self,
+        device: usize,
+        gate: Arc<Gate>,
+        class: WorkClass,
+    ) -> std::result::Result<(), ExecutionError> {
         let devices: Vec<usize> = self.stages.iter().map(|s| s.device).collect();
         let stage = self
             .stages
             .iter_mut()
             .find(|s| s.device == device)
-            .with_context(|| format!("a gate for device {device}, this model runs on device(s) {devices:?}"))?;
-        stage.gate = Some((gate, urgent));
+            .ok_or(ExecutionError::NoSuchDevice { device, devices })?;
+        stage.gate = Some((gate, class));
         Ok(())
+    }
+
+    /// CUDA and Metal: drained gate releases and stop checks at every stage entry and layer checkpoint. Refused
+    /// with diagnostics enabled, with a state cache (background forks run without one), and on CUDA when the
+    /// cuBLASLt table does not cover every M class up to `max_forward_tokens` (background never tunes GEMMs).
+    fn background_support(&self, max_forward_tokens: usize) -> BackgroundSupport {
+        if self.profile.is_some() || self.residual_max.is_some() {
+            return BackgroundSupport::Unsupported("diagnostics are enabled on this backend".into());
+        }
+        if self.state_cache_bytes > 0 {
+            return BackgroundSupport::Unsupported("the background engine must run without a state cache".into());
+        }
+        let missing = self.background_gemm_missing(max_forward_tokens);
+        if !missing.is_empty() {
+            return BackgroundSupport::Unsupported(format!(
+                "the cuBLASLt table does not cover every M class up to {max_forward_tokens} tokens for projection \
+                 shapes {missing:?}; background would tune GEMMs at run time"
+            ));
+        }
+        BackgroundSupport::Supported
+    }
+
+    /// Background forks: the state cache is disabled and its (unpinned) prefixes are dropped, each freed with its
+    /// stage's context bound (`OnStage`). Pinned template prefixes stay: resident K/V shared with the online engine.
+    /// The lineage's health on CUDA and Metal alike (`device_health` stays CUDA-only for the server's routing).
+    fn work_health(&self) -> Option<DeviceHealth> {
+        Some(self.lineage.health.clone())
+    }
+
+    fn configure_background(&mut self) -> std::result::Result<(), ExecutionError> {
+        if self.profile.is_some() || self.residual_max.is_some() {
+            return Err(ExecutionError::Unsupported { reason: "diagnostics are enabled on this backend".into() });
+        }
+        self.state_cache_bytes = 0;
+        self.prefixes.retain(|p| p.pinned);
+        Ok(())
+    }
+
+    /// A token is accepted only when every stage is gated as background work, so that no stage of a background call
+    /// runs without its device's gate.
+    fn set_stop_token(&mut self, stop: Option<StopToken>) -> std::result::Result<(), ExecutionError> {
+        if stop.is_some() && !self.stages.iter().all(|s| matches!(s.gate, Some((_, WorkClass::Background)))) {
+            return Err(ExecutionError::InvalidState {
+                reason: "background work needs the background gate of every GPU of the model".into(),
+            });
+        }
+        self.stop = stop;
+        Ok(())
+    }
+
+    fn host_staging(&self) -> Option<basal_core::planner::HostStaging> {
+        let c = &self.cfg;
+        // host inputs per token (ids, positions, RoPE cos/sin, segment and tree-unit metadata), letter logits and
+        // readout indices, evidence hidden rows (f32) read back for evidence questions; doubled for growth
+        Some(basal_core::planner::HostStaging {
+            fixed: 1 << 20,
+            per_token: ((c.head_dim * 4 + 128) * 2) as u64,
+            per_row: 1024,
+            per_readout: 64,
+            per_letter: 32,
+            per_media_value: 0,
+            per_evidence_token: (c.hidden * 4 * 2) as u64,
+        })
     }
 
     /// CUDA: the lineage's health, marked lost when the end of this model's own GPU work could not be confirmed (two

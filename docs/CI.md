@@ -105,8 +105,11 @@ Automatyczne kontrole uzupełniają `itsolpowers:rust-implementation`, `itsolpow
 
 CI nie wykonuje inferencji ani nie sprawdza zgodności wyników z upstream i wydajności. Te wymagania pozostają
 opisane w [BENCHMARKS.md](BENCHMARKS.md); pomiary zapisujemy w nowych raportach. Projekt nie ma testów, więc CI
-nie uruchamia `cargo test`, doctestów, nextest, coverage ani Miri. Nie ma też SQLx ani własnych procedural macros,
-które wymagałyby bramek `cargo sqlx prepare` lub trybuild.
+nie uruchamia `cargo test`, doctestów, nextest, coverage ani Miri. Magazyn batchy używa SQLx dla SQLite
+i PostgreSQL z zapytaniami wykonywanymi w runtime, bez makr `query!`; nie wymaga `cargo sqlx prepare`
+ani połączenia z bazą podczas kompilacji. SQL Server używa Tiberius, a MongoDB oficjalnego drivera.
+Kompilacja tych adapterów nie potwierdza transakcji, migracji, TLS ani recovery na rzeczywistym serwerze.
+Projekt nie ma własnych procedural macros wymagających trybuild.
 
 Wyjątek od advisory wymaga konkretnego ID, uzasadnienia, ograniczenia do istniejących zależności oraz terminu
 ponownego przeglądu. Nie wyłączamy całej kategorii advisory, żeby przepuścić pojedynczy przypadek.

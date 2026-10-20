@@ -21,7 +21,9 @@
 //!       - {device: 5, layers: 25}  # layers 25-49, final norm, lm_head, evidence head
 //! ```
 //!
-//! A model is addressed by the name in its `basal.json` (the `model` field of requests).
+//! A model is addressed by the name in its `basal.json` (the `model` field of requests). The optional durable features
+//! have their own sections: `database:` (`crate::database`, docs/DATABASE.md) and `batches:`
+//! (`serve::batches::config`, docs/BATCHES.md).
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -68,9 +70,17 @@ pub struct ServeConfig {
     /// Collect and expose Prometheus metrics at GET /metrics; disabled unless explicitly enabled.
     #[serde(default)]
     pub metrics: bool,
+    /// Database of the server's durable features (`crate::database`); absent: no database is opened.
+    #[serde(default)]
+    pub(crate) database: Option<crate::database::DatabaseConfig>,
+    /// Durable Batch/Files API; disabled unless explicitly enabled. Uses `database`.
+    #[serde(default)]
+    pub(crate) batches: crate::serve::batches::config::BatchConfig,
     /// Directory of the GEMM tables of `gemm_table: auto`.
     #[serde(default = "default_gemm_cache")]
     pub gemm_cache: PathBuf,
+    /// Required by `basal serve`; administration commands ([`ServeConfig::load_admin`]) accept a file without it.
+    #[serde(default)]
     pub models: Vec<ModelConfig>,
 }
 
@@ -145,6 +155,9 @@ pub struct ModelConfig {
     /// Enable native image/audio processing for an omni model on CUDA.
     #[serde(default)]
     pub media: bool,
+    /// Explicit evidence and memory limits of background batch execution; disabled by default.
+    #[serde(default)]
+    pub(crate) batch_profile: crate::serve::batches::config::BackgroundProfileConfig,
 }
 
 fn default_addr() -> SocketAddr {
@@ -389,14 +402,24 @@ pub fn check_table_on_devices(manifest: &ModelManifest, table: Option<&Path>, pl
 
 impl ServeConfig {
     pub fn load(path: &Path) -> Result<Self> {
-        let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", crate::term::P(&path)))?;
-        Self::parse(&text).with_context(|| format!("parsing {}", crate::term::P(&path)))
+        Self::read(path, true)
     }
 
-    fn parse(text: &str) -> Result<Self> {
+    /// The configuration of administration commands (`basal database`, `basal batches`): the same strict sections,
+    /// but `models` may be absent because nothing is served.
+    pub(crate) fn load_admin(path: &Path) -> Result<Self> {
+        Self::read(path, false)
+    }
+
+    fn read(path: &Path, serving: bool) -> Result<Self> {
+        let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", crate::term::P(&path)))?;
+        Self::parse(&text, serving).with_context(|| format!("parsing {}", crate::term::P(&path)))
+    }
+
+    fn parse(text: &str, serving: bool) -> Result<Self> {
         let c: Self = serde_saphyr::from_str_with_options(text, yaml_options())?;
         ensure_single_document(text)?;
-        ensure!(!c.models.is_empty(), "no models");
+        ensure!(!serving || !c.models.is_empty(), "no models");
         for model in &c.models {
             crate::parse_inference_mode(&model.inference_mode)?;
         }
@@ -406,7 +429,7 @@ impl ServeConfig {
 
     /// Configuration with default options for the given models (`basal serve --model`, the built-in one).
     pub fn for_models(models: Vec<ModelConfig>) -> Self {
-        let mut c = Self::parse("models: [{path: x}]").expect("default configuration");
+        let mut c = Self::parse("models: [{path: x}]", true).expect("default configuration");
         c.models = models;
         c
     }

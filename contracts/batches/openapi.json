@@ -1,0 +1,1354 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Basal Batch and Files API",
+    "version": "0.1.0",
+    "description": "Durable batches of native /v1/basal requests in JSONL files, processed with GPU capacity left by online traffic. OpenAI-like resources and error bodies; the native endpoint, limits, Idempotency-Key and the output_expires_after anchor are local extensions. Served by `basal serve` only when batches are enabled (`--batches` or `batches.enabled`); /v1/basal, /v1/systemone, /v1/models and /health are unchanged and not described here. System One batches (/v1/systemone records), `stream`, and network URLs are not supported. Every resource route needs `Authorization: Bearer <key_id>.<secret>`, also on loopback; /health/batches is unauthenticated; the owner of every resource comes only from the token. Another owner's resource is the same 404 as a missing one. Lists are ordered by created_at, id descending. Times are Unix seconds. This contract is separate from the SDK contracts (contracts/basal, contracts/typesafe) and is not covered by the SDKs.",
+    "license": {
+      "name": "Apache-2.0"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8000"
+    }
+  ],
+  "security": [
+    {
+      "bearer": []
+    }
+  ],
+  "paths": {
+    "/v1/files": {
+      "post": {
+        "operationId": "uploadFile",
+        "summary": "Upload a JSONL input file (streamed, purpose batch)",
+        "description": "Multipart form with exactly the fields below; any other field is a 400. `expires_after[...]` fields must precede the `file` part (the upload session is reserved before the first file byte); `purpose` may come before or after it, and an invalid purpose abandons the upload. The upload is streamed to the artifact store with a bounded buffer; a file above the size limit (default 200000000 bytes) is a 413, also without Content-Length. Quota (bytes, files, open upload sessions) is reserved before the first byte; exhausted quota or too many concurrent uploads is a 429 with Retry-After. The JSONL content is validated asynchronously when a batch uses it. Raw multipart input also has a bounded parser buffer (default 1 MiB) and 64 KiB of framing allowance. An individual transport frame larger than the configured buffer is refused with 413 multipart_too_large even if its multipart contents are valid. One upload deadline covers framing, text, file payload and epilogue; expiry returns 408 upload_timeout. An abandoned session retains its reservation until guarded cleanup.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "file",
+                  "purpose"
+                ],
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "The JSONL file; its part needs a filename of 1-255 bytes without control characters (stored as given, never used as a path)."
+                  },
+                  "purpose": {
+                    "type": "string",
+                    "enum": [
+                      "batch"
+                    ],
+                    "description": "Only `batch`; `batch_output` files are written by the server."
+                  },
+                  "expires_after[anchor]": {
+                    "type": "string",
+                    "enum": [
+                      "created_at"
+                    ]
+                  },
+                  "expires_after[seconds]": {
+                    "type": "integer",
+                    "minimum": 3600,
+                    "maximum": 2592000,
+                    "description": "File lifetime; default 30 days (configurable)."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The stored file.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "429": {
+            "$ref": "#/components/responses/Throttled"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          },
+          "408": {
+            "$ref": "#/components/responses/UploadTimeout"
+          }
+        }
+      },
+      "get": {
+        "operationId": "listFiles",
+        "summary": "List the owner's files",
+        "parameters": [
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/FileId"
+            },
+            "description": "Cursor: the last file id of the previous page (the list continues after it). A malformed, missing or another owner's id is the same 400."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            }
+          },
+          {
+            "name": "purpose",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/FilePurpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of files.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileList"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/v1/files/{file_id}": {
+      "parameters": [
+        {
+          "name": "file_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "$ref": "#/components/schemas/FileId"
+          }
+        }
+      ],
+      "get": {
+        "operationId": "getFile",
+        "summary": "File metadata and retention",
+        "responses": {
+          "200": {
+            "description": "The file.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileObject"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteFile",
+        "summary": "Delete a file (logical; physical removal follows after the download grace)",
+        "description": "New reads answer 404 at once. Downloads already running continue for at most the configured download_max_duration (default 1 h, less than the 2 h download grace). An input file of an active batch is a 409 file_in_use.",
+        "responses": {
+          "200": {
+            "description": "Deleted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletedFile"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/v1/files/{file_id}/content": {
+      "parameters": [
+        {
+          "name": "file_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "$ref": "#/components/schemas/FileId"
+          }
+        }
+      ],
+      "get": {
+        "operationId": "downloadFile",
+        "summary": "Stream the file content",
+        "description": "Streamed with a bounded buffer and checked against the recorded length and SHA-256; a mismatch or the end of download_max_duration ends the transfer with an error instead of a complete body. Result files contain one BatchResultLine per line.",
+        "responses": {
+          "200": {
+            "description": "The file bytes.",
+            "content": {
+              "application/jsonl": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/v1/batches": {
+      "post": {
+        "operationId": "createBatch",
+        "summary": "Create a batch (answers at once with status validating)",
+        "description": "The input file is pinned and the completion reserve (expiry lines of every possible record, result file slots) is reserved; without quota the answer is a 429. expires_at = created_at + 86400 (database clock), covering validation and queueing. Validation, then execution, run asynchronously; an invalid file ends in status failed with errors.data (line numbers), without any inference.",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[!-~]+$"
+            },
+            "description": "Local extension, scoped to the owner and kept while the batch metadata is retained: a replay with the same request data returns the current batch, with different data a 409. After the metadata is purged the key creates a new batch. Without it every create makes a new batch."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateBatchRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The new batch (or the batch of a replayed Idempotency-Key).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Batch"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/Throttled"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      },
+      "get": {
+        "operationId": "listBatches",
+        "summary": "List the owner's batches",
+        "parameters": [
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/BatchId"
+            },
+            "description": "Cursor: the last batch id of the previous page (the list continues after it). A malformed, missing or another owner's id is the same 400."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of batches.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchList"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/v1/batches/{batch_id}": {
+      "parameters": [
+        {
+          "name": "batch_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "$ref": "#/components/schemas/BatchId"
+          }
+        }
+      ],
+      "get": {
+        "operationId": "getBatch",
+        "summary": "Status, counts and result file ids",
+        "responses": {
+          "200": {
+            "description": "The batch.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Batch"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/health/batches": {
+      "get": {
+        "operationId": "batchHealth",
+        "summary": "Aggregate state of the batch service (no authentication)",
+        "security": [],
+        "description": "Storage, artifacts and policy availability, admission, model profiles (fingerprint, planner version, validation and background qualification), execution limits and the backlog per fingerprint. Contains no owners, batch ids, client data, addresses or secrets. 200 when accepting, else 503.",
+        "responses": {
+          "200": {
+            "description": "Accepting.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Degraded or unavailable (online inference is unaffected).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/batches/{batch_id}/cancel": {
+      "parameters": [
+        {
+          "name": "batch_id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "$ref": "#/components/schemas/BatchId"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "cancelBatch",
+        "summary": "Start cancelling (does not wait for the GPU)",
+        "description": "Results accepted before the cancel stay and are exported; records not executed get no synthetic line. A cancel of a terminal batch is an idempotent 200 with the current batch. A cancel after expires_at, when no other end was decided, ends the batch as expired.",
+        "responses": {
+          "200": {
+            "description": "The batch (cancelling, or its terminal state).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Batch"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "<key_id>.<secret>",
+        "description": "Local profile: key id `local`, the token is in the private file `<batch data dir>/local-token` written by the server on its first start. Production: tokens listed by SHA-256 in the server's tokens file. Missing, repeated or wrong tokens are a 401."
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "Malformed control request, unknown field/parameter/option, or unsupported route.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "Missing or invalid bearer token.",
+        "headers": {
+          "WWW-Authenticate": {
+            "schema": {
+              "type": "string",
+              "const": "Bearer"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "No such resource for this owner (missing, another owner's, or malformed id).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "Conflict": {
+        "description": "idempotency_key_reused, or file_in_use.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "PayloadTooLarge": {
+        "description": "The upload exceeds the file size limit (file_too_large), or multipart framing/parser/transport-frame bounds (multipart_too_large).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "Throttled": {
+        "description": "quota_exceeded or concurrency_limit_exceeded. The online 529 overload answer is separate.",
+        "headers": {
+          "Retry-After": {
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "Unavailable": {
+        "description": "The batch database or artifact storage is unavailable, or its schema unknown (batch_service_unavailable). Online inference is unaffected.",
+        "headers": {
+          "Retry-After": {
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "UploadTimeout": {
+        "description": "The request-wide upload deadline elapsed (upload_timeout). Start a new upload. Durable store publication is supervised separately.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "FileId": {
+        "type": "string",
+        "pattern": "^file_[0-9a-f]{32}$",
+        "description": "File id: `file_` + 32 lowercase hex digits of a random UUID v4. Malformed ids are answered like missing resources (404)."
+      },
+      "BatchId": {
+        "type": "string",
+        "pattern": "^batch_[0-9a-f]{32}$",
+        "description": "Batch id: `batch_` + 32 lowercase hex digits of a random UUID v4. Malformed ids are answered like missing resources (404)."
+      },
+      "BatchRequestId": {
+        "type": "string",
+        "pattern": "^batch_req_[0-9a-f]{32}$",
+        "description": "Id of one record of a batch: `batch_req_` + 32 lowercase hex digits of a random UUID v4. Malformed ids are answered like missing resources (404)."
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": [
+              "message",
+              "type",
+              "param",
+              "code"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "message": {
+                "type": "string",
+                "maxLength": 256
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "invalid_request_error",
+                  "rate_limit_error",
+                  "server_error"
+                ]
+              },
+              "param": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "code": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "examples": [
+                      "invalid_api_key",
+                      "invalid_route",
+                      "unknown_parameter",
+                      "unsupported_endpoint",
+                      "unsupported_completion_window",
+                      "invalid_purpose",
+                      "missing_filename",
+                      "invalid_filename",
+                      "file_too_large",
+                      "idempotency_key_reused",
+                      "file_in_use",
+                      "quota_exceeded",
+                      "concurrency_limit_exceeded",
+                      "batch_service_unavailable",
+                      "upload_timeout",
+                      "multipart_too_large"
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "FilePurpose": {
+        "type": "string",
+        "enum": [
+          "batch",
+          "batch_output"
+        ],
+        "description": "batch: uploaded input. batch_output: the output and the error file of a batch, written by the server (read-only), as OpenAI FileObject."
+      },
+      "FileObject": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "object",
+          "bytes",
+          "created_at",
+          "expires_at",
+          "filename",
+          "purpose",
+          "status",
+          "status_details"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/FileId"
+          },
+          "object": {
+            "const": "file"
+          },
+          "bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix seconds."
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "format": "int64",
+                "description": "Unix seconds."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "filename": {
+            "type": "string",
+            "maxLength": 255
+          },
+          "purpose": {
+            "$ref": "#/components/schemas/FilePurpose"
+          },
+          "status": {
+            "const": "processed",
+            "description": "Kept for OpenAI SDK compatibility (deprecated there)."
+          },
+          "status_details": {
+            "type": "null"
+          }
+        }
+      },
+      "DeletedFile": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "object",
+          "deleted"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/FileId"
+          },
+          "object": {
+            "const": "file"
+          },
+          "deleted": {
+            "const": true
+          }
+        }
+      },
+      "FileList": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "object",
+          "data",
+          "first_id",
+          "last_id",
+          "has_more"
+        ],
+        "properties": {
+          "object": {
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FileObject"
+            },
+            "maxItems": 100
+          },
+          "first_id": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FileId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_id": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FileId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "has_more": {
+            "type": "boolean"
+          }
+        }
+      },
+      "Metadata": {
+        "type": "object",
+        "maxProperties": 16,
+        "propertyNames": {
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "additionalProperties": {
+          "type": "string",
+          "maxLength": 512
+        },
+        "description": "Up to 16 pairs; keys 1-64 and values up to 512 characters; duplicate keys are refused; order kept."
+      },
+      "ExpiresAfter": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "anchor",
+          "seconds"
+        ],
+        "properties": {
+          "anchor": {
+            "const": "created_at",
+            "description": "Creation of each result file."
+          },
+          "seconds": {
+            "type": "integer",
+            "minimum": 3600,
+            "maximum": 2592000
+          }
+        }
+      },
+      "CreateBatchRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "input_file_id",
+          "endpoint",
+          "completion_window"
+        ],
+        "properties": {
+          "input_file_id": {
+            "$ref": "#/components/schemas/FileId"
+          },
+          "endpoint": {
+            "const": "/v1/basal",
+            "description": "Only the native endpoint; /v1/systemone is refused (unsupported_endpoint)."
+          },
+          "completion_window": {
+            "const": "24h"
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Metadata"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "output_expires_after": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ExpiresAfter"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "BatchStatus": {
+        "type": "string",
+        "enum": [
+          "validating",
+          "failed",
+          "in_progress",
+          "finalizing",
+          "completed",
+          "expired",
+          "cancelling",
+          "cancelled"
+        ],
+        "description": "validating → failed | in_progress → finalizing → completed; validating/in_progress/finalizing → cancelling → cancelled; validating/in_progress → finalizing → expired. A validated batch waiting for the GPU is in_progress. completed, expired and cancelled are shown only once their result files exist (or are null)."
+      },
+      "RequestCounts": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "total",
+          "completed",
+          "failed"
+        ],
+        "properties": {
+          "total": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "0 until the input is fully validated."
+          },
+          "completed": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "failed": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Includes batch_expired records."
+          }
+        }
+      },
+      "BatchErrorEntry": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "message",
+          "param",
+          "line"
+        ],
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/BatchErrorCode"
+          },
+          "message": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "param": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "line": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "BatchErrorCode": {
+        "type": "string",
+        "description": "Validation and batch-level codes; errors_truncated ends a list cut at its limit (1000 entries). budget_exceeded: the record does not fit the planning slot, the JSON limits or the background forward size of the profile; host_budget_exceeded: it needs more host memory or cost than background admits; unbounded_feature: a media format or shape without a verified bound.",
+        "enum": [
+          "empty_file",
+          "empty_line",
+          "invalid_json_line",
+          "line_too_large",
+          "too_many_records",
+          "invalid_custom_id",
+          "duplicate_custom_id",
+          "invalid_method",
+          "invalid_url",
+          "stream_unsupported",
+          "invalid_body",
+          "model_not_found",
+          "mixed_models",
+          "budget_exceeded",
+          "host_budget_exceeded",
+          "unbounded_feature",
+          "input_changed",
+          "batch_expired",
+          "errors_truncated"
+        ]
+      },
+      "BatchErrors": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "object",
+          "data"
+        ],
+        "properties": {
+          "object": {
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BatchErrorEntry"
+            },
+            "maxItems": 1000
+          }
+        }
+      },
+      "Batch": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "object",
+          "endpoint",
+          "model",
+          "errors",
+          "input_file_id",
+          "completion_window",
+          "status",
+          "output_file_id",
+          "error_file_id",
+          "created_at",
+          "in_progress_at",
+          "expires_at",
+          "finalizing_at",
+          "completed_at",
+          "failed_at",
+          "expired_at",
+          "cancelling_at",
+          "cancelled_at",
+          "request_counts",
+          "metadata"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/BatchId"
+          },
+          "object": {
+            "const": "batch"
+          },
+          "endpoint": {
+            "const": "/v1/basal"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string",
+                "description": "Effective model of the records once resolved."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "errors": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BatchErrors"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "input_file_id": {
+            "$ref": "#/components/schemas/FileId"
+          },
+          "completion_window": {
+            "const": "24h"
+          },
+          "status": {
+            "$ref": "#/components/schemas/BatchStatus"
+          },
+          "output_file_id": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FileId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error_file_id": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FileId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix seconds."
+          },
+          "in_progress_at": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "format": "int64",
+                "description": "Unix seconds."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "expires_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "created_at + 86400: end of the inference window (export may finish later)."
+          },
+          "finalizing_at": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "format": "int64",
+                "description": "Unix seconds."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "format": "int64",
+                "description": "Unix seconds."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "failed_at": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "format": "int64",
+                "description": "Unix seconds."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "expired_at": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "format": "int64",
+                "description": "Unix seconds."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cancelling_at": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "format": "int64",
+                "description": "Unix seconds."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cancelled_at": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "format": "int64",
+                "description": "Unix seconds."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "request_counts": {
+            "$ref": "#/components/schemas/RequestCounts"
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Metadata"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "BatchList": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "object",
+          "data",
+          "first_id",
+          "last_id",
+          "has_more"
+        ],
+        "properties": {
+          "object": {
+            "const": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Batch"
+            },
+            "maxItems": 100
+          },
+          "first_id": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BatchId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_id": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BatchId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "has_more": {
+            "type": "boolean"
+          }
+        }
+      },
+      "BatchInputLine": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "custom_id",
+          "method",
+          "url",
+          "body"
+        ],
+        "description": "One line of an input file (UTF-8; LF or CRLF; the last line may lack its LF; empty lines and empty files are invalid). The body is the native /v1/basal request, kept byte for byte; all lines must resolve to the same model. stream=true is refused.",
+        "properties": {
+          "custom_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "1-256 bytes, unique in the file byte for byte (case and trailing spaces count)."
+          },
+          "method": {
+            "const": "POST"
+          },
+          "url": {
+            "const": "/v1/basal",
+            "description": "A route identifier, never fetched."
+          },
+          "body": {
+            "type": "object",
+            "description": "Native /v1/basal request (contracts/basal/openapi.json)."
+          }
+        }
+      },
+      "BatchResultLine": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "custom_id",
+          "response",
+          "error"
+        ],
+        "description": "One line of the output file (response.status_code 200) or of the error file (other statuses, or no response); both files have purpose batch_output.",
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/BatchRequestId"
+          },
+          "custom_id": {
+            "type": "string"
+          },
+          "response": {
+            "anyOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "status_code",
+                  "request_id",
+                  "body"
+                ],
+                "properties": {
+                  "status_code": {
+                    "type": "integer",
+                    "description": "200, or the native error status (e.g. 422) with its error body."
+                  },
+                  "request_id": {
+                    "$ref": "#/components/schemas/BatchRequestId"
+                  },
+                  "body": {
+                    "type": "object",
+                    "description": "The native /v1/basal answer, as the online endpoint writes it; usage.latency_ms counts from batch creation."
+                  }
+                }
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "code",
+                  "message"
+                ],
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "examples": [
+                      "batch_expired",
+                      "result_too_large",
+                      "host_budget_exceeded",
+                      "execution_failed"
+                    ]
+                  },
+                  "message": {
+                    "type": "string"
+                  }
+                }
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

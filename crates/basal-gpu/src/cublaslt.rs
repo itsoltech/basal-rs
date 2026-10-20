@@ -188,6 +188,24 @@ impl Lt {
             || self.algos.lock().unwrap().keys().any(|key| key.n == n && key.k == k && key.dt == dt)
     }
 
+    /// Every M class of `m` in `1..=max_m` has an algorithm for `(n, k, dt)` without run-time tuning: a batch-invariant
+    /// entry (one algorithm for every M) or a table entry for each class.
+    pub fn covers_classes(&self, n: usize, k: usize, dt: DType, max_m: usize) -> bool {
+        if self.invariant.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains_key(&(n, k, dt)) {
+            return true;
+        }
+        let algos = self.algos.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut m = 1;
+        while m <= max_m.max(1) {
+            let class = m_class(m);
+            if !algos.contains_key(&Key { n, k, m_class: class, dt }) {
+                return false;
+            }
+            m = class + 1;
+        }
+        true
+    }
+
     pub fn is_invariant(&self) -> bool {
         !self.invariant.lock().unwrap().is_empty()
     }

@@ -675,6 +675,15 @@ Metryki są domyślnie wyłączone. Włącza je `basal serve --metrics` albo
 Konfiguracja Prometheusa,
 definicje liczników oraz zapytania p50/p99: [Observability](docs/OBSERVABILITY.md).
 
+Opcjonalne `/v1/batches` i `/v1/files` obsługują trwałe zlecenia JSONL w formacie
+`/v1/basal`, z oknem 24h i pierwszeństwem ruchu online. Funkcja jest domyślnie
+wyłączona; wykonywanie GPU wymaga osobnej kwalifikacji profilu. Lokalny start,
+magazyny SQLite/PostgreSQL/SQL Server/MongoDB, autoryzacja oraz bieżące ograniczenia:
+[Batch API](docs/BATCHES.md). Baza (backend, poświadczenia, TLS, pula, migracje)
+ma osobną, opcjonalną sekcję `database:` i polecenie `basal database migrate`:
+[Baza danych](docs/DATABASE.md). Zgodność numeryczna i obciążenie mieszane batch/online
+pozostają do potwierdzenia na GPU; sama dostępność endpointu ich nie potwierdza.
+
 ```sh
 curl --fail-with-body localhost:8000/v1/systemone -H 'content-type: application/json' -d '{
   "model": "basal-1.5-max",

@@ -18,6 +18,12 @@ reason = "User-approved maintenance exception for paste 1.0.15, a compile-time p
 [licenses]
 allow = ["Apache-2.0", "MIT", "BSD-2-Clause", "BSD-3-Clause", "ISC", "MPL-2.0", "Unicode-3.0", "Zlib"]
 confidence-threshold = 0.93
+# User-approved, version-scoped exceptions for the MongoDB 3.9.1 driver.
+# Keep these narrow: upgrades require checking the dependency licenses again.
+exceptions = [
+    { name = "tiny-keccak", version = "=2.0.2", allow = ["CC0-1.0"] },
+    { name = "webpki-roots", version = "=1.0.9", allow = ["CDLA-Permissive-2.0"] },
+]
 
 [bans]
 # Report version duplication; different major versions may be required by upstream crates.

@@ -8,10 +8,42 @@ use anyhow::{ensure, Context, Result};
 use base64::Engine;
 use serde_json::Value;
 
+use crate::execution::StopToken;
+use crate::planner::{PlanBudget, PlanStage, Reservation, UnboundedFeature};
+
 pub const MAX_ITEMS: usize = 8;
 pub const MAX_BYTES: usize = 20 * 1024 * 1024;
 pub const MAX_PIXELS: u64 = 50_000_000;
 pub const SAMPLE_RATE: u32 = 16000;
+/// `image::Limits::max_alloc` of an image decoder: the transient bound reserved for every image without a proven
+/// smaller format bound.
+pub const DECODER_ALLOC: u64 = 400 * 1024 * 1024;
+/// Ring buffer of symphonia's media source stream (its default `buffer_len`).
+const AUDIO_STREAM_BUFFER: u64 = 64 * 1024;
+/// Allowance for codec state (tables, synthesis/LPC buffers) of the bounded codecs; an estimator constant, not a
+/// measurement.
+const AUDIO_CODEC_STATE: u64 = 4 * 1024 * 1024;
+/// Allowance for the 512-point FFT plan and scratch of the mel analysis; an estimator constant, not a measurement.
+const FFT_SCRATCH: u64 = 1024 * 1024;
+
+/// Reserve the bytes computed by `bytes` for `stage` when planning under a bounded budget; the unbounded path
+/// computes no bound.
+fn reserve(
+    budget: Option<&PlanBudget>,
+    stage: PlanStage,
+    bytes: impl FnOnce() -> u64,
+) -> Result<Option<Reservation<'_>>> {
+    Ok(match budget {
+        Some(b) => Some(b.reserve(stage, bytes())?),
+        None => None,
+    })
+}
+
+fn retain(r: Option<Reservation<'_>>) {
+    if let Some(r) = r {
+        r.retain();
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -165,6 +197,22 @@ impl Processor {
     }
 
     pub fn process(&self, entries: &Value, detail: &str) -> Result<ProcessedMedia> {
+        self.process_with(entries, detail, None)
+    }
+
+    /// [`Processor::process`], optionally under a bounded planning budget: every allocation with a size known in
+    /// advance is reserved first (decoded payload, decoder transients up to [`DECODER_ALLOC`], image buffers,
+    /// resampling scratch, audio PCM and analysis), padded features stay reserved until the end of the plan, and the
+    /// stop token is checked between media. Audio codecs without a verified bound are refused with
+    /// [`UnboundedFeature`]. The decoded values are those of the unbounded path.
+    pub fn process_with(
+        &self,
+        entries: &Value,
+        detail: &str,
+        bounded: Option<(&PlanBudget, Option<&StopToken>)>,
+    ) -> Result<ProcessedMedia> {
+        let budget = bounded.map(|(b, _)| b);
+        let stop = bounded.and_then(|(_, s)| s);
         let max_soft = match detail {
             "default" => 280,
             "high" => 1120,
@@ -177,6 +225,9 @@ impl Processor {
         let mut items = Vec::with_capacity(entries.len());
         let mut processed_bytes = 0usize;
         for (i, entry) in entries.iter().enumerate() {
+            if let Some(stop) = stop {
+                stop.check()?;
+            }
             ensure!(
                 self.audio_enabled || entry.get("type").and_then(Value::as_str) != Some("audio"),
                 "media {i}: this model does not support audio"
@@ -189,16 +240,18 @@ impl Processor {
             let data =
                 if data.starts_with("data:") { data.split_once(',').context("invalid data URL")?.1 } else { data };
             ensure!(data.len().saturating_mul(3) / 4 <= MAX_BYTES, "media {i}: more than 20 MiB");
+            let _raw = reserve(budget, PlanStage::Base64, || (data.len() as u64).saturating_mul(3) / 4 + 3)?;
             let raw = base64::engine::general_purpose::STANDARD
                 .decode(data)
                 .with_context(|| format!("media {i}: invalid base64"))?;
             ensure!(raw.len() <= MAX_BYTES, "media {i}: more than 20 MiB");
             let item = match entry.get("type").and_then(Value::as_str) {
-                Some("image") => {
-                    Input::Image(image(&raw, max_soft, self.unified).with_context(|| format!("media {i}: image"))?)
-                }
+                Some("image") => Input::Image(
+                    image(&raw, max_soft, self.unified, budget).with_context(|| format!("media {i}: image"))?,
+                ),
                 Some("audio") => Input::Audio(
-                    audio(&raw, self.max_audio_seconds, self.unified).with_context(|| format!("media {i}: audio"))?,
+                    audio(&raw, self.max_audio_seconds, self.unified, budget)
+                        .with_context(|| format!("media {i}: audio"))?,
                 ),
                 _ => anyhow::bail!("media {i}: type must be image or audio"),
             };
@@ -216,16 +269,29 @@ impl Processor {
     }
 }
 
-fn image(raw: &[u8], max_soft: usize, unified: bool) -> Result<ImageInput> {
+fn image(raw: &[u8], max_soft: usize, unified: bool, budget: Option<&PlanBudget>) -> Result<ImageInput> {
     use image::ImageDecoder;
+    // padded features depend on `detail` only: reserved before decoding and kept with the plan
+    let features = reserve(budget, PlanStage::ImageFeatures, || {
+        let (size, padded) = if unified { (48u64, max_soft as u64) } else { (16, max_soft as u64 * 9) };
+        padded * size * size * 3 * 4 + padded * 16
+    })?;
     let mut reader = image::ImageReader::new(Cursor::new(raw)).with_guessed_format()?;
     let mut limits = image::Limits::default();
-    limits.max_alloc = Some(400 * 1024 * 1024);
+    // the decoder's own allocations are limited to exactly the reserved transient
+    let transient = reserve(budget, PlanStage::ImageDecoder, || DECODER_ALLOC)?;
+    limits.max_alloc = Some(DECODER_ALLOC);
     reader.limits(limits);
     let decoder = reader.into_decoder()?;
     let (w, h) = decoder.dimensions();
     ensure!(w > 0 && h > 0 && u64::from(w) * u64::from(h) <= MAX_PIXELS, "image exceeds 50 million pixels");
-    let rgb = image::DynamicImage::from_decoder(decoder)?.into_rgb8();
+    // `from_decoder` allocates the decoded buffer outside the decoder limits; `into_rgb8` may convert it
+    let decoded_buffer = reserve(budget, PlanStage::ImageBuffer, || decoder.total_bytes())?;
+    let decoded = image::DynamicImage::from_decoder(decoder)?;
+    drop(transient);
+    let _rgb_buffer = reserve(budget, PlanStage::ImageBuffer, || u64::from(w) * u64::from(h) * 3)?;
+    let rgb = decoded.into_rgb8();
+    drop(decoded_buffer);
     let factor = ((max_soft * 9 * 16 * 16) as f64 / (f64::from(w) * f64::from(h))).sqrt();
     let mut height = ((factor * f64::from(h) / 48.0).floor() as usize) * 48;
     let mut width = ((factor * f64::from(w) / 48.0).floor() as usize) * 48;
@@ -238,6 +304,7 @@ fn image(raw: &[u8], max_soft: usize, unified: bool) -> Result<ImageInput> {
         height = ((h / w) as usize * 48).min(max_soft * 48);
     }
     ensure!(height.checked_mul(width).is_some_and(|n| n <= max_soft * 9 * 16 * 16), "image patch budget exceeded");
+    let _resized = reserve(budget, PlanStage::Bicubic, || bicubic_bound(rgb.width(), rgb.height(), width, height))?;
     let rgb = bicubic_rgb(&rgb, width, height)?;
     let size = if unified { 48 } else { 16 };
     let (pw, ph) = (width / size, height / size);
@@ -261,7 +328,49 @@ fn image(raw: &[u8], max_soft: usize, unified: bool) -> Result<ImageInput> {
             }
         }
     }
+    retain(features);
     Ok(ImageInput { patches, positions, patch_dim: dim, soft_tokens: soft, patch_width: pw, patch_height: ph })
+}
+
+/// Host bytes of [`bicubic_rgb`]: both weight tables (f64 then fixed-point), the cached horizontal rows when they
+/// are cached, the accumulator and the output image (a clone when the size does not change).
+fn bicubic_bound(in_w: u32, in_h: u32, width: usize, height: usize) -> u64 {
+    let out = (width as u64).saturating_mul(height as u64).saturating_mul(3);
+    if (width as u32, height as u32) == (in_w, in_h) {
+        return out;
+    }
+    let weights = |input: u64, output: u64| {
+        let scale = input as f64 / output.max(1) as f64;
+        let max_size = (2.0 * scale.max(1.0)).ceil() as u64 * 2 + 1;
+        output.saturating_mul(32 + 2 * 8 * max_size)
+    };
+    let rows = (in_h as u64).saturating_mul(width as u64).saturating_mul(3);
+    let rows = if rows <= 32 << 20 { rows } else { 0 };
+    out.saturating_add(weights(in_w as u64, width as u64))
+        .saturating_add(weights(in_h as u64, height as u64))
+        .saturating_add(rows)
+        .saturating_add((width as u64).saturating_mul(24))
+}
+
+/// Largest decoded packet (frames) of a codec with a verified bound for bounded planning: PCM and FLAC from the
+/// stream parameters, MPEG audio layers from their fixed frame size. Other codecs (Vorbis setup tables, unknown
+/// packet sizes) are refused.
+fn bounded_packet_frames(params: &symphonia::core::codecs::audio::AudioCodecParameters) -> Result<u64> {
+    use symphonia::core::codecs::audio::well_known as id;
+    let codec = params.codec;
+    let frames = if codec >= id::CODEC_ID_PCM_S32LE && codec <= id::CODEC_ID_PCM_MULAW {
+        params.max_frames_per_packet
+    } else if codec == id::CODEC_ID_FLAC {
+        Some(params.max_frames_per_packet.unwrap_or(65535).min(65535))
+    } else if codec == id::CODEC_ID_MP3 || codec == id::CODEC_ID_MP2 || codec == id::CODEC_ID_MP1 {
+        Some(1152)
+    } else {
+        None
+    };
+    frames.filter(|f| *f > 0 && *f <= 1 << 20).ok_or_else(|| {
+        UnboundedFeature(format!("audio codec {codec} has no verified host memory bound for background planning"))
+            .into()
+    })
 }
 
 /// Torchvision's uint8 antialiased bicubic: Keys (-0.5), normalized boundary weights, horizontal then
@@ -375,10 +484,14 @@ fn resize_weights(input: usize, output: usize) -> (Vec<(usize, Vec<i64>)>, u32) 
     )
 }
 
-fn audio(raw: &[u8], max_seconds: f64, unified: bool) -> Result<AudioInput> {
+fn audio(raw: &[u8], max_seconds: f64, unified: bool, budget: Option<&PlanBudget>) -> Result<AudioInput> {
     use symphonia::core::formats::probe::Hint;
     use symphonia::core::formats::{FormatOptions, TrackType};
     use symphonia::core::io::MediaSourceStream;
+    // the payload copy, the stream ring buffer, packets and metadata (each at most the payload)
+    let _container = reserve(budget, PlanStage::AudioDecoder, || {
+        (raw.len() as u64).saturating_mul(3).saturating_add(AUDIO_STREAM_BUFFER)
+    })?;
     let stream = MediaSourceStream::new(Box::new(Cursor::new(raw.to_vec())), Default::default());
     let mut format =
         symphonia::default::get_probe().probe(&Hint::new(), stream, FormatOptions::default(), Default::default())?;
@@ -387,14 +500,31 @@ fn audio(raw: &[u8], max_seconds: f64, unified: bool) -> Result<AudioInput> {
     let track_id = track.id;
     let rate = params.sample_rate.filter(|r| *r > 0 && *r <= 384000).context("invalid audio sample rate")?;
     ensure!(params.channels.as_ref().is_none_or(|c| c.count() <= 64), "audio has more than 64 channels");
+    // decoder buffer (up to 8 B per sample) and the interleaved f32 copy of the largest packet
+    let packet_samples = match budget {
+        Some(_) => {
+            let channels = params.channels.as_ref().map_or(64, |c| c.count()) as u64;
+            Some(bounded_packet_frames(&params)?.saturating_mul(channels))
+        }
+        None => None,
+    };
+    let _codec = reserve(budget, PlanStage::AudioDecoder, || {
+        packet_samples.unwrap_or(0).saturating_mul(12).saturating_add(AUDIO_CODEC_STATE)
+    })?;
     let mut decoder = symphonia::default::get_codecs().make_audio_decoder(&params, &Default::default())?;
     let limit = (max_seconds * f64::from(rate)).floor() as usize;
+    // mono samples, at most twice the window after growth
+    let _mono = reserve(budget, PlanStage::AudioPcm, || (limit as u64).saturating_mul(8))?;
     let mut mono = Vec::new();
     while let Some(packet) = format.next_packet()? {
         if packet.track_id != track_id {
             continue;
         }
         let decoded = decoder.decode(&packet)?;
+        ensure!(
+            packet_samples.is_none_or(|n| decoded.samples_interleaved() as u64 <= n),
+            "audio packet larger than the codec's declared maximum"
+        );
         ensure!(decoded.spec().rate() == rate, "audio sample rate changes within the stream");
         let channels = decoded.spec().channels().count();
         ensure!(channels > 0 && channels <= 64, "invalid audio channel count");
@@ -411,15 +541,46 @@ fn audio(raw: &[u8], max_seconds: f64, unified: bool) -> Result<AudioInput> {
         }
     }
     ensure!(!mono.is_empty(), "empty audio");
+    let _resampled = reserve(budget, PlanStage::AudioPcm, || resample_bound(mono.len(), rate))?;
     let mono = resample(&mono, rate);
     if unified {
         let frames = mono.len().div_ceil(640);
+        // the resize may move the samples into a new buffer of the padded length
+        let features_reservation =
+            reserve(budget, PlanStage::AudioFeatures, || (frames as u64) * 640 * 4 + frames as u64)?;
         let mut features = mono;
         features.resize(frames * 640, 0.0);
+        retain(features_reservation);
         Ok(AudioInput { features, valid: vec![true; frames], feature_dim: 640, soft_tokens: frames })
     } else {
-        mel(&mono)
+        let features_reservation = reserve(budget, PlanStage::AudioFeatures, || {
+            // frames of `mel`
+            let frames = (mono.len().div_ceil(128) * 128 + 160).saturating_sub(321) / 160 + 1;
+            (frames as u64) * (128 * 4 + 1)
+        })?;
+        // filters, bands, window, FFT buffers and plan
+        let _analysis =
+            reserve(budget, PlanStage::AudioAnalysis, || 257 * 128 * 8 + 257 * 128 * 16 + 512 * 16 + FFT_SCRATCH)?;
+        let input = mel(&mono)?;
+        retain(features_reservation);
+        Ok(input)
     }
+}
+
+/// Host bytes of [`resample`] of `len` samples at `rate`: the output and both tap tables.
+fn resample_bound(len: usize, rate: u32) -> u64 {
+    if rate == SAMPLE_RATE {
+        return len as u64 * 4;
+    }
+    let (mut a, mut b) = (rate, SAMPLE_RATE);
+    while b != 0 {
+        let r = a % b;
+        a = b;
+        b = r;
+    }
+    let (up, down) = (u64::from(SAMPLE_RATE / a), u64::from(rate / a));
+    let taps = 2 * 10 * up.max(down) + 1;
+    (len as u64).saturating_mul(up).div_ceil(down).saturating_mul(4).saturating_add(taps * 12)
 }
 
 fn bessel(x: f64) -> f64 {

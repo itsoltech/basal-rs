@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde-saphyr = { version = "=2.0.0", default-features = false, features = ["deserialize"] }
@@ -23,6 +24,8 @@ hf-hub = { version = "1", features = ["blocking", "rustls-tls"] }
 clap.workspace = true
 tokio = { workspace = true, features = ["fs", "io-std", "io-util", "time"] }
 axum = { workspace = true, features = ["multipart"] }
+hyper-util = { version = "=0.1.21", default-features = false, features = ["server-auto", "service", "tokio"] }
+hyper = { version = "=1.11.1", default-features = false }
 base64 = "0.22"
 flate2 = "1"
 zstd = { version = "0.13", default-features = false }
@@ -32,6 +35,19 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 libc = "0.2"
 libloading = "0.8"
 sha2 = "0.10"
+# Durable Batch API storage; selected at runtime, without a database at build time.
+sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-native-roots", "postgres", "sqlite-bundled"] }
+tiberius = { version = "=0.13.0", default-features = false, features = ["tds80", "rustls"] }
+bb8 = { version = "=0.9.1", default-features = false }
+mongodb = { version = "=3.9.1", default-features = false, features = ["compat-3-3-0", "bson-3", "rustls-tls", "dns-resolver"] }
+object_store = { version = "=0.14.2", default-features = false, features = ["aws"] }
+tokio-util = { version = "=0.7.19", features = ["compat", "io", "rt"] }
+uuid = { version = "=1.27.0", features = ["v4", "serde"] }
+subtle = "=2.6.1"
+getrandom = "=0.4.3"
+bytes = "1"
+futures-util = "0.3"
+rustls = { version = "=0.23.46", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 basal-core = { path = "../basal-core" }
 basal-gpu = { path = "../basal-gpu" }
 

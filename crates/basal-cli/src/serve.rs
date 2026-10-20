@@ -56,6 +56,8 @@ use basal_core::{Backend, DecideError, DeviceHealth, Engine};
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot, Semaphore};
 
+pub(crate) mod batches;
+mod http;
 mod metrics;
 mod systemone;
 use metrics::{LaneMetrics, Metrics, ReplicaMetrics, RequestModel};
@@ -78,6 +80,11 @@ pub struct ServeOptions {
     pub access_log: bool,
     /// Collect and expose Prometheus metrics; disabled by default.
     pub metrics: bool,
+    /// The process database (`database:` or the local Batch default); `None` opens no database. Set whenever
+    /// `batches` is.
+    pub(crate) database: Option<std::sync::Arc<crate::database::Database>>,
+    /// Checked configuration; `None` opens no batch storage and creates no background workers.
+    pub(crate) batches: Option<batches::config::BatchSettings>,
 }
 
 /// One instance of a served model.
@@ -96,6 +103,9 @@ pub struct ServedModel<B: Backend> {
     pub schedule: Schedule,
     /// Requests above this many packed tokens run in a second lane that yields the GPU between layers (0 = one lane).
     pub long_tokens: usize,
+    /// Captured before moving the online engine; hashing and CPU planning are independent of GPU execution.
+    pub(crate) batch_profile: Option<batches::ModelProfile>,
+    pub(crate) batch_qualification: batches::config::BackgroundQualification,
 }
 
 struct Timing {
@@ -123,14 +133,17 @@ struct Job {
     _job_permit: tokio::sync::OwnedSemaphorePermit,
     /// This job counted on its replica (none for a single instance without metrics), until answered or dropped.
     load: Option<Reservation>,
+    /// Announced before queueing on the selected replica; lives through every round and the long lane.
+    online_demand: Option<basal_core::gate::OnlineDemand>,
 }
 
 impl Job {
     /// Release the reservation, then reply: a client that sends its next request as soon as it has the answer finds
     /// the replica's count already lowered. The reply is lost when the client is gone.
     fn answer(self, reply: Reply) {
-        let Self { reply: tx, load, .. } = self;
+        let Self { reply: tx, load, online_demand, .. } = self;
         drop(load);
+        drop(online_demand);
         let _ = tx.send(reply);
     }
 }
@@ -175,11 +188,14 @@ struct ReplicaRoute {
     health: Vec<DeviceHealth>,
     /// Always set in a replica group; for a single instance only with metrics.
     load: Option<Arc<ReplicaLoad>>,
+    /// Every gate of the instance, including all devices of a split.
+    gates: Vec<Arc<Gate>>,
 }
 
 impl ReplicaRoute {
     /// Queue a job; a stopped worker hands it back untouched.
-    fn submit(&self, job: Job) -> std::result::Result<(), Box<Job>> {
+    fn submit(&self, mut job: Job) -> std::result::Result<(), Box<Job>> {
+        job.online_demand = Some(basal_core::gate::OnlineDemand::register(self.gates.iter().cloned()));
         self.tx.send(job).map_err(|e| Box::new(e.0))?;
         if let Some(m) = self.load.as_ref().and_then(|l| l.metrics.as_ref()) {
             m.routed();
@@ -603,11 +619,7 @@ async fn decide(
     // The request's model, or the default one when the field is missing or not a string (/v1/systemone then
     // answers the schema error of the field). Resolved before admission so a 529 also carries the model label;
     // unknown client-provided names keep the empty label.
-    let model = match body.get("model").and_then(Value::as_str) {
-        Some(m) if app.routes.contains_key(m) => Ok(m),
-        Some(m) => Err(m),
-        None => Ok(app.default_model.as_str()),
-    };
+    let model = resolve_model(&body, &app.default_model, |name| app.routes.contains_key(name));
     if let (Some(label), Ok(m)) = (label, model) {
         let _ = label.0.set(m.to_string());
     }
@@ -674,6 +686,7 @@ async fn decide(
         arrived,
         reply: tx,
         load: None,
+        online_demand: None,
         _media_permit: media_permit,
         _large_body_permit: large,
         _job_permit: job_permit,
@@ -713,13 +726,34 @@ async fn decide(
 /// Error answer of an endpoint: upstream: 422 `{"error"}` for every failure; TypeSafe: 422 for schema errors and
 /// requests this runtime does not answer, 400 for the errors the TypeSafe API answers with 400, 500 otherwise.
 fn error_body(dialect: Dialect, e: DecideError) -> Response {
+    let (status, body) = error_parts(dialect, e);
+    error_response(status, body)
+}
+
+/// Select the effective model against the caller's model registry. Batch workers
+/// use the pinned deployment catalog; online uses the locally served routes.
+fn resolve_model<'a>(
+    body: &'a Value,
+    default: &'a str,
+    known: impl FnOnce(&str) -> bool,
+) -> std::result::Result<&'a str, &'a str> {
+    let model = body.get("model").and_then(Value::as_str).unwrap_or(default);
+    if known(model) {
+        Ok(model)
+    } else {
+        Err(model)
+    }
+}
+
+/// Pure native error mapping shared by HTTP and durable batch results.
+fn error_parts(dialect: Dialect, e: DecideError) -> (StatusCode, Value) {
     match e {
-        e if dialect == Dialect::Upstream => error_response(StatusCode::UNPROCESSABLE_ENTITY, e.to_upstream_json()),
-        e @ DecideError::Usage(_) => error_response(StatusCode::BAD_REQUEST, e.to_json()),
+        e if dialect == Dialect::Upstream => (StatusCode::UNPROCESSABLE_ENTITY, e.to_upstream_json()),
+        e @ DecideError::Usage(_) => (StatusCode::BAD_REQUEST, e.to_json()),
         e @ (DecideError::Validation(_) | DecideError::Unsupported(_)) => {
-            error_response(StatusCode::UNPROCESSABLE_ENTITY, e.to_json())
+            (StatusCode::UNPROCESSABLE_ENTITY, e.to_json())
         }
-        e => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_json()),
+        e => (StatusCode::INTERNAL_SERVER_ERROR, e.to_json()),
     }
 }
 
@@ -908,6 +942,57 @@ pub(crate) fn check_admission_limits(max_inflight: usize, max_large_inflight: us
     Ok(())
 }
 
+/// Qualified allowances are configuration, never inferred from free memory. The snapshot only refuses an
+/// allowance when the already-loaded models leave insufficient room for it and the qualified online reserve.
+fn background_limits<B: Backend>(
+    models: &[ServedModel<B>],
+    enabled: bool,
+) -> Result<(batches::device_budget::DeviceBudget, Vec<batches::executor::OnlineReserve>)> {
+    use batches::config::BackgroundQualification;
+    use batches::device_budget::{DeviceBudget, DeviceLimit};
+    let mut policies = std::collections::BTreeMap::<usize, (u64, u64, u64)>::new();
+    if enabled {
+        for model in models {
+            let BackgroundQualification::Qualified {
+                device_bytes,
+                online_reserve_bytes,
+                allocation_granularity_bytes,
+                ..
+            } = model.batch_qualification
+            else {
+                continue;
+            };
+            for device in model.replicas.iter().flat_map(|replica| replica.devices.iter().copied()) {
+                policies
+                    .entry(device)
+                    .and_modify(|policy| {
+                        policy.0 = policy.0.min(device_bytes);
+                        policy.1 = policy.1.max(online_reserve_bytes);
+                        policy.2 = policy.2.max(allocation_granularity_bytes);
+                    })
+                    .or_insert((device_bytes, online_reserve_bytes, allocation_granularity_bytes));
+            }
+        }
+    }
+    let mut limits = Vec::new();
+    let mut reserves = Vec::new();
+    for (device, (background, online, granularity)) in policies {
+        let snapshot = basal_gpu::gpu_memory(device).context("reading qualified batch device capacity")?;
+        let needed = background.checked_add(online).context("qualified device limits overflow")?;
+        anyhow::ensure!(needed <= snapshot.available_bytes,
+            "GPU {device}: qualified background allowance and online reserve exceed available memory after loading models");
+        anyhow::ensure!(granularity <= background, "GPU {device}: incompatible shared background allocation limits");
+        limits.push(DeviceLimit {
+            device,
+            background_bytes: background,
+            allocation_granularity: granularity,
+            online_reserve_bytes: online,
+        });
+        reserves.push(batches::executor::OnlineReserve { device, bytes: online });
+    }
+    Ok((DeviceBudget::new(&limits)?, reserves))
+}
+
 fn serve_inner<B: Backend + Send + 'static>(
     models: Vec<ServedModel<B>>,
     opts: ServeOptions,
@@ -950,11 +1035,19 @@ fn serve_inner<B: Backend + Send + 'static>(
     // holds one of its gates at a time.
     let instances: Vec<(&[usize], usize)> =
         models.iter().flat_map(|m| m.replicas.iter().map(move |r| (r.devices.as_slice(), m.long_tokens))).collect();
+    let background_devices: std::collections::BTreeSet<usize> = models
+        .iter()
+        .filter(|model| {
+            opts.batches.is_some()
+                && matches!(model.batch_qualification, batches::config::BackgroundQualification::Qualified { .. })
+        })
+        .flat_map(|model| model.replicas.iter().flat_map(|replica| replica.devices.iter().copied()))
+        .collect();
     let mut gates: HashMap<usize, Arc<Gate>> = HashMap::new();
     for &(devices, long_tokens) in &instances {
         for &device in devices {
             let on_device = instances.iter().filter(|(ds, _)| ds.contains(&device)).count();
-            if on_device > 1 || long_tokens > 0 {
+            if on_device > 1 || long_tokens > 0 || background_devices.contains(&device) {
                 gates
                     .entry(device)
                     .or_insert_with(|| Arc::new(Gate::new(std::time::Duration::from_millis(opts.long_slice_ms))));
@@ -962,10 +1055,18 @@ fn serve_inner<B: Backend + Send + 'static>(
         }
     }
     let mut threads = Vec::new();
+    let batches_enabled = opts.batches.is_some();
+    let (device_budget, online_reserves) = background_limits(&models, batches_enabled)?;
     let result = (|| -> Result<()> {
         let mut routes = HashMap::new();
+        let mut batch_profiles = Vec::new();
+        let mut background_lanes = Vec::new();
         for m in models {
-            let ServedModel { replicas, max_batch_tokens, schedule, long_tokens } = m;
+            let ServedModel { replicas, max_batch_tokens, schedule, long_tokens, batch_profile, batch_qualification } =
+                m;
+            if let Some(profile) = batch_profile {
+                batch_profiles.push(profile);
+            }
             let name = replicas[0].engine.manifest.name.clone();
             let group = replicas.len() > 1;
             let mut queues = Vec::with_capacity(replicas.len());
@@ -977,10 +1078,39 @@ fn serve_inner<B: Backend + Send + 'static>(
                 let label = if group { format!("{name}-r{index}") } else { name.clone() };
                 let device_gates: Vec<(usize, &Arc<Gate>)> =
                     devices.iter().filter_map(|&d| gates.get(&d).map(|g| (d, g))).collect();
-                let mut health: Vec<DeviceHealth> = engine.backend.device_health().into_iter().collect();
+                let mut health: Vec<DeviceHealth> = engine.backend.work_health().into_iter().collect();
                 let (tx, rx) = mpsc::unbounded_channel();
                 let lane =
                     |kind| Lane::new(schedule, max_batch_tokens, metrics.as_ref().map(|m| m.lane(&name, kind, index)));
+                if batches_enabled {
+                    if let batches::config::BackgroundQualification::Qualified { composition, max_requests, .. } =
+                        &batch_qualification
+                    {
+                        let mut background = engine.fork().with_context(|| format!("{label}: background engine"))?;
+                        background
+                            .configure_background()
+                            .with_context(|| format!("{label}: background configuration"))?;
+                        anyhow::ensure!(device_gates.len() == devices.len(), "background needs every device gate");
+                        for &(device, gate) in &device_gates {
+                            background.backend.set_device_work_class(
+                                device,
+                                gate.clone(),
+                                basal_core::WorkClass::Background,
+                            )?;
+                        }
+                        anyhow::ensure!(
+                            background.background_support().is_supported(),
+                            "{label}: background is unsupported"
+                        );
+                        background_lanes.push(batches::executor::ExecutionLane {
+                            model: name.clone(),
+                            worker: batches::bg_lane::BgLane::start(&label, background)?,
+                            composition_qualified: *composition == batches::config::Composition::Group,
+                            max_requests: *max_requests as usize,
+                            devices: devices.clone(),
+                        });
+                    }
+                }
                 let long = if long_tokens > 0 {
                     let mut le = engine.fork().with_context(|| format!("{label}: second engine for the long lane"))?;
                     anyhow::ensure!(
@@ -992,7 +1122,7 @@ fn serve_inner<B: Backend + Send + 'static>(
                             .set_device_gate(d, gate.clone(), false)
                             .with_context(|| format!("{label}: long lane"))?;
                     }
-                    health.extend(le.backend.device_health());
+                    health.extend(le.backend.work_health());
                     let (ltx, lrx) = std::sync::mpsc::channel();
                     let l = lane("long");
                     threads.push(
@@ -1034,7 +1164,8 @@ fn serve_inner<B: Backend + Send + 'static>(
                         metrics: metrics.as_ref().map(|m| m.replica(&name, index)),
                     })
                 });
-                queues.push(ReplicaRoute { tx, devices, health, load });
+                let instance_gates = device_gates.iter().map(|(_, gate)| Arc::clone(gate)).collect();
+                queues.push(ReplicaRoute { tx, devices, health, load, gates: instance_gates });
             }
             let route = if group {
                 Route::Group { replicas: queues.into_boxed_slice(), next: AtomicUsize::new(0) }
@@ -1043,6 +1174,7 @@ fn serve_inner<B: Backend + Send + 'static>(
             };
             routes.insert(name, route);
         }
+        let batch_default_model = default_model.clone();
         let app = Arc::new(App {
             metrics,
             routes,
@@ -1086,12 +1218,50 @@ fn serve_inner<B: Backend + Send + 'static>(
                     None,
                 ),
             };
+            let bound_addr = listener.local_addr()?;
+            let batch_service = match opts.batches {
+                Some(settings) => {
+                    let database = opts.database.clone().context("the Batch API has no database")?;
+                    Some(
+                        batches::BatchService::start(
+                            settings,
+                            database,
+                            opts.addr,
+                            batch_profiles,
+                            batch_default_model,
+                        )
+                        .await?,
+                    )
+                }
+                None => None,
+            };
+            // Without an enabled consumer, `auto_migrate` still migrates the configured database once at start
+            // (in the background: serving does not wait for it, and shutdown stops it).
+            let database_init = match (&batch_service, opts.database) {
+                (None, Some(database)) if database.settings().auto_migrate => Some(tokio::spawn(async move {
+                    if let Err(e) = database.prepare().await {
+                        crate::warn!("database: {:#}", anyhow::Error::new(e));
+                    }
+                })),
+                _ => None,
+            };
+            let router = match &batch_service {
+                Some(service) => router.merge(service.router()),
+                None => router,
+            };
+            let executor = batch_service.as_ref().map(|service| {
+                batches::executor::Executor::start(service.clone(), background_lanes, device_budget, online_reserves)
+            });
             crate::done!(
                 "serving on http://{} (ready {:.1} s after the start{})",
-                listener.local_addr()?,
+                bound_addr,
                 crate::started().elapsed().as_secs_f64(),
                 if opts.access_log { "; access log on" } else { "" }
             );
+            let http_grace = batch_service
+                .as_ref()
+                .map(|service| std::time::Duration::from_millis(service.settings().leases.shutdown_grace_ms));
+            let stop_batches = batch_service.as_ref().map(|service| service.stopping());
             let shutdown = async move {
                 match stop {
                     Some(stop) => {
@@ -1099,8 +1269,27 @@ fn serve_inner<B: Backend + Send + 'static>(
                     }
                     None => shutdown_signal().await,
                 }
+                if let Some(stopping) = stop_batches {
+                    stopping.cancel();
+                }
             };
-            axum::serve(listener, router).with_graceful_shutdown(shutdown).await.context("HTTP server")
+            let result = match http_grace {
+                Some(grace) => http::serve(listener, router, shutdown, grace).await,
+                None => axum::serve(listener, router).with_graceful_shutdown(shutdown).await,
+            }
+            .context("HTTP server");
+            let execution_result = match executor {
+                Some(executor) => executor.shutdown().await,
+                None => Ok(()),
+            };
+            if let Some(service) = batch_service {
+                service.shutdown().await;
+            }
+            if let Some(init) = database_init {
+                init.abort();
+                let _ = init.await;
+            }
+            result.and(execution_result)
         })?;
         // The router and with it every job queue are gone: the GPU threads finish their batch, return and drop their
         // engines (CUDA resources) before the process exits.

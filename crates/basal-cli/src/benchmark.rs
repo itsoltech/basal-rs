@@ -132,12 +132,16 @@ impl Server {
             long_slice_ms: options.long_slice_ms,
             access_log: false,
             metrics: false,
+            database: None,
+            batches: None,
         };
         let model = ServedModel {
             replicas: vec![Replica { engine, devices }],
             max_batch_tokens: options.max_batch_tokens,
             schedule: options.schedule,
             long_tokens: options.long_tokens,
+            batch_profile: None,
+            batch_qualification: crate::serve::batches::config::BackgroundQualification::not_configured(),
         };
         let (stop, receiver) = oneshot::channel();
         let done = Arc::new(AtomicBool::new(false));

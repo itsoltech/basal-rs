@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use basal_core::architecture::Architecture;
+use basal_core::execution::{BackgroundSupport, ExecutionError, StopToken, WorkClass};
 use basal_core::gate::Gate;
 use basal_core::pack::Packed;
 use basal_core::{Backend, DeviceHealth};
@@ -397,6 +398,81 @@ impl Backend for RuntimeBackend {
             Self::Gemma(b) => b.device_health(),
             #[cfg(all(feature = "intel", not(target_os = "macos")))]
             Self::Intel(b) => b.device_health(),
+        }
+    }
+    fn set_device_work_class(
+        &mut self,
+        device: usize,
+        gate: Arc<Gate>,
+        class: WorkClass,
+    ) -> std::result::Result<(), ExecutionError> {
+        match self {
+            Self::Llama(b) => b.set_device_work_class(device, gate, class),
+            Self::Gemma(b) => b.set_device_work_class(device, gate, class),
+            #[cfg(all(feature = "intel", not(target_os = "macos")))]
+            Self::Intel(b) => b.set_device_work_class(device, gate, class),
+        }
+    }
+    fn background_support(&self, max_forward_tokens: usize) -> BackgroundSupport {
+        match self {
+            Self::Llama(b) => b.background_support(max_forward_tokens),
+            Self::Gemma(b) => b.background_support(max_forward_tokens),
+            #[cfg(all(feature = "intel", not(target_os = "macos")))]
+            Self::Intel(b) => b.background_support(max_forward_tokens),
+        }
+    }
+    fn set_stop_token(&mut self, stop: Option<StopToken>) -> std::result::Result<(), ExecutionError> {
+        match self {
+            Self::Llama(b) => b.set_stop_token(stop),
+            Self::Gemma(b) => b.set_stop_token(stop),
+            #[cfg(all(feature = "intel", not(target_os = "macos")))]
+            Self::Intel(b) => b.set_stop_token(stop),
+        }
+    }
+    fn configure_background(&mut self) -> std::result::Result<(), ExecutionError> {
+        match self {
+            Self::Llama(b) => b.configure_background(),
+            Self::Gemma(b) => b.configure_background(),
+            #[cfg(all(feature = "intel", not(target_os = "macos")))]
+            Self::Intel(b) => b.configure_background(),
+        }
+    }
+    fn work_health(&self) -> Option<DeviceHealth> {
+        match self {
+            Self::Llama(b) => b.work_health(),
+            Self::Gemma(b) => b.work_health(),
+            #[cfg(all(feature = "intel", not(target_os = "macos")))]
+            Self::Intel(b) => b.work_health(),
+        }
+    }
+    fn release_work(&mut self) -> std::result::Result<(), ExecutionError> {
+        match self {
+            Self::Llama(b) => b.release_work(),
+            Self::Gemma(b) => b.release_work(),
+            #[cfg(all(feature = "intel", not(target_os = "macos")))]
+            Self::Intel(b) => b.release_work(),
+        }
+    }
+    fn device_work_bound(&self, shape: &basal_core::planner::DeviceWorkShape) -> basal_core::planner::DeviceWorkBound {
+        match self {
+            Self::Llama(b) => b.device_work_bound(shape),
+            Self::Gemma(b) => b.device_work_bound(shape),
+            #[cfg(all(feature = "intel", not(target_os = "macos")))]
+            Self::Intel(b) => b.device_work_bound(shape),
+        }
+    }
+    fn media_processor(&self) -> Option<Arc<basal_core::media::Processor>> {
+        match self {
+            Self::Gemma(b) => b.media_processor(),
+            _ => None,
+        }
+    }
+    fn host_staging(&self) -> Option<basal_core::planner::HostStaging> {
+        match self {
+            Self::Llama(b) => b.host_staging(),
+            Self::Gemma(b) => b.host_staging(),
+            #[cfg(all(feature = "intel", not(target_os = "macos")))]
+            Self::Intel(b) => b.host_staging(),
         }
     }
 }

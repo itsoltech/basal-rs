@@ -13,6 +13,25 @@ access_log: false                  # one log line per request: [POST] 200 /v1/sy
 metrics: false                     # opt in to Prometheus collection and GET /metrics (also --metrics)
 gemm_cache: .cache/gemm            # tables of `gemm_table: auto`
 
+# Database of the durable features (today the Batch API); none is opened without this section and without an
+# enabled consumer. Backends, credentials, TLS, pool and migrations: docs/DATABASE.md.
+# database:
+#   enabled: true                  # default when the section is written
+#   backend: sqlite                # sqlite | postgresql | mssql | mongodb
+#   path: /var/lib/basal/basal.sqlite3
+#   auto_migrate: true             # default: true for sqlite, false for remote databases
+#   # remote: connection_string_env, migration_connection_string_env, tls: {mode: verify_full}, pool
+#
+# Durable Batch/Files API is off by default. Local: `basal serve --batches` (without `database:` its SQLite file is
+# <batch data dir>/batches.sqlite3); production quota, tokens and procedures: docs/BATCHES.md. GPU background
+# execution additionally needs a measured models[].batch_profile; do not copy unqualified memory or cost
+# coefficients between devices/models.
+# batches:
+#   enabled: true
+#   profile: local
+#   accepting: true                # new uploads and batches
+#   processing: true               # new discovery/validation/execution claims; lifecycle cleanup keeps running
+
 models:
   - repo: Remek/basal-1.5-max      # Hugging Face repository, downloaded at start into HF_HOME (HF_TOKEN if needed)
     revision: be1b5ee7e7a9755a931262fa7fab4f59be0fd03c   # branch, tag or commit (default: main)

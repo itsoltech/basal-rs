@@ -1,0 +1,8 @@
+{
+  "version": 2,
+  "id": "0002_abandonment",
+  "collections": [],
+  "indexes": [
+    {"collection": "batch_items", "name": "items_eligible", "keys": [["owner_id",1],["batch_id",1],["state",1],["eligible_at",1],["line_no",1]]}
+  ]
+}

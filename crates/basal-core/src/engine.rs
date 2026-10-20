@@ -11,10 +11,15 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::decision::{self, answer, calibrate, canonical_average, softmax};
+use crate::execution::{BackgroundSupport, ExecutionError, StopToken, WorkClass};
 use crate::manifest::ModelManifest;
 use crate::pack::{chunks, pack, pack_tree, Packed, TrieSize};
+use crate::planner::{
+    BackendCaps, HostStaging, PlanBudget, PlanCaps, PlanContext, PlanError, PlanOptions, PlanStage, PlannerLoadError,
+    RequestPlanner, TOKENIZER_BYTES_PER_BYTE,
+};
 use crate::prompt::{render_model, ChatStyle, OptionOrders, PromptFormat};
-use crate::request::{check_capability_with_limit, DecideError, Item};
+use crate::request::{DecideError, Item};
 use crate::tokenize::BasalTokenizer;
 
 /// A forward implementation: packed rows in, letter logits (float32, before softmax) of every readout out.
@@ -81,6 +86,74 @@ pub trait Backend {
         bail!("this backend does not support positioned image assets")
     }
     fn end_media(&mut self) {}
+    /// Share device `device` with other engines through `gate` in work class `class`. Default: the online classes
+    /// through [`Backend::set_device_gate`]; [`WorkClass::Background`] is refused, because a backend without
+    /// cooperative stop checks and drained releases cannot honour background controls.
+    fn set_device_work_class(
+        &mut self,
+        device: usize,
+        gate: Arc<crate::gate::Gate>,
+        class: WorkClass,
+    ) -> std::result::Result<(), ExecutionError> {
+        match class {
+            WorkClass::Background => Err(ExecutionError::Unsupported {
+                reason: "this backend has no cooperative background execution".into(),
+            }),
+            online => self
+                .set_device_gate(device, gate, online == WorkClass::OnlineMain)
+                .map_err(|e| ExecutionError::Gate(e.into())),
+        }
+    }
+    /// Whether this backend can run [`WorkClass::Background`] work with forwards of up to `max_forward_tokens`
+    /// tokens. Default: unsupported.
+    fn background_support(&self, max_forward_tokens: usize) -> BackgroundSupport {
+        let _ = max_forward_tokens;
+        BackgroundSupport::Unsupported("this backend has no cooperative background execution".into())
+    }
+    /// Stop token observed at gate entry, resume and every checkpoint of background work (`None` clears it).
+    /// Default: refuses a token, since checkpoints of this backend would not observe it.
+    fn set_stop_token(&mut self, stop: Option<StopToken>) -> std::result::Result<(), ExecutionError> {
+        match stop {
+            None => Ok(()),
+            Some(_) => Err(ExecutionError::Unsupported { reason: "this backend does not observe stop tokens".into() }),
+        }
+    }
+    /// Prepare this backend (a fork) for [`WorkClass::Background`] before its gate is set: no private state
+    /// survives a call except resident weights and pinned prefixes shared with the online engine (a state cache is
+    /// disabled and emptied). Default: refused, so a backend that keeps unknown private state is not used for
+    /// background work.
+    fn configure_background(&mut self) -> std::result::Result<(), ExecutionError> {
+        Err(ExecutionError::Unsupported { reason: "this backend cannot be configured for background work".into() })
+    }
+    /// Health of this backend's own GPU work, also where [`Backend::device_health`] reports none: marked lost when
+    /// the end of its GPU work could not be confirmed. Background work requires it. Default: `device_health`.
+    fn work_health(&self) -> Option<DeviceHealth> {
+        self.device_health()
+    }
+    /// Release device memory of finished or failed calls that the backend frees lazily, without waiting for the
+    /// device. Default: nothing to do (allocations are released when a call returns).
+    fn release_work(&mut self) -> std::result::Result<(), ExecutionError> {
+        Ok(())
+    }
+    /// The media processor shared with forks, for offline planning without the backend ([`PlanCaps`]). Default: none.
+    fn media_processor(&self) -> Option<Arc<crate::media::Processor>> {
+        None
+    }
+    /// Host staging of this backend's calls as linear coefficients, for execution host bounds ([`exec_bound`]).
+    /// Default: unknown (background admission then stays disabled for this backend).
+    ///
+    /// [`exec_bound`]: crate::planner::exec_bound
+    fn host_staging(&self) -> Option<HostStaging> {
+        None
+    }
+    /// Conservative transient device memory of running work of `shape` (one `Engine::run_plans` micro-batch),
+    /// per device, excluding resident weights, pinned prefixes, GEMM workspaces, allocator retention and the online
+    /// reserve ([`crate::planner::DeviceWorkEstimate`]). Default: unknown, so background stays disabled for a
+    /// backend without a source-derived bound.
+    fn device_work_bound(&self, shape: &crate::planner::DeviceWorkShape) -> crate::planner::DeviceWorkBound {
+        let _ = shape;
+        crate::planner::DeviceWorkBound::Unknown("this backend has no source-derived device work bound".into())
+    }
 }
 
 /// Readiness flag shared by a backend and its observers. Once marked lost, the device cannot run requests until
@@ -165,6 +238,8 @@ pub struct Engine<B: Backend> {
     pub large_choice_strategy: crate::large_choice::Strategy,
     /// Keep the joint fit after the first round of grouped large choices in [`PlanOutput::first_round`] (evaluation).
     pub trace_large_choice: bool,
+    /// Stop token of background work, checked between rounds ([`Engine::set_stop_token`]); `None` online.
+    stop: Option<StopToken>,
 }
 
 impl<B: Backend> Engine<B> {
@@ -184,6 +259,7 @@ impl<B: Backend> Engine<B> {
             large_choice: true,
             large_choice_strategy: crate::large_choice::Strategy::DEFAULT,
             trace_large_choice: false,
+            stop: None,
         })
     }
 
@@ -228,77 +304,6 @@ impl<B: Backend> Engine<B> {
             lens.push(n);
         }
         Ok(lens)
-    }
-
-    pub fn prepare(&self, item: Item) -> Result<Prepared> {
-        let orders = self.manifest.orders.count(item.options.len());
-        self.prepare_orders(item, orders)
-    }
-
-    /// [`Engine::prepare`] with the first `orders` option orders only (1: as written; a screening group of a large
-    /// choice).
-    pub fn prepare_orders(&self, item: Item, orders: usize) -> Result<Prepared> {
-        self.prepare_orders_for(item, orders, None)
-    }
-
-    fn prepare_orders_for(
-        &self,
-        item: Item,
-        orders: usize,
-        media: Option<&crate::media::ProcessedMedia>,
-    ) -> Result<Prepared> {
-        let mut p = prepare_protocol(
-            &self.tok,
-            &self.manifest.bos_token,
-            item,
-            self.manifest.prompt_format,
-            self.manifest.chat_style,
-            media,
-        )?;
-        if orders < p.orders.len() {
-            p.orders.truncate(orders);
-            p.packed = pack(&p.orders.iter().map(|o| o.input_ids.clone()).collect::<Vec<_>>());
-        }
-        if self.mark_state {
-            p.state_len = self.state_len(&p)?;
-            p.packed.state_len = p.state_len.min(p.packed.prefix_len);
-        }
-        Ok(p)
-    }
-
-    /// Tokens of the prompt up to and including the state: the common prefix of the item's prompt with two probe
-    /// prompts that keep the state and change the question.
-    fn state_len(&self, p: &Prepared) -> Result<usize> {
-        let it = &p.item;
-        if self.manifest.prompt_format == PromptFormat::Two {
-            if it.state.is_empty() {
-                return Ok(0);
-            }
-            let label = match it.lang {
-                crate::prompt::Lang::Pl => "Stan:\n",
-                crate::prompt::Lang::En => "State:\n",
-            };
-            let needle = format!("{label}{}", it.state);
-            let prompt = &p.orders[0].prompt;
-            let start = prompt.find(&needle).ok_or_else(|| anyhow::anyhow!("state not found in rendered prompt"))?;
-            let prefix = self.tok.encode(&prompt[..start + needle.len()])?;
-            return Ok(prefix.iter().zip(&p.orders[0].input_ids).take_while(|(a, b)| a == b).count());
-        }
-
-        let probe = |q: &str| {
-            self.tok.encode(&render_model(
-                self.manifest.chat_style,
-                self.manifest.prompt_format,
-                &self.manifest.bos_token,
-                &it.state,
-                q,
-                &["x", "y"],
-                it.lang,
-            )?)
-        };
-        let (a, b) = (probe("A")?, probe("B")?);
-        let ids = &p.orders[0].input_ids;
-        Ok(a.iter().zip(&b).zip(ids).take_while(|((x, y), z)| x == y && x == z).count())
     }
 
     pub fn run(&mut self, prepared: &[Prepared], batching: Batching) -> Result<Vec<ItemResult>> {
@@ -398,25 +403,51 @@ impl<B: Backend> Engine<B> {
         ItemResult { letter_logits, probs, p_avg, temperature, p_cal }
     }
 
+    /// Planning options of this engine, for an offline [`RequestPlanner`].
+    pub fn plan_options(&self) -> PlanOptions {
+        PlanOptions {
+            mark_state: self.mark_state,
+            large_choice: self.large_choice,
+            large_choice_strategy: self.large_choice_strategy,
+        }
+    }
+
+    /// Capability snapshot of this engine's backend for offline planning.
+    pub fn plan_caps(&self) -> PlanCaps {
+        PlanCaps::from_backend(&self.backend)
+    }
+
+    /// An offline planner of this engine's model with its own tokenizer (loaded again), options and capabilities.
+    pub fn planner(&self) -> std::result::Result<RequestPlanner, PlannerLoadError> {
+        RequestPlanner::load(self.manifest.clone(), self.plan_options(), self.plan_caps())
+    }
+
+    /// The online planning context: this engine's tokenizer and backend, an unbounded budget, no stop token.
+    fn with_planner<R>(&self, f: impl FnOnce(&PlanContext<'_>) -> R) -> R {
+        let budget = PlanBudget::unbounded();
+        let caps = BackendCaps(&self.backend);
+        let ctx = PlanContext::with_caps(&self.manifest, &self.tok, self.plan_options(), &caps, &budget);
+        f(&ctx)
+    }
+
+    pub fn prepare(&self, item: Item) -> Result<Prepared> {
+        self.with_planner(|p| p.prepare(item))
+    }
+
+    /// [`Engine::prepare`] with the first `orders` option orders only (1: as written; a screening group of a large
+    /// choice).
+    pub fn prepare_orders(&self, item: Item, orders: usize) -> Result<Prepared> {
+        self.with_planner(|p| p.prepare_orders(item, orders))
+    }
+
+    /// Tokens of the prompt up to and including the state (see `PlanContext::state_len`).
+    fn state_len(&self, p: &Prepared) -> Result<usize> {
+        self.with_planner(|c| c.state_len(p))
+    }
+
     /// Parse, validate and prepare a System One request without running the model.
     pub fn prepare_request(&self, body: &Value) -> Result<Vec<Prepared>, DecideError> {
-        if self.manifest.prompt_format == PromptFormat::Two
-            || body.get("media").is_some_and(|v| !v.is_null())
-            || body.get("assets").is_some()
-        {
-            return self.plan_request(body).map(|p| p.prepared);
-        }
-        crate::systemone::check_features(body)?;
-        let req = crate::request::parse_request_for_format(
-            body,
-            crate::request::Dialect::TypeSafe,
-            self.manifest.prompt_format,
-        )?;
-        if req.model != self.manifest.name {
-            return Err(crate::request::api_usage_error(format!("Unknown model: {}", req.model)));
-        }
-        check_capability_with_limit(&req.items, self.manifest.prompt_format.max_options(), false, false)?;
-        Ok(req.items.into_iter().map(|it| self.prepare(it)).collect::<Result<Vec<_>>>()?)
+        self.with_planner(|p| p.prepare_request(body)).map_err(PlanError::into_decide)
     }
 
     /// Validate a request and plan its questions: one readout for 2..=10 options, the grouped strategy for choice
@@ -427,20 +458,7 @@ impl<B: Backend> Engine<B> {
 
     /// [`Engine::plan_request`] for an endpoint dialect (upstream: no model check, 2..10 options only).
     pub fn plan_request_as(&self, body: &Value, dialect: crate::request::Dialect) -> Result<RequestPlan, DecideError> {
-        if dialect == crate::request::Dialect::TypeSafe {
-            crate::systemone::check_features(body)?;
-            // Asset questions are restricted to the TypeSafe primitives before native task expansion.
-            if body.get("assets").is_some() {
-                return self.plan_decision_request_as(body, dialect);
-            }
-        }
-        if let Some(expansion) = crate::tasks::expand(body, self.manifest.prompt_format.max_options())? {
-            let mut plan = self.plan_decision_request_as(&expansion.request, dialect)?;
-            plan.tasks = Some(expansion.plan);
-            Ok(plan)
-        } else {
-            self.plan_decision_request_as(body, dialect)
-        }
+        self.with_planner(|p| p.plan_request_as(body, dialect)).map_err(PlanError::into_decide)
     }
 
     fn plan_decision_request_as(
@@ -448,273 +466,99 @@ impl<B: Backend> Engine<B> {
         body: &Value,
         dialect: crate::request::Dialect,
     ) -> Result<RequestPlan, DecideError> {
-        for field in ["early_exit", "thinking"] {
-            if body.get(field).is_some_and(|v| !v.is_null()) {
-                return Err(DecideError::Unsupported(vec![crate::request::FieldError::new(
-                    vec!["body".into(), field.into()],
-                    format!("{field} is not available in this runtime"),
-                    "unsupported_feature",
-                )]));
-            }
-        }
-        let assets =
-            if dialect == crate::request::Dialect::TypeSafe { crate::systemone::Assets::parse(body)? } else { None };
-        let media = if let Some(assets) = &assets {
-            if !self.backend.media_kinds().contains(&crate::media::Kind::Image) {
-                return Err(crate::systemone::unsupported(
-                    vec!["body".into(), "assets".into()],
-                    "this model/backend does not support images; enable media on an omni CUDA model",
-                ));
-            }
-            let mut processed = self.backend.prepare_media(&assets.entries, "default").map_err(|e| {
-                DecideError::Validation(vec![crate::request::FieldError::new(
-                    vec!["body".into(), "assets".into()],
-                    format!("{e:#}"),
-                    "value_error",
-                )])
-            })?;
-            Arc::make_mut(&mut processed).asset_markers = Some(assets.markers.clone());
-            Some(processed)
-        } else if let Some(entries) = body.get("media").filter(|v| !v.is_null()) {
-            if self.backend.media_kinds().is_empty() {
-                return Err(DecideError::Unsupported(vec![crate::request::FieldError::new(
-                    vec!["body".into(), "media".into()],
-                    "this model/backend does not take media; enable media on an omni CUDA model",
-                    "unsupported_feature",
-                )]));
-            }
-            let detail = body.get("detail").map_or(Some("default"), Value::as_str).ok_or_else(|| {
-                DecideError::Validation(vec![crate::request::FieldError::new(
-                    vec!["body".into(), "detail".into()],
-                    "detail must be default or high",
-                    "value_error",
-                )])
-            })?;
-            Some(self.backend.prepare_media(entries, detail).map_err(|e| {
-                DecideError::Validation(vec![crate::request::FieldError::new(
-                    vec!["body".into(), "media".into()],
-                    format!("{e:#}"),
-                    "value_error",
-                )])
-            })?)
-        } else {
-            None
-        };
-        let mut req = crate::request::parse_request_for_format(body, dialect, self.manifest.prompt_format)?;
-        if let Some(assets) = &assets {
-            assets.apply(body, &mut req.items, self.manifest.prompt_format)?;
-            if let Some(media) = &media {
-                assets.check_prompt_budget(body, &req.items, media, self.manifest.config.max_positions())?;
-            }
-            if self.manifest.prompt_format != PromptFormat::Two || self.manifest.chat_style == ChatStyle::Llama {
-                return Err(crate::systemone::unsupported(
-                    vec!["body".into(), "assets".into()],
-                    "image assets require an omni prompt format",
-                ));
-            }
-        }
-        if dialect == crate::request::Dialect::TypeSafe && req.model != self.manifest.name {
-            return Err(crate::request::api_usage_error(format!("Unknown model: {}", req.model)));
-        }
-        check_capability_with_limit(&req.items, self.manifest.prompt_format.max_options(), self.large_choice, true)?;
-        let ev: Vec<&Item> = req.items.iter().filter(|it| it.evidence).collect();
-        if media.is_some() && !ev.is_empty() {
-            return Err(DecideError::Unsupported(vec![crate::request::FieldError::new(
-                vec!["body".into(), "evidence".into()],
-                "evidence is not available with media",
-                "unsupported_feature",
-            )]));
-        }
-        if !ev.is_empty() {
-            let mut errs = Vec::new();
-            for it in ev {
-                let loc = vec!["body".into(), "questions".into(), it.name.clone().into(), "evidence".into()];
-                if !self.backend.has_evidence() {
-                    errs.push(crate::request::FieldError::new(
-                        loc,
-                        "evidence is not available for this model (no evidence_head.pt)",
-                        "unsupported_feature",
-                    ));
-                } else if !(2..=crate::prompt::MAX_OPTIONS).contains(&it.options.len()) {
-                    errs.push(crate::request::FieldError::new(
-                        loc,
-                        "evidence needs 2 to 10 options",
-                        "unsupported_feature",
-                    ));
-                }
-            }
-            if !errs.is_empty() {
-                return Err(DecideError::Unsupported(errs));
-            }
-        }
-        let mut plan = self.plan_items_with_media(req.items, media)?;
-        if let (Some(media), crate::architecture::Architecture::Gemma4(cfg)) = (&plan.media, &self.manifest.config) {
-            let image_tokens: usize = media
-                .items
-                .iter()
-                .filter(|x| x.kind() == crate::media::Kind::Image)
-                .map(crate::media::Input::soft_tokens)
-                .sum();
-            let audio_tokens: usize = media
-                .items
-                .iter()
-                .filter(|x| x.kind() == crate::media::Kind::Audio)
-                .map(crate::media::Input::soft_tokens)
-                .sum();
-            for p in &plan.prepared {
-                for order in &p.orders {
-                    let expected_images = order
-                        .asset_order
-                        .as_ref()
-                        .map_or(image_tokens, |indices| indices.iter().map(|&i| media.items[i].soft_tokens()).sum());
-                    let expected_audio = if order.asset_order.is_some() { 0 } else { audio_tokens };
-                    if order.input_ids.iter().filter(|id| **id == cfg.image_token).count() != expected_images
-                        || order.input_ids.iter().filter(|id| **id == cfg.audio_token).count() != expected_audio
-                    {
-                        return Err(DecideError::Validation(vec![crate::request::FieldError::new(
-                            vec!["body".into(), "questions".into(), p.item.name.clone().into()],
-                            "extra media placeholders in state, question or options",
-                            "value_error",
-                        )]));
-                    }
-                }
-            }
-        }
-        self.check_context(&plan)?;
-        plan.evidence_limit = req.facts_limit;
-        plan.dialect = dialect;
-        Ok(plan)
-    }
-
-    /// Prompts longer than the model's position limit are refused before the forward (422, "maximum context length",
-    /// the marker benchmark runners read as a capacity limit), not left to fail inside the backend (500).
-    fn check_context(&self, plan: &RequestPlan) -> Result<(), DecideError> {
-        let limit = self.manifest.config.max_positions();
-        let mut errs = Vec::new();
-        for p in &plan.prepared {
-            let possible = if self.manifest.orders == OptionOrders::Auto {
-                Some(prepare_protocol(
-                    &self.tok,
-                    &self.manifest.bos_token,
-                    p.item.clone(),
-                    self.manifest.prompt_format,
-                    self.manifest.chat_style,
-                    plan.media.as_deref(),
-                )?)
-            } else {
-                None
-            };
-            let longest = possible.as_ref().unwrap_or(p).orders.iter().map(|o| o.input_ids.len()).max().unwrap_or(0);
-            if longest > limit {
-                let name = p.item.name.split('#').next().unwrap_or(&p.item.name).to_string();
-                if errs.iter().any(|e: &crate::request::FieldError| e.loc.get(2) == Some(&Value::from(name.clone()))) {
-                    continue;
-                }
-                errs.push(crate::request::FieldError::new(
-                    vec!["body".into(), "questions".into(), name.into()],
-                    format!(
-                        "the prompt has {longest} tokens, more than the maximum context length of {limit} tokens of \
-                         model {}",
-                        self.manifest.name
-                    ),
-                    "context_length_exceeded",
-                ));
-            }
-        }
-        if errs.is_empty() {
-            Ok(())
-        } else {
-            Err(DecideError::Unsupported(errs))
-        }
+        self.with_planner(|p| p.plan_decision_request_as(body, dialect)).map_err(PlanError::into_decide)
     }
 
     /// Plan validated items (see [`Engine::plan_request`]).
     pub fn plan_items(&self, items: Vec<Item>) -> Result<RequestPlan> {
-        self.plan_items_with_media(items, None)
+        self.with_planner(|p| p.plan_items(items)).map_err(|e| match e.into_decide() {
+            DecideError::Internal(e) => e,
+            other => anyhow::Error::new(other),
+        })
     }
 
-    fn plan_items_with_media(
+    /// Whether this engine can run background work (its backend's support for forwards of up to
+    /// `forward_max_tokens`).
+    pub fn background_support(&self) -> BackgroundSupport {
+        self.backend.background_support(self.forward_max_tokens)
+    }
+
+    /// Limits of this engine's execution that bound the device shape of its forwards.
+    pub fn shape_limits(&self) -> crate::planner::ShapeLimits {
+        crate::planner::ShapeLimits {
+            batching: self.request_batching,
+            tree_max_tokens: self.tree_max_tokens,
+            forward_max_tokens: self.forward_max_tokens,
+            max_positions: self.manifest.config.max_positions(),
+            max_options: self.manifest.prompt_format.max_options(),
+            evidence_matches_prompt: self.manifest.chat_style == ChatStyle::Llama,
+            adaptive_orders: self.manifest.orders == OptionOrders::Auto,
+        }
+    }
+
+    /// Upper bounds of the device work of running `plans` together through [`Engine::run_plans`].
+    pub fn device_work_shape(
         &self,
-        items: Vec<Item>,
-        media: Option<Arc<crate::media::ProcessedMedia>>,
-    ) -> Result<RequestPlan> {
-        let mut plan = RequestPlan {
-            tasks: None,
-            prepared: Vec::new(),
-            questions: Vec::new(),
-            evidence_limit: None,
-            dialect: Default::default(),
-            calibration_unvalidated: self.manifest.calibration_unvalidated.is_some(),
-            media,
-        };
-        for mut it in items {
-            it.prompt_format = self.manifest.prompt_format;
-            if let crate::request::Ext::Act(a) = &mut it.ext {
-                a.calibrated = self.manifest.has_calibration() && self.manifest.calibration_unvalidated.is_none();
-                a.threshold = a.max_error.as_ref().and_then(|k| self.manifest.certified(k, a.base));
-            }
-            if let crate::request::Ext::Tool(t) = &mut it.ext {
-                t.threshold =
-                    t.max_error.as_deref().and_then(|k| self.manifest.certified(k, crate::request::QType::Choice));
-            }
-            let keys = it.keys.clone();
-            if let Some(m) = it.multi_spec_mut() {
-                if let Some(fallback) = m.rules.fallback.filter(|_| m.rules.fallback_threshold.is_none()) {
-                    let id = crate::sets::label_set_id(&keys, &m.labels, &keys[fallback])?;
-                    if let Some(threshold) = self
-                        .manifest
-                        .multi_calibration
-                        .get(&id)
-                        .and_then(|v| v.get("fallback_threshold"))
-                        .and_then(Value::as_f64)
-                    {
-                        anyhow::ensure!(
-                            threshold.is_finite() && (0.0..=1.0).contains(&threshold),
-                            "calibration: invalid fallback threshold"
-                        );
-                        m.rules.fallback_threshold = Some(threshold);
-                        m.rules.fallback_threshold_source = Some("calibration");
-                    }
-                }
-            }
-            if let Some(m) = it.multi_spec() {
-                // one yes/no branch per label, each an ordinary noul readout
-                let mut parts = Vec::with_capacity(m.labels.len());
-                for (k, label) in m.labels.iter().enumerate() {
-                    let mut sub = it.clone();
-                    sub.name = format!("{}#{k}", it.name);
-                    sub.kind = crate::request::QType::Noul;
-                    sub.keys = vec!["true".into(), "false".into()];
-                    sub.question = crate::request::multi_question(it.lang, &it.question, label);
-                    sub.ext = crate::request::Ext::None;
-                    parts.push(plan.prepared.len());
-                    let orders = self.manifest.orders.count(sub.options.len());
-                    plan.prepared.push(self.prepare_orders_for(sub, orders, plan.media.as_deref())?);
-                }
-                plan.questions.push(QuestionPlan::Multi { item: it, parts });
-                continue;
-            }
-            if it.options.len() == 1 {
-                // one option or level (choice, score): probability 1 without the model, as the TypeSafe API answers
-                plan.questions.push(QuestionPlan::Fixed(it));
-            } else if it.options.len() <= self.manifest.prompt_format.max_options() {
-                plan.questions.push(QuestionPlan::Direct(plan.prepared.len()));
-                let orders = self.manifest.orders.count(it.options.len());
-                plan.prepared.push(self.prepare_orders_for(it, orders, plan.media.as_deref())?);
-            } else {
-                let groups = crate::large_choice::groups(it.options.len(), self.large_choice_strategy.partitions);
-                let mut parts = Vec::with_capacity(groups.len());
-                for g in &groups {
-                    let mut sub = it.clone();
-                    sub.keys = g.iter().map(|&i| it.keys[i].clone()).collect();
-                    sub.options = g.iter().map(|&i| it.options[i].clone()).collect();
-                    parts.push(plan.prepared.len());
-                    plan.prepared.push(self.prepare_orders(sub, self.large_choice_strategy.screen_orders)?);
-                }
-                plan.questions.push(QuestionPlan::Groups { item: it, groups, parts });
+        plans: &[&RequestPlan],
+    ) -> std::result::Result<crate::planner::DeviceWorkShape, crate::planner::UnmodelledShape> {
+        crate::planner::DeviceWorkShape::from_plans(plans, &self.shape_limits())
+    }
+
+    /// Transient device memory of running `plans` together on this engine's backend, or `Unknown` with the reason.
+    pub fn device_work_bound(&self, plans: &[&RequestPlan]) -> crate::planner::DeviceWorkBound {
+        match self.device_work_shape(plans) {
+            Ok(shape) => self.backend.device_work_bound(&shape),
+            Err(e) => crate::planner::DeviceWorkBound::Unknown(e.to_string()),
+        }
+    }
+
+    /// Stop token of the next background work: checked between engine rounds and passed to the backend, which
+    /// observes it at gate entry, resume and checkpoints. `None` clears it (online work).
+    pub fn set_stop_token(&mut self, stop: Option<StopToken>) -> std::result::Result<(), ExecutionError> {
+        if stop.is_some() {
+            if let BackgroundSupport::Unsupported(reason) = self.background_support() {
+                return Err(ExecutionError::Unsupported { reason });
             }
         }
-        Ok(plan)
+        self.backend.set_stop_token(stop.clone())?;
+        self.stop = stop;
+        Ok(())
+    }
+
+    /// Prepare this engine (a background fork) for background work: [`Backend::configure_background`]. Call it
+    /// before setting the background work class of its devices.
+    pub fn configure_background(&mut self) -> std::result::Result<(), ExecutionError> {
+        if self.backend.work_health().is_none() {
+            return Err(ExecutionError::Unsupported {
+                reason: "this backend reports no health of its GPU work, needed after a failed background call".into(),
+            });
+        }
+        self.backend.configure_background()
+    }
+
+    /// Reset execution state before the next background micro-batch, also after an error or interruption: end any
+    /// media session (its private slot), clear the stop token and release lazily freed device memory
+    /// ([`Backend::release_work`]).
+    ///
+    /// After `run_plans` returned (`Ok` or `Err`) and this succeeded, with the backend configured by
+    /// [`Engine::configure_background`] and its [`Backend::work_health`] not lost: the call's own GPU work is confirmed
+    /// complete and no private device allocation of the call remains held by the engine. Device memory may still
+    /// be retained by the allocator (CUDA memory pool, Metal buffer cache) for reuse; that retention is separate
+    /// from the work estimate. A lost `DeviceHealth` means the end was not confirmed: memory may be retained and
+    /// the device must be treated as unusable (quarantine).
+    pub fn reset_execution(&mut self) -> std::result::Result<(), ExecutionError> {
+        self.backend.end_media();
+        self.stop = None;
+        self.backend.set_stop_token(None)?;
+        self.backend.release_work()
+    }
+
+    /// `Err(Interrupted)` once the background stop token is stopped; always `Ok` online.
+    fn check_stop(&self) -> Result<()> {
+        if let Some(stop) = &self.stop {
+            stop.check()?;
+        }
+        Ok(())
     }
 
     /// Run a plan: one round for direct questions; grouped questions get a second, final round with their strongest
@@ -765,6 +609,7 @@ impl<B: Backend> Engine<B> {
     /// Run the plans of several requests together: the questions of all plans share the forwards of each round
     /// (first round, then the final round of grouped large choices), as a server batches waiting requests.
     pub fn run_plans(&mut self, plans: &[&RequestPlan]) -> Result<Vec<PlanOutput>> {
+        self.check_stop()?;
         let mut outputs = self.run_decision_plans(plans)?;
         if !plans.iter().any(|p| p.tasks.is_some()) {
             return Ok(outputs);
@@ -790,6 +635,7 @@ impl<B: Backend> Engine<B> {
             }
         }
         if !continuations.is_empty() {
+            self.check_stop()?;
             // These are primitive plans only: extraction has exactly one dependent continuation, on this engine.
             let refs: Vec<_> = continuations.iter().collect();
             let second = self.run_decision_plans(&refs)?;
@@ -814,6 +660,7 @@ impl<B: Backend> Engine<B> {
     }
 
     fn run_decision_plans(&mut self, plans: &[&RequestPlan]) -> Result<Vec<PlanOutput>> {
+        self.check_stop()?;
         if plans.iter().any(|p| p.media.is_some()) {
             let mut results = Vec::with_capacity(plans.len());
             for plan in plans {
@@ -854,6 +701,7 @@ impl<B: Backend> Engine<B> {
                         self.manifest.prompt_format,
                         self.manifest.chat_style,
                         None,
+                        None,
                     )?;
                     redo.orders.remove(0);
                     redo.packed = pack(&redo.orders.iter().map(|o| o.input_ids.clone()).collect::<Vec<_>>());
@@ -865,6 +713,7 @@ impl<B: Backend> Engine<B> {
                     reverse.push(redo);
                 }
             }
+            self.check_stop()?;
             let rerun = self.run(&reverse, self.request_batching)?;
             for ((i, p2), r2) in owners.into_iter().zip(&reverse).zip(rerun) {
                 second_tokens[i] = p2.orders[0].input_ids.len();
@@ -922,6 +771,7 @@ impl<B: Backend> Engine<B> {
             if prep.is_empty() {
                 break;
             }
+            self.check_stop()?;
             let res = self.run(&prep, self.request_batching)?;
             for l in large.iter_mut() {
                 if l.finalists.is_none() {
@@ -989,6 +839,9 @@ impl<B: Backend> Engine<B> {
                 first_round.push(first);
             }
             let mut evidence = Vec::with_capacity(finals.len());
+            if finals.iter().any(|(item, _)| item.evidence) {
+                self.check_stop()?;
+            }
             for (item, _) in &finals {
                 evidence.push(if item.evidence { Some(self.evidence_for(item, plan.evidence_limit)?) } else { None });
             }
@@ -1019,8 +872,10 @@ impl<B: Backend> Engine<B> {
 
     fn run_media_plan(&mut self, plan: &RequestPlan) -> Result<PlanOutput> {
         let media = plan.media.as_deref().ok_or_else(|| anyhow::anyhow!("missing media plan"))?;
+        self.check_stop()?;
         self.backend.begin_media(media)?;
         let result = (|| -> Result<PlanOutput> {
+            self.check_stop()?;
             let prompts: Vec<&[u32]> =
                 plan.prepared.iter().flat_map(|p| p.orders.iter().map(|o| o.input_ids.as_slice())).collect();
             let codes: Vec<&[u32]> =
@@ -1053,11 +908,15 @@ impl<B: Backend> Engine<B> {
                             self.manifest.prompt_format,
                             self.manifest.chat_style,
                             Some(media),
+                            None,
                         )?;
                         reverse.orders.remove(0);
                         owners.push(i);
                         redo.push(reverse);
                     }
+                }
+                if !redo.is_empty() {
+                    self.check_stop()?;
                 }
                 let prompts: Vec<&[u32]> = redo.iter().map(|p| p.orders[0].input_ids.as_slice()).collect();
                 let codes: Vec<&[u32]> = redo.iter().map(|p| p.orders[0].letter_ids.as_slice()).collect();
@@ -1175,22 +1034,48 @@ pub fn prepare(tok: &BasalTokenizer, bos: &str, item: Item) -> Result<Prepared> 
 }
 
 pub fn prepare_format(tok: &BasalTokenizer, bos: &str, item: Item, fmt: PromptFormat) -> Result<Prepared> {
-    prepare_protocol(tok, bos, item, fmt, ChatStyle::Llama, None)
+    prepare_protocol(tok, bos, item, fmt, ChatStyle::Llama, None, None)
 }
 
-fn prepare_protocol(
+/// Upper bound of a rendered prompt of `item` with `opts` (template text, the item's strings and media
+/// placeholders), doubled for string growth.
+fn render_bound(bos: &str, item: &Item, opts: &[&str], media: Option<&crate::media::ProcessedMedia>) -> u64 {
+    let text = item.state.len() + item.question.len() + opts.iter().map(|o| o.len() + 8).sum::<usize>();
+    let placeholders: usize = media.map_or(0, |m| {
+        m.items
+            .iter()
+            .map(|x| match x {
+                crate::media::Input::Image(x) => 16 + 9 * x.soft_tokens,
+                crate::media::Input::Audio(x) => 16 + 9 * x.soft_tokens,
+            })
+            .sum()
+    });
+    // the prompt templates are smaller than 16 KiB; asset substitution may repeat placeholders per marker
+    let markers = media.and_then(|m| m.asset_markers.as_ref()).map_or(1, |v| v.len().max(1));
+    (16384 + bos.len() + 2 * text + placeholders * markers) as u64 * 2
+}
+
+/// Prepare the option-order prompts of `item`. With a bounded `budget` every allocation of the prompts, token ids
+/// and packed row is reserved before it is made (retained until the end of the plan); the tokenizer's transient
+/// allocations are reserved for the duration of each encode. `None` keeps the online path without accounting.
+pub(crate) fn prepare_protocol(
     tok: &BasalTokenizer,
     bos: &str,
     mut item: Item,
     fmt: PromptFormat,
     chat: ChatStyle,
     media: Option<&crate::media::ProcessedMedia>,
+    budget: Option<&PlanBudget>,
 ) -> Result<Prepared> {
     item.prompt_format = fmt;
     let k = item.options.len();
     let mut orders = Vec::new();
     for perm in decision::orders(k) {
         let opts: Vec<&str> = perm.iter().map(|&j| item.options[j].as_str()).collect();
+        let mut rendered = match budget {
+            Some(b) => Some(b.reserve(PlanStage::Tokens, render_bound(bos, &item, &opts, media))?),
+            None => None,
+        };
         let mut asset_order = None;
         let prompt = match media {
             Some(media) if media.asset_markers.is_some() => {
@@ -1208,13 +1093,48 @@ fn prepare_protocol(
             }
             None => render_model(chat, fmt, bos, &item.state, &item.question, &opts, item.lang)?,
         };
+        let (ids, transient) = match (budget, rendered.as_mut()) {
+            (Some(b), Some(r)) => {
+                r.fit(PlanStage::Tokens, prompt.capacity() as u64)?;
+                let len = prompt.len() as u64;
+                // token ids (at most one per byte) and letter ids stay with the plan
+                let ids = b.reserve(PlanStage::Tokens, len.saturating_mul(4).saturating_add(64))?;
+                let transient = b.reserve(
+                    PlanStage::Tokens,
+                    len.saturating_mul(TOKENIZER_BYTES_PER_BYTE).saturating_add(len.saturating_mul(2)),
+                )?;
+                (Some(ids), Some(transient))
+            }
+            _ => (None, None),
+        };
         let input_ids = tok.encode(&prompt)?;
         let Some(letter_ids) = tok.code_ids(fmt, &prompt, &input_ids, k)? else {
             bail!("option letters are not single tokens for this tokenizer ({k} options)");
         };
+        drop(transient);
+        if let (Some(mut ids), Some(r)) = (ids, rendered) {
+            ids.fit(
+                PlanStage::Tokens,
+                ((input_ids.capacity() + letter_ids.capacity()) * 4 + perm.capacity() * 8) as u64,
+            )?;
+            ids.retain();
+            r.retain();
+        }
         orders.push(OrderJob { perm, prompt, input_ids, letter_ids, asset_order });
     }
+    let packed_reservation = match budget {
+        Some(b) => {
+            let tokens: u64 = orders.iter().map(|o| o.input_ids.len() as u64).sum();
+            Some(
+                b.reserve(PlanStage::Packed, tokens.saturating_mul(32).saturating_add(orders.len() as u64 * 16 + 256))?,
+            )
+        }
+        None => None,
+    };
     let packed = pack(&orders.iter().map(|o| o.input_ids.clone()).collect::<Vec<_>>());
+    if let Some(r) = packed_reservation {
+        r.retain();
+    }
     Ok(Prepared { item, orders, packed, state_len: 0 })
 }
 
@@ -1269,7 +1189,7 @@ pub enum QuestionPlan {
 
 #[derive(Clone, Debug)]
 pub struct RequestPlan {
-    tasks: Option<crate::tasks::TaskPlan>,
+    pub(crate) tasks: Option<crate::tasks::TaskPlan>,
     pub prepared: Vec<Prepared>,
     pub questions: Vec<QuestionPlan>,
     /// Characters of the request's own state when facts were appended (evidence spans stay inside it).
@@ -1278,6 +1198,10 @@ pub struct RequestPlan {
     pub dialect: crate::request::Dialect,
     pub calibration_unvalidated: bool,
     pub media: Option<Arc<crate::media::ProcessedMedia>>,
+    /// With adaptive option orders: token lengths of the reversed-order prompts an uncertain first-round answer may
+    /// run (computed by the context check, which tokenizes both orders anyway); bounds the device shape of that
+    /// round ([`crate::planner::DeviceWorkShape`]).
+    pub(crate) auto_reverse: Option<crate::planner::ReverseTokens>,
 }
 
 pub fn plan_response(model: &str, plan: &RequestPlan, out: &PlanOutput) -> Result<Value, DecideError> {
