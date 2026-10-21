@@ -93,8 +93,8 @@ macro_rules! string_id {
 }
 
 string_id! {
-    /// Owner of batches, files and quota; set only by the Batch/Files authentication middleware.
-    /// 1–128 bytes of `[A-Za-z0-9._:@-]`; never derived from a token value.
+    /// Storage namespace of batches, files and quota; set by server configuration.
+    /// 1–128 bytes of `[A-Za-z0-9._:@-]`; never derived from request headers.
     OwnerId
 }
 

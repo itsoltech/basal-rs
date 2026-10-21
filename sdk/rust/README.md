@@ -6,6 +6,9 @@ No dependency on the inference engine or GPU libraries. Rust 1.95+; a Tokio runt
 This package is versioned independently. Release tag: `sdk-rust-vX.Y.Z`.
 [Changelog](https://github.com/itsoltech/basal-rs/blob/main/sdk/rust/CHANGELOG.md).
 
+SDK 0.7.0 removes API-key configuration. Remove `api_key`/`apiKey` from client initialization.
+Batch/Files require server 0.1.13+; all callers use its shared storage namespace.
+
 ## Batch and Files API (0.5+)
 
 ### Resource helpers (0.6+)
@@ -36,7 +39,7 @@ while let Some(record) = results.next().await? {
 ```
 
 The complete, compile-checked example is [`examples/batches.rs`](examples/batches.rs).
-Configure `BASAL_BATCH_TOKEN` and optionally `BASAL_BASE_URL`, then run
+Optionally configure `BASAL_BASE_URL`, then run
 `cargo run --example batches -p basal-client` (simplified path), or append `-- input.jsonl` for path A.
 It requires an enabled server and an explicit background execution profile for the selected model.
 
@@ -65,19 +68,16 @@ return recovery context; use the explicit Files path when the application must p
 
 `files().content_with_limit(id, bytes)` overrides only successful download bounds; HTTP errors
 keep the ordinary client-wide byte cap. Resource `list`, `retrieve`, `delete` and `cancel` delegate
-to their flat equivalents and share the same authentication, prefix, TLS and timeout policy.
+to their flat equivalents and share the same prefix, TLS and timeout policy.
 
 ### Existing flat methods
 
-Use a server with batches enabled (basal-rs 0.1.12+) and its Batch bearer token:
+Use a server with batches enabled (basal-rs 0.1.13+); API keys are not supported:
 
 ```rust,no_run
-use basal_client::{Client, ClientOptions, CreateBatchRequest, FileUploadOptions};
+use basal_client::{Client, CreateBatchRequest, FileUploadOptions};
 # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-let token = std::env::var("BASAL_BATCH_TOKEN")?;
-let client = Client::with_options(ClientOptions {
-    api_key: Some(&token), ..Default::default()
-})?;
+let client = Client::new("http://127.0.0.1:8000")?;
 let input = std::fs::read("input.jsonl")?;
 let file = client.upload_file("input.jsonl", &input, FileUploadOptions::default()).await?;
 let batch = client.create_batch(&CreateBatchRequest::new(file.id), Some("import-1")).await?;
@@ -102,7 +102,7 @@ timeout and `max_response_bytes` bound as other requests (default 8 MiB). Increa
 explicit cap to download larger artifacts. The whole response is buffered within that cap.
 No redirects or automatic retries; `Error::Http` retains status/body/Retry-After.
 Batch statuses are strings and unknown response fields are retained for compatibility.
-See [the server's Batch contract](../../docs/BATCHES.md) for authentication, input format
+See [the server's Batch contract](../../docs/BATCHES.md) for input format
 and the best-effort 24-hour window with online traffic priority.
 
 ```sh
@@ -143,7 +143,7 @@ Add `serde_json` directly (`cargo add serde_json --features preserve_order`) to 
 with its `json!` macro.
 
 `models()` reads `/v1/models`. Use `Client::with_options(ClientOptions { ... })`
-for a bearer token or a different timeout. The timeout (default 120 seconds) includes response-body reading.
+for a different timeout or response limit. The timeout (default 120 seconds) includes response-body reading.
 Dropping the request future cancels client-side I/O. Clone/reuse the client to share its connection pool.
 Use the server root (possibly with a proxy prefix), without `/v1`. HTTPS is required except for loopback
 HTTP, suitable for a local server or SSH tunnel. URL credentials/query/fragment are rejected. DNS names

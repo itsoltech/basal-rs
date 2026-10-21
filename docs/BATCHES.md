@@ -1,5 +1,8 @@
 # Batch i Files API
 
+Od serwera 0.1.13 wszystkie endpointy API działają bez uwierzytelniania kluczem API.
+Batch/Files udostępniają wspólne zasoby wszystkim klientom.
+
 Funkcja jest domyślnie wyłączona. Po włączeniu udostępnia trwałe zlecenia JSONL,
 Files API i `/health/batches`. Format rekordu i lifecycle nawiązują do OpenAI Batch API;
 obsługiwanym endpointem rekordu jest obecnie wyłącznie `POST /v1/basal`.
@@ -55,16 +58,14 @@ współbieżnej pamięci online/tła ani innych modeli i topologii.
 basal serve --model mini --batches --batch-data-dir ./batch-data
 ```
 
-Profil `local` używa SQLite i plików w prywatnym katalogu. Serwer nasłuchuje
-na loopback; automatyczny token nie działa przy nasłuchiwaniu na publicznym
-interfejsie. Plik `batch-data/local-token` powstaje raz, z prawami `0600`,
-w katalogu `0700`. Nie dodawaj go ani bazy do Gita. Nie zmieniaj katalogu
-danych pomiędzy restartami, jeżeli chcesz zachować kolejkę i wyniki.
+Profil `local` używa SQLite i plików w prywatnym katalogu. Serwer domyślnie nasłuchuje
+na loopback. Nie tworzy ani nie odczytuje tokenów. Nie dodawaj bazy ani artefaktów do Gita.
+Nie zmieniaj katalogu danych pomiędzy restartami, jeżeli chcesz zachować kolejkę i wyniki.
 
 Bez sekcji głównej `database:` profil `local` używa dotychczasowego pliku
 `<katalog danych>/batches.sqlite3` z automatyczną migracją. Jawna sekcja
 `database:` z `backend: sqlite` i własnym `path` zastępuje ten plik; wtedy
-`--batch-data-dir` dotyczy już tylko artefaktów i tokenu. Przy
+`--batch-data-dir` dotyczy już tylko artefaktów. Przy
 `database.enabled: false` opcja `--batches` nie wybiera innej bazy: serwer
 odmawia startu przed ładowaniem modelu. Szczegóły bazy: [DATABASE.md](DATABASE.md).
 
@@ -84,14 +85,11 @@ domyślny z przypiętej rewizji katalogu, a nie aktualny model w chwili wykonani
 Upload i utworzenie zlecenia to dwie osobne operacje:
 
 ```sh
-BASAL_BATCH_TOKEN=$(cat ./batch-data/local-token)
 curl --fail-with-body http://localhost:8000/v1/files \
-  -H "Authorization: Bearer $BASAL_BATCH_TOKEN" \
   -F purpose=batch -F file=@input.jsonl
 
 # Zastąp file_... identyfikatorem z odpowiedzi uploadu.
 curl --fail-with-body http://localhost:8000/v1/batches \
-  -H "Authorization: Bearer $BASAL_BATCH_TOKEN" \
   -H 'Content-Type: application/json' -H 'Idempotency-Key: import-1' \
   -d '{"input_file_id":"file_...","endpoint":"/v1/basal","completion_window":"24h"}'
 ```
@@ -102,7 +100,7 @@ idempotentną. Klucz należy do uwierzytelnionego właściciela.
 
 ## Trasy i lifecycle
 
-Wszystkie poniższe trasy zasobów wymagają `Authorization: Bearer …`.
+Poniższe trasy zasobów nie wymagają klucza API.
 Nagłówki proxy ani pole właściciela w body nie nadają dostępu do danych.
 Nieistniejący zasób i zasób innego właściciela zwracają ten sam 404.
 Uwierzytelnianie dotychczasowych tras inferencji pozostaje osobną konfiguracją.
@@ -181,7 +179,7 @@ operacji plikowych. Dla S3 skonfiguruj również lifecycle usuwający porzucone
 uploady multipart.
 
 Profil `production` wymaga sekcji głównej `database:` z bazą zdalną oraz jawnych
-artefaktów, tokenów i quota w `batches:`. Profil `local` wymaga SQLite.
+artefaktów, przestrzeni danych i quota w `batches:`. Profil `local` wymaga SQLite.
 Szablony ze wstrzymanym przyjmowaniem i wykonaniem:
 [PostgreSQL](../examples/batches/postgresql.yml),
 [SQL Server](../examples/batches/mssql.yml),
@@ -211,7 +209,7 @@ database:
 batches:
   enabled: true
   profile: production
-  # artifacts, auth i quota jak w szablonie wybranego backendu
+  # artifacts, owner i quota jak w szablonie wybranego backendu
 ```
 
 Przygotowanie produkcyjnej bazy batchy obejmuje schemat oraz zapis limitów
@@ -248,17 +246,22 @@ z ograniczeniem Tiberius. PostgreSQL z podanym plikiem CA używa tego CA jako
 magazynu zaufania. Nazwa hosta jest sprawdzana w obu przypadkach.
 Nie używaj `TrustServerCertificate` jako obejścia konfiguracji certyfikatów.
 
-Token produkcyjny generuje:
+### Wspólna przestrzeń danych i aktualizacja z 0.1.12
 
-```sh
-basal batches token --key-id acme-2026-10 --owner acme
-```
+`batches.owner` wybiera jedną przestrzeń przechowywania dla wszystkich żądań tego serwera;
+domyślnie `local`. To nazwa w bazie i polityce quota, nie tożsamość klienta ani uprawnienie.
+Musi występować w `batches.quota.owners`; lokalne limity powstają automatycznie dla wybranej nazwy.
+Repliki obsługujące ten sam zestaw zasobów powinny mieć tę samą wartość.
+Klient nie może zmienić tej przestrzeni nagłówkiem ani polem żądania.
 
-Token pojawia się raz w wyjściu polecenia; przekazuj go klientowi bezpiecznym
-kanałem. Do prywatnego `tokens_file` zapisz wygenerowany wpis z SHA-256,
-w strukturze `{"version":1,"keys":[…]}`. Każdy owner musi mieć wpis quota.
-Rotacja: uruchom usługę z nowym i starym kluczem tego samego ownera,
-przenieś klientów na nowy klucz, następnie usuń stary i zrestartuj usługę.
+Po aktualizacji usuń sekcję `batches.auth` z konfiguracji: jest teraz nieznanym polem.
+Nie ma komendy `basal batches token` ani pliku tokenu tworzonego przy starcie.
+Stare pliki tokenów pozostają nietknięte i nie są odczytywane.
+Dla dotychczasowego lokalnego wdrożenia zachowaj `owner: local` (wartość domyślna).
+Dla istniejącej produkcyjnej bazy ustaw `owner` na dotychczasową nazwę właściciela, np. `acme`;
+w ten sposób zachowasz dostęp do jego plików i batchy bez migracji danych.
+Dane pozostałych przestrzeni pozostają w bazie; nie są automatycznie łączone ani usuwane.
+Nagłówek `Authorization` nie jest sprawdzany i nie wybiera zasobów.
 
 ### Przygotowanie i uruchomienie batchy
 
@@ -267,8 +270,8 @@ i katalog modeli są inicjalizowane automatycznie.
 
 Przy wdrożeniu produkcyjnym postępuj w tej kolejności:
 
-1. Przygotuj `serve.yml`: bazę i poświadczenia, artefakty, tokeny klientów,
-   ich limity `batches.quota` oraz modele i kwalifikowane profile wykonania.
+1. Przygotuj `serve.yml`: bazę i poświadczenia, artefakty, przestrzeń `batches.owner`,
+   limity `batches.quota` oraz modele i kwalifikowane profile wykonania.
    Przygotuj też `batch-catalog.json` z nazwami i fingerprintami modeli
    tego wdrożenia, zgodnie z opisem poniżej. Dla wielu replik ustaw
    `database.auto_migrate: false`.

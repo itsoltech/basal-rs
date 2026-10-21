@@ -5,6 +5,9 @@ or GPU requirement.
 This package is versioned independently. Release tag: `sdk-csharp-vX.Y.Z`.
 [Changelog](https://github.com/itsoltech/basal-rs/blob/main/sdk/csharp/CHANGELOG.md).
 
+SDK 0.6.0 removes API-key configuration. Remove `api_key`/`apiKey` from client initialization.
+Batch/Files require server 0.1.13+; all callers use its shared storage namespace.
+
 ```sh
 dotnet add package ITSOL.Basal.Client
 ```
@@ -165,8 +168,7 @@ For a completely native request, use the `DecideAsync(JsonObject)` overload. It 
 JSON null fields, including `instructions: null`; null DTO properties are omitted.
 
 `ModelsAsync()` reads `/v1/models`. All methods accept a `CancellationToken`.
-The configurable timeout (default 120 seconds) includes response-body reading. `apiKey` optionally sends a
-bearer token to an authenticating proxy. Use the server root (possibly with a proxy prefix), without `/v1`.
+The configurable timeout (default 120 seconds) includes response-body reading. API keys are not supported. Use the server root (possibly with a proxy prefix), without `/v1`.
 
 The default constructor owns its HTTP connection pool; dispose the SDK client when finished. The constructor
 accepting an existing `HttpClient` leaves ownership to its caller and supports `IHttpClientFactory`. Configure
@@ -198,8 +200,8 @@ and a cancellation token to either the dictionary or object-factory overload; th
 
 Resource helpers (`create`, `wait`, `results`) require SDK 0.5.0+.
 
-Requires a server with the Batch API enabled ([docs/BATCHES.md](https://github.com/itsoltech/basal-rs/blob/main/docs/BATCHES.md)). The same client,
-bearer token, proxy prefix, HTTPS rule, redirect refusal, timeout, cancellation and error types apply.
+Requires server 0.1.13+ with the Batch API enabled ([docs/BATCHES.md](https://github.com/itsoltech/basal-rs/blob/main/docs/BATCHES.md)). The same client,
+proxy prefix, HTTPS rule, redirect refusal, timeout, cancellation and error types apply.
 Batches run native `/v1/basal` records only; each JSONL line is one `BatchInputLine`.
 
 ```csharp
@@ -208,7 +210,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using ITSOL.Basal;
 
-using var client = new BasalClient("http://127.0.0.1:8000", apiKey: token);
+using var client = new BasalClient("http://127.0.0.1:8000");
 var lines = new[]
 {
     new BatchInputLine { CustomId = "ticket-1", Body = JsonNode.Parse("""{"state":"A damaged phone.","questions":{"urgent":{"type":"noul","instructions":"Is it urgent?"}}}""")! },

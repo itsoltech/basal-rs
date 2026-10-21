@@ -8,10 +8,8 @@ use basal_client::{
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let token = std::env::var("BASAL_BATCH_TOKEN")?;
     let base_url = std::env::var("BASAL_BASE_URL").unwrap_or_else(|_| "http://127.0.0.1:8000".into());
-    let client =
-        Client::with_options(ClientOptions { base_url: &base_url, api_key: Some(&token), ..Default::default() })?;
+    let client = Client::with_options(ClientOptions { base_url: &base_url, ..Default::default() })?;
 
     let batch = if let Some(path) = std::env::args().nth(1) {
         // Explicit file input: upload first, then create using its id.

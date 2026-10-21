@@ -1,8 +1,8 @@
 //! HTTP routes of the Batch and Files API.
 //!
-//! Every route except `GET /health/batches` passes the bearer middleware; handlers take the owner only from its
-//! `store::OwnerId` extension and every store call is scoped by it, so another owner's resource is the same 404 as
-//! a missing one. Mutations run as supervised tasks (they finish even when the client disconnects).
+//! Routes do not authenticate callers. All requests use the configured storage namespace through a server-set
+//! `store::OwnerId` extension; every store call stays scoped to it. Mutations run as supervised tasks
+//! (they finish even when the client disconnects).
 //!
 //! Upload (`POST /v1/files`): the session (file slot, session slot, the largest upload plus its object charge) is
 //! reserved before the first byte. The body streams through a bounded buffer into a fresh artifact key and is
@@ -18,13 +18,11 @@ use axum::body::Bytes;
 use axum::extract::multipart::Field;
 use axum::extract::{DefaultBodyLimit, FromRequest, Multipart, Path, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Uri};
-use axum::middleware::from_fn_with_state;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 
 use super::artifacts::{ArtifactKey, ArtifactKind, ArtifactWriter};
-use super::auth::require_owner;
 use super::convert::{self, store_error};
 use super::dto::{
     self, check_cancel_body, check_expires_anchor, check_filename, check_upload_purpose, idempotency_key,
@@ -45,7 +43,6 @@ const MULTIPART_OVERHEAD: u64 = 64 * 1024;
 type ApiResult<T> = Result<T, ApiError>;
 
 pub(super) fn router(shared: Arc<Shared>) -> Router<()> {
-    let auth = Arc::clone(&shared.auth);
     let control = DefaultBodyLimit::max(MAX_CONTROL_BODY_BYTES);
     Router::new()
         .route("/v1/files", get(list_files).post(upload).layer(DefaultBodyLimit::disable()).fallback(unsupported))
@@ -54,7 +51,7 @@ pub(super) fn router(shared: Arc<Shared>) -> Router<()> {
         .route("/v1/batches", get(list_batches).post(create_batch).layer(control).fallback(unsupported))
         .route("/v1/batches/{batch_id}", get(get_batch).fallback(unsupported))
         .route("/v1/batches/{batch_id}/cancel", post(cancel_batch).layer(control).fallback(unsupported))
-        .route_layer(from_fn_with_state(auth, require_owner))
+        .route_layer(Extension(shared.settings.owner.clone()))
         .route("/health/batches", get(health_handler))
         .with_state(shared)
 }

@@ -2,8 +2,7 @@ using ITSOL.Basal;
 
 if (args is ["batch", ..])
 {
-    // The Batch API requires a bearer token.
-    using var batchClient = new BasalClient(apiKey: Environment.GetEnvironmentVariable("BASAL_BATCH_TOKEN"));
+    using var batchClient = new BasalClient();
     await BatchFlows.RunAsync(batchClient);
     return;
 }

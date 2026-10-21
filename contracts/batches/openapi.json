@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Basal Batch and Files API",
-    "version": "0.1.0",
-    "description": "Durable batches of native /v1/basal requests in JSONL files, processed with GPU capacity left by online traffic. OpenAI-like resources and error bodies; the native endpoint, limits, Idempotency-Key and the output_expires_after anchor are local extensions. Served by `basal serve` only when batches are enabled (`--batches` or `batches.enabled`); /v1/basal, /v1/systemone, /v1/models and /health are unchanged and not described here. System One batches (/v1/systemone records), `stream`, and network URLs are not supported. Every resource route needs `Authorization: Bearer <key_id>.<secret>`, also on loopback; /health/batches is unauthenticated; the owner of every resource comes only from the token. Another owner's resource is the same 404 as a missing one. Lists are ordered by created_at, id descending. Times are Unix seconds. This contract is separate from the online contracts (contracts/basal, contracts/typesafe). Batch/Files clients are available in Python, TypeScript/JavaScript and C# SDK 0.4.0+ and Rust SDK 0.5.0+ (basal-rs 0.1.12+).",
+    "version": "0.2.0",
+    "description": "Durable batches of native /v1/basal requests in JSONL files, processed with GPU capacity left by online traffic. OpenAI-like resources and error bodies; the native endpoint, limits, Idempotency-Key and the output_expires_after anchor are local extensions. Served by `basal serve` only when batches are enabled (`--batches` or `batches.enabled`); /v1/basal, /v1/systemone, /v1/models and /health are unchanged and not described here. System One batches (/v1/systemone records), `stream`, and network URLs are not supported. From server 0.1.13 all routes are unauthenticated. All callers share the storage namespace selected by batches.owner (default local); request headers never select it. Lists are ordered by created_at, id descending. Times are Unix seconds. This contract is separate from the online contracts (contracts/basal, contracts/typesafe). Batch/Files clients are available in Python, TypeScript/JavaScript and C# SDK 0.6.0+ and Rust SDK 0.7.0+ (basal-rs 0.1.13+).",
     "license": {
       "name": "Apache-2.0"
     }
@@ -11,11 +11,6 @@
   "servers": [
     {
       "url": "http://127.0.0.1:8000"
-    }
-  ],
-  "security": [
-    {
-      "bearer": []
     }
   ],
   "paths": {
@@ -85,9 +80,6 @@
           "429": {
             "$ref": "#/components/responses/Throttled"
           },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
-          },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           },
@@ -143,9 +135,6 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
-          },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
@@ -180,9 +169,6 @@
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
-          },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
@@ -208,9 +194,6 @@
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
-          },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
           },
           "503": {
             "$ref": "#/components/responses/Unavailable"
@@ -247,9 +230,6 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
-          },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
           },
           "503": {
             "$ref": "#/components/responses/Unavailable"
@@ -309,9 +289,6 @@
           "429": {
             "$ref": "#/components/responses/Throttled"
           },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
-          },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
@@ -356,9 +333,6 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
-          },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
@@ -393,9 +367,6 @@
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
-          },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
@@ -406,7 +377,6 @@
       "get": {
         "operationId": "batchHealth",
         "summary": "Aggregate state of the batch service (no authentication)",
-        "security": [],
         "description": "Storage, artifacts and policy availability, admission, model profiles (fingerprint, planner version, validation and background qualification), execution limits and the backlog per fingerprint. Contains no owners, batch ids, client data, addresses or secrets. 200 when accepting, else 503.",
         "responses": {
           "200": {
@@ -461,9 +431,6 @@
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
-          },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
@@ -472,35 +439,9 @@
     }
   },
   "components": {
-    "securitySchemes": {
-      "bearer": {
-        "type": "http",
-        "scheme": "bearer",
-        "bearerFormat": "<key_id>.<secret>",
-        "description": "Local profile: key id `local`, the token is in the private file `<batch data dir>/local-token` written by the server on its first start. Production: tokens listed by SHA-256 in the server's tokens file. Missing, repeated or wrong tokens are a 401."
-      }
-    },
     "responses": {
       "BadRequest": {
         "description": "Malformed control request, unknown field/parameter/option, or unsupported route.",
-        "content": {
-          "application/json": {
-            "schema": {
-              "$ref": "#/components/schemas/ErrorResponse"
-            }
-          }
-        }
-      },
-      "Unauthorized": {
-        "description": "Missing or invalid bearer token.",
-        "headers": {
-          "WWW-Authenticate": {
-            "schema": {
-              "type": "string",
-              "const": "Bearer"
-            }
-          }
-        },
         "content": {
           "application/json": {
             "schema": {

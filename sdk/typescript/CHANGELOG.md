@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.6.0 — 2026-10-21
+
+- **Breaking:** remove API-key configuration and bearer headers from client initialization.
+  Remove `api_key`/`apiKey` arguments. Batch/Files now require server 0.1.13+ without authentication;
+  all callers share the server-configured storage namespace. Existing create/wait/results flows remain.
+
 ## 0.5.0 — 2026-10-20
 
 - Add `client.files` (`create`, `retrieve`, `list`, `delete`, `content`) and `client.batches` (`create`, `retrieve`,

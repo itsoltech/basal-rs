@@ -262,7 +262,7 @@ dependencies = [
 
 [[package]]
 name = "basal-cli"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "anyhow",
  "axum",
@@ -274,7 +274,6 @@ dependencies = [
  "clap",
  "flate2",
  "futures-util",
- "getrandom 0.4.3",
  "hf-hub",
  "hyper",
  "hyper-util",
@@ -290,7 +289,6 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sqlx",
- "subtle",
  "thiserror 2.0.21",
  "tiberius",
  "tokio",
@@ -301,7 +299,7 @@ dependencies = [
 
 [[package]]
 name = "basal-client"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -318,7 +316,7 @@ dependencies = [
 
 [[package]]
 name = "basal-core"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -336,7 +334,7 @@ dependencies = [
 
 [[package]]
 name = "basal-gpu"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "anyhow",
  "ash",

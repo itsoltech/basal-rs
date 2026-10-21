@@ -7,7 +7,6 @@
 //!   works for the local default database of `basal serve --batches`, which has no `database:` section.
 //! - `doctor`: connection with the runtime account (TLS as configured), schema, installed policy and catalog,
 //!   bounded counters, quota drift and artifact storage, without printing connection strings or client data.
-//! - `token`: a new bearer token and its tokens-file entry (the token is printed once).
 //!
 //! The configuration is the `batches:` and root `database:` sections of the serve configuration (`--config FILE`,
 //! `BASAL_CONFIG` or `basal-serve.yml`; `models` may be absent); without one, the local profile under
@@ -25,11 +24,11 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::database::{Account, DatabaseConfig, DatabaseSettings, Target};
+use crate::serve::batches::artifacts::ArtifactStore;
 use crate::serve::batches::config::{BatchSettings, ValidateContext};
 use crate::serve::batches::store::{
     self, CatalogEntry, CatalogSpec, Fingerprint, InstallOutcome, ModelName, PlannerVersion, SchemaState, Store,
 };
-use crate::serve::batches::{artifacts::ArtifactStore, auth};
 
 #[derive(clap::Args)]
 pub(crate) struct Args {
@@ -63,15 +62,6 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Generate a bearer token for the production tokens file (printed once, never stored by basal)
-    Token {
-        /// Key id of the token (1-64 of A-Z, a-z, 0-9, `_`, `-`)
-        #[arg(long)]
-        key_id: String,
-        /// Owner the token authenticates (must have limits in the quota policy)
-        #[arg(long)]
-        owner: String,
-    },
 }
 
 #[derive(clap::Args)]
@@ -87,7 +77,6 @@ struct Source {
 
 pub(crate) fn run(args: Args) -> Result<()> {
     match args.command {
-        Command::Token { key_id, owner } => token(&key_id, &owner),
         Command::Migrate { source, catalog } => {
             let (settings, database) = settings(&source)?;
             runtime()?.block_on(async {
@@ -122,7 +111,7 @@ fn settings(source: &Source) -> Result<(BatchSettings, DatabaseSettings)> {
     };
     let database = DatabaseConfig::section(config.database.as_ref())?;
     config.batches.apply_cli(true, source.batch_data_dir.clone());
-    let ctx = ValidateContext { listen: config.addr, default_data_dir: crate::paths::data_dir() };
+    let ctx = ValidateContext { default_data_dir: crate::paths::data_dir() };
     let settings = config.batches.validate(&ctx)?.context("the batch configuration is disabled")?;
     let database = settings.database(&database)?;
     Ok((settings, database))
@@ -329,14 +318,5 @@ async fn doctor(settings: &BatchSettings, database: &DatabaseSettings, as_json: 
     if !problems.is_empty() {
         bail!("batch doctor found {} problem(s)", problems.len());
     }
-    Ok(())
-}
-
-fn token(key_id: &str, owner: &str) -> Result<()> {
-    let owner = auth::OwnerId::parse(owner).context("owner ids are 1-64 of a-z, 0-9, `_`, `-`")?;
-    let generated = auth::generate_token(key_id)?;
-    // The token goes to stdout once; only its digest belongs in the tokens file.
-    println!("{}", generated.token.expose());
-    println!("{}", json!({"key_id": key_id, "owner": owner.as_str(), "sha256": generated.sha256}));
     Ok(())
 }

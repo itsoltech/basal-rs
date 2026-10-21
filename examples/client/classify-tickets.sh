@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Usage: bash examples/client/classify-tickets.sh INPUT.jsonl NEW_OUTPUT_DIR
-# INPUT may be - for stdin. BASAL_URL, BASAL_MODEL and BASAL_API_KEY configure HTTP.
+# INPUT may be - for stdin. BASAL_URL and BASAL_MODEL configure HTTP.
 set -euo pipefail
 
 if [[ $# != 2 ]]; then

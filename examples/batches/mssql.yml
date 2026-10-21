@@ -27,9 +27,7 @@ batches:
     region: eu-central-1
     credentials:
       source: aws_default_chain
-  auth:
-    mode: tokens
-    tokens_file: /run/secrets/basal-batch-tokens.json
+  owner: acme  # shared storage namespace for all callers
   quota:
     revision: 1
     installation:

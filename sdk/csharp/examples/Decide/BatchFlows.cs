@@ -3,7 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using ITSOL.Basal;
 
-/// <summary>Both batch submission paths. Run with <c>dotnet run -- batch</c> and <c>BASAL_BATCH_TOKEN</c> against a server with the Batch API enabled.</summary>
+/// <summary>Both batch submission paths. Run with <c>dotnet run -- batch</c> against a server with the Batch API enabled.</summary>
 internal static class BatchFlows
 {
     public static async Task RunAsync(BasalClient client, CancellationToken cancellationToken = default)

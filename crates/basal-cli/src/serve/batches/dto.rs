@@ -112,12 +112,6 @@ impl ApiError {
         Self::invalid_request("Unsupported route or method for the Batch API.").with_code("invalid_route")
     }
 
-    /// 401: no, several or a wrong bearer token.
-    pub(crate) fn unauthorized() -> Self {
-        Self::new(StatusCode::UNAUTHORIZED, "invalid_request_error", "Missing or invalid bearer token.")
-            .with_code("invalid_api_key")
-    }
-
     /// 404: the same answer for a missing resource, another owner's resource and a malformed id.
     pub(crate) fn not_found(resource: Resource) -> Self {
         let name = match resource {
@@ -218,9 +212,6 @@ impl IntoResponse for ApiError {
         let mut response = (self.status, Json(self.body())).into_response();
         if let Some(s) = self.retry_after_s {
             response.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from(s));
-        }
-        if self.status == StatusCode::UNAUTHORIZED {
-            response.headers_mut().insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
         }
         response
     }

@@ -1054,10 +1054,8 @@ fn run() -> Result<()> {
             };
             let database_section = database::DatabaseConfig::section(c.database.as_ref())?;
             c.batches.apply_cli(batches, batch_data_dir);
-            let batch_settings = c.batches.validate(&serve::batches::config::ValidateContext {
-                listen: addr,
-                default_data_dir: paths::data_dir(),
-            })?;
+            let batch_settings =
+                c.batches.validate(&serve::batches::config::ValidateContext { default_data_dir: paths::data_dir() })?;
             // The Batch API uses the root database, or without one its local SQLite default. An enabled root
             // database without an enabled consumer is only migrated at start (with auto_migrate), never otherwise
             // connected.

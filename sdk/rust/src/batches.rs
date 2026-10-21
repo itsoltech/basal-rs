@@ -1,4 +1,4 @@
-//! Durable Batch/Files API. Resources require a bearer token configured through `ClientOptions`.
+//! Durable Batch/Files API. Resources share the server-configured storage namespace without authentication.
 //! Flat methods retain raw JSONL bytes. Resource helpers add opt-in encoding, polling and result parsing.
 
 use std::hash::{BuildHasher, Hasher};

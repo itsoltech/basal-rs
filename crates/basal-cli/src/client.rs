@@ -90,9 +90,6 @@ pub(super) struct ClientArgs {
     /// Model name (BASAL_MODEL, else template/request model, else automatic selection)
     #[arg(long)]
     model: Option<String>,
-    /// Environment variable containing the bearer token; no token is required for a local server
-    #[arg(long, default_value = "BASAL_API_KEY")]
-    key_env: String,
     /// Timeout in seconds per HTTP attempt, including response body
     #[arg(long, default_value_t = 120)]
     timeout: u64,

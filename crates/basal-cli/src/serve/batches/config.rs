@@ -15,7 +15,7 @@
 //!     prefix: prod
 //!     region: eu-central-1
 //!     credentials: {source: aws_default_chain}
-//!   auth: {mode: tokens, tokens_file: /etc/basal/batch-tokens.json}
+//!   owner: acme                      # shared storage namespace; not caller identity
 //!   quota:
 //!     revision: 1
 //!     installation: {max_bytes: 107374182400, max_active_batches: 100, max_retained_batches: 10000,
@@ -28,22 +28,20 @@
 //! [`BatchConfig`] is the strict YAML shape (unknown fields are refused everywhere); [`BatchConfig::validate`] turns
 //! it into [`BatchSettings`] and fails closed. The database, its credentials and migrations are the root `database:`
 //! section; [`BatchSettings::database`] picks the one the Batch API uses. The local profile
-//! (`basal serve --batches`) only uses SQLite and the filesystem, the automatic local token and a loopback listener,
+//! (`basal serve --batches`) only uses SQLite and the filesystem, a shared storage namespace,
 //! with finite default quota; without a root `database:` section its SQLite file is `<data_dir>/batches.sqlite3`.
-//! The production profile needs a remote root database, explicit artifacts, bearer tokens and quota policy. Secrets
+//! The production profile needs a remote root database, explicit artifacts and quota policy. Secrets
 //! (S3 keys) come from one environment variable or one file each, are read only when a component connects, and
 //! never appear in `Debug` output or error messages.
 
 use std::collections::BTreeMap;
-use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use super::auth::OwnerId;
 use super::store;
 use crate::config_support::{absolute, existing_file, invalid, within};
-pub(crate) use crate::config_support::{effective_uid, ensure_private_dir, ConfigError, SecretSource, SecretString};
+pub(crate) use crate::config_support::{effective_uid, ensure_private_dir, ConfigError, SecretSource};
 use crate::database::{DatabaseSection, DatabaseSettings, Target};
 
 const KIB: u64 = 1024;
@@ -68,11 +66,10 @@ const DAY_S: u64 = 86_400;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Profile {
-    /// One machine: SQLite and filesystem artifacts under the data directory, the automatic local token on a
-    /// loopback listener and finite default quota.
+    /// One machine: SQLite and filesystem artifacts under the data directory, with finite default quota.
     #[default]
     Local,
-    /// Shared deployment: PostgreSQL, SQL Server or MongoDB over verified TLS, explicit tokens and quota policy.
+    /// Shared deployment: PostgreSQL, SQL Server or MongoDB over verified TLS, explicit artifacts and quota policy.
     Production,
 }
 
@@ -103,8 +100,9 @@ pub(crate) struct BatchConfig {
     storage: Option<serde::de::IgnoredAny>,
     #[serde(default)]
     artifacts: Option<ArtifactConfig>,
+    /// Shared storage namespace for all callers (default local); must be listed in quota.owners.
     #[serde(default)]
-    auth: Option<AuthConfig>,
+    owner: Option<String>,
     #[serde(default)]
     quota: Option<QuotaConfig>,
     #[serde(default)]
@@ -122,8 +120,6 @@ pub(crate) struct BatchConfig {
 /// What the configuration is checked against.
 #[derive(Clone, Debug)]
 pub(crate) struct ValidateContext {
-    /// Address the HTTP server listens on.
-    pub(crate) listen: SocketAddr,
     /// `paths::data_dir()`: the default parent of the local batch directory.
     pub(crate) default_data_dir: PathBuf,
 }
@@ -139,7 +135,8 @@ pub(crate) struct BatchSettings {
     /// Operator flag: take new discovery, validation and execution claims.
     pub(crate) processing: bool,
     pub(crate) artifacts: ArtifactSettings,
-    pub(crate) auth: AuthSettings,
+    /// Shared storage namespace for every HTTP caller; not authentication.
+    pub(crate) owner: store::OwnerId,
     pub(crate) quota: QuotaPolicy,
     pub(crate) limits: Limits,
     pub(crate) host: HostLimits,
@@ -261,29 +258,16 @@ impl BatchConfig {
                 _ => return Err(invalid("batches.artifacts", "required in the production profile")),
             },
         };
-        let auth = match &self.auth {
-            Some(a) => a.validate(profile, data_dir.as_deref())?,
-            None => match (&data_dir, profile) {
-                (Some(dir), Profile::Local) => AuthSettings::LocalToken { token_file: dir.join("local-token") },
-                _ => return Err(invalid("batches.auth", "required in the production profile (mode: tokens)")),
-            },
-        };
-        if matches!(auth, AuthSettings::LocalToken { .. }) && !ctx.listen.ip().is_loopback() {
-            return Err(invalid(
-                "batches.auth",
-                format!(
-                    "the local token is only accepted on a loopback listener, not {}; use mode: tokens",
-                    ctx.listen
-                ),
-            ));
-        }
+        let owner = store::OwnerId::parse(self.owner.as_deref().unwrap_or("local"))
+            .map_err(|e| invalid("batches.owner", e.to_string()))?;
         let quota = match &self.quota {
             Some(q) => q.validate()?,
-            None if profile == Profile::Local && matches!(auth, AuthSettings::LocalToken { .. }) => {
-                QuotaPolicy::local_default()
-            }
-            None => return Err(invalid("batches.quota", "required unless the local profile uses the local token")),
+            None if profile == Profile::Local => QuotaPolicy::local_default(owner.as_str()),
+            None => return Err(invalid("batches.quota", "required in the production profile")),
         };
+        if quota.owner(owner.as_str()).is_none() {
+            return Err(invalid("batches.owner", "must have an entry in batches.quota.owners"));
+        }
         let limits = self.limits.validate()?;
         let host = self.host.validate()?;
         let execution = self.execution.validate(&limits)?;
@@ -299,7 +283,7 @@ impl BatchConfig {
             accepting: self.accepting.unwrap_or(true),
             processing: self.processing.unwrap_or(true),
             artifacts,
-            auth,
+            owner,
             quota,
             limits,
             host,
@@ -584,65 +568,6 @@ impl S3CredentialsConfig {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// Authentication
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum AuthMode {
-    LocalToken,
-    Tokens,
-}
-
-/// `batches.auth`: the automatic local token or a production file of hashed bearer tokens. There is no mode without
-/// authentication.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AuthConfig {
-    mode: AuthMode,
-    #[serde(default)]
-    token_file: Option<PathBuf>,
-    #[serde(default)]
-    tokens_file: Option<PathBuf>,
-}
-
-/// Checked `batches.auth`.
-#[derive(Clone, Debug)]
-pub(crate) enum AuthSettings {
-    /// Owner `local`; the server creates the token file on its first start (only on a loopback listener).
-    LocalToken { token_file: PathBuf },
-    /// JSON file `{"version":1,"keys":[{"key_id","owner","sha256"}]}` (see `auth.rs`).
-    Tokens { tokens_file: PathBuf },
-}
-
-impl AuthConfig {
-    fn validate(&self, profile: Profile, data_dir: Option<&Path>) -> Result<AuthSettings, ConfigError> {
-        match self.mode {
-            AuthMode::LocalToken => {
-                if profile == Profile::Production {
-                    return Err(invalid("batches.auth.mode", "production uses mode: tokens"));
-                }
-                if self.tokens_file.is_some() {
-                    return Err(invalid("batches.auth.tokens_file", "only for mode: tokens"));
-                }
-                let token_file = match (&self.token_file, data_dir) {
-                    (Some(p), _) => absolute("batches.auth.token_file", p)?,
-                    (None, Some(dir)) => dir.join("local-token"),
-                    (None, None) => return Err(invalid("batches.auth.token_file", "required without data_dir")),
-                };
-                Ok(AuthSettings::LocalToken { token_file })
-            }
-            AuthMode::Tokens => {
-                if self.token_file.is_some() {
-                    return Err(invalid("batches.auth.token_file", "only for mode: local_token"));
-                }
-                let path = self.tokens_file.as_ref().ok_or_else(|| invalid("batches.auth.tokens_file", "required"))?;
-                Ok(AuthSettings::Tokens { tokens_file: absolute("batches.auth.tokens_file", path)? })
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------------------------------------------
 // Quota policy
 
 /// Limits of one owner, or (as `installation`) of the whole deployment.
@@ -694,9 +619,9 @@ pub(crate) struct QuotaPolicy {
 }
 
 impl QuotaPolicy {
-    /// Policy of the local profile: owner `local` with 10 GiB, 10 active batches, 1000 retained batches and files,
+    /// Policy of the local profile: the configured namespace with 10 GiB, 10 active batches, 1000 retained batches and files,
     /// 2 open upload sessions; revision 1.
-    pub(crate) fn local_default() -> Self {
+    pub(crate) fn local_default(owner: &str) -> Self {
         let limits = OwnerLimits {
             max_bytes: 10 * GIB,
             max_active_batches: 10,
@@ -709,7 +634,7 @@ impl QuotaPolicy {
             object_charge_bytes: default_object_charge(),
             item_overhead_bytes: default_item_overhead(),
             installation: limits,
-            owners: BTreeMap::from([(super::auth::LOCAL_OWNER.to_string(), limits)]),
+            owners: BTreeMap::from([(owner.to_owned(), limits)]),
         }
     }
 
@@ -787,10 +712,10 @@ impl QuotaConfig {
         check("batches.quota.installation".into(), &self.installation)?;
         let mut sum = [0u128; 5];
         for (name, limits) in &self.owners {
-            if OwnerId::parse(name).is_none() {
+            if store::OwnerId::parse(name).is_err() {
                 return Err(invalid(
                     format!("batches.quota.owners.{}", name.escape_debug()),
-                    "owner ids are 1-64 of a-z, 0-9, `_`, `-`, starting with a letter or digit",
+                    "owner ids are 1-128 bytes of A-Z, a-z, 0-9, `._:@-`",
                 ));
             }
             check(format!("batches.quota.owners.{name}"), limits)?;

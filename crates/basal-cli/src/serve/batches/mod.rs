@@ -10,7 +10,6 @@
 //! 503, and `/health` keeps its GPU semantics (`/health/batches` reports this service).
 
 pub(crate) mod artifacts;
-pub(crate) mod auth;
 pub(crate) mod config;
 pub(crate) mod dto;
 pub(crate) mod store;

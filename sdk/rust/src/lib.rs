@@ -26,7 +26,7 @@ use hyper_util::{
     rt::{TokioExecutor, TokioTimer},
 };
 
-use http::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE, RETRY_AFTER, USER_AGENT};
+use http::header::{HeaderMap, HeaderValue, ACCEPT, CONTENT_TYPE, RETRY_AFTER, USER_AGENT};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -317,7 +317,7 @@ pub struct ModelsResponse {
 /// Typed SDK failures. Display and Debug omit response bodies and transport details.
 #[non_exhaustive]
 pub enum Error {
-    /// Invalid URL, timeout, response limit or bearer token.
+    /// Invalid URL, timeout or response limit.
     InvalidConfig(&'static str),
     /// Invalid typed question or ergonomic request.
     InvalidRequest(&'static str),
@@ -377,12 +377,10 @@ impl std::error::Error for Error {
     }
 }
 
-/// Connection configuration. The API key is intentionally not printable through `Debug`.
+/// Connection configuration.
 pub struct ClientOptions<'a> {
     /// Server root, optionally with a proxy prefix, without `/v1`.
     pub base_url: &'a str,
-    /// Optional bearer token; required by the server's Batch/Files API or an authenticating proxy.
-    pub api_key: Option<&'a str>,
     /// Whole HTTP request timeout, including response-body reading.
     pub timeout: Duration,
     /// Maximum response bytes (default 8 MiB), including error bodies.
@@ -393,7 +391,6 @@ impl Default for ClientOptions<'_> {
     fn default() -> Self {
         Self {
             base_url: "http://127.0.0.1:8000",
-            api_key: None,
             timeout: Duration::from_secs(120),
             max_response_bytes: 8 * 1024 * 1024,
         }
@@ -441,15 +438,6 @@ impl Client {
         let mut headers = HeaderMap::new();
         headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
         headers.insert(USER_AGENT, HeaderValue::from_static(concat!("basal-client-rust/", env!("CARGO_PKG_VERSION"))));
-        if let Some(key) = options.api_key {
-            if key.is_empty() || key.contains(['\r', '\n']) {
-                return Err(Error::InvalidConfig("api_key must be a nonempty, single-line token"));
-            }
-            let mut value = HeaderValue::from_str(&format!("Bearer {key}"))
-                .map_err(|_| Error::InvalidConfig("invalid bearer token"))?;
-            value.set_sensitive(true);
-            headers.insert(AUTHORIZATION, value);
-        }
         let connector = HttpsConnectorBuilder::new()
             .with_provider_and_platform_verifier(rustls::crypto::ring::default_provider())
             .map_err(|source| Error::Transport(Box::new(source)))?

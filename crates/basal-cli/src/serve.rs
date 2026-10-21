@@ -1222,16 +1222,7 @@ fn serve_inner<B: Backend + Send + 'static>(
             let batch_service = match opts.batches {
                 Some(settings) => {
                     let database = opts.database.clone().context("the Batch API has no database")?;
-                    Some(
-                        batches::BatchService::start(
-                            settings,
-                            database,
-                            opts.addr,
-                            batch_profiles,
-                            batch_default_model,
-                        )
-                        .await?,
-                    )
+                    Some(batches::BatchService::start(settings, database, batch_profiles, batch_default_model).await?)
                 }
                 None => None,
             };

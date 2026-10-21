@@ -6,6 +6,9 @@ Node.js 22+ or modern browsers with `fetch` and `AbortController`. No runtime de
 This package is versioned independently. Release tag: `sdk-typescript-vX.Y.Z`.
 [Changelog](https://github.com/itsoltech/basal-rs/blob/main/sdk/typescript/CHANGELOG.md).
 
+SDK 0.6.0 removes API-key configuration. Remove `api_key`/`apiKey` from client initialization.
+Batch/Files require server 0.1.13+; all callers use its shared storage namespace.
+
 ```sh
 npm i @itsoltech/basal-client
 ```
@@ -44,7 +47,7 @@ rejects before dispatch; the SDK deadline rejects even if an adapter fails to ho
 but such an adapter may continue its own network I/O.
 
 `models()` reads `/v1/models`. Each method optionally takes an `AbortSignal`.
-`timeoutMs` includes response-body reading. `apiKey` optionally sends a bearer token to a reverse proxy.
+`timeoutMs` includes response-body reading. API keys are not supported.
 Use the server root (possibly with a proxy prefix), without `/v1`. HTTPS is required except for loopback
 HTTP (localhost, 127.0.0.1, ::1), suitable for a local server or SSH tunnel. URL credentials/query/fragment
 are rejected. Requests omit cookies and use `cache: "no-store"`.
@@ -63,7 +66,7 @@ so use textual keys (e.g. `low`, `high`) or an ordered score array. Evidence off
 points; use the returned text, or `Array.from(state).slice(start, end).join("")` for textual states.
 
 In browsers, the server/proxy must support your origin through CORS. Basal-rs does not enable CORS by default.
-Keep private API keys in server-side code.
+The SDK does not configure API-key authentication.
 
 Factories and concrete classes cover `choice`, `noul`, `score`, `multi`, `act`. The two-argument
 `decide(state, questions, {model, facts, signal})` infers exact question IDs, answer types, choice keys
@@ -80,15 +83,14 @@ retains the native JSON without those defaults. The one-argument raw `decide(req
 Resource helpers (`create`, `wait`, `results`) require SDK 0.5.0+.
 
 Requires a Basal server with the Batch API enabled ([docs/BATCHES.md](https://github.com/itsoltech/basal-rs/blob/main/docs/BATCHES.md)).
-Every Batch and Files route needs `apiKey` set to a batch token `<key_id>.<secret>`, also on loopback; the owner
-of every file and batch comes from that token. Records are native `/v1/basal` requests; the SDK only transfers files and controls batches.
+Requires server 0.1.13+; every caller shares its configured Batch/Files storage namespace without authentication. Records are native `/v1/basal` requests; the SDK only transfers files and controls batches.
 `client.files` and `client.batches` follow the OpenAI resource names and workflow (upload, create, retrieve, download).
 That compatibility is in naming and workflow only: records are native Basal requests, not OpenAI chat payloads.
 
 ```typescript
 import { BasalBatchSubmissionError, BasalClient, batchInput, buildRequest, choice, parseBatchResults } from "@itsoltech/basal-client";
 
-const client = new BasalClient({ baseUrl: "https://basal.example.com", apiKey: "<key_id>.<secret>" });
+const client = new BasalClient({ baseUrl: "https://basal.example.com" });
 const body = buildRequest("Klient prosi o zwrot.", { department: choice("Dział?", { returns: "Zwroty", support: "Wsparcie" }) }, {});
 
 // Simplified: records in, terminal batch and records out.
@@ -158,7 +160,7 @@ The flat methods below remain available with unchanged behavior. They never poll
 ```typescript
 import { BasalClient, batchInput, buildRequest, choice, parseBatchResults } from "@itsoltech/basal-client";
 
-const client = new BasalClient({ baseUrl: "https://basal.example.com", apiKey: "<key_id>.<secret>" });
+const client = new BasalClient({ baseUrl: "https://basal.example.com" });
 const body = buildRequest("Klient prosi o zwrot.", { department: choice("Dział?", { returns: "Zwroty", support: "Wsparcie" }) }, {});
 const file = await client.uploadFile({ file: batchInput([{ custom_id: "ticket-1", body }]), filename: "tickets.jsonl" });
 const batch = await client.createBatch({ input_file_id: file.id, metadata: { source: "tickets" } }, { idempotencyKey: "tickets-2026-10-20" });

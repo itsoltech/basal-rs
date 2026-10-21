@@ -43,8 +43,6 @@ mongodb = { version = "=3.9.1", default-features = false, features = ["compat-3-
 object_store = { version = "=0.14.2", default-features = false, features = ["aws"] }
 tokio-util = { version = "=0.7.19", features = ["compat", "io", "rt"] }
 uuid = { version = "=1.27.0", features = ["v4", "serde"] }
-subtle = "=2.6.1"
-getrandom = "=0.4.3"
 bytes = "1"
 futures-util = "0.3"
 rustls = { version = "=0.23.46", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }

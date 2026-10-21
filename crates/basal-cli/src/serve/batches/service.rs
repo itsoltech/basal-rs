@@ -1,7 +1,6 @@
 //! The batch service of one process: startup, shared state, store connection, health and shutdown.
 
 use std::future::Future;
-use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Duration;
 
@@ -11,7 +10,6 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use super::artifacts::{ArtifactError, ArtifactStore};
-use super::auth::{AuthError, AuthStartup, Authenticator};
 use super::budget::HostPool;
 use super::config::{BackgroundQualification, BatchSettings, ConfigError, Profile};
 use super::dto::{ApiError, Throttle};
@@ -34,19 +32,15 @@ impl Drop for StoppingSupervisors {
     }
 }
 
-/// Starting the service failed for a local reason (configuration, auth files, artifact directory, profiles).
+/// Starting the service failed for a local reason (configuration, artifact directory, profiles).
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum StartError {
     #[error(transparent)]
     Config(#[from] ConfigError),
-    #[error(transparent)]
-    Auth(#[from] AuthError),
     #[error("batch artifacts: {0}")]
     Artifacts(#[source] ArtifactError),
     #[error("batch planning threads")]
     Planning(#[source] std::io::Error),
-    #[error("batch startup task stopped")]
-    Task,
 }
 
 /// Availability of one dependency, for health and admission.
@@ -89,7 +83,6 @@ pub(super) struct Shared {
     pub(super) store_settings: StoreSettings,
     pub(super) policy_spec: QuotaPolicySpec,
     pub(super) default_model: String,
-    pub(super) auth: Arc<Authenticator>,
     pub(super) artifacts: ArtifactStore,
     store: RwLock<Option<Store>>,
     profiles: RwLock<Vec<Arc<ResolvedProfile>>>,
@@ -226,34 +219,19 @@ pub(crate) struct BatchService {
 
 impl BatchService {
     /// Start the service inside the Tokio runtime, before the HTTP server. Only local problems fail (configuration,
-    /// auth files, the artifact directory, planning threads). An unreachable database or remote storage starts the
+    /// the artifact directory, planning threads). An unreachable database or remote storage starts the
     /// service degraded: the new routes answer 503 until it connects. The database's automatic schema migration
     /// (`database.auto_migrate`, [`Database::prepare`]) finishes before the store is published to workers. There is
     /// never a fallback to another database.
     pub(crate) async fn start(
         settings: BatchSettings,
         database: Arc<Database>,
-        listen: SocketAddr,
         profiles: Vec<ModelProfile>,
         default_model: String,
     ) -> Result<Arc<Self>, StartError> {
         // Both rustls providers are in the dependency graph; the drivers need one process default.
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let policy_spec = settings.quota.to_store_spec(&settings.limits)?;
-        let (auth_settings, quota) = (settings.auth.clone(), settings.quota.clone());
-        let (auth, startup) = tokio::task::spawn_blocking(move || Authenticator::load(&auth_settings, listen, &quota))
-            .await
-            .map_err(|_| StartError::Task)??;
-        match startup {
-            AuthStartup::LocalToken { path, created } => crate::note!(
-                "batch API: local bearer token {} {}",
-                if created { "written to" } else { "read from" },
-                crate::term::P(&path)
-            ),
-            AuthStartup::Tokens { keys, owners } => {
-                crate::note!("batch API: {keys} bearer token(s) of {owners} owner(s)")
-            }
-        }
         let buffer = usize::try_from(settings.host.upload_buffer_bytes).unwrap_or(1 << 20);
         let artifacts = ArtifactStore::open(&settings.artifacts, buffer).await.map_err(StartError::Artifacts)?;
         let limits = PlanLimits::new(
@@ -272,7 +250,6 @@ impl BatchService {
             store_settings: settings.store_settings(),
             policy_spec,
             default_model,
-            auth: Arc::new(auth),
             artifacts,
             store: RwLock::new(None),
             profiles: RwLock::new(Vec::new()),
@@ -300,7 +277,7 @@ impl BatchService {
         Ok(service)
     }
 
-    /// The Batch/Files routes (bearer auth on them only) and `GET /health/batches`; merge into the root router.
+    /// The unauthenticated Batch/Files routes and `GET /health/batches`; merge into the root router.
     pub(crate) fn router(self: &Arc<Self>) -> axum::Router<()> {
         super::api::router(Arc::clone(&self.shared))
     }

@@ -45,7 +45,6 @@ import { BasalClient, batchInput, buildRequest, choice } from "@itsoltech/basal-
 
 const client = new BasalClient({
   baseUrl: "http://127.0.0.1:8000",
-  apiKey: "<key_id>.<secret>",
 });
 const questions = {
   department: choice("Dział?", { returns: "Zwroty", support: "Wsparcie" }),
@@ -129,9 +128,11 @@ konwersje typów. W C# `CreateAsync` ma przeciążenia dla `CreateBatchRequest` 
 ### Wcześniejsze metody i wymagania serwera
 
 Obsługa wymaga serwera basal-rs **0.1.12+** z włączonymi batchami oraz SDK:
-Python, TypeScript/JavaScript i C# **0.4.0+**, Rust **0.5.0+**. Token Batch API
-przekaż przez istniejące ustawienie tokenu klienta (`api_key` w Pythonie/Rust
-lub `apiKey` w TypeScripcie/C#).
+Python, TypeScript/JavaScript i C# **0.4.0+**, Rust **0.5.0+**.
+Od serwera **0.1.13** API nie wymaga kluczy. SDK Python/npm/C# **0.6.0+** i Rust
+**0.7.0+** usuwają parametry `api_key`/`apiKey`; usuń je z inicjalizacji klienta.
+Te wersje SDK nie obsługują Batch/Files starszego serwera wymagającego tokenu.
+Wszyscy klienci korzystają z tej samej przestrzeni plików i batchy serwera.
 
 Przepływ aplikacji jest taki sam w każdym języku:
 
@@ -147,7 +148,7 @@ Przepływ aplikacji jest taki sam w każdym języku:
 SDK udostępniają upload, listowanie, odczyt metadanych, usuwanie i pobieranie
 plików oraz tworzenie, listowanie, odczyt i anulowanie batchy. DTO obejmują
 statusy, liczniki, metadane, błędy walidacji i opcje retencji. Python ma
-wariant synchroniczny i asynchroniczny. Transport zachowuje token, prefiks
+wariant synchroniczny i asynchroniczny. Transport zachowuje prefiks
 proxy, limity odpowiedzi, timeouty, status HTTP i `Retry-After`; dotychczasowe metody nie
 ponawiają żądań ani nie odpytują statusu automatycznie. Nowe `wait` jawnie uruchamia
 odpytywanie ograniczone czasowo.
@@ -185,7 +186,7 @@ Omni z CUDA i włączonymi mediami. Status kalibracji `text` jest akceptowany,
 ale nie oznacza potwierdzonej kalibracji mediów. Typowane usage i metadane
 obejmują liczbę tokenów/mediów, kolejności oraz format promptu.
 
-Aktualne wersje z tym API i obsługą batchy: Python/npm/.NET **0.5.0**, Rust **0.6.0**. Zmiany modeli
+Aktualne wersje z tym API i obsługą batchy: Python/npm/.NET **0.6.0**, Rust **0.7.0**. Zmiany modeli
 odpowiedzi (opcjonalny threshold i nowe warianty) są opisane w changelogach.
 Samo scalenie kodu nie publikuje paczek. Runtime nadal sprawdza możliwości
 starszych modeli; SDK nie uruchamiają inferencji lokalnie.
@@ -505,9 +506,8 @@ Błędy zachowują status HTTP, body oraz surowe `Retry-After`; dla body bez JSO
 zachowują tekst. Natywna walidacja daje 422, przeciążenie 529 z `Retry-After: 1`.
 Brak połączenia, timeout i niepoprawna odpowiedź JSON są oddzielone od błędów
 HTTP. Nie ma automatycznych retry: ponowienie może uruchomić kolejną inferencję.
-Domyślne transporty nie podążają za przekierowaniami. Opcjonalny klucz API
-ustawia `Authorization: Bearer ...` dla proxy oraz uwierzytelniania Batch/Files API.
-Zwykłe endpointy inferencji basal-rs pozostają bez własnej autoryzacji.
+Domyślne transporty nie podążają za przekierowaniami. Serwer i SDK nie obsługują
+uwierzytelniania kluczem API; dotyczy to zarówno inferencji online, jak i Batch/Files.
 
 Domyślny limit odpowiedzi wynosi 8 MiB i obejmuje również body błędów. Klienty
 liczą rzeczywiste bajty strumienia; parametr limitu opisują README paczek.

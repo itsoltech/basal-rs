@@ -110,7 +110,6 @@ export type RequestInput = string | URL | Request;
 export type Fetch = (input: RequestInput, init?: RequestInit) => Promise<Response>;
 export interface BasalClientOptions {
   baseUrl?: string;
-  apiKey?: string;
   timeoutMs?: number;
   maxResponseBytes?: number;
   /** Defaults to the runtime's native fetch; custom HTTP clients can supply a Fetch adapter. */
@@ -209,10 +208,6 @@ export class BasalClient {
       throw new TypeError("maxResponseBytes must be a positive safe integer");
     }
     this.fetch = options.fetch ?? globalThis.fetch.bind(globalThis);
-    if (options.apiKey !== undefined) {
-      if (!options.apiKey || /[\r\n]/.test(options.apiKey)) throw new TypeError("apiKey must be a nonempty, single-line token");
-      this.headers.Authorization = `Bearer ${options.apiKey}`;
-    }
     this.files = new Files(this);
     this.batches = new Batches(this);
   }

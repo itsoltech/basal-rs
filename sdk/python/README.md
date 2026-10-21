@@ -6,6 +6,9 @@ required on the client.
 This package is versioned independently. Release tag: `sdk-python-vX.Y.Z`.
 [Changelog](https://github.com/itsoltech/basal-rs/blob/main/sdk/python/CHANGELOG.md).
 
+SDK 0.6.0 removes API-key configuration. Remove `api_key`/`apiKey` from client initialization.
+Batch/Files require server 0.1.13+; all callers use its shared storage namespace.
+
 ```sh
 pip install basal-client
 ```
@@ -68,8 +71,7 @@ async def decide():
         return response.answers.urgent.noul
 ```
 
-`models()` reads `/v1/models`. An optional `api_key` adds a bearer token
-for an authenticating reverse proxy. The server root URL may include a proxy prefix; do not append `/v1`.
+`models()` reads `/v1/models`. API keys are not supported. The server root URL may include a proxy prefix; do not append `/v1`.
 HTTPS is required except for loopback HTTP, suitable for local servers and SSH tunnels.
 URL credentials/query/fragment are rejected. `trust_env=False` is the default: environment proxies and
 certificate overrides are ignored. Set `trust_env=True` only when you intend to trust that configuration.
@@ -164,8 +166,8 @@ without changing the supplied tool definitions.
 
 Resource helpers (`create`, `wait`, `results`) require SDK 0.5.0+.
 
-Requires basal-rs 0.1.12+ started with batches enabled, and SDK 0.4.0+. Every Batch/Files
-route needs the bearer token, also on loopback: pass it as `api_key`. Both `BasalClient` and
+Requires basal-rs 0.1.13+ started with batches enabled. All callers share the server's
+configured Batch/Files storage namespace without authentication. Both `BasalClient` and
 `AsyncBasalClient` provide the same methods:
 
 ```python
@@ -177,7 +179,7 @@ lines = [{"custom_id": f"ticket-{i}", "method": "POST", "url": "/v1/basal",
          for i, text in enumerate(["The service is down.", "Please send an invoice."])]
 jsonl = "".join(json.dumps(line, ensure_ascii=False) + "\n" for line in lines).encode()
 
-with BasalClient("http://127.0.0.1:8000", api_key=token) as client:
+with BasalClient("http://127.0.0.1:8000") as client:
     file = client.upload_file(jsonl, filename="tickets.jsonl")
     batch = client.create_batch(file["id"], metadata={"job": "tickets"}, idempotency_key="tickets-2026-10-20")
     batch = client.get_batch(batch["id"])          # poll at an interval chosen by the application
@@ -240,7 +242,7 @@ OpenAI chat payloads. The flat methods above are unchanged.
 The OpenAI-shaped flow uploads a prepared JSONL file:
 
 ```python
-with BasalClient("http://127.0.0.1:8000", api_key=token) as client:
+with BasalClient("http://127.0.0.1:8000") as client:
     file = client.files.create(jsonl, filename="tickets.jsonl")
     batch = client.batches.create(input_file_id=file["id"], idempotency_key="tickets-2026-10-20")
     batch = client.batches.retrieve(batch["id"])
@@ -257,7 +259,7 @@ requests = [{"custom_id": f"ticket-{i}",
              "body": {"state": text, "questions": {"urgent": {"type": "noul", "instructions": "Is this urgent?"}}}}
             for i, text in enumerate(["The service is down.", "Please send an invoice."])]
 
-with BasalClient("http://127.0.0.1:8000", api_key=token) as client:
+with BasalClient("http://127.0.0.1:8000") as client:
     try:
         batch = client.batches.create(requests=requests, metadata={"job": "tickets"})
     except BasalBatchSubmissionError as error:   # uploaded, but creating the batch failed
@@ -306,7 +308,7 @@ request, including slow headers and a slowly trickling body, and every sleep. Th
 still applies to each HTTPX phase; a phase timing out before the deadline is a `BasalTransportError`.
 In `AsyncBasalClient` cancelling the awaiting task stops the wait. HTTPX has no total-request timeout
 for its sync client, so `BasalClient.batches.wait` runs the async polling on a private event loop in a
-worker thread, with **its own connections** (same URL, authentication, TLS verification, timeout and
+worker thread, with **its own connections** (same URL, TLS verification, timeout and
 `trust_env`) that are closed before it returns; it does not use or close the caller's connection pool.
 The calling thread blocks until the worker is joined; nothing is left running. `KeyboardInterrupt`
 cancels the polling, waits for the worker to close its connections and then propagates. Name resolution

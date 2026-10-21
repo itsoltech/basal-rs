@@ -40,15 +40,7 @@ impl Remote {
             "server base URL must not contain credentials, a query or a fragment"
         );
         base.set_path(&format!("{}/", base.path().trim_end_matches('/')));
-        let mut headers = header::HeaderMap::new();
-        if let Some(key) = super::environment(&args.key_env)? {
-            let mut authorization = header::HeaderValue::from_str(&format!("Bearer {key}"))
-                .map_err(|_| anyhow::anyhow!("{} contains an invalid bearer token", args.key_env))?;
-            authorization.set_sensitive(true);
-            headers.insert(header::AUTHORIZATION, authorization);
-        }
         let client = reqwest::Client::builder()
-            .default_headers(headers)
             .user_agent(concat!("basal-client/", env!("CARGO_PKG_VERSION")))
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(args.timeout.min(10)))

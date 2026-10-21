@@ -1,6 +1,6 @@
 {
   "name": "@itsoltech/basal-client",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "TypeScript and JavaScript client for the native Basal HTTP API",
   "type": "module",
   "main": "./dist/cjs/index.cjs",
