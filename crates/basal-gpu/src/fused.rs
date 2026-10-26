@@ -277,11 +277,11 @@ impl CustomOp2 for BiasSiluMul {
             // The 256-thread f16 vec8 launch improved the measured H100 4.5B forwards. Keep other paths at
             // 1024 threads; the override permits controlled comparisons with the original launch.
             static BLOCK: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
-            let block = (*BLOCK.get_or_init(|| match std::env::var("BASAL_SILU_BLOCK").as_deref() {
-                Ok("128") => Some(128),
-                Ok("256") => Some(256),
-                Ok("512") => Some(512),
-                Ok("1024") => Some(1024),
+            let block = (*BLOCK.get_or_init(|| match crate::plan::DiagnosticOverrides::process().silu_block() {
+                Some("128") => Some(128),
+                Some("256") => Some(256),
+                Some("512") => Some(512),
+                Some("1024") => Some(1024),
                 _ => None,
             }))
             .unwrap_or(if vec8 && S == "f16" && cu::ptx_90a(&dev)?.is_some() { 256 } else { 1024 });
@@ -402,7 +402,7 @@ impl CustomOp3 for ResidualRmsNorm {
             // SAFETY: the kernel writes all 2 * m * h elements (both halves of every row).
             let out = unsafe { dev.alloc::<T>(2 * m * h)? };
             static KEEP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-            let keep = *KEEP.get_or_init(|| std::env::var("BASAL_NORM").as_deref() == Ok("register"))
+            let keep = *KEEP.get_or_init(|| crate::plan::DiagnosticOverrides::process().norm() == Some("register"))
                 && (1024..=8192).contains(&h);
             let name = if keep { format!("residual_rmsnorm_keep_{S}") } else { format!("residual_rmsnorm_{S}") };
             let f = cu::func(&dev, &name, "basal_fused", cu::ptx)?;
@@ -1034,7 +1034,7 @@ impl CustomOp3 for AttentionTree<'_> {
             "attn_tree_tc_static" if !self.v_exact || self.merged != Some(DType::F16) => "attn_tree_tc",
             "attn_tree_tc_qk1_static" if !self.v_exact || self.merged != Some(DType::F16) => "attn_tree_tc_qk1",
             "attn_tree_tc_f16_static" if !self.v_exact || self.merged != Some(DType::F16) => "attn_tree_tc_f16",
-            "attn_tree_wgp" if std::env::var("BASAL_ATT").as_deref() != Ok("wgp") => {
+            "attn_tree_wgp" if crate::plan::DiagnosticOverrides::process().att() != Some("wgp") => {
                 let blocks128: usize = self.units.iter().map(|s| (rep * s.q_len).div_ceil(128)).sum::<usize>() * nkv;
                 if 2 * blocks128 <= cu::sm_count(&dev)? as usize {
                     "attn_tree_wgp64"
@@ -1063,9 +1063,9 @@ impl CustomOp3 for AttentionTree<'_> {
         // SW128 reduces shared-memory conflicts in the measured Hopper f16 WGP path. Keep the original layout
         // and the copy-only experiment available for A/B; shape selection and arithmetic stay identical.
         static LOAD: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
-        let load = *LOAD.get_or_init(|| match std::env::var("BASAL_WGP_LOAD").as_deref() {
-            Ok("original") => 0,
-            Ok("coalesced") => 1,
+        let load = *LOAD.get_or_init(|| match crate::plan::DiagnosticOverrides::process().wgp_load() {
+            Some("original") => 0,
+            Some("coalesced") => 1,
             _ => 2,
         });
         let name = match (name, load) {
@@ -1173,33 +1173,30 @@ impl CustomOp3 for AttentionTree<'_> {
 /// candidates with the arithmetic of `tc`; their runtime parity and speed must be measured before promotion.
 /// `tc-static`, `tc-qk1-static` and `tc-f16-static` specialize their parent's exact-f16 V/output handling;
 /// other V/output dtypes retain the parent kernel. The per-backend inference policy may override this selector.
-/// Softmax and accumulation stay f32; supported kernels write merged f16/bf16 output when requested. The default
-/// depends on the GPU of `dev`.
+/// Softmax and accumulation stay f32; supported kernels write merged f16/bf16 output when requested. Without
+/// `BASAL_ATT`, `default`: the kernel the frozen plan's device rule fixed for the stage's GPU
+/// (`plan::DeviceDefaultRule`).
 #[cfg(feature = "cuda")]
-pub fn tc_kernel(dev: &candle_core::CudaDevice) -> Result<&'static str> {
+pub fn tc_kernel(default: &'static str) -> &'static str {
     static K: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
-    let forced = *K.get_or_init(|| match std::env::var("BASAL_ATT").as_deref() {
-        Ok("tc") => Some("attn_tree_tc"),
-        Ok("tc-static") => Some("attn_tree_tc_static"),
-        Ok("tc-qk1-static") => Some("attn_tree_tc_qk1_static"),
-        Ok("tc-f16-static") => Some("attn_tree_tc_f16_static"),
-        Ok("tc64") => Some("attn_tree_tc64"),
-        Ok("tc-sw128") => Some("attn_tree_tc_sw128"),
-        Ok("tc64-sw128") => Some("attn_tree_tc64_sw128"),
-        Ok("tc-pv1") => Some("attn_tree_tc_pv1"),
-        Ok("tc-qk1") => Some("attn_tree_tc_qk1"),
-        Ok("tc-f16") => Some("attn_tree_tc_f16"),
-        Ok("tc-pipe") => Some("attn_tree_tc_pipe"),
-        Ok("wg") => Some("attn_tree_wg"),
-        Ok("wgp") => Some("attn_tree_wgp"),
-        Ok("wgp64") => Some("attn_tree_wgp64"),
+    let forced = *K.get_or_init(|| match crate::plan::DiagnosticOverrides::process().att() {
+        Some("tc") => Some("attn_tree_tc"),
+        Some("tc-static") => Some("attn_tree_tc_static"),
+        Some("tc-qk1-static") => Some("attn_tree_tc_qk1_static"),
+        Some("tc-f16-static") => Some("attn_tree_tc_f16_static"),
+        Some("tc64") => Some("attn_tree_tc64"),
+        Some("tc-sw128") => Some("attn_tree_tc_sw128"),
+        Some("tc64-sw128") => Some("attn_tree_tc64_sw128"),
+        Some("tc-pv1") => Some("attn_tree_tc_pv1"),
+        Some("tc-qk1") => Some("attn_tree_tc_qk1"),
+        Some("tc-f16") => Some("attn_tree_tc_f16"),
+        Some("tc-pipe") => Some("attn_tree_tc_pipe"),
+        Some("wg") => Some("attn_tree_wg"),
+        Some("wgp") => Some("attn_tree_wgp"),
+        Some("wgp64") => Some("attn_tree_wgp64"),
         _ => None,
     });
-    Ok(match forced {
-        Some(k) => k,
-        None if cu::ptx_90a(dev)?.is_some() => "attn_tree_wgp",
-        None => "attn_tree_tc",
-    })
+    forced.unwrap_or(default)
 }
 
 /// f32 attention of all units (blocks of packed rows) of a forward (CUDA), invariant to how questions are packed:
@@ -1214,20 +1211,15 @@ pub fn attention_tree(
     scale: f32,
     tc: Option<(&Tensor, &Tensor, bool)>,
     merge: Option<DType>,
-    kernel_override: Option<&'static str>,
+    kernel: &'static str,
 ) -> Result<Tensor> {
-    let candle_core::Device::Cuda(dev) = qkv.device() else {
+    if !qkv.device().is_cuda() {
         candle_core::bail!("attention_tree: qkv must be on a CUDA device");
-    };
-    // the per-backend inference policy (fixed before warmup) wins over the GPU's default
-    let kernel = match kernel_override {
-        Some(k) => k,
-        None => tc_kernel(dev)?,
-    };
+    }
     // the tensor-core kernels (except tc-pipe) write merged heads themselves, bitwise as merge_heads would
     let in_kernel =
         merge.filter(|&dt| tc.is_some() && kernel != "attn_tree_tc_pipe" && matches!(dt, DType::F16 | DType::BF16));
-    let att = std::env::var("BASAL_ATT");
+    let att = crate::plan::DiagnosticOverrides::process().att();
     let op = AttentionTree {
         units,
         total: d.l,
@@ -1237,7 +1229,7 @@ pub fn attention_tree(
         tc: tc.is_some(),
         // the Hopper kernels are measured for f16 forwards: a bf16 forward (V lo plane) keeps tc unless BASAL_ATT asks
         // for wg / wgp; wgp has no V lo stage, so wg runs instead
-        tc_kernel: match (kernel, tc.is_some_and(|t| t.2), matches!(att.as_deref(), Ok("wg" | "wgp" | "wgp64"))) {
+        tc_kernel: match (kernel, tc.is_some_and(|t| t.2), matches!(att, Some("wg" | "wgp" | "wgp64"))) {
             ("attn_tree_wg" | "attn_tree_wgp" | "attn_tree_wgp64", false, false) => "attn_tree_tc",
             ("attn_tree_wgp" | "attn_tree_wgp64", false, true) => "attn_tree_wg",
             (k, _, _) => k,
@@ -1317,7 +1309,8 @@ impl CustomOp1 for AttentionTreeMetal<'_> {
         let qo = contiguous(ql, "qkv")? * 4;
         let rep = nh / nkv;
         // simdgroups (8 query rows each) per threadgroup, at most ATT_SG = 8; the result does not depend on it
-        let nsg: usize = std::env::var("BASAL_ATT_SG").ok().and_then(|v| v.parse().ok()).unwrap_or(8).clamp(1, 8);
+        let nsg: usize =
+            crate::plan::DiagnosticOverrides::process().att_sg().and_then(|v| v.parse().ok()).unwrap_or(8).clamp(1, 8);
         // one dispatch per prefix (it is bound as a buffer) and per MAXU units
         let mut groups: Vec<(Option<usize>, Vec<&MetalTreeUnit>)> = Vec::new();
         for u in self.units {

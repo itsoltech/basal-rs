@@ -492,7 +492,7 @@ fn configuration(r: &mut Report, file: Option<PathBuf>, model_refs: &[String]) -
                 format!(
                     "no `--model` and no {} here: `basal serve` serves {} (`basal init` writes {0})",
                     crate::paths::CONFIG_NAME,
-                    config::DEFAULT_MODEL.repo
+                    crate::models::default_model().repo
                 ),
             );
             Some(c)

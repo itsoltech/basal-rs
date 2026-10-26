@@ -13,8 +13,8 @@ HTTP (axum, tokio)
 | Crate | Odpowiedzialność |
 |---|---|
 | `basal-core` | kontrakt żądań (`request.rs`), prompt (`prompt.rs`), tokenizer i litery (`tokenize.rs`), JSON jak `json.dumps` Pythona (`pyjson.rs`), pakowanie (`pack.rs`), decyzje i confidence (`decision.rs`), `facts.rs`, `evidence.rs`, Choice 11–255 (`large_choice.rs`), silnik i trait `Backend` (`engine.rs`), współdzielenie GPU przez dwa silniki (`gate.rs`) |
-| `basal-gpu` | loader safetensors, forward Llama na candle 0.11, fuzje (`fused.rs`, kernele `kernels.cu` i `kernels.metal`), GEMM przez cuBLASLt (`cublaslt.rs`) lub port GEMM MLX (`gemm.rs`, Metal), głowica `evidence_head.pt` |
-| `basal-cli` | polecenie `basal`, serwer (`serve.rs`), eksport i porównania z referencją, pomiary |
+| `basal-gpu` | loader safetensors, forward Llama na candle 0.11, fuzje (`fused.rs`, kernele `kernels.cu` i `kernels.metal`), GEMM przez cuBLASLt (`cublaslt.rs`) lub port GEMM MLX (`gemm.rs`, Metal), głowica `evidence_head.pt`, typowany plan wykonania (`plan.rs`) |
+| `basal-cli` | polecenie `basal`, serwer (`serve.rs`), katalog modeli i profile (`models.rs`), artefakty GEMM (`gemm_artifact/`), eksport i porównania z referencją, pomiary |
 
 `basal client` składa requesty z pytań CLI lub szablonu, albo przyjmuje pełne requesty System One.
 `client/input.rs` czyta rekordy z limitem rozmiaru, `client/request.rs` składa i waliduje requesty przez `basal-core`,
@@ -25,6 +25,7 @@ Tokio, bez serwera i jego harmonogramu. Wybór tabel GEMM używa konfiguracji `s
 pozostaje w `basal-core`. Interfejs i przykłady: [CLIENT.md](CLIENT.md).
 
 Nowe rodziny, format 2, wybór kolejności i kalibracja: [UPSTREAM_2.0.md](UPSTREAM_2.0.md).
+Profile modeli i plan wykonania: [sekcja niżej](#profile-modeli-i-plan-wykonania).
 Natywne architektury i lifecycle mediów omni: [OMNI.md](OMNI.md).
 
 Opcjonalna sekcja `database:` i moduł `basal-cli/src/database/` posiadają konfigurację
@@ -81,6 +82,161 @@ skalowania obrazu; ten drugi cache ma limit 32 MiB i zachowuje poprzednią ście
 po jego przekroczeniu. Te zmiany nie wprowadzają cache żądań ani mediów między
 żądaniami. Numeryczne zmiany attention, RMSNorm i Conformera wymagają osobnego
 porównania z upstream FP32, opisanego w raportach.
+
+## Profile modeli i plan wykonania
+
+`basal-cli/src/models.rs` jest jedynym miejscem, w którym nazwa modelu wybiera
+politykę wykonania. Katalog zawiera repozytorium, przypiętą rewizję, rozmiar,
+skrót dla `--model` i profil każdego opublikowanego modelu; domyślny model
+wskazuje identyfikator (`DEFAULT_MODEL_ID`), nie pozycja w tablicy. Profil jest
+dopasowywany po nazwie z `basal.json`. Model spoza katalogu dostaje profil
+ogólny swojej architektury (`llama-generic.v1`, `gemma-generic.v1`) bez
+zmierzonych reguł model/GPU. Metadane, tokenizer, prompt i kalibracja zawsze
+pochodzą z plików modelu (`ModelManifest` w `basal-core`); `basal-core` nie ma
+katalogu produktów.
+
+Profil (`<model>.v1`) zawiera wyłącznie dane: zestaw kerneli (`KernelSet::V1`),
+wersjonowaną regułę dispatchu (`DispatchRule::LlamaV1` albo `GemmaV1`) z listami
+GPU, na których obowiązują zmierzone polityki, uporządkowaną listę tabel GEMM
+wbudowanych w build (nazwa pliku i SHA-256 znormalizowanej treści) oraz
+politykę harmonogramu `serve`. Zmiana zmierzonej polityki to nowa wersja
+profilu, a nowa arytmetyka to nowy wariant `KernelSet`; istniejące profile nie
+przechodzą na nie automatycznie.
+
+Plan powstaje w dwóch fazach. Najpierw CLI wybiera profil, ustala precyzję
+`dtype: auto` regułą profilu i pozyskuje oraz sprawdza tabelę GEMM (I/O,
+[artefakty GEMM](#artefakty-gemm)). Następnie `ResolvedExecutionPlan::freeze`
+(`basal-gpu/src/plan.rs`) ocenia regułę dla kart instancji i zamraża plan:
+precyzję, odczyt, kernele, format wag, politykę rodziny, tabelę GEMM z
+pochodzeniem, fallback kształtów bez tabeli, tryb odtwarzalności oraz
+diagnostyczne nadpisania. Plan istnieje przed konwersją wag;
+`RuntimeBackend::load_planned` ładuje wagi z jego opcjami i stosuje politykę
+przed K/V prefiksów, gate'ami i forkami torów. Backend dostaje decyzje, nie
+nazwy modeli. Fork kopiuje zastosowaną politykę.
+
+Publiczne konstruktory `GpuBackend::load` i `GpuBackend::load_split` nie
+przyjmują planu. Przed wczytaniem wag ustalają politykę ogólną: bez profilu
+modelu, z kernelem attention według `DeviceDefaultRule::V1` dla GPU każdego
+etapu. Odpowiada to dotychczasowemu zachowaniu konstruktorów bez
+`configure_inference`. `BASAL_ATT` nadal wybiera kernel do porównań A/B.
+`RuntimeBackend::load_planned` korzysta z wewnętrznych wariantów bez
+polityki i stosuje politykę planu tylko raz, przed K/V.
+
+| Reguła | Decyzja |
+|---|---|
+| `LlamaV1` | `auto` → f16; attention jednakowe dla wszystkich etapów: `accurate` przenośny hi/lo, `balanced` QK1 (CUDA f16, `fused`, odczyt f32, inaczej odmowa), `auto` QK1 tylko gdy GPU każdego etapu jest na liście profilu i `BASAL_ATT` nie jest ustawione, w pozostałych przypadkach domyślny kernel urządzenia według `DeviceDefaultRule::V1` (`attention-default.1`) |
+| `GemmaV1` | `auto` → f16 na GPU pierwszego etapu z listy profilu, inaczej bf16; `balanced` odmowa; per etap, z GPU tego etapu: iloczyny attention FP16 i fuzje FP16 tylko w `auto`, przy f16 i karcie z odpowiedniej listy |
+
+Listy profili odtwarzają dotychczasową macierz: Basal 2.0 mini/4.5B/max na
+RTX 6000 Ada wybierają QK1; Omni 1.0 mini/max na tej karcie dekoder FP16 i
+iloczyny FP16; Omni 1.1 max dekoder FP16 i iloczyny FP32 (asymetria zostaje,
+bo zmierzono tylko dekoder); Ultra na H100 PCIe dekoder i fuzje FP16 z
+iloczynami FP32. Modele basal-1.5 i profile ogólne nie mają list.
+
+Zmienne `BASAL_*` (attention, układ WGP, blok SiLU, RMSNorm, cuBLAS,
+synchronizacja CUDA, diagnostyka GEMM i czasów hosta, Metal SG) są odczytywane
+raz na proces (`DiagnosticOverrides::process`) i zapisywane w planie. Kernele
+czytają tę samą migawkę. Pierwszeństwo jest bez zmian: jawne `accurate` i
+`balanced` wygrywają z `BASAL_ATT` na CUDA, `auto` respektuje zmienną, a dalszy
+dispatch bf16 na Hopperze w `fused.rs` (`wg`/`wgp` tylko na żądanie zmiennej)
+działa jak wcześniej.
+
+Domyślny kernel urządzenia Llamy jest rozstrzygany przy zamrażaniu planu, nie
+w runtime. Plan zapisuje dla każdego etapu kartę z drivera (nazwa, compute
+capability, liczba SM, bez tworzenia kontekstu) i kernel wersjonowanej reguły
+`attention-default.1`: `attn_tree_wgp` na compute capability 9.0, gdy build
+zawiera PTX compute_90a, w pozostałych przypadkach `attn_tree_tc`. `BASAL_ATT`
+i dalszy dispatch bf16 na Hopperze działają na tym wyniku jak wcześniej. Nowa
+reguła domyślna wymaga nowego wariantu, więc plany z kartami Ada i Hopper mają
+różne tożsamości.
+
+Polityka harmonogramu jest częścią profilu: Omni 1.0 max zbiera wracających
+klientów przez 10 ms po współbieżnej partii, gdy plan pierwszego etapu ma
+iloczyny attention FP16 (`SchedulingPolicy::CoalesceReturning`). Pozostałe
+profile startują partię od razu. HTTP i SDK nie zmieniają się.
+
+Przy ładowaniu log zawiera linię `execution plan <profil> sha256:<16 hex>` z
+głównymi decyzjami. Skrót liczony jest z kanonicznego JSON
+`ResolvedExecutionPlan::identity` (schemat `basal-execution-plan.2`, bez ścieżek;
+tabela GEMM jako digest i pochodzenie, karty etapów z compute capability i
+liczbą SM, reguła i kernele domyślne attention).
+`basal benchmark` zapisuje ten JSON w raporcie (`execution_plan`). Opis backendu
+(`describe`) i odcisk profilu batchy nie zmieniają formatu.
+
+### Artefakty GEMM
+
+Tabela GEMM jest identyfikowana SHA-256 znormalizowanej treści
+(`basal-cli/src/gemm_artifact/normalize.rs`, schemat `basal-gemm-artifact.1`):
+GPU, wersja cuBLASLt, dtype, flaga niezależności od partii, wersja
+przeszukania i wpisy `(dtype, n, k, m_class, 8 słów algorytmu)` posortowane;
+bez modelu, czasów, notatek i listy kształtów. Ta sama definicja służy
+`build.rs` i runtime'owi. Build odrzuca dwa pliki z tym samym artefaktem;
+dwie różne tabele dla jednej karty i kształtów mogą istnieć, bo wybór wskazuje
+profil. `basal gemm-digest PLIK` wypisuje digest, a z `--import` zapisuje tabelę
+w magazynie.
+
+Magazyn `gemm_cache/artifacts/<sha256>.json` jest niezmienny: plik powstaje pod
+unikalną nazwą tymczasową i jest dowiązywany na miejsce, nigdy nie zastępuje
+istniejącego; plik o innej znormalizowanej treści pod tą nazwą jest błędem.
+Pierwszy zapis zachowuje otrzymane bajty (wbudowany zredukowany JSON, wynik
+przeszukania, plik importowany). Kolejny zapis tego samego digestu zachowuje
+istniejący plik, także gdy różnią się metadane pomijane przy normalizacji.
+Odcisk profilu batchy nadal uwzględnia bajty użytego pliku; może się zmienić,
+jeżeli wcześniejszy wpis magazynu ma inne metadane niż źródło importu.
+SHA-256 tych bajtów jest liczony razem z migawką, przed wagami
+(`GemmArtifact::bytes_sha256`); profil batchy nie czyta ponownie ścieżki tabeli.
+`gemm_cache/bindings/` wiąże profil, model, dtype, GPU, wersję cuBLASLt,
+wersję przeszukania i kształty z digestem tabeli zrobionej lub zaimportowanej
+na tej maszynie (zapis przez plik tymczasowy i `rename`).
+
+Cache, do którego proces nie może pisać (`PermissionDenied`, system plików
+tylko do odczytu), nie blokuje tabeli już odczytanej i sprawdzonej: jawnej,
+wbudowanej albo z dawnego cache. Taka migawka jest używana z pamięci, bez
+zapisu w magazynie i bez powiązania, z ostrzeżeniem; dawny plik jest wtedy
+importowany przy każdym starcie, a odcisk batchy liczy bajty odczytanego
+źródła. Pozostałe błędy nadal przerywają start, w tym magazyn, którego nie
+można przeszukać ani odczytać (sprawdzany przed jakimkolwiek zapisem), i plik
+magazynu o innej treści. Powiązanie wskazujące artefakt obecny, ale
+nieczytelny lub o innej treści, jest błędem: `auto` nie przechodzi wtedy do
+dawnego cache ani do tabeli wbudowanej. Przeszukanie i `gemm-digest --import` wymagają
+zapisu; artefakt `sha256:` spoza buildu musi już być w magazynie.
+
+| `gemm_table` | Wybór |
+|---|---|
+| `auto` (domyślnie, adaptacyjnie) | powiązanie tej maszyny dla profilu; potem, tylko w profilach zgodności v1, plik dawnego cache `<model>-<dtype>.json` importowany bez zmiany źródła, z jego algorytmami i pochodzeniem `adaptive/local` (albo `bundled`, gdy digest jest tabelą buildu); potem pierwsza poprawna tabela wbudowana z listy profilu; potem Llama przeszukuje i zapisuje tabelę (`adaptive/local`), Gemma używa stałych GEMM per prompt |
+| `pinned` (odtwarzalnie) | tylko tabela wbudowana z listy profilu; jej brak to błąd |
+| `sha256:<digest>` (odtwarzalnie) | dokładnie ten artefakt, wbudowany albo z magazynu; brak to błąd |
+| `none` | bez tabeli: Llama dobiera algorytmy przy pierwszym użyciu (niedozwolone w trybie odtwarzalnym) |
+| ścieżka | ten plik (`explicit`, adaptacyjnie), skopiowany do magazynu, gdy cache jest zapisywalny |
+
+Tryb domyślny zachowuje dotychczasową kolejność: ciepły cache, tabela buildu,
+przeszukanie dla Llamy i stałe GEMM per prompt dla Gemmy. Tabele mini są
+wspólne dla basal-1.5 i Basal 2.0 (to samo dla 4.5B i max), a Omni 1.1 max
+korzysta z listy Omni 1.0 max, jeśli tabela obejmuje jego kształty. Wskazuje
+to profil, nie dopasowanie pierwszej pasującej tabeli, więc nowa tabela w
+`gemm-tables/` nie zmienia wyboru istniejących profili. Profile ogólne mają
+listę tabel wbudowanych w chwili wprowadzenia profili. Pin pliku, którego
+digest w buildzie jest inny, kończy start błędem. Lokalnie zrobiona lub
+zaimportowana tabela nie jest certyfikowana przez sam fakt pochodzenia ani nazwę.
+
+Każda tabela jest odczytywana raz. Sprawdzona i sparsowana migawka jest
+nazwana digestem w planie i ładowana przez backend; plik nie jest czytany
+ponownie po wagach. Przed wagami tabela jest sprawdzana na każdym GPU modelu
+(wszystkie repliki i etapy): wersja cuBLASLt i nazwa karty z drivera, a w
+trybie odtwarzalnym, dla tabeli niezależnej od partii współdzielonej przez
+kilka kart oraz dla każdej tabeli Gemmy także akceptacja każdego algorytmu
+przez cuBLASLt. Tabela Gemmy, także podana jawnie, musi być niezależna od
+partii i mieć niepustą listę wpisów wyłącznie w dtype obliczeń; kształty bez
+wpisu nadal używają stałych GEMM per prompt.
+
+Tryb odtwarzalny nie dopuszcza lokalnego przeszukania, importu ani tabeli
+`none`. Tabela przypięta musi mieć dokładnie wersję przeszukania tego buildu
+(późniejsza nie jest rozumiana), wpisy wyłącznie w dtype planu i wpis tego
+dtype dla każdego kształtu wag. W runtime GEMM Llamy bez przypiętego algorytmu
+jest błędem, bez pomiaru heurystyk (fallback `refused` w planie). Tryb
+adaptacyjny zachowuje dotychczasową tolerancję i fallbacki; dla kształtów bez
+tabeli Llama odmawia startu (`check_gemm_coverage`). Tryby f32, Metal i Intel nie używają tabel cuBLASLt, więc
+nie mają czego przypinać (`not_applicable` w planie).
 
 ## Kontrakt promptu
 
@@ -172,10 +328,10 @@ rozszerza je przed użyciem (dokładny forward FP32, punkt odniesienia).
   przy innych typach kernel wraca do odpowiadającego mu wariantu ogólnego.
   Na CUDA jawny tryb ma pierwszeństwo przed `BASAL_ATT`; `auto` zachowuje tę zmienną
   do eksperymentów. Wybór nie modyfikuje środowiska procesu ani gotowych cache K/V.
-  Automatyczny QK1 dotyczy wyłącznie rozpoznanej RTX 6000 Ada Generation,
-  nazw Basal 2.0 mini/4.5B/max oraz CUDA f16 fused z odczytem f32; pozostałe
-  konfiguracje zachowują poprzedni wybór. Nieudany opcjonalny odczyt nazwy GPU
-  również zachowuje poprzednią politykę.
+  Automatyczny QK1 dotyczy wyłącznie profili Basal 2.0 mini/4.5B/max
+  (`models.rs`), rozpoznanej RTX 6000 Ada Generation na każdym etapie oraz CUDA
+  f16 fused z odczytem f32; pozostałe konfiguracje zachowują poprzedni wybór.
+  Nieudany opcjonalny odczyt nazwy GPU również zachowuje poprzednią politykę.
   [Pomiary i ograniczenia jakości](../reports/precision-performance-ada-2026-10-16/README.md)
   nie są gwarancją zgodności każdego wejścia z FP32.
 - `auto` na H100 PCIe dla Ultra w FP16 łączy niezależne macierze attention
@@ -192,7 +348,8 @@ rozszerza je przed użyciem (dokładny forward FP32, punkt odniesienia).
 - CUDA GEMM przez cuBLASLt z tabelą algorytmów z pełnego przeszukania
   (`basal gemm-search`): algorytm, kafelek, liczba etapów, split-K z
   redukcją f32, swizzle; bez tabeli najszybszy z 16 algorytmów heurystyki
-  mierzony przy pierwszym użyciu.
+  mierzony przy pierwszym użyciu. Wybór tabeli opisuje sekcja
+  [artefakty GEMM](#artefakty-gemm).
 
 ### Kwantyzacja W8A16 (`q8_0`)
 
@@ -397,7 +554,7 @@ odrzuca pustą listę, powtórzenia, `device` razem z listą (także `device: 0`
 instancja. Przed pobraniem modelu `basal_gpu::gpu_identity` pyta sterownik,
 bez tworzenia kontekstu, o nazwę, compute capability i liczbę SM każdej karty
 grupy; różne typy kończą się błędem. Tabela GEMM jest rozwiązywana raz, na
-pierwszej karcie grupy (jeden plik w `gemm_cache`), a potem
+pierwszej karcie grupy (jeden artefakt w `gemm_cache`), a potem
 `check_gemm_table` sprawdza ją na każdej karcie przed załadowaniem
 którejkolwiek repliki. Każda replika ładuje wagi na swoją kartę; fork toru
 długich żądań współdzieli wagi tylko w obrębie repliki, a scratch i cache ma
@@ -582,9 +739,11 @@ zgodności ani wydajności na sprzęcie. Wyniki niżej dotyczą basal-1.5.
 `auto` wybiera `balanced` dla podziału Llama tylko, gdy każda karta etapu jest RTX 6000 Ada.
 
 - Score powyżej 10 poziomów i pytania z jedną opcją kończą się jawnym błędem.
-- Tabela GEMM jest specyficzna dla karty i wersji cuBLASLt. Plik w
-  `gemm_cache` jest nazwany modelem i precyzją, bez karty: przeniesienie
-  modelu na GPU innego typu generuje tabelę od nowa i zastępuje poprzednią.
+- Tabela GEMM jest specyficzna dla karty i wersji cuBLASLt. Magazyn w
+  `gemm_cache` przechowuje tabele po digeście, a powiązania lokalne zawierają
+  kartę i wersję cuBLASLt: przeniesienie modelu na GPU innego typu tworzy nowe
+  powiązanie i nie usuwa poprzedniej tabeli. Pliki dawnego cache
+  `<model>-<dtype>.json` są tylko czytane (import).
 - `quantization: q8_0` działa tylko na CUDA z f16 i dodaje dekwantyzację
   wag na każdy forward. Na RTX 6000 Ada zmniejsza zajętość puli pamięci CUDA
   (basal-1.5-mini i 4.5B), wydłuża czas (4.5B) i zmienia część decyzji oraz

@@ -99,6 +99,9 @@ pub struct Lt {
     /// The algorithm of `invariant` chosen and accepted by cuBLASLt for an exact (M, N, K, dtype), so that a call
     /// repeats neither the choice nor `cublasLtMatmulAlgoCheck`; emptied when the table changes.
     chosen: Mutex<HashMap<(usize, usize, usize, DType), sys::cublasLtMatmulAlgo_t>>,
+    /// A reproducible plan: only the algorithms of the batch-invariant table run; a shape without one is an error,
+    /// never timed or chosen by heuristic. Set once before the first inference matmul.
+    table_only: std::sync::atomic::AtomicBool,
 }
 
 // SAFETY: an `Lt` belongs to one GPU (`ctx`) and is shared only by the engines (lanes) of one model on that GPU,
@@ -148,7 +151,14 @@ impl Lt {
             from_table: Mutex::new(0),
             invariant: Mutex::new(HashMap::new()),
             chosen: Mutex::new(HashMap::new()),
+            table_only: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    /// From now on run only the algorithms of the batch-invariant table (a reproducible plan).
+    pub fn set_table_only(&self) {
+        // Release/Acquire: the flag is set on the loading thread before the backend is shared with lanes.
+        self.table_only.store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// Batch-invariant table: for each (N, K, dtype) the algorithms of its M classes, all of them giving bitwise the
@@ -320,7 +330,7 @@ impl Lt {
         };
         let scored: Vec<(usize, f64)> =
             roots.iter().map(|&r| (r, geo(&|ci| fastest(r, ci).map_or(f64::INFINITY, |ai| times[ai][ci])))).collect();
-        if std::env::var("BASAL_GEMM_EQUIV").is_ok() {
+        if crate::plan::DiagnosticOverrides::process().gemm_equiv() {
             let single = (0..cands.len()).map(|ai| geo(&|ci| times[ai][ci])).fold(f64::INFINITY, f64::min);
             eprintln!(
                 "equivalence n={n} k={k}: {} candidates, {} groups; best single algorithm {single:.3}",
@@ -897,6 +907,11 @@ impl Lt {
             chosen.insert((m, n, k, dt), a);
             // SAFETY: device pointers of the operands and of a fresh output of m*n elements, all on `stream`.
             return unsafe { self.run(p, &a, w, x, y, stream) };
+        }
+        if search == 0 && self.table_only.load(std::sync::atomic::Ordering::Acquire) {
+            candle_core::bail!(
+                "reproducible plan: no pinned cuBLASLt algorithm for {dt:?} n={n} k={k}; no run-time timing is allowed"
+            );
         }
         let key = Key { n, k, m_class: m_class(m), dt };
         if search > 0 {

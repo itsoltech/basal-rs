@@ -8,7 +8,7 @@
 //! models:
 //!   - repo: Remek/basal-1.5-max    # downloaded from Hugging Face at start (HF_HOME cache, HF_TOKEN)
 //!     revision: be1b5ee7e7a9755a931262fa7fab4f59be0fd03c
-//!     gemm_table: auto             # auto (default) | none | path of a `basal gemm-search` table
+//!     gemm_table: auto             # auto (default) | pinned | sha256:<digest> | none | path of a table
 //!   - path: .models/basal-1.5-mini # or a local model directory
 //!     long_tokens: 0
 //!     device: 1                    # CUDA device (default 0); models on one device take turns on it
@@ -130,8 +130,11 @@ pub struct ModelConfig {
     /// auto, accurate (Llama original, Gemma FP32 attention), or balanced (CUDA FP16 Llama).
     #[serde(default = "default_inference_mode")]
     pub inference_mode: String,
-    /// `auto`: the table of this model and GPU from `gemm_cache`, generated when missing or not valid here; `none`:
-    /// algorithms timed at first use (results may depend on the batch); otherwise the path of a table.
+    /// `auto` (adaptive): this machine's table of the model and GPU in `gemm_cache`, else a bundled table pinned by
+    /// the model profile, else a search (Llama; Omni uses fixed per-prompt GEMMs); `pinned` (reproducible): only a
+    /// bundled table pinned by the profile, none is an error; `sha256:<digest>` (reproducible): exactly that
+    /// artifact (bundled or stored, `basal gemm-digest --import`); `none`: algorithms timed at first use (results may
+    /// depend on the batch); otherwise the path of a table (`crate::gemm_artifact`).
     #[serde(default = "default_gemm_table")]
     pub gemm_table: String,
     /// Packed tokens of one batch (a larger request runs alone).
@@ -376,27 +379,32 @@ pub fn check_same_gpus(model: &str, placement: &Placement) -> Result<()> {
     Ok(())
 }
 
-/// The one GEMM table of a replica group or a layer split is batch-invariant and valid on every one of its GPUs
-/// (cuBLASLt version, GPU name and every algorithm at its M class), checked before anything loads. A replica group
-/// needs a table, except Omni (Gemma, `manifest`), whose GEMMs without one are fixed per prompt (independent of the
-/// batch); a split without one (`gemm_table: none`) times its algorithms at first use on every GPU.
-pub fn check_table_on_devices(manifest: &ModelManifest, table: Option<&Path>, placement: &Placement) -> Result<()> {
+/// The one GEMM table of a replica group or a layer split is batch-invariant (its cuBLASLt version, GPU name and
+/// algorithms were checked on every one of its GPUs by `gemm_artifact::resolve`, before anything loads). A replica
+/// group needs a table, except Omni (Gemma, `manifest`), whose GEMMs without one are fixed per prompt (independent
+/// of the batch); a split without one (`gemm_table: none`) times its algorithms at first use on every GPU.
+pub fn check_table_on_devices(
+    manifest: &ModelManifest,
+    table: Option<&basal_gpu::GemmArtifact>,
+    placement: &Placement,
+) -> Result<()> {
     let name = &manifest.name;
-    let Some(devices) = placement.shared_devices() else { return Ok(()) };
+    if placement.shared_devices().is_none() {
+        return Ok(());
+    }
     let split = matches!(placement, Placement::Split(_));
-    let Some(path) = table else {
+    let Some(table) = table else {
         if split || matches!(manifest.config, basal_core::architecture::Architecture::Gemma4(_)) {
             return Ok(());
         }
         bail!("{name}: several `replica_devices` need a batch-invariant GEMM table (CUDA build, gemm_table not none)")
     };
-    let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", crate::term::P(&path)))?;
-    let v: Value = serde_json::from_str(&text).with_context(|| format!("parsing {}", crate::term::P(&path)))?;
-    let role = if split { "layer split" } else { "replica" };
-    for d in devices {
-        basal_gpu::check_gemm_table(&v, d)
-            .with_context(|| format!("{name}: GEMM table {} on {role} device {d}", crate::term::P(&path)))?;
-    }
+    let role = if split { "a layer split" } else { "replicas" };
+    ensure!(
+        table.table()["invariant"].as_bool() == Some(true),
+        "{name}: GEMM table {} of {role} is not batch-invariant",
+        table.label()
+    );
     Ok(())
 }
 
@@ -422,6 +430,7 @@ impl ServeConfig {
         ensure!(!serving || !c.models.is_empty(), "no models");
         for model in &c.models {
             crate::parse_inference_mode(&model.inference_mode)?;
+            crate::gemm_artifact::TableRequest::parse(&model.gemm_table)?;
         }
         crate::serve::check_admission_limits(c.max_inflight, c.max_large_inflight)?;
         Ok(c)
@@ -467,92 +476,12 @@ fn ensure_single_document(text: &str) -> Result<()> {
     Ok(())
 }
 
-/// A published basal model pinned to a metadata revision. Runtime verification is recorded separately in reports.
-pub struct KnownModel {
-    /// short name for `basal init --model`
-    pub short: &'static str,
-    pub repo: &'static str,
-    pub revision: &'static str,
-    /// checkpoint size (download), GB
-    pub size_gb: f64,
-}
-
-pub const KNOWN_MODELS: [KnownModel; 10] = [
-    KnownModel {
-        short: "mini",
-        repo: "Remek/basal-1.5-mini",
-        revision: "1978d0705ce09cd2d7d8d3e87b304468121e7255",
-        size_gb: 3.1,
-    },
-    KnownModel {
-        short: "4.5B",
-        repo: "Remek/basal-1.5-4.5B",
-        revision: "784a683bfadcc8865238fc0fc74a83b4000269bc",
-        size_gb: 9.1,
-    },
-    KnownModel {
-        short: "max",
-        repo: "Remek/basal-1.5-max",
-        revision: "be1b5ee7e7a9755a931262fa7fab4f59be0fd03c",
-        size_gb: 22.3,
-    },
-    KnownModel {
-        short: "2.0-mini",
-        repo: "Remek/basal-2.0-mini",
-        revision: "cb81b32ce89b0b87e62fcdad28f0435e25c953f3",
-        size_gb: 3.1,
-    },
-    KnownModel {
-        short: "2.0-4.5B",
-        repo: "Remek/basal-2.0-4.5B",
-        revision: "e5ba9149760d99b73b1963d8e0ccf948b58afacb",
-        size_gb: 9.1,
-    },
-    KnownModel {
-        short: "2.0-max",
-        repo: "Remek/basal-2.0-max",
-        revision: "2fffc5cc41e5cf7a2f752f38f17e7b4d9a4a8252",
-        size_gb: 22.3,
-    },
-    KnownModel {
-        short: "omni-mini",
-        repo: "Remek/basal-omni-1.0-mini",
-        revision: "73c993dc3d9ab3cb8887ac0b1ee1cf1c92783240",
-        size_gb: 15.9,
-    },
-    KnownModel {
-        short: "omni-max",
-        repo: "Remek/basal-omni-1.0-max",
-        revision: "e538228c4f3ffd96dde298a073ed10247da0d637",
-        size_gb: 23.9,
-    },
-    KnownModel {
-        short: "omni-1.1-max",
-        repo: "Remek/basal-omni-1.1-max",
-        revision: "c8ab50cd973c116b3ca6bd9e4d574f713bab1f68",
-        size_gb: 23.92,
-    },
-    KnownModel {
-        short: "omni-ultra",
-        repo: "Remek/basal-omni-1.0-ultra",
-        revision: "b8e214cb42d0a7a4cb2c3a93b0ba02c65d7590e4",
-        size_gb: 62.55,
-    },
-];
-
-/// Model of the built-in configuration: the pinned basal-2.0-4.5B checkpoint.
-/// Keep index 4 assigned to basal-2.0-4.5B when changing [`KNOWN_MODELS`].
-pub const DEFAULT_MODEL: &KnownModel = &KNOWN_MODELS[4];
-
-/// Owner of a repository given without one (`--model basal-1.5-max` is `Remek/basal-1.5-max`).
-pub const DEFAULT_OWNER: &str = "Remek";
-
 /// A model on the command line (`basal serve --model`, `basal init --model`, the `--model` of the other commands):
 /// a local model directory (an existing path, or one starting with `/`, `.` or `~`), else a Hugging Face repository
 /// `owner/name` or `name` (owner Remek; 2.0-mini/2.0-4.5B/2.0-max and omni-mini/omni-max;
 /// mini/4.5B/max for basal-1.5), each with an optional
-/// `@revision` (branch, tag or commit). Without a revision a model of [`KNOWN_MODELS`] is the revision this runtime
-/// pins, any other repository its main branch.
+/// `@revision` (branch, tag or commit). Without a revision a model of the catalog ([`crate::models`]) is the revision
+/// this runtime pins, any other repository its main branch.
 pub fn model_ref(s: &str) -> Result<ModelConfig> {
     let s = s.trim();
     ensure!(!s.is_empty(), "empty model");
@@ -570,34 +499,25 @@ pub fn model_ref(s: &str) -> Result<ModelConfig> {
             }
             None => (s, None),
         };
-        let known = KNOWN_MODELS.iter().find(|m| {
-            m.short.eq_ignore_ascii_case(name)
-                || m.repo.eq_ignore_ascii_case(name)
-                || m.repo.rsplit('/').next().is_some_and(|n| n.eq_ignore_ascii_case(name))
-        });
+        let known = crate::models::find(name);
         let repo = match known {
             Some(k) => k.repo.to_string(),
             None if name.contains('/') => name.to_string(),
-            None => format!("{DEFAULT_OWNER}/{name}"),
+            None => format!("{}/{name}", crate::models::DEFAULT_OWNER),
         };
         ensure!(repo.split('/').count() == 2, "model {s:?}: expected name, owner/name or a local directory");
         let rev = rev.map(str::to_string).or_else(|| known.map(|k| k.revision.to_string()));
         // Unknown repositories need architecture-aware precision after their metadata is loaded.
         // Known Omni checkpoints also resolve precision after the GPU is known.
-        let dtype = match known {
-            Some(m) if m.short.starts_with("omni-") => "auto",
-            Some(_) => "f16",
-            None => "auto",
-        };
+        let dtype = known.map_or("auto", |k| k.cli_dtype());
         serde_json::json!({ "repo": repo, "revision": rev, "dtype": dtype })
     };
     Ok(serde_json::from_value(entry)?)
 }
 
-/// Checkpoint size (GB) of a model of [`KNOWN_MODELS`].
+/// Checkpoint size (GB) of a model of the catalog.
 pub fn known_size_gb(m: &ModelConfig) -> Option<f64> {
-    let repo = m.repo.as_deref()?;
-    KNOWN_MODELS.iter().find(|k| k.repo == repo).map(|k| k.size_gb)
+    crate::models::by_repo(m.repo.as_deref()?).map(|k| k.size_gb)
 }
 
 /// `owner/name@revision` (commit shortened) or the directory of a model, for messages.
@@ -676,12 +596,12 @@ pub enum Source {
     File(PathBuf),
     /// `--model` on the command line
     Models,
-    /// none of them: [`DEFAULT_MODEL`] with default options
+    /// none of them: the default model of the catalog ([`crate::models::default_model`]) with default options
     Builtin,
 }
 
 /// The configuration: `--config FILE`, else the `--model`s, else `BASAL_CONFIG` or `basal-serve.yml` in the working
-/// directory, else [`DEFAULT_MODEL`].
+/// directory, else the default model of the catalog.
 pub fn select(config: Option<PathBuf>, models: &[String]) -> Result<(Source, ServeConfig)> {
     if let Some(p) = config {
         let c = ServeConfig::load(&p)?;
@@ -695,7 +615,7 @@ pub fn select(config: Option<PathBuf>, models: &[String]) -> Result<(Source, Ser
         let c = ServeConfig::load(&p)?;
         return Ok((Source::File(p), c));
     }
-    Ok((Source::Builtin, ServeConfig::for_models(vec![model_ref(DEFAULT_MODEL.short)?])))
+    Ok((Source::Builtin, ServeConfig::for_models(vec![model_ref(crate::models::default_model().short)?])))
 }
 
 /// Snapshot of `repo` at `revision` in the Hugging Face cache, without contacting the Hub.
@@ -837,117 +757,16 @@ impl hf_hub::progress::ProgressHandler for DownloadLog {
     }
 }
 
-/// CLI auto precision: use the validated FP16 decoder for measured Omni/GPU pairs
-/// (GPU `device`; replicas run on GPUs of one type). Explicit precision always wins;
-/// media towers stay BF16. Other Gemma devices keep the published BF16 default.
+/// Precision of `value` (`auto`, f16, bf16, f32) for `manifest` on GPU `device`, by the dispatch rule of the model's
+/// profile ([`crate::models`]): `auto` is f16 for Llama; for Omni (Gemma) f16 on the GPUs the profile lists, else
+/// the published bf16. The GPU is asked only when the rule needs it. Explicit precision always wins; media towers
+/// stay BF16. Replicas and layer splits run on GPUs of one type.
 pub fn model_precision(value: &str, manifest: &ModelManifest, device: usize) -> Result<basal_gpu::Precision> {
-    if value == "auto"
-        && matches!(&manifest.config, basal_core::architecture::Architecture::Gemma4(_))
-        && basal_gpu::gpu_name(device).is_ok_and(|name| match name.as_str() {
-            "NVIDIA RTX 6000 Ada Generation" => {
-                matches!(manifest.name.as_str(), "basal-omni-1.0-mini" | "basal-omni-1.0-max" | "basal-omni-1.1-max")
-            }
-            "NVIDIA H100 PCIe" => manifest.name == "basal-omni-1.0-ultra",
-            _ => false,
-        })
-    {
-        return Ok(basal_gpu::Precision::F16);
-    }
-    basal_gpu::model_precision(value, &manifest.config)
-}
-
-/// GEMM table of a model: `None` for `gemm_table: none` and on builds without CUDA; for `auto` the cached table of
-/// this model, dtype, GPU `device` and cuBLASLt version. Llama generates it (one-time, minutes to an hour) on that GPU
-/// when it is missing, was made on another GPU or cuBLASLt, or does not cover the model's weight shapes; Gemma falls
-/// back to fixed per-prompt GEMMs when no matching cached or bundled table is available. A replica group or a layer
-/// split resolves its one table on its first device ([`check_table_on_devices`] then checks it on every device; the
-/// file name has no GPU identity, so a split needs GPUs of one type).
-pub fn gemm_table(m: &ModelConfig, manifest: &ModelManifest, cache: &Path, device: usize) -> Result<Option<PathBuf>> {
-    let mut resolved = m.clone();
-    resolved.dtype = match model_precision(&m.dtype, manifest, device)? {
-        basal_gpu::Precision::F16 => "f16",
-        basal_gpu::Precision::Bf16 => "bf16",
-        basal_gpu::Precision::F32 => "f32",
-    }
-    .into();
-    let m = &resolved;
-    match m.gemm_table.as_str() {
-        "none" => return Ok(None),
-        "auto" => {}
-        p => return Ok(Some(PathBuf::from(p))),
-    }
-    // The algorithm search supports half precision only; FP32 uses the reference matmul path.
-    if m.dtype == "f32" {
-        return Ok(None);
-    }
-    let Some(version) = basal_gpu::cublaslt_version() else {
-        return Ok(None); // Metal: no cuBLASLt tables
-    };
-    let gpu = basal_gpu::gpu_name(device)?;
-    let shapes = basal_gpu::architecture_projection_shapes(&manifest.config)?;
-    let path = cache.join(format!("{}-{}.json", manifest.name, m.dtype));
-    let problem = match std::fs::read_to_string(&path) {
-        Err(_) => Some("no table".to_string()),
-        Ok(text) => {
-            let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-            table_problem(&v, version, &gpu, &m.dtype, &shapes)
-        }
-    };
-    // a table compiled into this build for the same GPU, cuBLASLt version and shapes, checked on this GPU
-    if problem.is_some() {
-        for (file, text) in bundled::TABLES {
-            let Ok(v) = serde_json::from_str::<Value>(text) else { continue };
-            if table_problem(&v, version, &gpu, &m.dtype, &shapes).is_some() {
-                continue;
-            }
-            match basal_gpu::check_gemm_table(&v, device) {
-                Ok(()) => {
-                    std::fs::create_dir_all(cache).with_context(|| format!("creating {}", crate::term::P(&cache)))?;
-                    let tmp = path.with_extension("json.tmp");
-                    std::fs::write(&tmp, text)?;
-                    std::fs::rename(&tmp, &path)?;
-                    crate::done!("{}: GEMM table for {gpu} from this build ({file}), no search needed", manifest.name);
-                    return Ok(Some(path));
-                }
-                Err(e) => crate::warn!("{}: GEMM table {file} of this build rejected ({e:#})", manifest.name),
-            }
-        }
-    }
-    if matches!(manifest.config, basal_core::architecture::Architecture::Gemma4(_)) && problem.is_some() {
-        crate::note!(
-            "{}: using fixed per-prompt GEMMs; an invariant Gemma table for this GPU can be generated with gemm-search",
-            manifest.name
-        );
-        return Ok(None);
-    }
-    if let Some(why) = problem {
-        crate::progress!(
-            "{}: generating the batch-invariant GEMM table for {gpu} (device {}; {why}; {} classes x {} shapes, \
-             one-time) -> {}",
-            manifest.name,
-            device,
-            INVARIANT_CLASSES.len(),
-            shapes.len(),
-            crate::term::P(&path)
-        );
-        let t = std::time::Instant::now();
-        let mut table = search(&shapes, &m.dtype, device)?;
-        // for `basal gemm-share`: which build and model made the table
-        table["model"] = Value::from(manifest.name.clone());
-        table["basal"] = Value::from(format!("{} ({})", env!("CARGO_PKG_VERSION"), env!("BASAL_GIT_SHA")));
-        std::fs::create_dir_all(cache).with_context(|| format!("creating {}", crate::term::P(&cache)))?;
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_string_pretty(&table)? + "\n")?;
-        std::fs::rename(&tmp, &path)?;
-        crate::done!("{}: GEMM table done in {:.0} s", manifest.name, t.elapsed().as_secs_f64());
-        crate::note!(
-            "basal {} has no GEMM table of {} for {gpu}: `basal gemm-share` sends this one to the basal-rs project \
-             (a GitHub issue, after your confirmation), so that later builds spare other users of this GPU the search",
-            env!("CARGO_PKG_VERSION"),
-            manifest.name
-        );
-    }
-    Ok(Some(path))
+    let profile = crate::models::profile_for(manifest);
+    profile
+        .dispatch
+        .precision(value, &manifest.config, || basal_gpu::gpu_name(device).ok())
+        .with_context(|| format!("model {} (profile {})", manifest.name, profile.id))
 }
 
 /// GEMM tables compiled into this build (crates/basal-cli/gemm-tables, reduced by build.rs; none without CUDA).
@@ -959,7 +778,7 @@ pub mod bundled {
 pub fn bundled_gpus() -> Vec<String> {
     let mut g: Vec<String> = bundled::TABLES
         .iter()
-        .filter_map(|(_, t)| serde_json::from_str::<Value>(t).ok()?["gpu"].as_str().map(str::to_string))
+        .filter_map(|(_, _, t)| serde_json::from_str::<Value>(t).ok()?["gpu"].as_str().map(str::to_string))
         .collect();
     g.sort();
     g.dedup();
@@ -967,7 +786,13 @@ pub fn bundled_gpus() -> Vec<String> {
 }
 
 /// Why a GEMM table cannot be used for this GPU, cuBLASLt version, dtype and model shapes (None: it can).
-fn table_problem(v: &Value, version: usize, gpu: &str, dtype: &str, shapes: &[(usize, usize)]) -> Option<String> {
+pub(crate) fn table_problem(
+    v: &Value,
+    version: usize,
+    gpu: &str,
+    dtype: &str,
+    shapes: &[(usize, usize)],
+) -> Option<String> {
     let covered = |n: usize, k: usize| {
         v["entries"]
             .as_array()
@@ -988,7 +813,8 @@ fn table_problem(v: &Value, version: usize, gpu: &str, dtype: &str, shapes: &[(u
     }
 }
 
-fn search(shapes: &[(usize, usize)], dtype: &str, device: usize) -> Result<Value> {
+/// The batch-invariant search of `shapes` in `dtype` on GPU `device` (CUDA builds).
+pub(crate) fn search(shapes: &[(usize, usize)], dtype: &str, device: usize) -> Result<Value> {
     #[cfg(feature = "cuda")]
     return basal_gpu::gemm_search(&INVARIANT_CLASSES, shapes, dtype, true, device);
     #[cfg(not(feature = "cuda"))]
@@ -996,12 +822,12 @@ fn search(shapes: &[(usize, usize)], dtype: &str, device: usize) -> Result<Value
 }
 
 /// Refuse a GEMM table that leaves weight shapes of the model to run-time algorithm choice.
-pub fn check_gemm_coverage(name: &str, missing: &[(usize, usize)], table: &Path) -> Result<()> {
+pub fn check_gemm_coverage(name: &str, missing: &[(usize, usize)], table: &basal_gpu::GemmArtifact) -> Result<()> {
     if !missing.is_empty() {
         bail!(
             "{name}: GEMM table {} has no entries for the weight shapes {missing:?} (generate one with `basal \
              gemm-search --model ... --invariant` or use gemm_table: auto)",
-            crate::term::P(&table)
+            crate::gemm_artifact::describe(table)
         );
     }
     Ok(())

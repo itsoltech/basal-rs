@@ -4,7 +4,6 @@ use anyhow::{bail, ensure, Context, Result};
 use serde_json::{json, Map, Value};
 
 use super::{ClientArgs, Failure};
-use crate::config;
 
 pub(super) struct Requests {
     template: Option<Value>,
@@ -14,14 +13,7 @@ pub(super) struct Requests {
 }
 
 pub(super) fn model_name(name: &str) -> String {
-    config::KNOWN_MODELS
-        .iter()
-        .find(|m| {
-            m.short.eq_ignore_ascii_case(name)
-                || m.repo.eq_ignore_ascii_case(name)
-                || m.repo.rsplit('/').next().is_some_and(|n| n.eq_ignore_ascii_case(name))
-        })
-        .map_or_else(|| name.to_string(), |m| m.repo.rsplit('/').next().unwrap_or(name).to_string())
+    crate::models::find(name).map_or_else(|| name.to_string(), |m| m.name().to_string())
 }
 
 fn criteria(values: &[String]) -> Result<Map<String, Value>> {

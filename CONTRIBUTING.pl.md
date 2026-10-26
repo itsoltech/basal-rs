@@ -64,8 +64,10 @@ modelu, których build nie ma, może ją wysłać przez `basal gemm-share` (issu
 potwierdzeniu; bez `gh` przez formularz „Tabela GEMM / GEMM table”).
 
 Tabele trafiają tylko do buildu CUDA, a `build.rs` ogranicza ich zbiór: f16, wersja cuBLASLt z toolkitu CUDA
-(`cublas_api.h`) i bieżąca wersja wyszukiwania, jedna tabela na GPU i kształty wag, nazwa pliku
-`<gpu>--<model>--f16--cublaslt<wersja>.json`. Zostawia tylko pola czytane przez serwer (13–15 KB na tabelę zamiast
+(`cublas_api.h`) i bieżąca wersja wyszukiwania, każdy plik jako osobny artefakt (SHA-256 znormalizowanej
+treści, `src/gemm_artifact/normalize.rs`), nazwa pliku `<gpu>--<model>--f16--cublaslt<wersja>.json`. Tabeli używają
+tylko profile modeli, które przypinają jej plik i digest w `crates/basal-cli/src/models.rs` (`basal gemm-digest
+PLIK` wypisuje digest); dodanie tabeli nie zmienia wyboru istniejących profili. Zostawia tylko pola czytane przez serwer (13–15 KB na tabelę zamiast
 ~34 KB) i przerywa build, gdy tabela łamie regułę albo wszystkie razem przekraczają 1 MiB; CI (Clippy z CUDA)
 sprawdza to w każdym pull requeście. Nowy toolkit CUDA lub nowa wersja wyszukiwania oznacza więc wymianę tabel,
 a nie dokładanie kolejnych.

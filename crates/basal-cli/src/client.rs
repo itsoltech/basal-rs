@@ -428,7 +428,7 @@ fn run_local(
                         let name = requests
                             .configured_model()
                             .or_else(|| body.get("model").and_then(Value::as_str))
-                            .unwrap_or(crate::config::DEFAULT_MODEL.short)
+                            .unwrap_or(crate::models::default_model().short)
                             .to_string();
                         // Validate the request before downloading weights or preparing a CUDA table.
                         if body.get("model").is_none() {
@@ -478,7 +478,16 @@ fn load_local(args: &ClientArgs, name: &str) -> Result<basal_core::Engine<crate:
     }
     let dir = crate::config::model_dir(&model)?;
     let manifest = ModelManifest::load_with_orders(&dir, model.orders.as_deref())?;
-    let table = crate::config::gemm_table(&model, &manifest, &crate::config::default_gemm_cache(), args.device)?;
+    let precision = crate::config::model_precision(&model.dtype, &manifest, args.device)?;
+    let table = crate::gemm_artifact::resolve(
+        &crate::gemm_artifact::TableRequest::parse(&model.gemm_table)?,
+        &manifest,
+        crate::models::profile_for(&manifest),
+        precision,
+        &crate::config::default_gemm_cache(),
+        &[args.device],
+    )?;
+    let table_path = table.path().map(std::path::Path::to_path_buf);
     let gpu = crate::GpuArgs {
         media: model.media,
         orders: model.orders.clone(),
@@ -490,14 +499,15 @@ fn load_local(args: &ClientArgs, name: &str) -> Result<basal_core::Engine<crate:
         no_prefix_cache: false,
         state_cache_mb: 0,
         tree_max_tokens: basal_core::engine::TREE_MAX_TOKENS,
-        gemm_table: table.clone(),
+        gemm_table: table_path,
+        resolved_gemm: Some(table),
         device: Some(args.device),
         // `basal client --local` runs a model on one GPU
         layer_split: None,
     };
     let engine = crate::gpu_engine_at(&dir, &gpu)?;
-    if let Some(table) = table {
-        crate::config::check_gemm_coverage(&engine.manifest.name, &engine.backend.gemm_table_missing(), &table)?;
+    if let Some(table) = gpu.resolved_gemm.as_ref().and_then(|r| r.table.as_ref()) {
+        crate::config::check_gemm_coverage(&engine.manifest.name, &engine.backend.gemm_table_missing(), table)?;
     }
     Ok(engine)
 }

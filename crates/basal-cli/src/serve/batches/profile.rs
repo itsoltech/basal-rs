@@ -68,14 +68,19 @@ pub(crate) struct ModelProfile {
     forward_max_tokens: usize,
     shape_limits: ShapeLimits,
     numeric: Value,
-    gemm_table: Option<PathBuf>,
+    /// SHA-256 of the bytes of the GEMM table the engine's backend loaded, captured when the table was read or stored
+    /// before any weight (`GemmArtifact::bytes_sha256`); the table is never read again from a path.
+    gemm_table_sha256: Option<[u8; 32]>,
     qualification: BackgroundQualification,
 }
 
 impl ModelProfile {
-    /// Capture the profile of `engine` (call on its GPU thread, before the engine moves to a worker). `gemm_table` is
-    /// the table file the engine's backend uses, if any.
-    pub(crate) fn from_engine<B: Backend>(engine: &Engine<B>, gemm_table: Option<&Path>) -> Result<Self, ProfileError> {
+    /// Capture the profile of `engine` (call on its GPU thread, before the engine moves to a worker). `gemm_table_sha256`
+    /// is the SHA-256 of the bytes of the GEMM table the engine's backend uses, if any.
+    pub(crate) fn from_engine<B: Backend>(
+        engine: &Engine<B>,
+        gemm_table_sha256: Option<&[u8; 32]>,
+    ) -> Result<Self, ProfileError> {
         let name = engine.manifest.name.clone();
         let planner = engine.planner().map_err(|source| ProfileError::Planner { model: name.clone(), source })?;
         let mut describe = engine.backend.describe();
@@ -101,7 +106,7 @@ impl ModelProfile {
             forward_max_tokens: engine.forward_max_tokens,
             shape_limits: engine.shape_limits(),
             numeric,
-            gemm_table: gemm_table.map(Path::to_path_buf),
+            gemm_table_sha256: gemm_table_sha256.copied(),
             qualification: BackgroundQualification::not_configured(),
         })
     }
@@ -195,8 +200,8 @@ impl ModelProfile {
         field(b"basal.batch.fingerprint.v1");
         field(PLANNER_VERSION.as_bytes());
         field(&serde_json::to_vec(&self.numeric).map_err(|e| self.invalid(format!("numeric profile: {e}")))?);
-        match &self.gemm_table {
-            Some(table) => field(&file_digest(table).map_err(|e| read("GEMM table", e))?),
+        match &self.gemm_table_sha256 {
+            Some(table) => field(table),
             None => field(b"no-gemm-table"),
         }
         let mut files: Vec<String> = MODEL_FILES.iter().map(|f| (*f).to_string()).collect();

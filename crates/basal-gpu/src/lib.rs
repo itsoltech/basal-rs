@@ -46,13 +46,19 @@ mod inference;
 pub mod intel;
 pub use inference::{InferenceConfigError, InferenceMode};
 mod memory;
+pub mod plan;
+pub use plan::{
+    AttentionProducts, DeviceDefaultRule, DiagnosticOverrides, DispatchRule, ExecutionPolicy, GemmArtifact,
+    GemmFallback, GemmPolicy, GemmProvenance, KernelSet, PlanError, PlanOptions, Reproducibility,
+    ResolvedExecutionPlan,
+};
 mod quant;
 mod runtime;
 mod split;
 pub use memory::{gpu_memory, pool_probe, GpuMemory, GpuMemoryProbe, PoolProbe, PoolUsage};
 pub use quant::{estimated_stage_weight_bytes, estimated_weight_bytes, ParseQuantizationError, Quantization};
 use quant::{ProjWeight, Projection};
-pub use runtime::RuntimeBackend;
+pub use runtime::{PlannedPlacement, RuntimeBackend};
 pub use split::{LayerSplit, LayerSplitError, StageSpec};
 #[cfg(target_os = "macos")]
 pub mod gemm;
@@ -403,12 +409,12 @@ pub fn cublaslt_version() -> Option<usize> {
 fn set_cuda_sync(device: usize) -> Result<()> {
     use candle_core::cuda_backend::cudarc::driver::{result, sys};
     use sys::CUctx_flags_enum as F;
-    let flag = match std::env::var("BASAL_CUDA_SYNC").as_deref() {
-        Err(_) | Ok("") | Ok("auto") => return Ok(()),
-        Ok("spin") => F::CU_CTX_SCHED_SPIN,
-        Ok("yield") => F::CU_CTX_SCHED_YIELD,
-        Ok("blocking") => F::CU_CTX_SCHED_BLOCKING_SYNC,
-        Ok(v) => anyhow::bail!("BASAL_CUDA_SYNC={v:?}: auto, spin, yield or blocking"),
+    let flag = match crate::plan::DiagnosticOverrides::process().cuda_sync() {
+        None | Some("") | Some("auto") => return Ok(()),
+        Some("spin") => F::CU_CTX_SCHED_SPIN,
+        Some("yield") => F::CU_CTX_SCHED_YIELD,
+        Some("blocking") => F::CU_CTX_SCHED_BLOCKING_SYNC,
+        Some(v) => anyhow::bail!("BASAL_CUDA_SYNC={v:?}: auto, spin, yield or blocking"),
     };
     result::init()?;
     let dev = result::device::get(i32::try_from(device)?)?;
@@ -511,6 +517,10 @@ pub struct GpuBackend {
     kernels: Kernels,
     /// Fixed before prefix warmup and copied to every execution lane.
     attention_override: Option<&'static str>,
+    /// CUDA: the attention kernel the device rule fixed for the GPU of each stage (by stage): set by the public
+    /// loaders ([`DeviceDefaultRule::V1`]) or by the applied plan, before any K/V or lane exists, and copied with
+    /// `attention_override`. Empty only between an unplanned load and `apply_plan`.
+    attention_defaults: Vec<&'static str>,
     inv_freq: Vec<f64>,
     /// RoPE cos and sin of every position below `cfg.max_positions` (`rope_row`), `[pos][cos: hd/2 | sin: hd/2]`:
     /// computed once instead of per token and forward; host memory shared by the stages
@@ -1606,7 +1616,66 @@ fn check(st: &MmapedSafetensors, name: &str, shape: &[usize]) -> Result<()> {
 impl GpuBackend {
     /// Load a model onto GPU `device`. `quantization` sets the format of the projection weights; a quantized format is
     /// checked against `precision`, `kernels` and this build's backend before anything is opened.
+    ///
+    /// Without an execution plan the backend runs the generic attention policy: no measured model profile, the
+    /// CUDA kernel that [`DeviceDefaultRule::V1`] fixes for the GPU, decided before the weights are read
+    /// (`BASAL_ATT` still selects another kernel for A/B). A model instance with a profile, inference mode or
+    /// GEMM table is loaded by [`RuntimeBackend::load_planned`].
     pub fn load(
+        model_dir: &Path,
+        cfg: &LlamaConfig,
+        precision: Precision,
+        readout: Readout,
+        kernels: Kernels,
+        quantization: Quantization,
+        device: usize,
+    ) -> Result<Self> {
+        quantization.check(precision, kernels, cfg!(feature = "cuda"))?;
+        let defaults = DeviceDefaultRule::V1.stage_kernels(&[device])?;
+        let mut backend = Self::load_stages(
+            model_dir,
+            cfg,
+            precision,
+            readout,
+            kernels,
+            quantization,
+            &[(device, 0..cfg.num_layers)],
+        )?;
+        backend.attention_defaults = defaults;
+        Ok(backend)
+    }
+
+    /// Load a model split by consecutive layer ranges over several CUDA devices ([`LayerSplit`]): every stage holds its
+    /// layers, cuBLASLt handle and prefix K/V on its GPU; stage 0 also the embedding, the last stage the final norm,
+    /// lm_head and evidence head. The split is checked against this build's backend, `precision`, `kernels` and the
+    /// model's layer count before anything is opened. Computations are those of one GPU (same kernels, GEMM tables
+    /// and bits of every weight); the activations move between GPUs at each boundary.
+    ///
+    /// The attention policy is the generic one of [`GpuBackend::load`], decided for the GPU of every stage.
+    pub fn load_split(
+        model_dir: &Path,
+        cfg: &LlamaConfig,
+        precision: Precision,
+        readout: Readout,
+        kernels: Kernels,
+        quantization: Quantization,
+        split: &LayerSplit,
+    ) -> Result<Self> {
+        let stages = Self::split_stages(cfg, precision, kernels, quantization, split)?;
+        let devices: Vec<usize> = stages.iter().map(|(d, _)| *d).collect();
+        let defaults = DeviceDefaultRule::V1.stage_kernels(&devices)?;
+        let mut backend = Self::load_stages(model_dir, cfg, precision, readout, kernels, quantization, &stages)?;
+        backend.attention_defaults = defaults;
+        Ok(backend)
+    }
+
+    /// [`GpuBackend::load`] without an attention policy, for [`RuntimeBackend::load_planned`], which applies the
+    /// plan's policy before any K/V or lane exists. Not usable for a forward before that.
+    #[cfg_attr(
+        all(feature = "intel", not(feature = "cuda"), not(target_os = "macos")),
+        expect(dead_code, reason = "an Intel-only build loads Llama through IntelBackend")
+    )]
+    pub(crate) fn load_unplanned(
         model_dir: &Path,
         cfg: &LlamaConfig,
         precision: Precision,
@@ -1619,12 +1688,12 @@ impl GpuBackend {
         Self::load_stages(model_dir, cfg, precision, readout, kernels, quantization, &[(device, 0..cfg.num_layers)])
     }
 
-    /// Load a model split by consecutive layer ranges over several CUDA devices ([`LayerSplit`]): every stage holds its
-    /// layers, cuBLASLt handle and prefix K/V on its GPU; stage 0 also the embedding, the last stage the final norm,
-    /// lm_head and evidence head. The split is checked against this build's backend, `precision`, `kernels` and the
-    /// model's layer count before anything is opened. Computations are those of one GPU (same kernels, GEMM tables
-    /// and bits of every weight); the activations move between GPUs at each boundary.
-    pub fn load_split(
+    /// [`GpuBackend::load_split`] without an attention policy ([`GpuBackend::load_unplanned`]).
+    #[cfg_attr(
+        all(feature = "intel", not(feature = "cuda"), not(target_os = "macos")),
+        expect(dead_code, reason = "an Intel-only build loads Llama through IntelBackend")
+    )]
+    pub(crate) fn load_split_unplanned(
         model_dir: &Path,
         cfg: &LlamaConfig,
         precision: Precision,
@@ -1633,11 +1702,22 @@ impl GpuBackend {
         quantization: Quantization,
         split: &LayerSplit,
     ) -> Result<Self> {
+        let stages = Self::split_stages(cfg, precision, kernels, quantization, split)?;
+        Self::load_stages(model_dir, cfg, precision, readout, kernels, quantization, &stages)
+    }
+
+    /// The checked device and layer range of every stage of `split`.
+    fn split_stages(
+        cfg: &LlamaConfig,
+        precision: Precision,
+        kernels: Kernels,
+        quantization: Quantization,
+        split: &LayerSplit,
+    ) -> Result<Vec<(usize, Range<usize>)>> {
         quantization.check(precision, kernels, cfg!(feature = "cuda"))?;
         split.check(precision, kernels, cfg!(feature = "cuda"))?;
         let ranges = split.ranges(cfg.num_layers)?;
-        let plan: Vec<(usize, Range<usize>)> = split.devices().into_iter().zip(ranges).collect();
-        Self::load_stages(model_dir, cfg, precision, readout, kernels, quantization, &plan)
+        Ok(split.devices().into_iter().zip(ranges).collect())
     }
 
     /// Load the stages `plan` (device ordinal and global layer range of each, in layer order; one stage is the whole
@@ -1961,7 +2041,9 @@ impl GpuBackend {
             }
             #[cfg(feature = "cuda")]
             for (s, dev) in devs.iter().enumerate() {
-                if let (Device::Cuda(d), false) = (dev, std::env::var("BASAL_GEMM").as_deref() == Ok("cublas")) {
+                if let (Device::Cuda(d), false) =
+                    (dev, crate::plan::DiagnosticOverrides::process().gemm() == Some("cublas"))
+                {
                     if split {
                         match bind_twice(dev) {
                             Twice::First => {}
@@ -2006,6 +2088,7 @@ impl GpuBackend {
             readout,
             kernels,
             attention_override: None,
+            attention_defaults: Vec::new(),
             inv_freq,
             rope: rope.into(),
             load_s,
@@ -2027,15 +2110,8 @@ impl GpuBackend {
     /// CUDA attention kernel of this forward precision.
     fn attention_kernel(&self) -> Result<&'static str> {
         #[cfg(feature = "cuda")]
-        if let Device::Cuda(d) = &self.stages[0].dev {
-            return if self.tc_attention() {
-                Ok(match self.attention_override {
-                    Some(k) => k,
-                    None => fused::tc_kernel(d)?,
-                })
-            } else {
-                Ok("attn_tree_f32")
-            };
+        if self.stages[0].dev.is_cuda() {
+            return if self.tc_attention() { self.tc_kernel_of(0) } else { Ok("attn_tree_f32") };
         }
         Ok(if self.tree_attention() { "attn_tree_f32" } else { "sdpa" })
     }
@@ -2069,7 +2145,7 @@ impl GpuBackend {
     /// Attention by tree units, invariant to packing: always on CUDA; on Metal unless `BASAL_ATT=sdpa` (the MLX SDPA
     /// kernel over each packed row with an additive mask, the earlier path, kept for comparison).
     fn tree_attention(&self) -> bool {
-        self.is_cuda() || std::env::var("BASAL_ATT").as_deref() != Ok("sdpa")
+        self.is_cuda() || crate::plan::DiagnosticOverrides::process().att() != Some("sdpa")
     }
 
     /// Profiling: synchronise `dev` (the GPU of the running stage) and attribute the time since `*t` to `section`.
@@ -2514,10 +2590,10 @@ impl GpuBackend {
                         scale,
                         Some((&khl, &vhl, v_exact)),
                         Some(dt),
-                        self.attention_override,
+                        self.tc_kernel_of(s)?,
                     )?)
                 } else {
-                    Some(fused::attention_tree(&_flat, &us, f.dims, scale, None, Some(dt), self.attention_override)?)
+                    Some(fused::attention_tree(&_flat, &us, f.dims, scale, None, Some(dt), self.tc_kernel_of(s)?)?)
                 }
             } else {
                 None
@@ -2703,12 +2779,27 @@ impl GpuBackend {
         }
     }
 
+    /// The tensor-core attention kernel of stage `s`: the plan's attention policy, else `BASAL_ATT`, else the
+    /// plan's device default for the stage's GPU.
+    #[cfg(feature = "cuda")]
+    fn tc_kernel_of(&self, s: usize) -> Result<&'static str> {
+        if let Some(k) = self.attention_override {
+            return Ok(k);
+        }
+        let default = self
+            .attention_defaults
+            .get(s)
+            .copied()
+            .with_context(|| format!("no planned attention kernel for stage {s}"))?;
+        Ok(fused::tc_kernel(default))
+    }
+
     /// CUDA attention on tensor cores (f16 / bf16 forwards; `BASAL_ATT=simt` selects the f32 kernel for A/B).
     #[cfg_attr(not(feature = "cuda"), allow(dead_code, reason = "Tensor-core attention is a CUDA-only kernel"))]
     fn tc_attention(&self) -> bool {
         self.is_cuda()
             && self.precision != Precision::F32
-            && (self.attention_override.is_some() || std::env::var("BASAL_ATT").as_deref() != Ok("simt"))
+            && (self.attention_override.is_some() || crate::plan::DiagnosticOverrides::process().att() != Some("simt"))
     }
 
     /// The prefix K / V of every layer (of one stage) split into f16 hi / lo planes, when the tensor-core attention
@@ -2937,16 +3028,16 @@ impl GpuBackend {
         Value::Null
     }
 
-    /// Use a cuBLASLt algorithm table written by `gemm_search` (CUDA; rejected if the cuBLASLt version differs), on
-    /// every stage: the same table, checked against the GPU name of each stage, so all stages run the same mode.
-    pub fn load_gemm_table(&mut self, path: &Path) -> Result<usize> {
+    /// Use the cuBLASLt algorithm table `v` written by `gemm_search` (CUDA; rejected if the cuBLASLt version
+    /// differs), on every stage: the same table, checked against the GPU name of each stage, so all stages run the
+    /// same mode. `name` names the table in messages. With `table_only` (a reproducible plan) only a
+    /// batch-invariant table of the forward's dtype is accepted and a GEMM without its algorithm is an error.
+    pub fn load_gemm_table(&mut self, v: &Value, name: &str, table_only: bool) -> Result<usize> {
         #[cfg(feature = "cuda")]
         if self.stages.iter().all(|s| s.w.get().lt.is_some()) {
-            let v: Value = serde_json::from_str(&std::fs::read_to_string(path)?)?;
             ensure!(
                 v["cublaslt_version"].as_u64() == Some(cublaslt::version() as u64),
-                "{}: table for cuBLASLt {}, this process uses {}",
-                path.display(),
+                "{name}: table for cuBLASLt {}, this process uses {}",
                 v["cublaslt_version"],
                 cublaslt::version()
             );
@@ -2954,23 +3045,35 @@ impl GpuBackend {
                 if let (Some(t), Device::Cuda(d)) = (v["gpu"].as_str(), &st.dev) {
                     let here = d.cuda_stream().context().name()?;
                     if self.stages.len() > 1 {
-                        ensure!(t == here, "{}: table for {t}, the GPU of stage {s} is {here}", path.display());
+                        ensure!(t == here, "{name}: table for {t}, the GPU of stage {s} is {here}");
                     } else {
-                        ensure!(t == here, "{}: table for {t}, this GPU is {here}", path.display());
+                        ensure!(t == here, "{name}: table for {t}, this GPU is {here}");
                     }
                 }
             }
-            let entries = table_entries(&v)?;
+            let entries = table_entries(v)?;
+            if table_only {
+                let dt = self.precision.compute();
+                ensure!(
+                    v["invariant"].as_bool() == Some(true) && entries.iter().all(|e| e.dtype == dt),
+                    "{name}: a reproducible plan needs a batch-invariant table of {dt:?} only"
+                );
+            }
             for lt in self.stages.iter().filter_map(|s| s.w.get().lt.as_ref()) {
                 if v["invariant"].as_bool() == Some(true) {
                     lt.load_invariant(&entries)?;
                 } else {
                     lt.load(&entries);
                 }
+                if table_only {
+                    lt.set_table_only();
+                }
             }
             return Ok(entries.len());
         }
-        bail!("--gemm-table needs the CUDA backend with cuBLASLt ({})", path.display())
+        #[cfg(not(feature = "cuda"))]
+        let _ = (v, table_only);
+        bail!("--gemm-table needs the CUDA backend with cuBLASLt ({name})")
     }
 
     /// The device of the first stage (the only one on one GPU).
@@ -3043,7 +3146,7 @@ pub fn check_gemm_table(v: &Value, device: usize) -> Result<()> {
 #[cfg(feature = "cuda")]
 fn host_timing() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("BASAL_HOST_TIMING").is_some())
+    *ON.get_or_init(|| crate::plan::DiagnosticOverrides::process().host_timing())
 }
 
 /// RoPE cos and sin of position `pos` for every frequency.
@@ -3483,6 +3586,7 @@ impl Backend for GpuBackend {
             readout: self.readout,
             kernels: self.kernels,
             attention_override: self.attention_override,
+            attention_defaults: self.attention_defaults.clone(),
             inv_freq: self.inv_freq.clone(),
             rope: self.rope.clone(),
             load_s: 0.0,

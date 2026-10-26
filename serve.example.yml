@@ -35,9 +35,11 @@ gemm_cache: .cache/gemm            # tables of `gemm_table: auto`
 models:
   - repo: Remek/basal-1.5-max      # Hugging Face repository, downloaded at start into HF_HOME (HF_TOKEN if needed)
     revision: be1b5ee7e7a9755a931262fa7fab4f59be0fd03c   # branch, tag or commit (default: main)
-    # auto (default): the batch-invariant GEMM table of this model, dtype and GPU from gemm_cache; generated at start
-    # when missing or made for another GPU / cuBLASLt (one-time, minutes). none: algorithms timed at first use
-    # (results may depend on the batch). Otherwise the path of a `basal gemm-search --invariant` table.
+    # auto (default): the batch-invariant GEMM table of this model, dtype and GPU from gemm_cache, else a built-in
+    # table pinned by the model profile, else generated at start (one-time, minutes; Omni uses fixed per-prompt GEMMs).
+    # pinned / sha256:<digest>: reproducible, only the profile's built-in table / exactly that artifact, else an error.
+    # none: algorithms timed at first use (results may depend on the batch). Otherwise the path of a
+    # `basal gemm-search --invariant` table.
     gemm_table: reports/rust-cuda-1.5-max/gemm-equiv/gemm-algos-f16-invariant-groups.json
     dtype: f16                     # f16 (default), bf16, f32
     inference_mode: auto           # balanced for Basal 2.0 text on RTX 6000 Ada; accurate preserves original attention

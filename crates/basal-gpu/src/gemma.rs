@@ -458,50 +458,35 @@ impl GemmaBackend {
         self.transfers.clone().map(crate::StageTransfers)
     }
 
-    pub fn configure_inference(
-        &mut self,
-        mode: crate::InferenceMode,
-        model_name: &str,
-    ) -> Result<(), crate::InferenceConfigError> {
+    /// Apply the stage-local policies of `plan` (one per stage, decided with each stage's GPU) before media slots,
+    /// gates or forks exist.
+    pub fn apply_plan(&mut self, plan: &crate::plan::ResolvedExecutionPlan) -> Result<(), crate::InferenceConfigError> {
         if self.stages().any(|stage| stage.gate.is_some() || stage.media_slot.is_some()) {
             return Err(crate::InferenceConfigError::CacheInitialized);
         }
-        if mode == crate::InferenceMode::Balanced {
-            return Err(crate::InferenceConfigError::UnsupportedBalanced);
+        crate::inference::check_plan(plan)?;
+        if plan.precision() != self.precision || plan.readout() != self.readout {
+            return Err(crate::InferenceConfigError::PlanMismatch("precision or readout"));
         }
-        #[cfg(feature = "cuda")]
-        let dtype = match (mode, self.precision, &self.dev) {
-            (crate::InferenceMode::Auto, Precision::F16, Device::Cuda(dev))
-                if matches!(model_name, "basal-omni-1.0-mini" | "basal-omni-1.0-max")
-                    && dev
-                        .cuda_stream()
-                        .context()
-                        .name()
-                        .is_ok_and(|name| name == "NVIDIA RTX 6000 Ada Generation") =>
-            {
-                DType::F16
-            }
-            _ => DType::F32,
+        let crate::plan::ExecutionPolicy::Gemma { stages } = plan.policy() else {
+            return Err(crate::InferenceConfigError::PlanMismatch("a Llama policy for a Gemma backend"));
         };
-        #[cfg(not(feature = "cuda"))]
-        let dtype = {
-            let _ = model_name;
-            DType::F32
-        };
-        self.attention_dtype = dtype;
-        #[cfg(feature = "cuda")]
-        let measured = mode == crate::InferenceMode::Auto
-            && self.precision == Precision::F16
-            && self.readout == Readout::F32
-            && model_name == "basal-omni-1.0-ultra"
-            && matches!(&self.dev, Device::Cuda(dev) if dev.cuda_stream().context().name().is_ok_and(|name| name == "NVIDIA H100 PCIe"));
-        #[cfg(not(feature = "cuda"))]
-        let measured = false;
-        self.optimized = measured;
-        for stage in &mut self.following {
-            stage.configure_inference(mode, model_name)?;
+        if stages.len() != 1 + self.following.len() {
+            return Err(crate::InferenceConfigError::PlanMismatch("stage count"));
+        }
+        self.apply_stage_policy(&stages[0]);
+        for (stage, policy) in self.following.iter_mut().zip(&stages[1..]) {
+            stage.apply_stage_policy(policy);
         }
         Ok(())
+    }
+
+    fn apply_stage_policy(&mut self, policy: &crate::plan::GemmaStagePolicy) {
+        self.attention_dtype = match policy.attention_products {
+            crate::plan::AttentionProducts::F16 => DType::F16,
+            crate::plan::AttentionProducts::F32 => DType::F32,
+        };
+        self.optimized = policy.ops == crate::plan::GemmaOps::FusedF16;
     }
 
     fn decoder_norm(&self, x: &Tensor, weight: Option<&Tensor>, eps: f64) -> Result<Tensor> {
@@ -599,11 +584,12 @@ impl GemmaBackend {
     }
 
     /// Accept only an invariant table for this GPU/library/dtype; uncovered shapes use fixed GEMMs.
-    pub fn load_gemm_table(&mut self, path: &std::path::Path) -> Result<usize> {
+    /// `v`: the validated table of the plan, `name` names it in messages.
+    pub fn load_gemm_table(&mut self, v: &Value, name: &str) -> Result<usize> {
         let mut total = 0;
         for stage in std::iter::once(&*self).chain(self.following.iter()) {
             stage.bind()?;
-            total += stage.load_local_gemm_table(path)?;
+            total += stage.load_local_gemm_table(v, name)?;
         }
         Ok(total)
     }
@@ -620,12 +606,11 @@ impl GemmaBackend {
         }
     }
 
-    fn load_local_gemm_table(&self, path: &std::path::Path) -> Result<usize> {
+    fn load_local_gemm_table(&self, value: &Value, name: &str) -> Result<usize> {
         #[cfg(feature = "cuda")]
         if let Some(lt) = &self.weights.get().lt {
-            let value: Value = serde_json::from_str(&std::fs::read_to_string(path)?)?;
-            crate::check_gemm_table(&value, self.device)?;
-            let entries = crate::table_entries(&value)?;
+            crate::check_gemm_table(value, self.device)?;
+            let entries = crate::table_entries(value)?;
             ensure!(
                 !entries.is_empty() && entries.iter().all(|e| e.dtype == self.precision.compute()),
                 "Gemma GEMM table dtype must match the selected compute dtype"
@@ -634,7 +619,9 @@ impl GemmaBackend {
             lt.validate_invariant()?;
             return Ok(entries.len());
         }
-        anyhow::bail!("Gemma GEMM tables require CUDA half precision ({})", path.display())
+        #[cfg(not(feature = "cuda"))]
+        let _ = value;
+        anyhow::bail!("Gemma GEMM tables require CUDA half precision ({name})")
     }
 
     // This cache belongs to one step: every rotation uses the same offset, token count and dtype.

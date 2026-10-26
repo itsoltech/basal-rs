@@ -24,19 +24,34 @@ struct Candidate {
     v: Value,
 }
 
+/// Generated tables of the cache (the content-addressed `artifacts/` and files of earlier caches), one per
+/// artifact digest, that no table of this build matches.
 fn candidates(dir: &Path) -> Result<Vec<Candidate>> {
-    let mut out = Vec::new();
-    let Ok(rd) = std::fs::read_dir(dir) else { return Ok(out) };
+    let mut out: Vec<Candidate> = Vec::new();
     let bundled: Vec<Value> =
-        config::bundled::TABLES.iter().filter_map(|(_, t)| serde_json::from_str::<Value>(t).ok()).collect();
-    let mut paths: Vec<PathBuf> =
-        rd.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|x| x == "json")).collect();
-    paths.sort();
+        config::bundled::TABLES.iter().filter_map(|(_, _, t)| serde_json::from_str::<Value>(t).ok()).collect();
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for d in [dir.join("artifacts"), dir.to_path_buf()] {
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        let mut found: Vec<PathBuf> = rd
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "json"))
+            .collect();
+        found.sort();
+        paths.extend(found);
+    }
+    let mut digests: Vec<String> = Vec::new();
     for path in paths {
         let Ok(v) = serde_json::from_str::<Value>(&std::fs::read_to_string(&path)?) else { continue };
         if v["invariant"].as_bool() != Some(true) || v["entries"].as_array().is_none_or(|e| e.is_empty()) {
             continue;
         }
+        // the same artifact imported into the store and still in an earlier cache file is offered once
+        let Ok(digest) = crate::gemm_artifact::digest(&v) else { continue };
+        if digests.contains(&digest) || crate::gemm_artifact::bundled_digests().any(|d| d == digest) {
+            continue;
+        }
+        digests.push(digest);
         // tables of this build, or of an earlier one, for the same GPU, cuBLASLt and shapes need no sharing
         let same = |b: &Value| {
             b["gpu"] == v["gpu"]

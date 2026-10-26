@@ -26,8 +26,10 @@ mod config_support;
 mod database;
 mod doctor;
 mod export;
+mod gemm_artifact;
 mod gemm_share;
 mod large_eval;
+mod models;
 mod paths;
 mod reference;
 mod serve;
@@ -170,6 +172,10 @@ struct GpuArgs {
     /// CUDA: cuBLASLt algorithm table from `basal gemm-search` (classes not in it are tuned at first use)
     #[arg(long)]
     gemm_table: Option<PathBuf>,
+    /// The GEMM table acquired by the first plan phase (`gemm_artifact::resolve`, serve and benchmark), with its
+    /// digest and provenance; takes the place of `gemm_table`.
+    #[arg(skip)]
+    resolved_gemm: Option<gemm_artifact::ResolvedGemm>,
     /// GPU: CUDA device ordinal among the GPUs visible to this process (CUDA_VISIBLE_DEVICES renumbers them); Metal
     /// and Intel: 0 only. Default 0. `basal serve`: the device of every --model (a configuration file sets `device`
     /// per model instead)
@@ -427,6 +433,19 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Print the SHA-256 of the normalized content of GEMM tables (the identity `gemm_table: sha256:<digest>` pins);
+    /// with --import also store them in the content-addressed GEMM cache
+    GemmDigest {
+        /// Table files (`basal gemm-search` output, a bundled table, an earlier cache file)
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+        /// Store each table under its digest in the GEMM cache (never replacing a stored artifact)
+        #[arg(long)]
+        import: bool,
+        /// GEMM cache of --import (default: the GEMM cache of `basal serve`)
+        #[arg(long, requires = "import")]
+        dir: Option<PathBuf>,
+    },
     /// Remove what basal put on this machine: user service, configuration, caches, CUDA libraries, the binaries of a
     /// package installation; with --models also the basal models in the Hugging Face cache
     Uninstall {
@@ -622,7 +641,28 @@ fn parse_inference_mode(value: &str) -> Result<InferenceMode> {
     })
 }
 
+/// An engine with the frozen plan and profile it was loaded with.
+pub(crate) struct PlannedEngine {
+    pub engine: Engine<GpuBackend>,
+    pub plan: basal_gpu::ResolvedExecutionPlan,
+    pub profile: &'static models::Profile,
+}
+
+impl PlannedEngine {
+    /// The scheduling policy of `basal serve` for this instance: the profile's, with the features of the plan.
+    pub fn scheduling(&self) -> models::SchedulingPolicy {
+        self.profile.scheduling.resolve(&self.plan)
+    }
+}
+
 fn gpu_engine_at(dir: &Path, g: &GpuArgs) -> Result<Engine<GpuBackend>> {
+    Ok(planned_engine_at(dir, g)?.engine)
+}
+
+/// Load the model of `dir` with `g`: resolve its profile, freeze the execution plan (precision, kernels, attention,
+/// GEMM table and fallbacks for the instance's GPUs) before any weight is read, load the backend from the plan,
+/// then precompute the template prefixes.
+fn planned_engine_at(dir: &Path, g: &GpuArgs) -> Result<PlannedEngine> {
     let inference_mode = parse_inference_mode(&g.inference_mode)?;
     #[cfg(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos")))]
     anyhow::ensure!(g.state_cache_mb == 0, "Intel state cache is not implemented; use --state-cache-mb 0");
@@ -635,28 +675,57 @@ fn gpu_engine_at(dir: &Path, g: &GpuArgs) -> Result<Engine<GpuBackend>> {
         "bf16" => Readout::Bf16Rounded,
         r => bail!("unknown readout {r:?} (f32, bf16)"),
     };
+    let profile = models::profile_for(&manifest);
     let precision = config::model_precision(&g.dtype, &manifest, g.devices()[0])?;
     let kernels = Kernels::parse(&g.kernels)?;
-    let backend = match &g.layer_split {
-        None => GpuBackend::load(dir, &manifest.config, precision, readout, kernels, quantization, g.device(), g.media)
-            .with_context(|| format!("loading {}", manifest.name))?,
-        Some(split) => {
-            // the stages must cover the model's layers exactly: checked before any weight is read
-            let layers = manifest.config.num_layers();
-            config::check_split_coverage(&manifest.name, split, layers)?;
-            GpuBackend::load_split_with_media(
-                dir,
-                &manifest.config,
-                precision,
-                readout,
-                kernels,
-                quantization,
-                split,
-                g.media,
-            )
-            .with_context(|| format!("loading {} with layer split {split}", manifest.name))?
-        }
+    if let Some(split) = &g.layer_split {
+        // the stages must cover the model's layers exactly: checked before any weight is read
+        config::check_split_coverage(&manifest.name, split, manifest.config.num_layers())?;
+    }
+    let gemm = match (&g.resolved_gemm, &g.gemm_table) {
+        (Some(resolved), _) => resolved.clone(),
+        // `--gemm-table PATH`, or `pinned` / `sha256:<digest>` / `auto` resolved in the user's GEMM cache
+        (None, Some(value)) => gemm_artifact::resolve(
+            &gemm_artifact::TableRequest::parse(&value.to_string_lossy())?,
+            &manifest,
+            profile,
+            precision,
+            &config::default_gemm_cache(),
+            &g.devices(),
+        )?,
+        (None, None) => gemm_artifact::ResolvedGemm::none(
+            basal_gpu::cublaslt_version().is_some() && precision != basal_gpu::Precision::F32,
+        ),
     };
+    let options = basal_gpu::PlanOptions {
+        mode: inference_mode,
+        precision,
+        readout,
+        kernels,
+        quantization,
+        reproducibility: gemm.reproducibility,
+    };
+    let plan = basal_gpu::ResolvedExecutionPlan::freeze(
+        profile.id,
+        profile.kernel_set,
+        &profile.dispatch,
+        &manifest.config,
+        &g.devices(),
+        options,
+        gemm.table.clone(),
+        gemm.tables_apply,
+    )
+    .with_context(|| format!("model {} (profile {})", manifest.name, profile.id))?;
+    crate::note!("{}: execution plan {}", manifest.name, plan_summary(&plan));
+    let placement = match &g.layer_split {
+        None => basal_gpu::PlannedPlacement::Single(g.device()),
+        Some(split) => basal_gpu::PlannedPlacement::Split(split),
+    };
+    let (mut backend, gemm_classes) = GpuBackend::load_planned(dir, &manifest.config, &plan, placement, g.media)
+        .with_context(|| match &g.layer_split {
+            None => format!("loading {}", manifest.name),
+            Some(split) => format!("loading {} with layer split {split}", manifest.name),
+        })?;
     match &g.layer_split {
         None => crate::done!("{} loaded on GPU {} in {:.1}s", manifest.name, g.device(), backend.load_s()),
         Some(split) => {
@@ -704,11 +773,8 @@ fn gpu_engine_at(dir: &Path, g: &GpuArgs) -> Result<Engine<GpuBackend>> {
             );
         }
     }
-    let mut backend = backend;
-    backend.configure_inference(inference_mode, &manifest.name)?;
-    if let Some(p) = &g.gemm_table {
-        let n = backend.load_gemm_table(p)?;
-        crate::note!("{n} GEMM classes from {}", crate::term::P(&p));
+    if let (Some(n), Some(table)) = (gemm_classes, &plan.gemm().table) {
+        crate::note!("{n} GEMM classes from {}", gemm_artifact::describe(table));
     }
     backend.set_state_cache_bytes(g.state_cache_mb.checked_mul(1 << 20).context("state cache budget overflow")?)?;
     let mut engine = Engine::new(manifest, backend)?;
@@ -718,7 +784,23 @@ fn gpu_engine_at(dir: &Path, g: &GpuArgs) -> Result<Engine<GpuBackend>> {
         let lens = engine.warm_static_prefixes()?;
         crate::note!("template prefixes precomputed ({lens:?} tokens)");
     }
-    Ok(engine)
+    Ok(PlannedEngine { engine, plan, profile })
+}
+
+/// Profile, digest of the plan identity and its main decisions, for the log.
+fn plan_summary(plan: &basal_gpu::ResolvedExecutionPlan) -> String {
+    use sha2::Digest;
+    let identity = plan.identity();
+    let hash = sha2::Sha256::digest(identity.to_string().as_bytes());
+    let hex: String = hash.iter().take(8).map(|b| format!("{b:02x}")).collect();
+    let gemm = plan.gemm().table.as_ref().map_or_else(|| identity["gemm"]["fallback"].to_string(), |t| t.label());
+    format!(
+        "{} sha256:{hex} ({}; {}; GEMM {gemm}; {})",
+        plan.profile(),
+        identity["kernel_set"].as_str().unwrap_or("?"),
+        identity["policy"],
+        identity["reproducibility"].as_str().unwrap_or("?")
+    )
 }
 
 fn parse_batching(s: &str) -> Result<basal_core::Batching> {
@@ -930,9 +1012,13 @@ fn run() -> Result<()> {
         }
         Cmd::Update { version, check } => update::run(version, check)?,
         Cmd::GemmShare { dir, yes, dry_run } => gemm_share::run(dir, yes, dry_run)?,
+        Cmd::GemmDigest { files, import, dir } => {
+            let cache = import.then(|| dir.unwrap_or_else(config::default_gemm_cache));
+            gemm_artifact::digest_command(&files, cache.as_deref())?;
+        }
         Cmd::Uninstall { models, yes, dry_run } => uninstall::run(&uninstall::Options { models, yes, dry_run })?,
         Cmd::Init { models, out, force } => {
-            let models = if models.is_empty() { vec![config::DEFAULT_MODEL.short.to_string()] } else { models };
+            let models = if models.is_empty() { vec![models::default_model().short.to_string()] } else { models };
             let models = models.iter().map(|m| config::model_ref(m)).collect::<Result<Vec<_>>>()?;
             let out = out.unwrap_or_else(|| PathBuf::from(paths::CONFIG_NAME));
             if out.exists() && !force {
@@ -996,7 +1082,7 @@ fn run() -> Result<()> {
                     "no `--model` and no {} here: serving {} (`--model 2.0-mini|2.0-max` selects another 2.0 model; \
                      `--model mini|4.5B|max` selects basal-1.5)",
                     paths::CONFIG_NAME,
-                    config::DEFAULT_MODEL.repo
+                    models::default_model().repo
                 ),
             }
             if matches!(source, config::Source::File(_)) {
@@ -1115,12 +1201,22 @@ fn run() -> Result<()> {
                     config::check_split_coverage(&manifest.name, split, manifest.config.num_layers())?;
                 }
             }
-            // one table per model, resolved on its first device; the table of a replica group or a layer split is
-            // checked on every device before anything loads (no per-device cache writes)
+            // one table per model, chosen on its first device (first phase of the execution plan) and checked on
+            // every device of the model before anything loads
             let mut tables = Vec::new();
             for ((mc, manifest), placement) in c.models.iter().zip(&manifests).zip(&placements) {
-                let table = config::gemm_table(mc, manifest, &c.gemm_cache, placement.first_device())?;
-                config::check_table_on_devices(manifest, table.as_deref(), placement)?;
+                let device = placement.first_device();
+                let precision = config::model_precision(&mc.dtype, manifest, device)?;
+                let profile = models::profile_for(manifest);
+                let table = gemm_artifact::resolve(
+                    &gemm_artifact::TableRequest::parse(&mc.gemm_table)?,
+                    manifest,
+                    profile,
+                    precision,
+                    &c.gemm_cache,
+                    &placement.instances().concat(),
+                )?;
+                config::check_table_on_devices(manifest, table.table.as_ref(), placement)?;
                 tables.push(table);
             }
             let mut served = Vec::new();
@@ -1141,21 +1237,27 @@ fn run() -> Result<()> {
                         no_prefix_cache: mc.no_prefix_cache,
                         state_cache_mb: mc.state_cache_mb,
                         tree_max_tokens: mc.tree_max_tokens,
-                        gemm_table: table.clone(),
+                        gemm_table: None,
+                        resolved_gemm: Some(table.clone()),
                         device: placement.split().is_none().then(|| devices[0]),
                         layer_split: placement.split().cloned(),
                     };
-                    let mut engine = gpu_engine_at(&dir, &mg)?;
+                    let planned = planned_engine_at(&dir, &mg)?;
+                    let scheduling = planned.scheduling();
+                    let mut engine = planned.engine;
                     engine.forward_max_tokens = mc.max_batch_tokens;
-                    if let Some(t) = &table {
+                    if let Some(t) = &table.table {
                         config::check_gemm_coverage(&engine.manifest.name, &engine.backend.gemm_table_missing(), t)?;
                     }
-                    replicas.push(serve::Replica { engine, devices });
+                    replicas.push(serve::Replica { engine, devices, scheduling });
                 }
                 let batch_profile = if batch_settings.is_some() {
                     Some(
-                        serve::batches::ModelProfile::from_engine(&replicas[0].engine, table.as_deref())?
-                            .with_background(batch_qualification.clone()),
+                        serve::batches::ModelProfile::from_engine(
+                            &replicas[0].engine,
+                            table.table.as_ref().map(basal_gpu::GemmArtifact::bytes_sha256),
+                        )?
+                        .with_background(batch_qualification.clone()),
                     )
                 } else {
                     None
