@@ -12,10 +12,20 @@ use basal_core::pack::Packed;
 use basal_core::{Backend, DeviceHealth};
 use serde_json::Value;
 
+use crate::plan::ResolvedExecutionPlan;
 use crate::{
-    GpuMemory, GpuMemoryProbe, InferenceConfigError, InferenceMode, Kernels, LayerSplit, Precision, Quantization,
-    Readout, StageTransfers,
+    GpuMemory, GpuMemoryProbe, InferenceConfigError, Kernels, LayerSplit, Precision, Quantization, Readout,
+    StageTransfers,
 };
+
+/// Where a planned model instance runs ([`RuntimeBackend::load_planned`]).
+#[derive(Clone, Copy, Debug)]
+pub enum PlannedPlacement<'a> {
+    /// The whole model on one GPU.
+    Single(usize),
+    /// Consecutive layer ranges on the split's GPUs (CUDA).
+    Split(&'a LayerSplit),
+}
 
 pub enum RuntimeBackend {
     Llama(Box<crate::GpuBackend>),
@@ -40,26 +50,61 @@ impl RuntimeBackend {
         crate::gemma::GemmaBackend::estimated_stage_bytes(dir, cfg, range, media)
     }
 
-    /// Select arithmetic before prefix warmup or lane creation. Explicit balanced mode requires a CUDA FP16 Llama.
-    pub fn configure_inference(&mut self, mode: InferenceMode, model_name: &str) -> Result<(), InferenceConfigError> {
+    /// Load a model instance with the load options of its frozen `plan` (precision, readout, kernels, weight
+    /// format), then apply the plan's execution policy and GEMM table before any template K/V, gate or fork exists.
+    /// Returns the backend and the number of GEMM table entries it loaded.
+    pub fn load_planned(
+        dir: &Path,
+        cfg: &Architecture,
+        plan: &ResolvedExecutionPlan,
+        placement: PlannedPlacement<'_>,
+        media: bool,
+    ) -> Result<(Self, Option<usize>)> {
+        let (precision, readout, kernels, quantization) =
+            (plan.precision(), plan.readout(), plan.kernels(), plan.quantization());
+        let mut backend = match placement {
+            PlannedPlacement::Single(device) => {
+                Self::load(dir, cfg, precision, readout, kernels, quantization, device, media)?
+            }
+            PlannedPlacement::Split(split) => {
+                Self::load_split_with_media(dir, cfg, precision, readout, kernels, quantization, split, media)?
+            }
+        };
+        backend.apply_plan(plan)?;
+        let classes = match &plan.gemm().table {
+            Some(table) => Some(backend.load_gemm_table(
+                table.table(),
+                &table.label(),
+                plan.gemm().fallback == crate::plan::GemmFallback::Refused,
+            )?),
+            None => None,
+        };
+        Ok((backend, classes))
+    }
+
+    /// Apply the execution policy of `plan`; refused once K/V or an execution lane exists.
+    fn apply_plan(&mut self, plan: &ResolvedExecutionPlan) -> Result<(), InferenceConfigError> {
         match self {
-            Self::Llama(b) => b.configure_inference(mode, model_name),
-            Self::Gemma(b) => b.configure_inference(mode, model_name),
+            Self::Llama(b) => b.apply_plan(plan),
+            Self::Gemma(b) => b.apply_plan(plan),
             #[cfg(all(feature = "intel", not(target_os = "macos")))]
             Self::Intel(_) => {
-                if mode == InferenceMode::Balanced {
-                    Err(InferenceConfigError::UnsupportedBalanced)
-                } else {
-                    Ok(())
+                crate::inference::check_plan(plan)?;
+                match plan.policy() {
+                    crate::plan::ExecutionPolicy::Llama { .. } => Ok(()),
+                    crate::plan::ExecutionPolicy::Gemma { .. } => {
+                        Err(InferenceConfigError::PlanMismatch("a Gemma policy for the Intel backend"))
+                    }
                 }
             }
         }
     }
 
-    /// Load a model onto GPU `device`. Projection quantization exists for Llama only: an Omni (Gemma) model is refused
+    /// Load a model onto GPU `device`, without its execution policy: only for [`RuntimeBackend::load_planned`], which
+    /// applies the plan's policy next. Projection quantization exists for Llama only: an Omni (Gemma) model is refused
     /// any format other than `none` before its weights are read.
     #[expect(clippy::too_many_arguments, reason = "the load options of every architecture, validated together")]
-    pub fn load(
+    fn load(
         dir: &Path,
         cfg: &Architecture,
         precision: Precision,
@@ -90,7 +135,7 @@ impl RuntimeBackend {
                     device,
                 )?)));
                 #[cfg(not(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos"))))]
-                Ok(Self::Llama(Box::new(crate::GpuBackend::load(
+                Ok(Self::Llama(Box::new(crate::GpuBackend::load_unplanned(
                     dir,
                     c,
                     precision,
@@ -103,22 +148,10 @@ impl RuntimeBackend {
         }
     }
 
-    /// Load consecutive decoder layer ranges over several CUDA devices, without media encoders.
-    pub fn load_split(
-        dir: &Path,
-        cfg: &Architecture,
-        precision: Precision,
-        readout: Readout,
-        kernels: Kernels,
-        quantization: Quantization,
-        split: &LayerSplit,
-    ) -> Result<Self> {
-        Self::load_split_with_media(dir, cfg, precision, readout, kernels, quantization, split, false)
-    }
-
-    /// Load consecutive decoder layer ranges on CUDA FP16, with optional Gemma media encoders on the first stage.
+    /// Load consecutive decoder layer ranges on CUDA FP16, with optional Gemma media encoders on the first stage;
+    /// like [`RuntimeBackend::load`] without the execution policy.
     #[expect(clippy::too_many_arguments, reason = "the validated load options of each architecture and media mode")]
-    pub fn load_split_with_media(
+    fn load_split_with_media(
         dir: &Path,
         cfg: &Architecture,
         precision: Precision,
@@ -142,7 +175,7 @@ impl RuntimeBackend {
             anyhow::bail!("layer split {split}: needs the CUDA backend, this build runs Intel Vulkan")
         }
         #[cfg(not(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos"))))]
-        Ok(Self::Llama(Box::new(crate::GpuBackend::load_split(
+        Ok(Self::Llama(Box::new(crate::GpuBackend::load_split_unplanned(
             dir,
             c,
             precision,
@@ -217,12 +250,13 @@ impl RuntimeBackend {
         }
     }
 
-    pub fn load_gemm_table(&mut self, path: &Path) -> Result<usize> {
+    /// Load the plan's validated GEMM table `v` (`name` for messages); `table_only`: a reproducible Llama plan.
+    fn load_gemm_table(&mut self, v: &serde_json::Value, name: &str, table_only: bool) -> Result<usize> {
         match self {
-            Self::Llama(b) => b.load_gemm_table(path),
-            Self::Gemma(b) => b.load_gemm_table(path),
+            Self::Llama(b) => b.load_gemm_table(v, name, table_only),
+            Self::Gemma(b) => b.load_gemm_table(v, name),
             #[cfg(all(feature = "intel", not(target_os = "macos")))]
-            Self::Intel(b) => b.load_gemm_table(path),
+            Self::Intel(b) => b.load_gemm_table(v, name),
         }
     }
 

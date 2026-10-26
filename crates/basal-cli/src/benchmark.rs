@@ -119,7 +119,12 @@ struct Server {
 }
 
 impl Server {
-    fn start(engine: Engine<GpuBackend>, devices: Vec<usize>, options: &Options) -> Result<Self> {
+    fn start(
+        engine: Engine<GpuBackend>,
+        devices: Vec<usize>,
+        scheduling: crate::models::SchedulingPolicy,
+        options: &Options,
+    ) -> Result<Self> {
         let listener =
             std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).context("binding benchmark listener")?;
         let addr = listener.local_addr()?;
@@ -136,7 +141,7 @@ impl Server {
             batches: None,
         };
         let model = ServedModel {
-            replicas: vec![Replica { engine, devices }],
+            replicas: vec![Replica { engine, devices, scheduling }],
             max_batch_tokens: options.max_batch_tokens,
             schedule: options.schedule,
             long_tokens: options.long_tokens,
@@ -419,21 +424,33 @@ fn execute(
         config.gemm_table = table.to_string_lossy().into_owned();
     }
     let mut gpu_settings = g.clone();
-    gpu_settings.gemm_table =
-        crate::config::gemm_table(&config, &manifest, &crate::config::default_gemm_cache(), devices[0])?;
+    let precision = crate::config::model_precision(&config.dtype, &manifest, devices[0])?;
+    let resolved = crate::gemm_artifact::resolve(
+        &crate::gemm_artifact::TableRequest::parse(&config.gemm_table)?,
+        &manifest,
+        crate::models::profile_for(&manifest),
+        precision,
+        &crate::config::default_gemm_cache(),
+        &devices,
+    )?;
     if let Some(split) = &g.layer_split {
         crate::config::check_table_on_devices(
             &manifest,
-            gpu_settings.gemm_table.as_deref(),
+            resolved.table.as_ref(),
             &crate::config::Placement::Split(split.clone()),
         )?;
     }
+    gpu_settings.gemm_table = resolved.path().map(Path::to_path_buf);
+    gpu_settings.resolved_gemm = Some(resolved);
     // pool watermarks of the load alone: reset after the preflight and the GEMM table, outside load_s
     let mut pools: Vec<PoolTelemetry> = devices.iter().map(|&d| PoolTelemetry::new(d)).collect();
     for pool in &mut pools {
         pool.reset("reset before load");
     }
-    let engine = crate::gpu_engine_at(&dir, &gpu_settings)?;
+    let planned = crate::planned_engine_at(&dir, &gpu_settings)?;
+    let scheduling = planned.scheduling();
+    report["execution_plan"] = planned.plan.identity();
+    let engine = planned.engine;
     // The prefix precomputation queues its temporaries' stream-ordered frees without a final synchronisation:
     // synchronise the context first (after load_s, before any measured work) so `used` counts only what stays.
     for pool in &mut pools {
@@ -445,14 +462,19 @@ fn execute(
         }
     }
     set_pools(report, &pools, g.layer_split.is_some());
-    if let Some(table) = &gpu_settings.gemm_table {
+    let table = gpu_settings.resolved_gemm.as_ref().and_then(|r| r.table.as_ref());
+    if let Some(table) = table {
         crate::config::check_gemm_coverage(&engine.manifest.name, &engine.backend.gemm_table_missing(), table)?;
     }
     report["model"]["name"] = json!(engine.manifest.name);
     report["model"]["load_s"] = json!(engine.backend.load_s());
     report["backend"] = engine.backend.describe();
-    // File name only: an automatic table lives in the user's cache directory, whose path identifies the machine.
-    let gemm_table = gpu_settings.gemm_table.as_deref().and_then(Path::file_name).map(|n| n.to_string_lossy());
+    // File name only: an automatic table lives in the user's cache directory, whose path identifies the machine; a
+    // table that could not be stored (a read-only cache) by its digest.
+    let gemm_table = table.map(|t| match t.path().and_then(Path::file_name) {
+        Some(name) => name.to_string_lossy().into_owned(),
+        None => format!("sha256:{}", t.digest()),
+    });
     report["settings"] = json!({"dtype": g.dtype, "inference_mode": g.inference_mode, "quantization": quantization.as_str(), "kernels": g.kernels, "readout": g.readout, "prefix_cache": !g.no_prefix_cache,
         "state_cache_mb": g.state_cache_mb, "gemm_table": gemm_table, "tree_max_tokens": g.tree_max_tokens,
         "max_batch_tokens": options.max_batch_tokens, "max_inflight": options.max_inflight,
@@ -501,7 +523,7 @@ fn execute(
     for (name, work, _) in &workloads {
         ensure!(!work.is_empty(), "benchmark workload {name}: no requests within the model context limit");
     }
-    let server = Server::start(engine, devices.clone(), options)?;
+    let server = Server::start(engine, devices.clone(), scheduling, options)?;
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let mut phases = Vec::new();
     report["status"] = json!("running");

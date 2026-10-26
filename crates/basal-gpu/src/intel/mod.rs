@@ -570,7 +570,7 @@ impl IntelBackend {
         }
         t
     }
-    pub fn load_gemm_table(&mut self, _: &Path) -> Result<usize> {
+    pub fn load_gemm_table(&mut self, _: &serde_json::Value, _: &str) -> Result<usize> {
         bail!("CUDA GEMM tables cannot be used by Intel Vulkan")
     }
     /// Quantized projection weights are CUDA-only: never any dequantization format, time or values.

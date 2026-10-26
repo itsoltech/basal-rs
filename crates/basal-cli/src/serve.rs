@@ -93,6 +93,8 @@ pub struct Replica<B: Backend> {
     /// GPU ordinals the engine was loaded on: one, or the stages of a layer split in order. Engines using the same
     /// ordinal share its gate.
     pub devices: Vec<usize>,
+    /// How the main lane collects requests: the model profile's policy with the features of the engine's plan.
+    pub scheduling: crate::models::SchedulingPolicy,
 }
 
 /// One served model: its instances and admission options.
@@ -425,14 +427,15 @@ fn scheduler<B: Backend>(
     mut rx: mpsc::UnboundedReceiver<Job>,
     mut lane: Lane,
     long: Option<(std::sync::mpsc::Sender<Waiting>, usize)>,
+    scheduling: crate::models::SchedulingPolicy,
 ) {
-    // A model idle for at least 100 ms still starts immediately. After a concurrent validated Omni Max batch, collect
-    // its returning clients for at most 10 ms, avoiding repeated 1+(N-1) forwards.
-    // This runs on the dedicated GPU thread, never on a Tokio executor worker.
-    let coalesce = matches!(&engine.manifest.config, basal_core::architecture::Architecture::Gemma4(_))
-        && engine.manifest.name == "basal-omni-1.0-max"
-        && engine.backend.describe()["attention_products"].as_str() == Some("F16");
-    let window = std::time::Duration::from_millis(10);
+    // `CoalesceReturning` (a profile policy, resolved with the engine's plan): a model idle for at least `idle` still
+    // starts immediately; after a concurrent batch, collect its returning clients for at most `window`, avoiding
+    // repeated 1+(N-1) forwards. This runs on the dedicated GPU thread, never on a Tokio executor worker.
+    let coalesce = match scheduling {
+        crate::models::SchedulingPolicy::CoalesceReturning { window, idle, .. } => Some((window, idle)),
+        crate::models::SchedulingPolicy::Immediate => None,
+    };
     let mut last_batch = 1;
     loop {
         let mut arrived: Vec<Job> = Vec::new();
@@ -447,7 +450,9 @@ fn scheduler<B: Backend>(
         while let Ok(j) = rx.try_recv() {
             arrived.push(j);
         }
-        if coalesce && last_batch > 1 && !had_backlog && wait_start.elapsed() < std::time::Duration::from_millis(100) {
+        if let Some((window, _)) =
+            coalesce.filter(|&(_, idle)| last_batch > 1 && !had_backlog && wait_start.elapsed() < idle)
+        {
             let until = Instant::now() + window;
             while Instant::now() < until {
                 match rx.try_recv() {
@@ -1070,7 +1075,7 @@ fn serve_inner<B: Backend + Send + 'static>(
             let name = replicas[0].engine.manifest.name.clone();
             let group = replicas.len() > 1;
             let mut queues = Vec::with_capacity(replicas.len());
-            for (index, Replica { mut engine, devices }) in replicas.into_iter().enumerate() {
+            for (index, Replica { mut engine, devices, scheduling }) in replicas.into_iter().enumerate() {
                 // Keep the forward budget aligned with admission, including the forked long lane.
                 // Otherwise a larger server batch is silently split at the engine's default 8192.
                 engine.forward_max_tokens = max_batch_tokens;
@@ -1142,7 +1147,7 @@ fn serve_inner<B: Backend + Send + 'static>(
                 threads.push(
                     std::thread::Builder::new()
                         .name(label)
-                        .spawn(move || scheduler(engine, rx, main_lane, long))
+                        .spawn(move || scheduler(engine, rx, main_lane, long, scheduling))
                         .context("starting a GPU thread")?,
                 );
                 let on = match devices.as_slice() {

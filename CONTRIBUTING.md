@@ -64,8 +64,10 @@ build lacks can send it with `basal gemm-share` (an issue with the `gemm-table` 
 `gh` through the "GEMM table" issue form).
 
 Only the CUDA build carries tables, and `build.rs` bounds them: f16, the cuBLASLt version of the CUDA toolkit
-(`cublas_api.h`) and the current search version, one table per GPU and weight shapes, the file name
-`<gpu>--<model>--f16--cublaslt<version>.json`. It keeps only the fields the server reads (13-15 KB per table instead
+(`cublas_api.h`) and the current search version, each file a distinct artifact (the SHA-256 of its normalized
+content, `src/gemm_artifact/normalize.rs`), the file name `<gpu>--<model>--f16--cublaslt<version>.json`. A table is
+used only by the model profiles that pin its file and digest in `crates/basal-cli/src/models.rs` (`basal gemm-digest
+FILE` prints the digest); adding a table does not change the choice of existing profiles. It keeps only the fields the server reads (13-15 KB per table instead
 of ~34 KB) and stops the build when a table breaks a rule or all of them exceed 1 MiB; CI (Clippy with CUDA) runs
 it for every pull request. A new CUDA toolkit or search version therefore means new tables, not more of them.
 

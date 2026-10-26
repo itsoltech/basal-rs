@@ -1,7 +1,11 @@
 //! BASAL_GIT_SHA for `basal --version`: the environment variable of the same name (release builds, container image)
 //! or the commit of the checkout; "unknown" without either. gemm_tables.rs: the batch-invariant GEMM tables of
-//! gemm-tables/*.json compiled into the CUDA binary (config::gemm_table uses one for a matching GPU instead of a
-//! search), checked and reduced by [`gemm_tables`].
+//! gemm-tables/*.json compiled into the CUDA binary with the digest of their normalized content
+//! (`src/gemm_artifact/normalize.rs`); a model profile (`src/models.rs`) pins the tables it may use by that digest.
+//! Checked and reduced by [`gemm_tables`].
+
+#[path = "src/gemm_artifact/normalize.rs"]
+mod normalize;
 
 fn main() {
     println!("cargo:rerun-if-env-changed=BASAL_GIT_SHA");
@@ -36,7 +40,7 @@ const MAX_TOTAL_BYTES: usize = 1024 * 1024;
 /// A table breaking a rule fails the build, so CI (Clippy with CUDA) stops it in the pull request:
 /// - batch-invariant, f16, of the current search version (`INVARIANT_SEARCH_VERSION` of basal-gpu) and of the
 ///   cuBLASLt version of the CUDA toolkit (`cublas_api.h`), so that a toolkit change requires new tables;
-/// - file name `<gpu>--<model>--f16--cublaslt<version>.json`, one table per GPU and weight shapes;
+/// - file name `<gpu>--<model>--f16--cublaslt<version>.json`, each file a distinct artifact (normalized digest);
 /// - at most MAX_TABLE_BYTES per reduced table and MAX_TOTAL_BYTES in all.
 fn gemm_tables() {
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -44,10 +48,11 @@ fn gemm_tables() {
     let gpu_src = manifest.join("../basal-gpu/src/cublaslt.rs");
     println!("cargo:rerun-if-changed={}", dir.display());
     println!("cargo:rerun-if-changed={}", gpu_src.display());
+    println!("cargo:rerun-if-changed={}", manifest.join("src/gemm_artifact/normalize.rs").display());
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
     let mut out = String::from(
-        "/// (file name, reduced table JSON) of gemm-tables/*.json\npub static TABLES: &[(&str, &str)] = &[\n",
+        "/// (file name, SHA-256 of the normalized artifact, reduced table JSON) of gemm-tables/*.json\npub static TABLES: &[(&str, &str, &str)] = &[\n",
     );
     if std::env::var_os("CARGO_FEATURE_CUDA").is_some() {
         let search: u64 = std::fs::read_to_string(&gpu_src)
@@ -70,14 +75,18 @@ fn gemm_tables() {
             })
             .unwrap_or_default();
         files.sort();
-        let (mut total, mut seen) = (0, Vec::new());
+        let (mut total, mut seen): (usize, Vec<(String, String)>) = (0, Vec::new());
         for f in &files {
             println!("cargo:rerun-if-changed={}", f.display());
             let name = f.file_name().unwrap().to_string_lossy().to_string();
             let table = reduce(f, &name, search, cublaslt).unwrap_or_else(|e| panic!("gemm-tables/{name}: {e}"));
-            let key = (table["gpu"].clone(), table["shapes"].clone());
-            assert!(!seen.contains(&key), "gemm-tables/{name}: a second table for this GPU and these weight shapes");
-            seen.push(key);
+            // identity of the artifact, not of its GPU or shapes: profiles pin tables by this digest, so two distinct
+            // tables for one GPU and shapes may coexist, while the same artifact twice is refused
+            let digest = normalize::digest(&table).unwrap_or_else(|e| panic!("gemm-tables/{name}: {e}"));
+            if let Some((first, _)) = seen.iter().find(|(_, d)| *d == digest) {
+                panic!("gemm-tables/{name}: the same GEMM artifact as gemm-tables/{first} (sha256 {digest})");
+            }
+            seen.push((name.clone(), digest.clone()));
             let text = serde_json::to_string(&table).unwrap();
             assert!(
                 text.len() <= MAX_TABLE_BYTES,
@@ -85,7 +94,7 @@ fn gemm_tables() {
                 text.len()
             );
             total += text.len();
-            out += &format!("    ({name:?}, {text:?}),\n");
+            out += &format!("    ({name:?}, {digest:?}, {text:?}),\n");
         }
         assert!(total <= MAX_TOTAL_BYTES, "gemm-tables: {total} bytes reduced, more than {MAX_TOTAL_BYTES}");
     }

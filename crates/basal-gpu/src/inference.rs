@@ -1,13 +1,13 @@
-//! Per-backend attention policy, fixed before K/V caches and execution lanes exist.
+//! Per-backend execution policy, applied from a frozen [`ResolvedExecutionPlan`] before K/V caches and execution
+//! lanes exist.
 
-use candle_core::Device;
-
-use crate::{GpuBackend, Kernels, Precision, Readout};
+use crate::plan::{ExecutionPolicy, KernelSet, ResolvedExecutionPlan};
+use crate::GpuBackend;
 
 /// Attention arithmetic selected before any template or state K/V is computed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InferenceMode {
-    /// Use the measured model/device policy; preserve explicit `BASAL_ATT` experiments.
+    /// Use the measured model/device policy of the profile; preserve explicit `BASAL_ATT` experiments.
     Auto,
     /// High-precision attention: original hi/lo on CUDA Llama, FP32 products on Gemma.
     /// Full FP32 computation uses `Precision::F32`.
@@ -16,75 +16,65 @@ pub enum InferenceMode {
     Balanced,
 }
 
-/// Why an inference mode cannot be selected for this backend.
+/// Why an execution plan cannot be selected or applied for this backend.
 #[derive(Debug)]
 pub enum InferenceConfigError {
     /// Cached K/V or an execution lane already uses the current arithmetic.
     CacheInitialized,
     /// Balanced mode requires CUDA FP16 Llama, fused kernels and FP32 readout.
     UnsupportedBalanced,
+    /// The plan was frozen for another family, stage count or load options than this backend.
+    PlanMismatch(&'static str),
+    /// The plan's kernel set is not implemented by this build.
+    UnsupportedKernelSet(KernelSet),
 }
 
 impl std::fmt::Display for InferenceConfigError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::CacheInitialized => "configure inference before prefix warmup or lane creation",
-            Self::UnsupportedBalanced => "balanced inference requires CUDA FP16 Llama, fused kernels and FP32 readout",
-        })
+        match self {
+            Self::CacheInitialized => f.write_str("configure inference before prefix warmup or lane creation"),
+            Self::UnsupportedBalanced => {
+                f.write_str("balanced inference requires CUDA FP16 Llama, fused kernels and FP32 readout")
+            }
+            Self::PlanMismatch(what) => write!(f, "execution plan does not match the loaded backend: {what}"),
+            Self::UnsupportedKernelSet(set) => write!(f, "kernel set {} is not implemented by this build", set.id()),
+        }
     }
 }
 
 impl std::error::Error for InferenceConfigError {}
 
+/// The checks shared by every backend before a plan is applied.
+pub(crate) fn check_plan(plan: &ResolvedExecutionPlan) -> Result<(), InferenceConfigError> {
+    if !KernelSet::SUPPORTED.contains(&plan.kernel_set()) {
+        return Err(InferenceConfigError::UnsupportedKernelSet(plan.kernel_set()));
+    }
+    Ok(())
+}
+
 impl GpuBackend {
-    pub(super) fn configure_inference(
-        &mut self,
-        mode: InferenceMode,
-        model_name: &str,
-    ) -> Result<(), InferenceConfigError> {
+    /// Apply the Llama attention policy of `plan` (the same on every stage). Refused once template K/V or a lane
+    /// exists, and for a plan of other load options.
+    pub(super) fn apply_plan(&mut self, plan: &ResolvedExecutionPlan) -> Result<(), InferenceConfigError> {
         if !self.prefixes.is_empty() || self.stages.iter().any(|s| s.gate.is_some()) {
             return Err(InferenceConfigError::CacheInitialized);
         }
-        let balanced = self.is_cuda()
-            && self.precision == Precision::F16
-            && self.kernels == Kernels::Fused
-            && self.readout == Readout::F32;
-        let kernel = match mode {
-            // a layer split computes as on one GPU: auto applies the measured policy only when every stage's GPU is
-            // in its scope
-            InferenceMode::Auto if balanced && self.stages.iter().all(|s| measured_balanced(&s.dev, model_name)) => {
-                Some("attn_tree_tc_qk1_static")
-            }
-            InferenceMode::Auto => None,
-            InferenceMode::Accurate => Some("attn_tree_tc"),
-            InferenceMode::Balanced if balanced => Some("attn_tree_tc_qk1_static"),
-            InferenceMode::Balanced => return Err(InferenceConfigError::UnsupportedBalanced),
-        };
-        self.attention_override = kernel;
-        Ok(())
-    }
-}
-
-/// Keep the original policy outside the evaluated model/device scope. A failed optional device-name query
-/// also keeps the original policy. Explicit experimental kernel selection always wins over auto selection.
-fn measured_balanced(dev: &Device, model_name: &str) -> bool {
-    #[cfg(feature = "cuda")]
-    {
-        if std::env::var_os("BASAL_ATT").is_some()
-            || !matches!(model_name, "basal-2.0-mini" | "basal-2.0-4.5B" | "basal-2.0-max")
+        check_plan(plan)?;
+        if plan.precision() != self.precision
+            || plan.readout() != self.readout
+            || plan.kernels() != self.kernels
+            || plan.quantization() != self.quantization
         {
-            return false;
+            return Err(InferenceConfigError::PlanMismatch("precision, readout, kernels or quantization"));
         }
-        match dev {
-            Device::Cuda(d) => {
-                d.cuda_stream().context().name().is_ok_and(|name| name == "NVIDIA RTX 6000 Ada Generation")
-            }
-            _ => false,
+        let ExecutionPolicy::Llama { attention, default_kernels, .. } = plan.policy() else {
+            return Err(InferenceConfigError::PlanMismatch("a Gemma policy for a Llama backend"));
+        };
+        if self.is_cuda() && default_kernels.len() != self.stages.len() {
+            return Err(InferenceConfigError::PlanMismatch("stage count"));
         }
-    }
-    #[cfg(not(feature = "cuda"))]
-    {
-        let _ = (dev, model_name);
-        false
+        self.attention_override = attention.kernel_override();
+        self.attention_defaults.clone_from(default_kernels);
+        Ok(())
     }
 }
