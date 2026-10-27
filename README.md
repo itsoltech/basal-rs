@@ -703,10 +703,32 @@ curl --fail-with-body localhost:8000/v1/systemone -H 'content-type: application/
 Opcje modelu (klucze YAML w `models`; dla jednego modelu te same opcje
 wiersza poleceń, np. `--max-batch-tokens`):
 
+Layout, kalibrację i progi `orders: auto` można ustawić także w `decide`,
+`prepare`, `check-prompts`, `export`, poleceniach pomiarowych z opcjami GPU
+oraz `client --local`. Przykład:
+
+```sh
+basal serve --model 2.0-mini --layout qfirst --no-calibration --orders auto --auto-tau 0.6 --auto-band 0.2 0.8
+```
+
+Jawne `--layout`, `--calibration` / `--no-calibration`, `--strict-calibration`,
+`--auto-tau` i `--auto-band` nadpisują odpowiednie ustawienia **każdego** modelu
+z YAML, również przy `--config`. CLI wybiera jedno źródło kalibracji zamiast
+źródła z YAML; `--calibration` i `--no-calibration` wykluczają się. Brak tych
+flag zachowuje YAML. `--strict-calibration` włącza strict; brak flagi nie wyłącza
+strict z YAML. Dotychczasowe `orders` ma inne pierwszeństwo: wartość modelu
+w YAML, następnie wspólne `--orders`, następnie domyślna wartość formatu.
+Ścieżki kalibracji, jak lokalne ścieżki modeli, są względem katalogu procesu.
+
 | Klucz | Domyślnie | Znaczenie |
 |---|---|---|
 | `repo`, `revision` | | repozytorium Hugging Face `owner/name` i gałąź, tag albo commit (domyślnie `main`); pobierane do cache Hugging Face (`HF_HOME`, w obrazie `/data/hf`), przy braku dostępu do Hub z cache |
 | `path` | | lokalny katalog modelu (zamiast `repo`) |
+| `layout` | deklaracja `basal.json`, inaczej `canonical` | `canonical`, `qfirst` lub `state_twice`; dwa ostatnie wymagają prompt format 1 |
+| `orders` | format 1: `2`, format 2: `1` | `1`, `2`, `auto` lub `2le<N>` |
+| `calibration`, `no_calibration` | automatycznie | jawny plik albo wyłączenie (`true`); wzajemnie wykluczające się |
+| `strict_calibration` | `false` | jawny plik dla innego modelu lub rozpoznanej rewizji HF odmawia startu; bez strict ostrzega i zachowuje progi |
+| `auto_tau`, `auto_band` | `0.6`, `[0.2, 0.8]` | progi drugiego porządku przy `orders: auto`; wszystkie liczby muszą być skończone i w `[0,1]`, LO ≤ HI, dokładnie dwie granice |
 | `gemm_table` | `auto` | tabela algorytmów cuBLASLt (opis niżej); `pinned` albo `sha256:<digest>`: tryb odtwarzalny, tylko tabela przypięta przez profil modelu albo wskazana digestem, jej brak to błąd; `none`: Llama dobiera algorytmy przy pierwszym użyciu, Gemma wykonuje osobne GEMM dla promptów; albo ścieżka tabeli |
 | `dtype` | `auto` | Llama: `f16`; zmierzone Omni mini/max/1.1 max na RTX 6000 Ada oraz Ultra na H100 PCIe: `f16`, pozostałe Gemma: `bf16`; jawne `f16`, `bf16` lub `f32` mają pierwszeństwo |
 | `inference_mode` | `auto` | dobór attention; `accurate`: pierwotne attention Llamy lub iloczyny FP32 Gemmy; `balanced`: CUDA Llama f16, softmax i akumulacja f32, prawdopodobieństwa hi/lo |
@@ -718,6 +740,24 @@ wiersza poleceń, np. `--max-batch-tokens`):
 | `schedule` | `hrrn` | kolejność przyjmowania żądań: `hrrn` (krótkie przed długimi, bez zagłodzenia) albo `fifo` |
 | `long_tokens` | 4096 | żądania powyżej tej liczby tokenów idą do toru długich żądań, który oddaje GPU krótkim partiom między warstwami; `0` wyłącza |
 | `state_cache_mb` | 0 | cache K/V stanu między żądaniami |
+
+Ustawienia są walidowane i stosowane przed wagami i tabelami GEMM, także
+w preflight oraz we wszystkich replikach i forkach. Automatyczna kalibracja
+wybiera `CALIBRATION.<layout>.json`, jeśli istnieje dla niekanonicznego layoutu,
+inaczej `CALIBRATION.json`, potem pasujący wariant `.o<orders>.json`.
+Jawnego pliku nie zastępuje wariant automatyczny. Wyłączenie nie czyta kalibracji;
+brak pliku automatycznego oznacza nieskalibrowane prawdopodobieństwa.
+Niezgodny layout/porządek usuwa certyfikowane progi i dopasowane fallbacki,
+zachowując temperatury. Tożsamość pochodzi z faktycznego źródła modelu;
+dla ścieżki snapshotu HF porównuje repozytorium i rozwiązany commit.
+Domyślne wartości i szablon canonical pozostają dotychczasowe; bitowa zgodność
+i jakość nowych ustawień wymagają osobnej kwalifikacji runtime.
+
+Globalne `--systemone-dialect typesafe|upstream` lub procesowe YAML
+`systemone_dialect` wybiera kontrakt online `/v1/systemone` (domyślnie `typesafe`;
+jawna flaga ma pierwszeństwo). `upstream` kieruje go do tego samego handlera
+co `/v1/basal`, również bez pola `model`, dla oficjalnego klienta i mostu upstream.
+Szczegóły ograniczeń mediów, evidence i cache: [SYSTEM_ONE.md](docs/SYSTEM_ONE.md).
 
 `inference_mode: auto` wybiera `balanced` dla Basal 2.0 mini/4.5B/max na
 RTX 6000 Ada Generation, przy CUDA f16, fused kernels i odczycie f32.

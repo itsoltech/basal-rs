@@ -339,6 +339,17 @@ nie jest tożsamością modelu. Nowy katalog tworzy rewizję. Przyjęte batche
 pozostają przypięte do poprzedniej rewizji; utrzymuj zgodnych workerów do ich
 zakończenia lub świadomego wygaśnięcia.
 
+Wersja planera `basal-planner.2` rozróżnia obsługę layoutów oraz metadane usage.
+Fingerprint obejmuje efektywne `orders`, layout (także override), SHA-256
+wybranej kalibracji lub stan off/brak, strict oraz auto tau/band.
+Zachowuje też hashowanie `basal.json` i plików `CALIBRATION*.json` w katalogu
+modelu. Pełna ścieżka jawnego pliku, lokalna tożsamość i ostrzeżenie o niej
+nie zastępują hasha treści i nie wchodzą do odcisku; numer urządzenia również nie.
+Planner CPU dostaje migawkę manifestu i opcji faktycznie załadowanego silnika;
+fork tła dziedziczy te same opcje. Bounded evidence przy niekanonicznym layoutcie
+jest odrzucane jako `unmodelled`, ponieważ jego budżet nie jest zamodelowany.
+Wybór online `systemone_dialect` nie zmienia kontraktu trwałych rekordów batchy.
+
 ## Wykonanie i kwalifikacja GPU
 
 Tylko jeden lokalny scheduler może zarządzać danym fizycznym GPU. Lease bazy

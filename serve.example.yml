@@ -5,6 +5,7 @@
 # basal.json); /v1/basal requests without the field go to default_model.
 
 addr: 0.0.0.0:8000
+systemone_dialect: typesafe        # opt-in upstream: /v1/systemone aliases /v1/basal, including default_model
 default_model: basal-1.5-max       # default: the first model
 max_inflight: 1024                 # waiting + running requests of all models; more get 529
 max_large_inflight: 4              # shared limit for large/chunked bodies and expanded input above 128 KiB
@@ -43,6 +44,15 @@ models:
     gemm_table: reports/rust-cuda-1.5-max/gemm-equiv/gemm-algos-f16-invariant-groups.json
     dtype: f16                     # f16 (default), bf16, f32
     inference_mode: auto           # balanced for Basal 2.0 text on RTX 6000 Ada; accurate preserves original attention
+    # Prompt/calibration options apply before weights/GEMM, to every replica and long/background fork.
+    # Explicit shared CLI flags override these fields even with --config. YAML orders wins over --orders.
+    # layout: canonical            # omitted: basal.json declaration, otherwise canonical; qfirst/state_twice: fmt1
+    # orders: auto                 # omitted: fmt1=2, fmt2=1; also 1, 2, 2le<N>
+    # calibration: ./fitted.json   # explicit file, never replaced by an automatic orders variant
+    no_calibration: false          # true: no file read; conflicts with calibration
+    strict_calibration: false      # explicit file identity mismatch: false warns/retains, true refuses startup
+    auto_tau: 0.6                  # finite [0,1]; adaptive orders only
+    auto_band: [0.2, 0.8]           # exactly two finite values in [0,1], LO <= HI; inclusive noul band
     # none (default): dense weights of dtype. q8_0: the q|k|v, o, gate|up and down projections of every layer stay
     # on the GPU as 8-bit GGML Q8_0 blocks and are dequantized to f16 before each projection GEMM (f16 activations):
     # less GPU memory for those weights, more work on every forward. CUDA with dtype f16 (auto for Llama) and Llama

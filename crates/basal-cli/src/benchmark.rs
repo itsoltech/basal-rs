@@ -129,6 +129,7 @@ impl Server {
             std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).context("binding benchmark listener")?;
         let addr = listener.local_addr()?;
         let opts = ServeOptions {
+            systemone_dialect: crate::serve::SystemOneDialect::TypeSafe,
             addr,
             release_date: "2026-10-05".into(),
             max_inflight: options.max_inflight,
@@ -283,11 +284,12 @@ pub(crate) fn run(model: &ModelArgs, gpu_options: &GpuArgs, options: &Options) -
 }
 
 /// The model directory (downloaded when missing), its checkpoint size (also reported) and manifest.
-fn model_files(model: &ModelArgs, report: &mut Value) -> Result<(PathBuf, u64, ModelManifest)> {
+fn model_files(model: &ModelArgs, g: &GpuArgs, report: &mut Value) -> Result<(PathBuf, u64, ModelManifest)> {
     let dir = model.dir()?;
     let checkpoint_bytes = basal_core::checkpoint::bytes(&dir).context("checkpoint size")?;
     report["model"]["checkpoint_bytes"] = json!(checkpoint_bytes);
-    let manifest = ModelManifest::load(&dir)?;
+    let source = crate::config::model_ref(&model.model)?.source_name();
+    let manifest = g.model_options.load_manifest(&dir, g.orders.as_deref(), &source)?;
     Ok((dir, checkpoint_bytes, manifest))
 }
 
@@ -308,7 +310,7 @@ fn execute(
         .layer_split
         .as_ref()
         .map(|split| {
-            let files = model_files(model, report)?;
+            let files = model_files(model, g, report)?;
             // Refuse unsupported architecture-specific split options before the preflight.
             crate::config::check_architecture(&files.2, quantization, true)?;
             crate::config::check_split_coverage(&files.2.name, split, files.2.config.num_layers())?;
@@ -348,7 +350,7 @@ fn execute(
     }
     let (dir, checkpoint_bytes, manifest) = match split_files {
         Some(files) => files,
-        None => model_files(model, report)?,
+        None => model_files(model, g, report)?,
     };
     // quantization exists for Llama only: an Omni (Gemma) model is refused before the preflight
     crate::config::check_architecture(&manifest, quantization, g.layer_split.is_some())?;
@@ -450,7 +452,7 @@ fn execute(
     for pool in &mut pools {
         pool.reset("reset before load");
     }
-    let planned = crate::planned_engine_at(&dir, &gpu_settings)?;
+    let planned = crate::planned_engine_at(&dir, &gpu_settings, &config.source_name())?;
     let scheduling = planned.scheduling();
     report["execution_plan"] = planned.plan.identity();
     let engine = planned.engine;

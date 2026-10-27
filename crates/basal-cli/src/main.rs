@@ -29,6 +29,7 @@ mod export;
 mod gemm_artifact;
 mod gemm_share;
 mod large_eval;
+mod model_options;
 mod models;
 mod paths;
 mod reference;
@@ -79,27 +80,28 @@ pub fn cuda_command(bin: &Path) -> std::process::Command {
 
 /// Linux package: this binary (no CUDA) runs the GPU commands through the CUDA build next to it.
 #[cfg(all(target_os = "linux", not(feature = "cuda")))]
-fn delegate_gpu_command() {
+fn delegate_gpu_command(cmd: &Cmd) {
     use std::os::unix::process::CommandExt;
-    const GPU: [&str; 12] = [
-        "decide",
-        "export",
-        "bench-requests",
-        "eval-large-choice",
-        "eval-choice-set",
-        "profile",
-        "serve",
-        "gemm-search",
-        "gemm",
-        "gemm-share",
-        "bench",
-        "benchmark",
-    ];
-    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
-    if !args.get(1).and_then(|a| a.to_str()).is_some_and(|c| GPU.contains(&c)) {
+    // Parse the command first: global flags may precede its name.
+    if !matches!(
+        cmd,
+        Cmd::Decide { .. }
+            | Cmd::Export { .. }
+            | Cmd::BenchRequests { .. }
+            | Cmd::EvalLargeChoice { .. }
+            | Cmd::EvalChoiceSet { .. }
+            | Cmd::Profile { .. }
+            | Cmd::Serve { .. }
+            | Cmd::GemmSearch { .. }
+            | Cmd::Gemm { .. }
+            | Cmd::GemmShare { .. }
+            | Cmd::Bench { .. }
+            | Cmd::Benchmark { .. }
+    ) {
         return;
     }
     if let Some(bin) = paths::cuda_binary() {
+        let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
         let err = cuda_command(&bin).args(&args[1..]).exec();
         crate::warn!("running {}: {err} (`basal doctor` checks the installation)", crate::term::P(&bin));
         std::process::exit(1);
@@ -112,6 +114,9 @@ struct Cli {
     /// Colours in the output: auto (a terminal, without NO_COLOR), always, never
     #[arg(long, global = true, value_enum, default_value_t = term::ColorMode::Auto)]
     color: term::ColorMode,
+    /// /v1/systemone dialect for serve; default typesafe (YAML can also select it)
+    #[arg(long, global = true, value_enum)]
+    systemone_dialect: Option<serve::SystemOneDialect>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -135,6 +140,8 @@ const INFERENCE_MODES: [&str; 3] = ["auto", "accurate", "balanced"];
 
 #[derive(Args, Clone)]
 struct GpuArgs {
+    #[command(flatten)]
+    model_options: model_options::ModelOptions,
     /// Enable image/audio processors and native encoders (omni CUDA; BF16/F32 encoders)
     #[arg(long)]
     media: bool,
@@ -262,6 +269,8 @@ enum Cmd {
         /// Option orders: 1, 2, auto or `2le<N>`
         #[arg(long)]
         orders: Option<String>,
+        #[command(flatten)]
+        model_options: model_options::ModelOptions,
         #[arg(long, default_value = "-")]
         request: String,
     },
@@ -269,6 +278,11 @@ enum Cmd {
     CheckPrompts {
         #[command(flatten)]
         m: ModelArgs,
+        #[command(flatten)]
+        model_options: model_options::ModelOptions,
+        /// Option orders: 1, 2, auto or `2le<N>`
+        #[arg(long)]
+        orders: Option<String>,
         #[arg(long)]
         reference: PathBuf,
         #[arg(long)]
@@ -629,7 +643,8 @@ fn gpu_engine(m: &ModelArgs, g: &GpuArgs) -> Result<Engine<GpuBackend>> {
     // an unsupported weight format or layer split fails before the model is downloaded
     g.quantization(&m.model)?;
     g.check_layer_split(&m.model)?;
-    gpu_engine_at(&m.dir()?, g)
+    let model = config::model_ref(&m.model)?;
+    gpu_engine_at(&m.dir()?, g, &model.source_name())
 }
 
 fn parse_inference_mode(value: &str) -> Result<InferenceMode> {
@@ -655,18 +670,18 @@ impl PlannedEngine {
     }
 }
 
-fn gpu_engine_at(dir: &Path, g: &GpuArgs) -> Result<Engine<GpuBackend>> {
-    Ok(planned_engine_at(dir, g)?.engine)
+fn gpu_engine_at(dir: &Path, g: &GpuArgs, source: &str) -> Result<Engine<GpuBackend>> {
+    Ok(planned_engine_at(dir, g, source)?.engine)
 }
 
 /// Load the model of `dir` with `g`: resolve its profile, freeze the execution plan (precision, kernels, attention,
 /// GEMM table and fallbacks for the instance's GPUs) before any weight is read, load the backend from the plan,
 /// then precompute the template prefixes.
-fn planned_engine_at(dir: &Path, g: &GpuArgs) -> Result<PlannedEngine> {
+fn planned_engine_at(dir: &Path, g: &GpuArgs, source: &str) -> Result<PlannedEngine> {
     let inference_mode = parse_inference_mode(&g.inference_mode)?;
     #[cfg(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos")))]
     anyhow::ensure!(g.state_cache_mb == 0, "Intel state cache is not implemented; use --state-cache-mb 0");
-    let manifest = ModelManifest::load_with_orders(dir, g.orders.as_deref())?;
+    let manifest = g.model_options.load_manifest(dir, g.orders.as_deref(), source)?;
     let quantization = g.quantization(&manifest.name)?;
     // Validate architecture-specific quantization and split constraints before any weight is read.
     config::check_architecture(&manifest, quantization, g.layer_split.is_some())?;
@@ -778,6 +793,7 @@ fn planned_engine_at(dir: &Path, g: &GpuArgs) -> Result<PlannedEngine> {
     }
     backend.set_state_cache_bytes(g.state_cache_mb.checked_mul(1 << 20).context("state cache budget overflow")?)?;
     let mut engine = Engine::new(manifest, backend)?;
+    engine.set_auto_orders(g.model_options.auto_orders()?);
     engine.mark_state = g.state_cache_mb > 0;
     engine.tree_max_tokens = g.tree_max_tokens;
     if !g.no_prefix_cache && engine.backend.supports_prefix_cache() {
@@ -835,10 +851,10 @@ pub fn started() -> std::time::Instant {
 
 fn run() -> Result<()> {
     started();
-    #[cfg(all(target_os = "linux", not(feature = "cuda")))]
-    delegate_gpu_command();
     let cli = Cli::parse();
     term::set_mode(cli.color);
+    #[cfg(all(target_os = "linux", not(feature = "cuda")))]
+    delegate_gpu_command(&cli.cmd);
     match cli.cmd {
         Cmd::Batches(args) => batches::run(args)?,
         Cmd::Database(args) => database::cli::run(args)?,
@@ -872,8 +888,11 @@ fn run() -> Result<()> {
                 }
             }
         }
-        Cmd::Prepare { m, request, upstream, orders } => {
-            let engine = Engine::new(ModelManifest::load_with_orders(&m.dir()?, orders.as_deref())?, NoBackend)?;
+        Cmd::Prepare { m, request, upstream, orders, model_options } => {
+            let source = config::model_ref(&m.model)?.source_name();
+            let mut engine =
+                Engine::new(model_options.load_manifest(&m.dir()?, orders.as_deref(), &source)?, NoBackend)?;
+            engine.set_auto_orders(model_options.auto_orders()?);
             let body = read_request(&request)?;
             let prepared = if upstream {
                 engine.plan_request_as(&body, basal_core::request::Dialect::Upstream).map(|p| p.prepared)
@@ -889,8 +908,11 @@ fn run() -> Result<()> {
                 }
             }
         }
-        Cmd::CheckPrompts { m, reference, out } => {
-            let engine = Engine::new(ModelManifest::load(&m.dir()?)?, NoBackend)?;
+        Cmd::CheckPrompts { m, reference, out, orders, model_options } => {
+            let source = config::model_ref(&m.model)?.source_name();
+            let mut engine =
+                Engine::new(model_options.load_manifest(&m.dir()?, orders.as_deref(), &source)?, NoBackend)?;
+            engine.set_auto_orders(model_options.auto_orders()?);
             let report = compare::check_prompts(&engine, &reference)?;
             let t = &report["tokens"];
             eprintln!(
@@ -1075,6 +1097,12 @@ fn run() -> Result<()> {
                 }
             });
             let (source, mut c) = config::select(config, &models)?;
+            c.systemone_dialect = cli.systemone_dialect.unwrap_or(c.systemone_dialect);
+            for model in &mut c.models {
+                model.model_options.apply_cli(&g.model_options);
+                model.model_options.validate()?;
+                model.orders = model.orders.clone().or_else(|| g.orders.clone());
+            }
             match &source {
                 config::Source::File(p) => crate::note!("configuration {}", crate::term::P(p)),
                 config::Source::Models => {}
@@ -1183,7 +1211,11 @@ fn run() -> Result<()> {
             // model files (local or downloaded), then GEMM tables (a search needs no model weights in GPU memory),
             // then the models
             let dirs: Vec<PathBuf> = c.models.iter().map(config::model_dir).collect::<Result<_>>()?;
-            let manifests: Vec<ModelManifest> = dirs.iter().map(|d| ModelManifest::load(d)).collect::<Result<_>>()?;
+            let manifests: Vec<ModelManifest> = dirs
+                .iter()
+                .zip(&c.models)
+                .map(|(d, m)| m.model_options.load_manifest(d, m.orders.as_deref(), &m.source_name()))
+                .collect::<Result<_>>()?;
             // one engine per model name (the `model` field of requests) before any GEMM search or load
             for (i, m) in manifests.iter().enumerate() {
                 anyhow::ensure!(
@@ -1227,8 +1259,9 @@ fn run() -> Result<()> {
                 let mut replicas = Vec::with_capacity(instances.len());
                 for devices in instances {
                     let mg = GpuArgs {
+                        model_options: mc.model_options.clone(),
                         media: mc.media || g.media,
-                        orders: mc.orders.clone().or_else(|| g.orders.clone()),
+                        orders: mc.orders.clone(),
                         dtype: mc.dtype.clone(),
                         inference_mode: mc.inference_mode.clone(),
                         readout: g.readout.clone(),
@@ -1242,7 +1275,7 @@ fn run() -> Result<()> {
                         device: placement.split().is_none().then(|| devices[0]),
                         layer_split: placement.split().cloned(),
                     };
-                    let planned = planned_engine_at(&dir, &mg)?;
+                    let planned = planned_engine_at(&dir, &mg, &mc.source_name())?;
                     let scheduling = planned.scheduling();
                     let mut engine = planned.engine;
                     engine.forward_max_tokens = mc.max_batch_tokens;
@@ -1272,6 +1305,7 @@ fn run() -> Result<()> {
                 });
             }
             let opts = serve::ServeOptions {
+                systemone_dialect: c.systemone_dialect,
                 addr,
                 release_date: c.release_date,
                 max_inflight: c.max_inflight,

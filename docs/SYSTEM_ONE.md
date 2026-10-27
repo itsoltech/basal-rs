@@ -1,17 +1,39 @@
 # Zgodność API
 
-Serwer ma dwa endpointy decyzji o tej samej semantyce modelu i różnych
-konwencjach żądań oraz odpowiedzi:
+Serwer domyślnie udostępnia dwa kontrakty decyzji:
 
 - `POST /v1/systemone`: kontrakt TypeSafe System One. Na nim opiera się
   integracja z aplikacjami.
 - `POST /v1/basal`: konwencje `Server.decide` upstream basal v2.0.0, dla
   klientów napisanych pod serwer upstream.
 
+`basal serve --systemone-dialect upstream` (globalna flaga) lub YAML
+`systemone_dialect: upstream` przełącza `/v1/systemone` na rzeczywisty alias
+`/v1/basal`: ten sam handler, natywny dekoder JSON, limity i koperta błędów.
+Oficjalny klient i most upstream mogą pominąć `model`; wybierany jest
+`default_model`, domyślnie pierwszy skonfigurowany model. Jawne `model`
+nadal wybiera jeden z wielu serwowanych modeli. Dialekt nie zależy od treści.
+Flaga CLI ma pierwszeństwo nad YAML. Domyślne `typesafe` zachowuje kontrakt
+opisany poniżej, w tym dekodowanie kompresji i multipart.
+Natywny alias przyjmuje ten sam surowy JSON co `/v1/basal`; nie korzysta
+z adaptera kompresji, multipart ani `assets` TypeSafe. Limit natywny wynosi
+2 MiB, a gdy serwer udostępnia media: 256 MiB ze wspólnym admission dużych ciał.
+Metryki zachowują faktyczną ścieżkę endpointu oraz rozwiązany model.
+Wybór dotyczy online HTTP; zapisany kontrakt rekordów Batch API nie zmienia się.
+
 `GET /v1/models` zwraca listę TypeSafe `ModelMetadataList` (`name`,
 `description`, `release_date`) z polami upstream `mode` i `early_exit`
 (pusta lista: runtime nie stosuje wczesnego wyjścia). `release_date` ustawia
 `basal serve --release-date`.
+
+Metadane zawierają również `prompt_format`, efektywne `orders`,
+`temperature_per_prim` (puste `{}` przy wyłączonej kalibracji), `layout` tylko
+gdy niekanoniczny oraz `calibration_warning`, gdy kalibracja jest niezgodna.
+Ostrzeżenie jest logowane przed udostępnieniem modelu; API nie ujawnia pełnej
+ścieżki pliku kalibracji ani lokalnej tożsamości modelu. Mismatch jawnego pliku
+z modelem/rewizją ostrzega i zachowuje certyfikaty; `--strict-calibration`
+odmawia startu. Niezgodność layoutu/porządku usuwa certyfikaty i dopasowane
+fallbacki. Opcje i pierwszeństwo: [README](../README.md#serwer).
 
 ## /v1/systemone
 
@@ -131,6 +153,13 @@ brzegowych, [raport](../reports/typesafe-api-edge-cases/README.md)):
 `legend` zachowuje oryginalne wartości JSON kryteriów. `usage` zawiera
 `input_tokens` (tokeny promptów obu porządków), `output_tokens` = 0,
 `questions`, `branches` i `latency_ms` (czas żądania w serwerze).
+`longest_prompt_tokens` podaje najdłuższy prompt w obu formatach modelu.
+`branches` liczy początkowe gałęzie logiczne (jedną na etykietę `multi`),
+bez mnożenia przez liczbę porządków; `second_order_branches` przy `orders: auto`
+liczy dodatkowy drugi porządek. Kontynuacje zadań zachowują własne doliczanie
+tokenów i gałęzi oraz maksimum długości. Przy aktywnym torze długich żądań
+`usage.lane` to `main` lub `long` według toru, który faktycznie wykonał żądanie,
+także po fallbacku do głównego toru i na replikach. Pola czasu pozostają dostępne.
 
 Confidence według TypeSafe, liczone z końcowego rozkładu po kalibracji:
 
@@ -191,8 +220,9 @@ nieznana nazwa: 422). Oryginalny serwer upstream ignoruje to pole. Brak lub niez
 `type` to `choice` (nieznany typ bez kalibracji), `instructions: null` jako
 tekst `"null"`, puste opisy noul zastąpione Tak/Nie, 2–10 opcji. Odpowiedzi
 jak upstream: `probabilities` i `confidence = max(p)` dla każdego typu,
-legenda score z tekstami opcji. Każdy błąd, także niepoprawny JSON, to 422
-`{"error": "..."}`. Dla modelu basal-1.0 obowiązują reguły v1.5.0 (`type:
+legenda score z tekstami opcji. Błędy żądania, także niepoprawny JSON, to 422
+`{"error": "..."}`; rozpoznany OOM: 503, inne błędy silnika: 500.
+Admission zachowuje 529 i `Retry-After`. Dla modelu basal-1.0 obowiązują reguły v1.5.0 (`type:
 "multi"` to multi).
 
 Na 34 żądaniach referencji basal-1.5 błędy występują w tych samych miejscach
@@ -203,6 +233,20 @@ odpowiedzią upstream.
 
 SDK tego endpointu dla Python, TypeScript/JavaScript, C# i Rust:
 [SDK natywnego API](SDK.md).
+
+## Layout, evidence i cache
+
+`--layout canonical|qfirst|state_twice` lub per-model YAML `layout` nadpisuje
+deklarację modelu; bez deklaracji używane jest canonical. Niekanoniczne layouty
+obsługują PL/EN w prompt format 1. Media z niekanonicznym layoutem są odrzucane
+z 422. Evidence nadal używa własnego promptu canonical. Dla bounded batch
+evidence z niekanonicznym layoutem ma status `unmodelled` i jest odrzucane,
+zamiast przyjmować nieudowodniony budżet pamięci.
+
+Cache stanu może działać również dla innych layoutów: ponowne użycie wymaga
+identycznego prefiksu tokenów. Skuteczności i wydajności cache w tych layoutach
+nie zmierzono. Domyślne auto tau/band pozostają `0.6` i `[0.2, 0.8]`;
+walidacja jest ściślejsza od upstream: skończone liczby w `[0,1]`, LO ≤ HI.
 
 ## Źródła
 

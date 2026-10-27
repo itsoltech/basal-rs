@@ -24,6 +24,19 @@ W trybie lokalnym jeden `Engine` przetwarza rekordy kolejno; ładowanie i infere
 Tokio, bez serwera i jego harmonogramu. Wybór tabel GEMM używa konfiguracji `serve`. Kontrakt promptu i odpowiedzi
 pozostaje w `basal-core`. Interfejs i przykłady: [CLIENT.md](CLIENT.md).
 
+`basal-cli/src/model_options.rs` łączy CLI/YAML z `ModelLoadOptions` i waliduje
+progi `AutoOrderSettings`. Efektywne opcje są stosowane w preflight, przed wagami
+i GEMM oraz w każdym osobno ładowanym silniku i replice. Forki long/tła kopiują
+manifest i progi auto. Tożsamość jawnej kalibracji pochodzi z rzeczywistego
+repozytorium/ścieżki; ścieżka snapshotu HF dostarcza repo i rozwiązany commit.
+`serve` buduje metadane z silnika, a planer batchy z jego sklonowanego manifestu.
+API pokazuje ostrzeżenie kalibracji bez lokalnych ścieżek i tożsamości.
+
+Procesowy `systemone_dialect` (globalna flaga CLI lub YAML, domyślnie typesafe)
+wybiera trasę `/v1/systemone`. W trybie upstream jest to kopia trasy `/v1/basal`
+z tym samym handlerem i warstwami, bez dekodera TypeSafe; native routing wielu
+modeli i domyślny model pozostają wspólne. Dialekt nie jest zgadywany po body.
+
 Nowe rodziny, format 2, wybór kolejności i kalibracja: [UPSTREAM_2.0.md](UPSTREAM_2.0.md).
 Profile modeli i plan wykonania: [sekcja niżej](#profile-modeli-i-plan-wykonania).
 Natywne architektury i lifecycle mediów omni: [OMNI.md](OMNI.md).

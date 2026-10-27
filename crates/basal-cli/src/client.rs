@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{ensure, Context, Result};
-use basal_core::{DecideError, ModelManifest};
+use basal_core::DecideError;
 use clap::{ArgGroup, Args, ValueEnum};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -45,6 +45,8 @@ impl InputFormat {
     after_help = "Examples:\n  cat text.txt | basal client --ask 'Is this urgent?'\n  cat text.txt | basal client --ask 'Which department?' --choice sales --choice support --value\n  jq -c '.[]' data.json | basal client --template questions.json --input jsonl --jobs 8\n  cat text.txt | basal client --local --model mini --ask 'Is this urgent?'\n\nJSON goes to stdout; diagnostics go to stderr. See docs/CLIENT.md for Bash recipes."
 )]
 pub(super) struct ClientArgs {
+    #[command(flatten)]
+    model_options: crate::model_options::ModelOptions,
     /// Question about stdin; noul by default, or choice/score/multi with options below
     #[arg(long)]
     ask: Option<String>,
@@ -253,6 +255,8 @@ fn answer_value(response: &Value) -> Result<&Value, Failure> {
 }
 
 pub(super) fn run(args: ClientArgs) -> Result<u8> {
+    args.model_options.validate()?;
+    ensure!(args.local || !args.model_options.is_set(), "prompt/calibration/auto-order options require --local");
     let format = args.input.unwrap_or(if args.request.is_some() { InputFormat::Json } else { InputFormat::Text });
     ensure!((1..=256).contains(&args.jobs), "--jobs must be between 1 and 256");
     ensure!(args.timeout > 0 && args.timeout <= 86400, "--timeout must be between 1 and 86400 seconds");
@@ -477,7 +481,7 @@ fn load_local(args: &ClientArgs, name: &str) -> Result<basal_core::Engine<crate:
         model.gemm_table = table.display().to_string();
     }
     let dir = crate::config::model_dir(&model)?;
-    let manifest = ModelManifest::load_with_orders(&dir, model.orders.as_deref())?;
+    let manifest = args.model_options.load_manifest(&dir, model.orders.as_deref(), &model.source_name())?;
     let precision = crate::config::model_precision(&model.dtype, &manifest, args.device)?;
     let table = crate::gemm_artifact::resolve(
         &crate::gemm_artifact::TableRequest::parse(&model.gemm_table)?,
@@ -489,6 +493,7 @@ fn load_local(args: &ClientArgs, name: &str) -> Result<basal_core::Engine<crate:
     )?;
     let table_path = table.path().map(std::path::Path::to_path_buf);
     let gpu = crate::GpuArgs {
+        model_options: args.model_options.clone(),
         media: model.media,
         orders: model.orders.clone(),
         dtype: args.dtype.clone(),
@@ -505,7 +510,7 @@ fn load_local(args: &ClientArgs, name: &str) -> Result<basal_core::Engine<crate:
         // `basal client --local` runs a model on one GPU
         layer_split: None,
     };
-    let engine = crate::gpu_engine_at(&dir, &gpu)?;
+    let engine = crate::gpu_engine_at(&dir, &gpu, &model.source_name())?;
     if let Some(table) = gpu.resolved_gemm.as_ref().and_then(|r| r.table.as_ref()) {
         crate::config::check_gemm_coverage(&engine.manifest.name, &engine.backend.gemm_table_missing(), table)?;
     }

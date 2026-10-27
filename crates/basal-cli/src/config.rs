@@ -46,6 +46,8 @@ pub const INVARIANT_CLASSES: [usize; 25] = [
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServeConfig {
+    #[serde(default)]
+    pub systemone_dialect: crate::serve::SystemOneDialect,
     #[serde(default = "default_addr")]
     pub addr: SocketAddr,
     /// Waiting + running requests of all models; more are refused with 529.
@@ -87,6 +89,8 @@ pub struct ServeConfig {
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelConfig {
+    #[serde(flatten)]
+    pub(crate) model_options: crate::model_options::ModelOptions,
     /// Local model directory (config.json, basal.json, tokenizer.json, model.safetensors, CALIBRATION.json, ...).
     #[serde(default)]
     pub path: Option<PathBuf>,
@@ -207,6 +211,12 @@ fn default_tree_max_tokens() -> usize {
 }
 
 impl ModelConfig {
+    /// Actual configured source, without a routing alias or an unresolved revision suffix.
+    pub(crate) fn source_name(&self) -> String {
+        self.repo
+            .clone()
+            .unwrap_or_else(|| self.path.as_deref().unwrap_or(Path::new("")).to_string_lossy().into_owned())
+    }
     /// GPU ordinal of a model without replicas (`device`, default 0).
     pub fn device(&self) -> usize {
         self.device.unwrap_or(0)
@@ -441,6 +451,7 @@ impl ServeConfig {
         ensure_single_document(text)?;
         ensure!(!serving || !c.models.is_empty(), "no models");
         for model in &c.models {
+            model.model_options.validate()?;
             crate::parse_inference_mode(&model.inference_mode)?;
             crate::gemm_artifact::TableRequest::parse(&model.gemm_table)?;
         }
@@ -594,7 +605,7 @@ const MODEL_FILES: [&str; 14] = [
     "CALIBRATION.json",
     "model.safetensors",
     "evidence_head.pt",
-    "CALIBRATION.o*.json",
+    "CALIBRATION.*.json",
     "model.safetensors.index.json",
     "model-*.safetensors",
     "processor_config.json",
@@ -643,7 +654,7 @@ pub fn cached_model_dir(repo: &str, revision: Option<&str>) -> Option<PathBuf> {
         .local_files_only(true)
         .send()
         .ok()?;
-    (MODEL_FILES[..6].iter().all(|f| dir.join(f).exists()) && basal_core::checkpoint::files(&dir).is_ok())
+    (MODEL_FILES[..5].iter().all(|f| dir.join(f).exists()) && basal_core::checkpoint::files(&dir).is_ok())
         .then_some(dir)
 }
 
@@ -690,7 +701,8 @@ fn download(repo: &str, revision: Option<&str>) -> Result<PathBuf> {
                 .with_context(|| format!("{repo}@{at}: download failed ({e}) and no cached copy"))?
         }
     };
-    for f in &MODEL_FILES[..6] {
+    // Calibration is optional: explicit/off loads must not require the automatic file.
+    for f in &MODEL_FILES[..5] {
         ensure!(dir.join(f).exists(), "{repo}@{at}: {f} missing in {}", crate::term::P(&dir));
     }
     ensure!(

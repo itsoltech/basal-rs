@@ -64,7 +64,19 @@ use metrics::{LaneMetrics, Metrics, ReplicaMetrics, RequestModel};
 
 pub(crate) const DEFAULT_MAX_LARGE_INFLIGHT: usize = 4;
 
+/// Explicit dialect of /v1/systemone; never inferred from a request body.
+#[derive(Clone, Copy, Debug, Default, clap::ValueEnum, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SystemOneDialect {
+    #[default]
+    #[value(name = "typesafe")]
+    #[serde(rename = "typesafe")]
+    TypeSafe,
+    Upstream,
+}
+
 pub struct ServeOptions {
+    pub systemone_dialect: SystemOneDialect,
     pub addr: SocketAddr,
     /// `release_date` of GET /v1/models (TypeSafe ModelMetadata; upstream reports its engine release date)
     pub release_date: String,
@@ -298,6 +310,7 @@ fn least_loaded(replicas: &[ReplicaRoute], start: usize) -> Option<&ReplicaRoute
 }
 
 struct App {
+    systemone_dialect: SystemOneDialect,
     metrics: Option<Metrics>,
     /// Queues of every served model, by name.
     routes: HashMap<String, Route>,
@@ -338,6 +351,8 @@ struct Waiting {
 /// Admission of one lane: order of the waiting requests, budget, packed tokens per second of its recent batches
 /// (exponential average, converts tokens to seconds for HRRN).
 struct Lane {
+    /// Actual execution lane, reported only when this replica has an active long lane.
+    usage_lane: Option<&'static str>,
     metrics: Option<LaneMetrics>,
     schedule: Schedule,
     max_batch_tokens: usize,
@@ -347,7 +362,7 @@ struct Lane {
 
 impl Lane {
     fn new(schedule: Schedule, max_batch_tokens: usize, metrics: Option<LaneMetrics>) -> Self {
-        Self { metrics, schedule, max_batch_tokens, rate: 3000.0, waiting: Vec::new() }
+        Self { usage_lane: None, metrics, schedule, max_batch_tokens, rate: 3000.0, waiting: Vec::new() }
     }
 
     /// Take the next batch: the first waiting request in schedule order always, then every other one that still fits
@@ -406,7 +421,10 @@ impl Lane {
         match result {
             Ok(outs) => {
                 for ((job, plan), out) in batch.into_iter().zip(outs) {
-                    let resp = plan_response(&engine.manifest.name, &plan, &out);
+                    let mut resp = plan_response(&engine.manifest.name, &plan, &out);
+                    if let (Some(lane), Ok(response)) = (self.usage_lane, &mut resp) {
+                        response["usage"]["lane"] = lane.into();
+                    }
                     if let (Some(metrics), Ok(v)) = (&self.metrics, &resp) {
                         metrics.usage(v);
                     }
@@ -862,7 +880,9 @@ async fn models_list(State(app): State<Arc<App>>) -> Json<Value> {
 
 /// Admit large or chunked inference bodies before reading/allocating them.
 async fn large_body_admission(State(app): State<Arc<App>>, mut request: Request, next: Next) -> Response {
-    if request.uri().path() == "/v1/systemone" {
+    let typesafe =
+        request.uri().path() == "/v1/systemone" && matches!(app.systemone_dialect, SystemOneDialect::TypeSafe);
+    if typesafe {
         let permit = match app.systemone_decoders.clone().try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
@@ -881,13 +901,12 @@ async fn large_body_admission(State(app): State<Arc<App>>, mut request: Request,
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok())
         .is_none_or(|n| n > 2 * 1024 * 1024)
-        || (request.uri().path() == "/v1/systemone"
-            && request.headers().get(axum::http::header::CONTENT_ENCODING).is_some_and(|v| v != "identity"));
+        || (typesafe && request.headers().get(axum::http::header::CONTENT_ENCODING).is_some_and(|v| v != "identity"));
     let _permit = if large {
         match app.large_bodies.clone().try_acquire_owned() {
             Ok(permit) => Some(Arc::new(permit)),
             Err(_) => {
-                let dialect = if request.uri().path() == "/v1/basal" { Dialect::Upstream } else { Dialect::TypeSafe };
+                let dialect = if typesafe { Dialect::TypeSafe } else { Dialect::Upstream };
                 return overloaded(
                     dialect,
                     "Too many large requests in flight. Retry after a short delay.",
@@ -1021,6 +1040,12 @@ fn metadata_for_model<B: Backend>(engine: &Engine<B>) -> Value {
         "orders": manifest.orders.metadata(),
         "temperature_per_prim": temperatures
     });
+    if manifest.layout != basal_core::prompt::PromptLayout::Canonical {
+        metadata["layout"] = manifest.layout.as_str().into();
+    }
+    if let Some(warning) = crate::model_options::calibration_warning(manifest) {
+        metadata["calibration_warning"] = warning.into();
+    }
     let media = engine.backend.media_kinds();
     if !media.is_empty() {
         metadata["media"] = json!(media.iter().map(|kind| kind.as_str()).collect::<Vec<_>>());
@@ -1222,7 +1247,8 @@ fn serve_inner<B: Backend + Send + 'static>(
                     }
                     health.extend(le.backend.work_health());
                     let (ltx, lrx) = std::sync::mpsc::channel();
-                    let l = lane("long");
+                    let mut l = lane("long");
+                    l.usage_lane = Some("long");
                     threads.push(
                         std::thread::Builder::new()
                             .name(format!("{label}-long"))
@@ -1236,7 +1262,8 @@ fn serve_inner<B: Backend + Send + 'static>(
                 for &(d, gate) in &device_gates {
                     engine.backend.set_device_gate(d, gate.clone(), true).with_context(|| label.clone())?;
                 }
-                let main_lane = lane("main");
+                let mut main_lane = lane("main");
+                main_lane.usage_lane = long.as_ref().map(|_| "main");
                 threads.push(
                     std::thread::Builder::new()
                         .name(label)
@@ -1274,6 +1301,7 @@ fn serve_inner<B: Backend + Send + 'static>(
         }
         let batch_default_model = default_model.clone();
         let app = Arc::new(App {
+            systemone_dialect: opts.systemone_dialect,
             metrics,
             routes,
             names,
@@ -1287,7 +1315,7 @@ fn serve_inner<B: Backend + Send + 'static>(
             max_inflight: opts.max_inflight,
             release_date: opts.release_date.clone(),
         });
-        let systemone = post(systemone)
+        let typesafe = post(systemone)
             .layer(axum::extract::DefaultBodyLimit::max(basal_core::systemone::MAX_BODY_BYTES))
             .layer(axum::middleware::from_fn_with_state(app.clone(), large_body_admission));
         let basal = if supports_media {
@@ -1296,6 +1324,10 @@ fn serve_inner<B: Backend + Send + 'static>(
                 .layer(axum::middleware::from_fn_with_state(app.clone(), large_body_admission))
         } else {
             post(basal)
+        };
+        let systemone = match opts.systemone_dialect {
+            SystemOneDialect::TypeSafe => typesafe,
+            SystemOneDialect::Upstream => basal.clone(),
         };
         let router = Router::new().route("/v1/systemone", systemone).route("/v1/basal", basal);
         let router = if opts.metrics {

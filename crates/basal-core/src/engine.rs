@@ -1312,9 +1312,7 @@ pub fn plan_response(model: &str, plan: &RequestPlan, out: &PlanOutput) -> Resul
         plan.prepared.iter().flat_map(|p| &p.orders).map(|o| o.input_ids.len()).sum::<usize>() + out.final_round_tokens;
     let mut response = json!({"model": model, "answers": answers, "usage": {"input_tokens": input_tokens, "output_tokens": 0,
                                                              "questions": plan.questions.len(), "branches": branches}});
-    if out.finals.first().is_some_and(|(it, _)| it.prompt_format == PromptFormat::Two) {
-        response["usage"]["longest_prompt_tokens"] = out.longest_prompt_tokens.into();
-    }
+    response["usage"]["longest_prompt_tokens"] = out.longest_prompt_tokens.into();
     if let Some(n) = out.second_order_branches {
         response["usage"]["second_order_branches"] = n.into();
     }
