@@ -90,19 +90,31 @@ fn read(path: &Path) -> Result<(Value, String)> {
 }
 
 fn fitted_layout(data: &Value) -> Result<&str> {
+    let set = |v: &&Value| !v.is_null() && v.as_str() != Some("");
     data.pointer("/fitted_on/layout")
-        .filter(|v| !v.is_null() && v.as_str() != Some(""))
-        .or_else(|| data.get("layout").filter(|v| !v.is_null() && v.as_str() != Some("")))
-        .map(|v| v.as_str().context("calibration layout must be a string"))
-        .transpose()
-        .map(|layout| layout.unwrap_or("canonical"))
+        .filter(set)
+        .or_else(|| data.get("layout").filter(set))
+        .map_or(Ok("canonical"), |v| v.as_str().context("calibration layout must be a string"))
+}
+
+/// Why `data` read from `path` does not hold for the served `layout`; `None` for an empty file or a matching layout.
+fn layout_mismatch(data: &Value, path: &Path, layout: PromptLayout) -> Result<Option<String>> {
+    if data.as_object().is_none_or(serde_json::Map::is_empty) {
+        return Ok(None);
+    }
+    let fitted = fitted_layout(data)?;
+    Ok((fitted != layout.as_str()).then(|| {
+        // The file name only (as upstream): the message may reach API metadata, a full local path must not.
+        let name = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
+        format!("{name} was fitted on the {fitted} layout, served with --layout {layout}")
+    }))
 }
 
 fn fitted_orders(data: &Value) -> Result<Option<OptionOrders>> {
+    let set = |v: &&Value| !v.is_null();
     data.pointer("/fitted_on/orders")
-        .filter(|v| !v.is_null())
-        .or_else(|| data.get("orders"))
-        .filter(|v| !v.is_null())
+        .filter(set)
+        .or_else(|| data.get("orders").filter(set))
         .map(|v| OptionOrders::parse(&v.as_str().map(str::to_owned).unwrap_or_else(|| v.to_string())))
         .transpose()
 }
@@ -135,30 +147,24 @@ pub(crate) fn load(
         (serde_json::json!({}), None)
     };
     // Layout is checked before orders: a mismatch must not be rescued by an orders variant.
-    let mut unvalidated = None;
-    if data.as_object().is_some_and(|m| !m.is_empty()) && fitted_layout(&data)? != layout.as_str() {
-        unvalidated = Some(format!(
-            "{} was fitted on the {} layout, served with --layout {layout}",
-            path.display(),
-            fitted_layout(&data)?
-        ));
-    } else {
-        if fitted_orders(&data)?.is_some_and(|o| o != orders) && !explicit && !off {
-            let stem = path.file_stem().and_then(|s| s.to_str()).context("invalid calibration filename")?;
-            let alt = path.with_file_name(format!("{stem}.o{orders}.json"));
+    let mut unvalidated = layout_mismatch(&data, &path, layout)?;
+    if unvalidated.is_none() {
+        if !explicit && !off && fitted_orders(&data)?.is_some_and(|o| o != orders) {
+            // Automatic names are CALIBRATION[.<layout>].json; the variant is CALIBRATION[.<layout>].o<orders>.json.
+            let alt = path.with_extension(format!("o{orders}.json"));
             if alt.exists() {
                 let (value, digest) = read(&alt)?;
+                // Validate the replacement too, so an incorrectly packaged orders file cannot certify another layout.
+                unvalidated = layout_mismatch(&value, &alt, layout)?;
                 data = value;
                 hash = Some(digest);
                 path = alt;
             }
         }
-        // Validate the replacement too, so an incorrectly packaged orders file cannot certify another layout.
-        if data.as_object().is_some_and(|m| !m.is_empty()) && fitted_layout(&data)? != layout.as_str() {
-            unvalidated =
-                Some(format!("{} was fitted on another layout, served with --layout {layout}", path.display()));
-        } else if let Some(fitted) = fitted_orders(&data)?.filter(|o| *o != orders) {
-            unvalidated = Some(format!("calibration was fitted on {fitted} option order(s), served with {orders}"));
+        if unvalidated.is_none() {
+            unvalidated = fitted_orders(&data)?
+                .filter(|o| *o != orders)
+                .map(|fitted| format!("calibration was fitted on {fitted} option order(s), served with {orders}"));
         }
     }
     let mut provenance = CalibrationProvenance {
