@@ -29,6 +29,7 @@ mod export;
 mod gemm_artifact;
 mod gemm_share;
 mod large_eval;
+mod mcp;
 mod model_options;
 mod models;
 mod paths;
@@ -234,6 +235,8 @@ impl GpuArgs {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// MCP stdio bridge to a running basal server; does not load models or start a server
+    Mcp(mcp::Args),
     /// Manage durable batch storage without loading a model or a GPU.
     Batches(batches::Args),
     /// Manage the configured database (`database:`) without loading a model or a GPU.
@@ -494,6 +497,9 @@ enum Cmd {
     /// System One HTTP server: POST /v1/systemone, POST /v1/basal, GET /v1/models, GET /health. Models from --model,
     /// --config, basal-serve.yml in the working directory, else basal-2.0-4.5B from Hugging Face
     Serve {
+        /// Serve stateless streamable HTTP MCP at /mcp (default: off; YAML mcp)
+        #[arg(long, value_enum)]
+        mcp: Option<mcp::Switch>,
         /// YAML file with the served models and their options (serve.example.yml); replaces the model, GPU and
         /// admission options below. Default: BASAL_CONFIG, else basal-serve.yml in the working directory
         #[arg(long, conflicts_with_all = ["models", "gemm_table", "device", "replica_devices", "layer_split"])]
@@ -874,6 +880,7 @@ fn run() -> Result<()> {
     #[cfg(all(target_os = "linux", not(feature = "cuda")))]
     delegate_gpu_command(&cli.cmd);
     match cli.cmd {
+        Cmd::Mcp(args) => mcp::run(args)?,
         Cmd::Batches(args) => batches::run(args)?,
         Cmd::Database(args) => database::cli::run(args)?,
         Cmd::Client(args) => {
@@ -1080,6 +1087,7 @@ fn run() -> Result<()> {
             }
         }
         Cmd::Serve {
+            mcp,
             config,
             models,
             g,
@@ -1320,6 +1328,7 @@ fn run() -> Result<()> {
                 });
             }
             let opts = serve::ServeOptions {
+                mcp: mcp.unwrap_or(c.mcp),
                 systemone_dialect: c.systemone_dialect,
                 log_decisions: c.log_decisions,
                 addr,

@@ -146,6 +146,13 @@ handlerów, a nie pomiar zajętości GPU ani dokładnej długości kolejki.
 
 ## Rejestr decyzji
 
+MCP korzysta z tego samego admission, kolejek, liczników `/health` i metryk
+modelu (tokeny, pytania, partie, kolejki, repliki) co native HTTP. Metryki
+`basal_http_*` nadal opisują wyłącznie `/v1/systemone` i `/v1/basal`, bez
+ruchu protokołu `/mcp`. `--access-log` obejmuje także `/mcp`; status HTTP
+200 może przenosić MCP `isError=true`. Most stdio nie eksportuje własnych
+metryk: jego decyzje liczy zdalny `/v1/basal`.
+
 `basal serve --log-decisions ./decisions.jsonl` lub globalne YAML
 `log_decisions: ./decisions.jsonl` włącza procesowe dopisywanie JSONL.
 Jawne CLI zastępuje YAML; względna ścieżka jest względem katalogu procesu.
@@ -179,6 +186,13 @@ na potwierdzenie; nagłówki queue/compute zachowują swoje dotychczasowe znacze
 Zamknięcie HTTP zwalnia nadawców, a osobny wątek opróżnia kolejkę, flushuje plik
 i jest dołączany poza executorem. Nie ma rotacji ani fsync per linia. Awaria I/O
 może pozostawić częściową linię; taka próba nigdy nie jest potwierdzana jako sukces.
+
+To samo dotyczy obu narzędzi MCP. Rejestrowany i hashowany jest natywny
+request zbudowany z argumentów narzędzia, bez koperty JSON-RPC. `decide`
+zapisuje pełną finalną odpowiedź przed zwróceniem `answers.answer`;
+`decide_many` nie dodaje drugiego zapisu. Błędy writera są błędami narzędzia
+z przyczyną API. Shutdown HTTP/MCP anuluje oczekujące narzędzia i pozwala
+writerowi opróżnić przyjęte rekordy przed dołączeniem jego wątku.
 
 ## Tokeny i pytania
 

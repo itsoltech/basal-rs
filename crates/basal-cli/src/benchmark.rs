@@ -129,6 +129,7 @@ impl Server {
             std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).context("binding benchmark listener")?;
         let addr = listener.local_addr()?;
         let opts = ServeOptions {
+            mcp: crate::mcp::Switch::Off,
             systemone_dialect: crate::serve::SystemOneDialect::TypeSafe,
             log_decisions: None,
             addr,

@@ -47,6 +47,8 @@ pub const INVARIANT_CLASSES: [usize; 25] = [
 #[serde(deny_unknown_fields)]
 pub struct ServeConfig {
     #[serde(default)]
+    pub mcp: crate::mcp::Switch,
+    #[serde(default)]
     pub systemone_dialect: crate::serve::SystemOneDialect,
     /// Append final successful online decisions; absent: no log file, hashing or record serialization.
     #[serde(default)]

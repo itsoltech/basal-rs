@@ -671,7 +671,13 @@ Jeden model bez pliku konfiguracji:
 | `GET /health` | gotowość: 200 `{"status":"ok"}`; 503 `{"status":"device_lost"}` z `lost_models`, gdy backend modelu z jedną instancją (także z podziałem warstw) zgłosił trwałą utratę: Intel Vulkan po utracie urządzenia, CUDA gdy nie potwierdził końca własnej pracy GPU (dwie nieudane synchronizacje albo wiązania kontekstu); to nie test sprzętu. Grupy replik: 200 z `degraded_models`, gdy część replik jest niedostępna; 503 `{"status":"engine_stopped"}` z `unavailable_models`, gdy żadna. Wpis: `{"model", "replicas", "available", "unavailable": [{"replica", "device", "reason": "worker_closed" \| "device_lost"}]}` |
 | `GET /metrics` | opcjonalne metryki Prometheus: żądania, opóźnienia, tokeny, kolejka i partie, z podziałem na modele i ich repliki |
 
-Odpowiedzi mają nagłówki `x-basal-queue-ms`, `x-basal-compute-ms` i
+`basal serve --mcp on` (YAML `mcp: "on"`, domyślnie `"off"`) dodaje
+stateless streamable HTTP `/mcp` z narzędziami `decide` i `decide_many`.
+`basal mcp --url http://127.0.0.1:8000 --timeout 60` jest mostem stdio do
+już działającego serwera, bez ładowania wag. Oba korzystają z natywnego
+domyślnego modelu. Kontrakt, limity i Host/Origin: [MCP](docs/MCP.md).
+
+Odpowiedzi `/v1/systemone` i `/v1/basal` mają nagłówki `x-basal-queue-ms`, `x-basal-compute-ms` i
 `x-basal-batch-requests`.
 
 Metryki są domyślnie wyłączone. Włącza je `basal serve --metrics` albo

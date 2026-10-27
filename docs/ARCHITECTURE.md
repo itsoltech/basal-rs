@@ -56,6 +56,21 @@ wybiera trasę `/v1/systemone`. W trybie upstream jest to kopia trasy `/v1/basal
 z tym samym handlerem i warstwami, bez dekodera TypeSafe; native routing wielu
 modeli i domyślny model pozostają wspólne. Dialekt nie jest zgadywany po body.
 
+`basal-cli/src/mcp.rs` dostarcza dwa narzędzia oficjalnego SDK `rmcp 3.8.0`.
+Opcjonalny stateless HTTP `/mcp` wywołuje konkretny dispatcher w `serve.rs`,
+wspólny z oboma adapterami HTTP: wybór modelu, admission, kolejki, health,
+metryki modelu i pojedynczy finalny zapis decyzji. TypeSafe zachowuje swój
+dekoder, błędy, statusy i nagłówki. MCP otrzymuje obiekt lub błąd narzędzia
+z przyczyną native API. Middleware rezerwuje współdzielone permity przed
+parsowaniem SDK; kontekst zadania SDK i job silnika zachowują ich ownership
+po anulowaniu handlera HTTP. Token istniejącego shutdown anuluje także
+transport MCP; off nie tworzy zasobów transportu. Nie ma embedded loopback HTTP.
+
+`basal mcp` to osobny tryb tego samego CLI, bez delegowania do CUDA i bez
+ładowania modeli. Wysyła natywny JSON do `/v1/basal` przez istniejący reqwest.
+Ma ograniczony kodek SDK, admission stdio i bounded odpowiedzi; discovery nie
+wpływa na routing. Szczegóły kontraktu i Host/Origin: [MCP.md](MCP.md).
+
 Nowe rodziny, format 2, wybór kolejności i kalibracja: [UPSTREAM_2.0.md](UPSTREAM_2.0.md).
 Profile modeli i plan wykonania: [sekcja niżej](#profile-modeli-i-plan-wykonania).
 Natywne architektury i lifecycle mediów omni: [OMNI.md](OMNI.md).

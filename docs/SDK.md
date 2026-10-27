@@ -4,6 +4,11 @@ Cztery klienty HTTP obsługują **`POST /v1/basal`** oraz **Batch/Files API**.
 Nie korzystają z kontraktu TypeSafe System One. Nie wymagają GPU ani wag
 modelu po stronie aplikacji. Serwer uruchamiasz osobno przez `basal serve`.
 
+Hosty agentów mogą też użyć narzędzi `decide`/`decide_many` przez opcjonalne
+HTTP `/mcp` lub `basal mcp` (most stdio do `/v1/basal`). Transporty i schematy
+MCP dostarcza CLI z oficjalnym `rmcp 3.8.0`; cztery SDK HTTP zachowują własne
+kontrakty. Ustawienia, przykłady i limity: [MCP.md](MCP.md).
+
 Pierwsze wydanie każdego SDK ma wersję `0.1.0`. Kolejne wersje i wydania
 są niezależne dla każdej paczki. Paczki instaluje się z rejestrów poniższymi
 poleceniami; samo zbudowanie repozytorium nie publikuje paczek.

@@ -77,6 +77,7 @@ pub enum SystemOneDialect {
 }
 
 pub struct ServeOptions {
+    pub mcp: crate::mcp::Switch,
     pub systemone_dialect: SystemOneDialect,
     pub log_decisions: Option<std::path::PathBuf>,
     pub addr: SocketAddr,
@@ -327,6 +328,32 @@ struct App {
     load: Arc<Mutex<LoadCounts>>,
     max_inflight: usize,
     release_date: String,
+}
+
+/// Concrete MCP access to the same online dispatcher as the HTTP adapters.
+#[derive(Clone)]
+pub(crate) struct McpDispatch {
+    app: Arc<App>,
+    stop: tokio_util::sync::CancellationToken,
+}
+
+impl McpDispatch {
+    pub(crate) async fn decide(
+        &self,
+        body: Value,
+        context: &rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<Value> {
+        let parts =
+            context.extensions.get::<axum::http::request::Parts>().context("MCP HTTP request context missing")?;
+        let large = parts.extensions.get::<LargeBodyPermit>().cloned();
+        let label = parts.extensions.get::<RequestModel>().cloned();
+        tokio::select! {
+            result = dispatch(self.app.clone(), body, Dialect::Upstream, Instant::now(), label, large) => {
+                result.map(|(value, _)| value).map_err(|error| anyhow::anyhow!(error.tool_message()))
+            }
+            _ = self.stop.cancelled() => anyhow::bail!("basal server shutting down"),
+        }
+    }
 }
 
 fn plan_prompts(p: &RequestPlan) -> Vec<&[u32]> {
@@ -705,8 +732,72 @@ async fn decide(
     dialect: Dialect,
     arrived: Instant,
     label: Option<RequestModel>,
-    mut large: Option<LargeBodyPermit>,
+    large: Option<LargeBodyPermit>,
 ) -> Response {
+    match dispatch(app, body, dialect, arrived, label, large).await {
+        Ok((value, timing)) => {
+            let mut headers = HeaderMap::new();
+            if let Some(t) = timing {
+                for (k, v) in [
+                    ("x-basal-queue-ms", format!("{:.3}", t.queue_ms)),
+                    ("x-basal-compute-ms", format!("{:.3}", t.compute_ms)),
+                    ("x-basal-batch-requests", t.batch.to_string()),
+                ] {
+                    headers.insert(k, HeaderValue::from_str(&v).expect("numeric timing header"));
+                }
+            }
+            (StatusCode::OK, headers, Json(value)).into_response()
+        }
+        Err(error) => error.response(dialect),
+    }
+}
+
+/// Shared online result retains API causes until the transport maps them.
+enum DispatchError {
+    Api(DecideError),
+    Overloaded { typesafe: &'static str, upstream: &'static str },
+    Stopped,
+}
+
+impl DispatchError {
+    fn overloaded(typesafe: &'static str, upstream: &'static str) -> Self {
+        Self::Overloaded { typesafe, upstream }
+    }
+
+    fn response(self, dialect: Dialect) -> Response {
+        match self {
+            Self::Api(error) => error_body(dialect, error),
+            Self::Overloaded { typesafe, upstream } => overloaded(dialect, typesafe, upstream),
+            Self::Stopped => error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                match dialect {
+                    Dialect::Upstream => json!({"error": "engine stopped"}),
+                    Dialect::TypeSafe => json!({"error": "internal", "detail": "engine stopped"}),
+                },
+            ),
+        }
+    }
+
+    fn tool_message(self) -> String {
+        match self {
+            Self::Api(error) => {
+                let (status, body) = error_parts(Dialect::Upstream, error);
+                format!("basal server {status}: {}", body["error"].as_str().unwrap_or("decision failed"))
+            }
+            Self::Overloaded { upstream, .. } => format!("basal server 529: {upstream}; Retry-After: 1"),
+            Self::Stopped => "basal server 500: engine stopped".into(),
+        }
+    }
+}
+
+async fn dispatch(
+    app: Arc<App>,
+    body: Value,
+    dialect: Dialect,
+    arrived: Instant,
+    label: Option<RequestModel>,
+    mut large: Option<LargeBodyPermit>,
+) -> std::result::Result<(Value, Option<Timing>), DispatchError> {
     // The request's model, or the default one when the field is missing or not a string (/v1/systemone then
     // answers the schema error of the field). Resolved before admission so a 529 also carries the model label;
     // unknown client-provided names keep the empty label.
@@ -717,39 +808,36 @@ async fn decide(
     let (slot, previous) = Inflight::new(&app.load);
     if previous >= app.max_inflight {
         // 529 as the TypeSafe API when it is overloaded; its SDKs (and most HTTP clients) retry 5xx with backoff
-        return overloaded(
-            dialect,
+        return Err(DispatchError::overloaded(
             "Too many requests in flight. Retry after a short delay.",
             "overloaded: too many requests in flight",
-        );
+        ));
     }
     let model = match model {
         Ok(m) => m,
-        Err(m) => return error_body(dialect, basal_core::request::api_usage_error(format!("Unknown model: {m}"))),
+        Err(m) => return Err(DispatchError::Api(basal_core::request::api_usage_error(format!("Unknown model: {m}")))),
     };
     let job_permit = match app.jobs.clone().try_acquire_owned() {
         Ok(permit) => permit,
         Err(_) => {
-            return overloaded(
-                dialect,
+            return Err(DispatchError::overloaded(
                 "Too many queued or running requests. Retry after a short delay.",
                 "overloaded: too many queued or running requests",
-            );
+            ));
         }
     };
     let expanded = match basal_core::request::prepared_input_bytes(&body) {
         Ok(n) => n,
-        Err(e) => return error_body(dialect, e),
+        Err(e) => return Err(DispatchError::Api(e)),
     };
     if large.is_none() && expanded > 128 * 1024 {
         match app.large_bodies.clone().try_acquire_owned() {
             Ok(permit) => large = Some(Arc::new(permit)),
             Err(_) => {
-                return overloaded(
-                    dialect,
+                return Err(DispatchError::overloaded(
                     "Too many expanded requests in flight. Retry after a short delay.",
                     "overloaded: too many expanded requests in flight",
-                );
+                ));
             }
         }
     }
@@ -760,11 +848,10 @@ async fn decide(
         match app.media_requests.clone().try_acquire_owned() {
             Ok(permit) => Some(permit),
             Err(_) => {
-                return overloaded(
-                    dialect,
+                return Err(DispatchError::overloaded(
                     "Too many media requests in flight. Retry after a short delay.",
                     "overloaded: too many media requests in flight",
-                );
+                ));
             }
         }
     } else {
@@ -779,7 +866,7 @@ async fn decide(
     let (body, request_sha256, job_permit, large) = if app.decisions.is_some() {
         match decisions::DecisionLog::hash_request(body, job_permit, large).await {
             Ok(hashed) => (hashed.body, Some(hashed.hash), hashed.job, hashed.large),
-            Err(error) => return error_body(dialect, DecideError::Internal(error)),
+            Err(error) => return Err(DispatchError::Api(DecideError::Internal(error))),
         }
     } else {
         (body, None, job_permit, large)
@@ -798,13 +885,7 @@ async fn decide(
     });
     let reply = if sent { rx.await.ok() } else { None };
     let Some((result, timing)) = reply else {
-        return error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            match dialect {
-                Dialect::Upstream => json!({"error": "engine stopped"}),
-                Dialect::TypeSafe => json!({"error": "internal", "detail": "engine stopped"}),
-            },
-        );
+        return Err(DispatchError::Stopped);
     };
     // One final dispatch point for both online dialects, after auto orders and native task continuations.
     let result = match (result, &app.decisions, request_sha256) {
@@ -820,19 +901,9 @@ async fn decide(
                 let ms = (arrived.elapsed().as_secs_f64() * 1e5).round() / 100.0;
                 u.insert("latency_ms".into(), json!(ms));
             }
-            let mut headers = HeaderMap::new();
-            if let Some(t) = timing {
-                for (k, v) in [
-                    ("x-basal-queue-ms", format!("{:.3}", t.queue_ms)),
-                    ("x-basal-compute-ms", format!("{:.3}", t.compute_ms)),
-                    ("x-basal-batch-requests", t.batch.to_string()),
-                ] {
-                    headers.insert(k, HeaderValue::from_str(&v).unwrap());
-                }
-            }
-            (StatusCode::OK, headers, Json(v)).into_response()
+            Ok((v, timing))
         }
-        Err(e) => error_body(dialect, e),
+        Err(e) => Err(DispatchError::Api(e)),
     }
 }
 
@@ -901,14 +972,15 @@ async fn models_list(State(app): State<Arc<App>>) -> Json<Value> {
 
 /// Admit large or chunked inference bodies before reading/allocating them.
 async fn large_body_admission(State(app): State<Arc<App>>, mut request: Request, next: Next) -> Response {
+    let mcp = request.uri().path() == "/mcp";
     let typesafe =
         request.uri().path() == "/v1/systemone" && matches!(app.systemone_dialect, SystemOneDialect::TypeSafe);
-    if typesafe {
+    if typesafe || mcp {
         let permit = match app.systemone_decoders.clone().try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
                 return overloaded(
-                    Dialect::TypeSafe,
+                    if typesafe { Dialect::TypeSafe } else { Dialect::Upstream },
                     "Too many System One requests decoding. Retry after a short delay.",
                     "overloaded: too many requests decoding",
                 )
@@ -921,7 +993,7 @@ async fn large_body_admission(State(app): State<Arc<App>>, mut request: Request,
         .get(axum::http::header::CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok())
-        .is_none_or(|n| n > 2 * 1024 * 1024)
+        .is_none_or(|n| n > if mcp { 128 * 1024 } else { 2 * 1024 * 1024 })
         || (typesafe && request.headers().get(axum::http::header::CONTENT_ENCODING).is_some_and(|v| v != "identity"));
     let _permit = if large {
         match app.large_bodies.clone().try_acquire_owned() {
@@ -945,7 +1017,7 @@ async fn large_body_admission(State(app): State<Arc<App>>, mut request: Request,
 }
 
 /// Ctrl-C, or SIGTERM (`docker stop`) on Unix.
-async fn shutdown_signal() {
+pub(crate) async fn shutdown_signal() {
     #[cfg(unix)]
     {
         let mut term =
@@ -1361,8 +1433,7 @@ fn serve_inner<B: Backend + Send + 'static>(
         } else {
             router
         };
-        let router = router.route("/v1/models", get(models_list)).route("/health", get(health)).with_state(app);
-        let router = if opts.access_log { router.layer(axum::middleware::from_fn(access_log)) } else { router };
+        let router = router.route("/v1/models", get(models_list)).route("/health", get(health)).with_state(app.clone());
         let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
         rt.block_on(async move {
             let (listener, stop) = match owned {
@@ -1373,6 +1444,28 @@ fn serve_inner<B: Backend + Send + 'static>(
                 ),
             };
             let bound_addr = listener.local_addr()?;
+            // Off creates no transport, cancellation token or session manager. Stateless SDK mode never starts
+            // session workers or stores sessions. The token's guard also cancels on setup / server errors.
+            let mcp_stop = matches!(opts.mcp, crate::mcp::Switch::On).then(tokio_util::sync::CancellationToken::new);
+            let _mcp_guard = mcp_stop.clone().map(tokio_util::sync::CancellationToken::drop_guard);
+            let router = if let Some(stop) = &mcp_stop {
+                let service = crate::mcp::http_service(
+                    McpDispatch { app: app.clone(), stop: stop.clone() },
+                    bound_addr,
+                    app.default_model.clone(),
+                    stop.clone(),
+                );
+                router.merge(
+                    Router::new()
+                        .route_service("/mcp", service)
+                        .layer(axum::middleware::from_fn_with_state(app.clone(), large_body_admission)),
+                )
+            } else {
+                router
+            };
+            let router = if opts.access_log { router.layer(axum::middleware::from_fn(access_log)) } else { router };
+            // No queue sender survives the router/transport. In particular do not keep App while joining workers.
+            drop(app);
             let batch_service = match opts.batches {
                 Some(settings) => {
                     let database = opts.database.clone().context("the Batch API has no database")?;
@@ -1415,6 +1508,9 @@ fn serve_inner<B: Backend + Send + 'static>(
                     None => shutdown_signal().await,
                 }
                 if let Some(stopping) = stop_batches {
+                    stopping.cancel();
+                }
+                if let Some(stopping) = mcp_stop {
                     stopping.cancel();
                 }
             };

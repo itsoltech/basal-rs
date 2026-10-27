@@ -6,6 +6,7 @@
 
 addr: 0.0.0.0:8000
 systemone_dialect: typesafe        # opt-in upstream: /v1/systemone aliases /v1/basal, including default_model
+mcp: "off"                        # on: stateless streamable HTTP /mcp; Host/Origin and access: docs/MCP.md
 default_model: basal-1.5-max       # default: the first model
 max_inflight: 1024                 # waiting + running requests of all models; more get 529
 max_large_inflight: 4              # shared limit for large/chunked bodies and expanded input above 128 KiB

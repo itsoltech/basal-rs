@@ -15,6 +15,11 @@ Oficjalny klient i most upstream mogą pominąć `model`; wybierany jest
 nadal wybiera jeden z wielu serwowanych modeli. Dialekt nie zależy od treści.
 Flaga CLI ma pierwszeństwo nad YAML. Domyślne `typesafe` zachowuje kontrakt
 opisany poniżej, w tym dekodowanie kompresji i multipart.
+
+Opcjonalne MCP (`basal serve --mcp on`) i most `basal mcp` używają
+natywnego kontraktu oraz tego samego domyślnego modelu, niezależnie od
+`systemone_dialect`. Nie wymagają przełączenia TypeSafe. Narzędzia,
+mapowanie body/wyników, limity i dostęp: [MCP.md](MCP.md).
 Natywny alias przyjmuje ten sam surowy JSON co `/v1/basal`; nie korzysta
 z adaptera kompresji, multipart ani `assets` TypeSafe. Limit natywny wynosi
 2 MiB, a gdy serwer udostępnia media: 256 MiB ze wspólnym admission dużych ciał.

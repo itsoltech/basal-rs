@@ -45,6 +45,7 @@ tokio-util = { version = "=0.7.19", features = ["compat", "io", "rt"] }
 uuid = { version = "=1.27.0", features = ["v4", "serde"] }
 bytes = "1"
 futures-util = "0.3"
+rmcp = { version = "=3.8.0", default-features = false, features = ["server", "transport-streamable-http-server", "transport-io"] }
 rustls = { version = "=0.23.46", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 basal-core = { path = "../basal-core" }
 basal-gpu = { path = "../basal-gpu" }
