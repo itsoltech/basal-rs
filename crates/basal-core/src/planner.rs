@@ -453,6 +453,10 @@ impl<'a> PlanContext<'a> {
         self.budget.is_bounded().then_some(self.budget)
     }
 
+    fn truncates(&self) -> bool {
+        self.options.overflow.policy() == crate::overflow::ContextOverflow::Truncate
+    }
+
     pub fn prepare(&self, item: Item) -> anyhow::Result<Prepared> {
         let orders = self.manifest.orders.count(item.options.len());
         self.prepare_orders(item, orders)
@@ -506,7 +510,7 @@ impl<'a> PlanContext<'a> {
         // Prefix-cache probes also render/tokenize after a cut. Count both live token lists and tokenizer scratch
         // before creating the probe strings, just as for the full prompt.
         let _probe = match self.bounded() {
-            Some(b) if self.options.overflow.policy() == crate::overflow::ContextOverflow::Truncate => {
+            Some(b) if self.truncates() => {
                 let bytes = p.orders.iter().map(|o| o.prompt.len() as u64).max().unwrap_or(0);
                 Some(b.reserve(
                     PlanStage::Tokens,
@@ -550,7 +554,7 @@ impl<'a> PlanContext<'a> {
 
     /// Parse, validate and prepare a System One request without running the model.
     pub fn prepare_request(&self, body: &Value) -> Result<Vec<Prepared>, PlanError> {
-        if self.options.overflow.policy() == crate::overflow::ContextOverflow::Truncate
+        if self.truncates()
             || self.manifest.prompt_format == PromptFormat::Two
             || body.get("media").is_some_and(|v| !v.is_null())
             || body.get("assets").is_some()
@@ -581,9 +585,7 @@ impl<'a> PlanContext<'a> {
         self.check_stop()?;
         // Parsing and task expansion clone state, options and JSON before token preparation. Include the retained
         // task text/character indexes and transient expansion copies, not only the final rendered prompts.
-        let items_bound = if self.budget.is_bounded()
-            && self.options.overflow.policy() == crate::overflow::ContextOverflow::Truncate
-        {
+        let items_bound = if self.budget.is_bounded() && self.truncates() {
             (crate::request::prepared_input_bytes(body)? as u64).saturating_mul(16).saturating_add(65536)
         } else {
             0
@@ -866,7 +868,7 @@ impl<'a> PlanContext<'a> {
                 errs.push(context_error(&name, longest, limit, &self.manifest.name));
             }
         }
-        if self.options.overflow.policy() == crate::overflow::ContextOverflow::Truncate && plan.media.is_none() {
+        if self.truncates() && plan.media.is_none() {
             for q in &plan.questions {
                 let QuestionPlan::Groups { item, .. } = q else { continue };
                 self.check_stop()?;
@@ -920,7 +922,7 @@ impl<'a> PlanContext<'a> {
             plan.auto_reverse = lengths.reverse;
             return Ok(plan);
         }
-        if self.options.overflow.policy() == crate::overflow::ContextOverflow::Refuse || plan.media.is_some() {
+        if !self.truncates() || plan.media.is_some() {
             return Err(DecideError::Unsupported(lengths.errors).into());
         }
         let original_state = &question_item(&plan.questions[0], &plan.prepared).state;
@@ -1027,7 +1029,7 @@ impl<'a> PlanContext<'a> {
 
     /// Plan validated items (see [`PlanContext::plan_request`]). Truncation requires one shared request state.
     pub fn plan_items(&self, items: Vec<Item>) -> Result<RequestPlan, PlanError> {
-        if self.options.overflow.policy() == crate::overflow::ContextOverflow::Truncate {
+        if self.truncates() {
             self.plan_with_overflow(items, None)
         } else {
             // Preserve the low-level wrapper: refusal/context checks belong to plan_request, without adding

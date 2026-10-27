@@ -117,10 +117,11 @@ impl DecisionWriter {
                     };
                     let _ = record.reply.send(result);
                 }
-                writer.flush().context("flushing decision log at shutdown")?;
+                // Report the first write failure, not a later flush error it may have caused.
+                let flushed = writer.flush().context("flushing decision log at shutdown");
                 match failure {
                     Some(error) => Err(error.into()),
-                    None => Ok(()),
+                    None => flushed,
                 }
             })
             .context("starting decision log writer")?;

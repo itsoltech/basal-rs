@@ -774,48 +774,43 @@ impl<B: Backend> Engine<B> {
         if self.manifest.orders == OptionOrders::Auto {
             let mut reverse = Vec::new();
             let mut owners = Vec::new();
-            for (i, p) in all.iter().enumerate() {
-                let pi = offs.partition_point(|&off| off <= i) - 1;
-                if !context_errors[pi].is_empty() {
-                    continue;
-                }
-                if p.orders.len() != 1 {
-                    continue;
-                }
-                let probabilities = &results[i].p_cal;
-                let uncertain = self.auto_orders.uncertain(p.item.temp_kind(), probabilities);
-                if uncertain {
-                    let mut redo = prepare_protocol(
-                        &self.tok,
-                        &self.manifest.bos_token,
-                        p.item.clone(),
-                        self.manifest.prompt_format,
-                        self.manifest.chat_style,
-                        self.manifest.layout,
-                        None,
-                        None,
-                    )?;
-                    redo.orders.remove(0);
-                    if let Some(error) = self.prepared_context_error(&redo) {
-                        context_errors[pi].push(error);
+            for (pi, (plan, &off)) in plans.iter().zip(&offs).enumerate() {
+                let queued = reverse.len();
+                for (i, p) in all.iter().enumerate().skip(off).take(plan.prepared.len()) {
+                    if p.orders.len() != 1 {
                         continue;
                     }
-                    redo.packed = pack(&redo.orders.iter().map(|o| o.input_ids.clone()).collect::<Vec<_>>());
-                    if self.mark_state {
-                        redo.state_len = self.state_len(&redo)?;
-                        redo.packed.state_len = redo.state_len.min(redo.packed.prefix_len);
+                    let probabilities = &results[i].p_cal;
+                    let uncertain = self.auto_orders.uncertain(p.item.temp_kind(), probabilities);
+                    if uncertain {
+                        let mut redo = prepare_protocol(
+                            &self.tok,
+                            &self.manifest.bos_token,
+                            p.item.clone(),
+                            self.manifest.prompt_format,
+                            self.manifest.chat_style,
+                            self.manifest.layout,
+                            None,
+                            None,
+                        )?;
+                        redo.orders.remove(0);
+                        if let Some(error) = self.prepared_context_error(&redo) {
+                            // Discard the reversed orders already queued for this plan; skip its other questions.
+                            reverse.truncate(queued);
+                            owners.truncate(queued);
+                            context_errors[pi].push(error);
+                            break;
+                        }
+                        redo.packed = pack(&redo.orders.iter().map(|o| o.input_ids.clone()).collect::<Vec<_>>());
+                        if self.mark_state {
+                            redo.state_len = self.state_len(&redo)?;
+                            redo.packed.state_len = redo.state_len.min(redo.packed.prefix_len);
+                        }
+                        owners.push(i);
+                        reverse.push(redo);
                     }
-                    owners.push(i);
-                    reverse.push(redo);
                 }
             }
-            let mut i = 0;
-            reverse.retain(|_| {
-                let pi = offs.partition_point(|&off| off <= owners[i]) - 1;
-                i += 1;
-                context_errors[pi].is_empty()
-            });
-            owners.retain(|&i| context_errors[offs.partition_point(|&off| off <= i) - 1].is_empty());
             self.check_stop()?;
             let rerun = self.run(&reverse, self.request_batching)?;
             for ((i, p2), r2) in owners.into_iter().zip(&reverse).zip(rerun) {
@@ -860,7 +855,7 @@ impl<B: Backend> Engine<B> {
         }
         loop {
             let mut prep = Vec::new();
-            let mut owners = Vec::new();
+            let mut owners: Vec<(usize, Vec<usize>, bool)> = Vec::new();
             for (li, l) in large.iter().enumerate() {
                 if l.finalists.is_some() || !context_errors[l.owner].is_empty() {
                     continue;
@@ -879,6 +874,12 @@ impl<B: Backend> Engine<B> {
                     sub.options = g.iter().map(|&i| l.item.options[i].clone()).collect();
                     let p = self.prepare_orders(sub, if last { 2 } else { strategy.screen_orders })?;
                     if let Some(error) = self.prepared_context_error(&p) {
+                        // `large` is in plan order, so this plan's queued groups (also those of its other grouped
+                        // questions) form the tail. Discard them all, keeping both vectors aligned.
+                        while owners.last().is_some_and(|&(queued, _, _)| large[queued].owner == l.owner) {
+                            owners.pop();
+                            prep.pop();
+                        }
                         context_errors[l.owner].push(error);
                         break;
                     }
@@ -886,15 +887,6 @@ impl<B: Backend> Engine<B> {
                     owners.push((li, g, last));
                 }
             }
-            // Discard every question already queued for an overflowing plan, even when its other grouped
-            // question was encountered first. Keep both vectors aligned before the next GPU launch.
-            let mut i = 0;
-            prep.retain(|_| {
-                let keep = context_errors[large[owners[i].0].owner].is_empty();
-                i += 1;
-                keep
-            });
-            owners.retain(|&(li, _, _)| context_errors[large[li].owner].is_empty());
             if prep.is_empty() {
                 break;
             }

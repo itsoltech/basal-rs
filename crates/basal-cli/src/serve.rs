@@ -724,7 +724,7 @@ async fn decide(
         );
     }
     let model = match model {
-        Ok(m) => m.to_owned(),
+        Ok(m) => m,
         Err(m) => return error_body(dialect, basal_core::request::api_usage_error(format!("Unknown model: {m}"))),
     };
     let job_permit = match app.jobs.clone().try_acquire_owned() {
@@ -770,7 +770,9 @@ async fn decide(
     } else {
         None
     };
-    let admitted = app.metrics.as_ref().map(|metrics| metrics.admitted(&model));
+    let admitted = app.metrics.as_ref().map(|metrics| metrics.admitted(model));
+    // Look the route up while `model` still borrows the body, which request hashing may take below.
+    let route = &app.routes[model];
     let queued = slot.queue();
     // Hash only when enabled, on the original incoming body. Moving admission permits through the blocking
     // worker keeps cancelled hashing jobs bounded and retains their large-body allocation until it is released.
@@ -782,7 +784,7 @@ async fn decide(
     } else {
         (body, None, job_permit, large)
     };
-    let sent = app.routes[&model].send(Job {
+    let sent = route.send(Job {
         body,
         dialect,
         arrived,
