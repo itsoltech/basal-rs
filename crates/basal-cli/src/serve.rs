@@ -37,8 +37,8 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -137,15 +137,18 @@ struct Job {
     load: Option<Reservation>,
     /// Announced before queueing on the selected replica; lives through every round and the long lane.
     online_demand: Option<basal_core::gate::OnlineDemand>,
+    /// Waiting for admission in either online lane; also released if the handler disconnects.
+    queued: Option<Queued>,
 }
 
 impl Job {
     /// Release the reservation, then reply: a client that sends its next request as soon as it has the answer finds
     /// the replica's count already lowered. The reply is lost when the client is gone.
     fn answer(self, reply: Reply) {
-        let Self { reply: tx, load, online_demand, .. } = self;
+        let Self { reply: tx, load, online_demand, queued, .. } = self;
         drop(load);
         drop(online_demand);
+        drop(queued);
         let _ = tx.send(reply);
     }
 }
@@ -305,7 +308,7 @@ struct App {
     media_requests: Arc<Semaphore>,
     systemone_decoders: Arc<Semaphore>,
     default_model: String,
-    inflight: AtomicUsize,
+    inflight: Arc<Mutex<LoadCounts>>,
     max_inflight: usize,
     release_date: String,
 }
@@ -367,10 +370,12 @@ impl Lane {
         let mut batch = Vec::new();
         let mut size = TrieSize::default();
         let mut rest = Vec::with_capacity(self.waiting.len());
-        for w in self.waiting.drain(..) {
+        for mut w in self.waiting.drain(..) {
             let prompts = plan_prompts(&w.plan);
             if batch.is_empty() || size.tokens + size.growth(&prompts) <= self.max_batch_tokens {
                 size.insert(&prompts);
+                // Both lanes leave queued only on admission, after planning and any long-lane handoff.
+                drop(w.job.queued.take());
                 batch.push((w.job, w.plan));
             } else {
                 rest.push(w);
@@ -567,8 +572,8 @@ fn json_invalid(body: &[u8], e: &serde_json::Error) -> Value {
                        "ctx": {"error": msg}}]})
 }
 
-/// Upstream-compatible endpoint (`Server.decide` conventions): any failure, including a body that is not JSON, is a
-/// 422 `{"error": message}`.
+/// Upstream-compatible endpoint (`Server.decide` conventions): 422 for invalid requests, 503 for recognized OOM,
+/// 500 for other engine failures, with `{"error": message}`. Admission retains 529.
 async fn basal(
     State(app): State<Arc<App>>,
     label: Option<Extension<RequestModel>>,
@@ -613,12 +618,62 @@ async fn decode_body(
     }
 }
 
-/// One slot of `App::inflight`, released when the handler finishes or is dropped (client disconnect).
-struct Inflight<'a>(&'a AtomicUsize);
+/// A coherent health snapshot across all online models and lanes. Durable background batches do not enter here.
+#[derive(Default)]
+struct LoadCounts {
+    inflight: usize,
+    queued: usize,
+}
 
-impl Drop for Inflight<'_> {
+/// The handler and job share a waiting flag. All accesses to it are under `counts`, so admission, worker drops and
+/// handler cancellation can release the same queued count exactly once. No lock spans planning, GPU work or await.
+struct RequestLoad {
+    counts: Arc<Mutex<LoadCounts>>,
+    queued: AtomicBool,
+}
+
+impl RequestLoad {
+    fn clear_queue(&self, counts: &mut LoadCounts) {
+        if self.queued.swap(false, Ordering::Relaxed) {
+            counts.queued -= 1;
+        }
+    }
+}
+
+/// One slot of `App::inflight`, released when the handler finishes or is dropped (client disconnect).
+struct Inflight(Arc<RequestLoad>);
+
+impl Inflight {
+    fn new(counts: &Arc<Mutex<LoadCounts>>) -> (Self, usize) {
+        let mut total = counts.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = total.inflight;
+        total.inflight += 1;
+        (Self(Arc::new(RequestLoad { counts: counts.clone(), queued: AtomicBool::new(false) })), previous)
+    }
+
+    fn queue(&self) -> Queued {
+        let mut counts = self.0.counts.lock().unwrap_or_else(|e| e.into_inner());
+        self.0.queued.store(true, Ordering::Relaxed);
+        counts.queued += 1;
+        Queued(self.0.clone())
+    }
+}
+
+impl Drop for Inflight {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
+        let mut counts = self.0.counts.lock().unwrap_or_else(|e| e.into_inner());
+        self.0.clear_queue(&mut counts);
+        counts.inflight -= 1;
+    }
+}
+
+/// Lives with a waiting job, including planning, the long-lane channel, and stopped/panicked workers' queues.
+struct Queued(Arc<RequestLoad>);
+
+impl Drop for Queued {
+    fn drop(&mut self) {
+        let mut counts = self.0.counts.lock().unwrap_or_else(|e| e.into_inner());
+        self.0.clear_queue(&mut counts);
     }
 }
 
@@ -637,8 +692,8 @@ async fn decide(
     if let (Some(label), Ok(m)) = (label, model) {
         let _ = label.0.set(m.to_string());
     }
-    let slot = Inflight(&app.inflight);
-    if app.inflight.fetch_add(1, Ordering::SeqCst) >= app.max_inflight {
+    let (slot, previous) = Inflight::new(&app.inflight);
+    if previous >= app.max_inflight {
         // 529 as the TypeSafe API when it is overloaded; its SDKs (and most HTTP clients) retry 5xx with backoff
         return overloaded(
             dialect,
@@ -701,17 +756,20 @@ async fn decide(
         reply: tx,
         load: None,
         online_demand: None,
+        queued: Some(slot.queue()),
         _media_permit: media_permit,
         _large_body_permit: large,
         _job_permit: job_permit,
     });
     let reply = if sent { rx.await.ok() } else { None };
-    drop(slot);
     drop(admitted);
     let Some((result, timing)) = reply else {
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            json!({"error": "internal", "detail": "engine stopped"}),
+            match dialect {
+                Dialect::Upstream => json!({"error": "engine stopped"}),
+                Dialect::TypeSafe => json!({"error": "internal", "detail": "engine stopped"}),
+            },
         );
     };
     match result {
@@ -737,7 +795,8 @@ async fn decide(
     }
 }
 
-/// Error answer of an endpoint: upstream: 422 `{"error"}` for every failure; TypeSafe: 422 for schema errors and
+/// Error answer of an endpoint: upstream: 422 for request errors, 503 for recognized OOM, 500 otherwise, `{"error"}`;
+/// TypeSafe: 422 for schema errors and
 /// requests this runtime does not answer, 400 for the errors the TypeSafe API answers with 400, 500 otherwise.
 fn error_body(dialect: Dialect, e: DecideError) -> Response {
     let (status, body) = error_parts(dialect, e);
@@ -761,8 +820,26 @@ fn resolve_model<'a>(
 
 /// Pure native error mapping shared by HTTP and durable batch results.
 fn error_parts(dialect: Dialect, e: DecideError) -> (StatusCode, Value) {
+    if dialect == Dialect::Upstream {
+        let status = match &e {
+            DecideError::Internal(error) => {
+                let oom = error.chain().any(|cause| {
+                    let message = cause.to_string();
+                    message.to_ascii_lowercase().contains("out of memory") || message.contains("OutOfMemory")
+                });
+                if oom {
+                    StatusCode::SERVICE_UNAVAILABLE
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                }
+            }
+            DecideError::Validation(_) | DecideError::Usage(_) | DecideError::Unsupported(_) => {
+                StatusCode::UNPROCESSABLE_ENTITY
+            }
+        };
+        return (status, e.to_upstream_json());
+    }
     match e {
-        e if dialect == Dialect::Upstream => (StatusCode::UNPROCESSABLE_ENTITY, e.to_upstream_json()),
         e @ DecideError::Usage(_) => (StatusCode::BAD_REQUEST, e.to_json()),
         e @ (DecideError::Validation(_) | DecideError::Unsupported(_)) => {
             (StatusCode::UNPROCESSABLE_ENTITY, e.to_json())
@@ -878,7 +955,12 @@ async fn health(State(app): State<Arc<App>>) -> Response {
             degraded.push(entry)
         }
     }
-    let mut body = json!({"status": "ok", "models": app.names, "default_model": app.default_model});
+    let (running, queued) = {
+        let counts = app.inflight.lock().unwrap_or_else(|e| e.into_inner());
+        (counts.inflight - counts.queued, counts.queued)
+    };
+    let mut body = json!({"status": "ok", "models": app.names, "default_model": app.default_model,
+                          "running": running, "queued": queued});
     let status = if !lost.is_empty() {
         body["status"] = json!("device_lost");
         body["lost_models"] = json!(lost);
@@ -1199,7 +1281,7 @@ fn serve_inner<B: Backend + Send + 'static>(
             media_requests: Arc::new(Semaphore::new(4)),
             systemone_decoders: Arc::new(Semaphore::new(opts.max_inflight)),
             default_model,
-            inflight: AtomicUsize::new(0),
+            inflight: Arc::new(Mutex::new(LoadCounts::default())),
             max_inflight: opts.max_inflight,
             release_date: opts.release_date.clone(),
         });

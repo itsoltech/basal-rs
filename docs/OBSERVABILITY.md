@@ -31,6 +31,43 @@ po restarcie. Poniższe definicje i zapytania dotyczą włączonych metryk.
 curl --fail localhost:8000/metrics
 ```
 
+## Health i błędy API
+
+`GET /health` działa także bez `--metrics`. Oprócz pól gotowości (`status`,
+`models`, `default_model` i ewentualnych informacji o niedostępnych modelach
+lub replikach) zawsze zwraca `running` i `queued`. Statusy gotowości pozostają
+bez zmian: 200 przy gotowości, także z `degraded_models`, oraz 503 przy
+`device_lost` lub braku dostępnych replik grupy (`engine_stopped`).
+
+Liczniki sumują żądania decyzji online ze wszystkich modeli i replik, obu
+API oraz obu torów kolejek. Jedno żądanie jest liczone raz, niezależnie od
+liczby pytań, promptów i gałęzi. Nie obejmują files/batches ani wykonywania
+trwałych batches w tle. Liczenie zaczyna się po dekodowaniu body, przy
+wejściu do obsługi decyzji, i kończy przy odpowiedzi, błędzie lub porzuceniu
+handlera. Odczyt body i dekodowanie nie należą do tych liczników.
+
+`queued` oznacza oczekiwanie na przyjęcie do partii silnika: kanał wejściowy,
+planowanie, kolejkę schedulera i przekazanie do toru długiego. `running`
+obejmuje pozostałe aktywne żądania, w tym pracę serwera przed kolejką i po
+obliczeniach. Para jest odczytywana razem; `running + queued = 0` oznacza brak
+aktywnych żądań klientów, niekoniecznie bezczynność GPU. Po porzuceniu handlera
+żądanie znika z obu liczników, choć rozpoczęte obliczenia mogą nadal trwać.
+Odrzucenie, błąd planowania i zakończenie workera także zwalniają `queued`.
+Drugi przebieg `orders=auto` pozostaje `running`: nasz silnik wykonuje go
+wewnątrz tego samego wywołania, bez ponownego kolejkowania stosowanego przez
+upstream. Wstrzymanie długiego forwardu na gate także pozostaje `running`.
+
+`POST /v1/basal` zwraca błędy w postaci `{"error": "komunikat"}`:
+422 dla walidacji, błędnego użycia API i nieobsługiwanych żądań; 503 dla
+`Internal`, gdy dowolny komunikat w łańcuchu przyczyn zawiera `out of memory`
+bez względu na wielkość liter albo dokładny fragment `OutOfMemory`; 500 dla
+pozostałych błędów silnika, także `{"error": "engine stopped"}` przy zakończeniu
+workera. To tekstowa reguła upstream: błąd backendu bez pasującego komunikatu
+otrzyma 500, nawet jeśli jego przyczyną jest brak pamięci. Przeciążenie nadal
+daje 529 z `Retry-After: 1`. Kontrakt błędów TypeSafe `/v1/systemone` i trwałych
+rekordów batches pozostaje bez zmian. Opis określa reguły implementacji;
+nie stanowi pomiaru ani weryfikacji runtime.
+
 ## Zbieranie metryk
 
 Minimalny fragment `prometheus.yml` dla Prometheusa działającego na tym samym
