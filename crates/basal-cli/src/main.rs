@@ -644,7 +644,20 @@ fn gpu_engine(m: &ModelArgs, g: &GpuArgs) -> Result<Engine<GpuBackend>> {
     g.quantization(&m.model)?;
     g.check_layer_split(&m.model)?;
     let model = config::model_ref(&m.model)?;
-    gpu_engine_at(&m.dir()?, g, &model.source_name())
+    gpu_engine_at(&config::model_dir(&model)?, g, &model.source_name())
+}
+
+/// Prompt planning without a GPU: the manifest with `options` and their adaptive-order thresholds, no weights.
+fn planning_engine(
+    m: &ModelArgs,
+    orders: Option<&str>,
+    options: &model_options::ModelOptions,
+) -> Result<Engine<NoBackend>> {
+    let model = config::model_ref(&m.model)?;
+    let manifest = options.load_manifest(&config::model_dir(&model)?, orders, &model.source_name())?;
+    let mut engine = Engine::new(manifest, NoBackend)?;
+    engine.set_auto_orders(options.auto_orders()?);
+    Ok(engine)
 }
 
 fn parse_inference_mode(value: &str) -> Result<InferenceMode> {
@@ -889,10 +902,7 @@ fn run() -> Result<()> {
             }
         }
         Cmd::Prepare { m, request, upstream, orders, model_options } => {
-            let source = config::model_ref(&m.model)?.source_name();
-            let mut engine =
-                Engine::new(model_options.load_manifest(&m.dir()?, orders.as_deref(), &source)?, NoBackend)?;
-            engine.set_auto_orders(model_options.auto_orders()?);
+            let engine = planning_engine(&m, orders.as_deref(), &model_options)?;
             let body = read_request(&request)?;
             let prepared = if upstream {
                 engine.plan_request_as(&body, basal_core::request::Dialect::Upstream).map(|p| p.prepared)
@@ -909,10 +919,7 @@ fn run() -> Result<()> {
             }
         }
         Cmd::CheckPrompts { m, reference, out, orders, model_options } => {
-            let source = config::model_ref(&m.model)?.source_name();
-            let mut engine =
-                Engine::new(model_options.load_manifest(&m.dir()?, orders.as_deref(), &source)?, NoBackend)?;
-            engine.set_auto_orders(model_options.auto_orders()?);
+            let engine = planning_engine(&m, orders.as_deref(), &model_options)?;
             let report = compare::check_prompts(&engine, &reference)?;
             let t = &report["tokens"];
             eprintln!(

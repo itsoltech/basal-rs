@@ -724,7 +724,7 @@ w YAML, następnie wspólne `--orders`, następnie domyślna wartość formatu.
 |---|---|---|
 | `repo`, `revision` | | repozytorium Hugging Face `owner/name` i gałąź, tag albo commit (domyślnie `main`); pobierane do cache Hugging Face (`HF_HOME`, w obrazie `/data/hf`), przy braku dostępu do Hub z cache |
 | `path` | | lokalny katalog modelu (zamiast `repo`) |
-| `layout` | deklaracja `basal.json`, inaczej `canonical` | `canonical`, `qfirst` lub `state_twice`; dwa ostatnie wymagają prompt format 1 |
+| `layout` | deklaracja `basal.json`, inaczej `canonical` | `canonical`, `qfirst` lub `state_twice`; dwa ostatnie wymagają prompt format 2 |
 | `orders` | format 1: `2`, format 2: `1` | `1`, `2`, `auto` lub `2le<N>` |
 | `calibration`, `no_calibration` | automatycznie | jawny plik albo wyłączenie (`true`); wzajemnie wykluczające się |
 | `strict_calibration` | `false` | jawny plik dla innego modelu lub rozpoznanej rewizji HF odmawia startu; bez strict ostrzega i zachowuje progi |
@@ -741,15 +741,19 @@ w YAML, następnie wspólne `--orders`, następnie domyślna wartość formatu.
 | `long_tokens` | 4096 | żądania powyżej tej liczby tokenów idą do toru długich żądań, który oddaje GPU krótkim partiom między warstwami; `0` wyłącza |
 | `state_cache_mb` | 0 | cache K/V stanu między żądaniami |
 
-Ustawienia są walidowane i stosowane przed wagami i tabelami GEMM, także
+Ustawienia są walidowane i stosowane po rozwiązaniu (i ewentualnym pobraniu)
+plików modelu, przed wyborem tabel GEMM i ładowaniem wag na GPU, także
 w preflight oraz we wszystkich replikach i forkach. Automatyczna kalibracja
 wybiera `CALIBRATION.<layout>.json`, jeśli istnieje dla niekanonicznego layoutu,
 inaczej `CALIBRATION.json`, potem pasujący wariant `.o<orders>.json`.
 Jawnego pliku nie zastępuje wariant automatyczny. Wyłączenie nie czyta kalibracji;
-brak pliku automatycznego oznacza nieskalibrowane prawdopodobieństwa.
+brak pliku automatycznego oznacza nieskalibrowane prawdopodobieństwa
+i ostrzeżenie w logu przy ładowaniu (wyłączenie nie ostrzega).
 Niezgodny layout/porządek usuwa certyfikowane progi i dopasowane fallbacki,
 zachowując temperatury. Tożsamość pochodzi z faktycznego źródła modelu;
 dla ścieżki snapshotu HF porównuje repozytorium i rozwiązany commit.
+Raport `benchmark` zapisuje w `settings` efektywne `orders`, `layout`, `auto_orders`
+oraz SHA-256 treści kalibracji, `off` i `strict`, bez ścieżek, jak odcisk batchy.
 Domyślne wartości i szablon canonical pozostają dotychczasowe; bitowa zgodność
 i jakość nowych ustawień wymagają osobnej kwalifikacji runtime.
 
@@ -757,6 +761,7 @@ Globalne `--systemone-dialect typesafe|upstream` lub procesowe YAML
 `systemone_dialect` wybiera kontrakt online `/v1/systemone` (domyślnie `typesafe`;
 jawna flaga ma pierwszeństwo). `upstream` kieruje go do tego samego handlera
 co `/v1/basal`, również bez pola `model`, dla oficjalnego klienta i mostu upstream.
+HTTP `basal client` i SDK TypeSafe wymagają serwera w trybie `typesafe`.
 Szczegóły ograniczeń mediów, evidence i cache: [SYSTEM_ONE.md](docs/SYSTEM_ONE.md).
 
 `inference_mode: auto` wybiera `balanced` dla Basal 2.0 mini/4.5B/max na

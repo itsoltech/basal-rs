@@ -10,6 +10,7 @@ use basal_core::prompt::PromptLayout;
 use basal_core::ModelManifest;
 use clap::Args;
 use serde::Deserialize;
+use serde_json::{json, Value};
 
 #[derive(Args, Clone, Default, Deserialize)]
 pub(crate) struct ModelOptions {
@@ -85,7 +86,8 @@ impl ModelOptions {
     }
 
     /// Identity follows upstream: HF snapshot repo/commit, otherwise the actual configured source and no revision.
-    /// Never infer identity from the routed name or basal.json. Validate before weights or GEMM allocation.
+    /// Never infer identity from the routed name or basal.json. Runs after model-file resolution, before GEMM
+    /// selection and GPU weight loading.
     pub(crate) fn load_manifest(&self, dir: &Path, orders: Option<&str>, source: &str) -> Result<ModelManifest> {
         self.validate()?;
         let snapshot_repo = dir
@@ -114,14 +116,33 @@ impl ModelOptions {
             },
         )
         .context("loading model prompt and calibration settings")?;
-        if let Some(warning) = calibration_warning(&manifest) {
+        // Local log: unlike the metadata, it may name the fitted and served identities.
+        let provenance = &manifest.calibration_provenance;
+        if let Some(warning) = &manifest.calibration_unvalidated {
             crate::warn!("{}: {warning}", manifest.name);
+        }
+        if let Some(identity) = &provenance.identity_warning {
+            crate::warn!("{}: explicit calibration {identity}; calibration retained", manifest.name);
+        }
+        if !provenance.explicit && !provenance.off && provenance.content_sha256.is_none() {
+            crate::warn!("{}: no calibration file; probabilities are uncalibrated", manifest.name);
         }
         Ok(manifest)
     }
 }
 
-/// Metadata/log warning without local source identities or the calibration's full path.
+/// Effective prompt, calibration and adaptive-order settings that change results (batch fingerprints, benchmark
+/// reports): the calibration by exact content hash, never by path or identity. Absent hash without `off`: no file.
+pub(crate) fn record_effective_settings(target: &mut Value, manifest: &ModelManifest, auto: AutoOrderSettings) {
+    let calibration = &manifest.calibration_provenance;
+    target["orders"] = manifest.orders.metadata();
+    target["layout"] = manifest.layout.as_str().into();
+    target["calibration"] =
+        json!({"content_sha256": calibration.content_sha256, "off": calibration.off, "strict": calibration.strict});
+    target["auto_orders"] = json!(auto);
+}
+
+/// API metadata warning without local source identities or the calibration's full path.
 pub(crate) fn calibration_warning(manifest: &ModelManifest) -> Option<String> {
     let mut warnings = Vec::new();
     if let Some(warning) = &manifest.calibration_unvalidated {

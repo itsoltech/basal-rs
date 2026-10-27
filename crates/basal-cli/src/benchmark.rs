@@ -488,6 +488,7 @@ fn execute(
     if let Some(split) = &g.layer_split {
         report["settings"]["layer_split"] = json!(split.stages());
     }
+    crate::model_options::record_effective_settings(&mut report["settings"], &engine.manifest, engine.auto_orders());
     let probes = engine.backend.memory_probes();
     let host = host_memory()?;
     let gpu = engine.backend.memory()?;

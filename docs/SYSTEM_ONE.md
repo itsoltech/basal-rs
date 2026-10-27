@@ -20,6 +20,8 @@ z adaptera kompresji, multipart ani `assets` TypeSafe. Limit natywny wynosi
 2 MiB, a gdy serwer udostępnia media: 256 MiB ze wspólnym admission dużych ciał.
 Metryki zachowują faktyczną ścieżkę endpointu oraz rozwiązany model.
 Wybór dotyczy online HTTP; zapisany kontrakt rekordów Batch API nie zmienia się.
+Tryb `upstream` jest dla klientów natywnych; HTTP `basal client` i SDK TypeSafe
+wymagają serwera w trybie `typesafe`.
 
 `GET /v1/models` zwraca listę TypeSafe `ModelMetadataList` (`name`,
 `description`, `release_date`) z polami upstream `mode` i `early_exit`
@@ -29,7 +31,9 @@ Wybór dotyczy online HTTP; zapisany kontrakt rekordów Batch API nie zmienia si
 Metadane zawierają również `prompt_format`, efektywne `orders`,
 `temperature_per_prim` (puste `{}` przy wyłączonej kalibracji), `layout` tylko
 gdy niekanoniczny oraz `calibration_warning`, gdy kalibracja jest niezgodna.
-Ostrzeżenie jest logowane przed udostępnieniem modelu; API nie ujawnia pełnej
+Ostrzeżenie jest logowane przed udostępnieniem modelu, przy każdym ładowaniu
+(preflight i każda replika, więc może się powtarzać); lokalny log podaje też
+model/rewizję dopasowania i serwowaną tożsamość. API nie ujawnia pełnej
 ścieżki pliku kalibracji ani lokalnej tożsamości modelu. Mismatch jawnego pliku
 z modelem/rewizją ostrzega i zachowuje certyfikaty; `--strict-calibration`
 odmawia startu. Niezgodność layoutu/porządku usuwa certyfikaty i dopasowane
@@ -153,7 +157,8 @@ brzegowych, [raport](../reports/typesafe-api-edge-cases/README.md)):
 `legend` zachowuje oryginalne wartości JSON kryteriów. `usage` zawiera
 `input_tokens` (tokeny promptów obu porządków), `output_tokens` = 0,
 `questions`, `branches` i `latency_ms` (czas żądania w serwerze).
-`longest_prompt_tokens` podaje najdłuższy prompt w obu formatach modelu.
+`longest_prompt_tokens` podaje najdłuższy prompt w obu formatach modelu,
+łącznie z drugim porządkiem `orders: auto` i kolejnymi rundami grupowego `choice`.
 `branches` liczy początkowe gałęzie logiczne (jedną na etykietę `multi`),
 bez mnożenia przez liczbę porządków; `second_order_branches` przy `orders: auto`
 liczy dodatkowy drugi porządek. Kontynuacje zadań zachowują własne doliczanie
@@ -238,7 +243,7 @@ SDK tego endpointu dla Python, TypeScript/JavaScript, C# i Rust:
 
 `--layout canonical|qfirst|state_twice` lub per-model YAML `layout` nadpisuje
 deklarację modelu; bez deklaracji używane jest canonical. Niekanoniczne layouty
-obsługują PL/EN w prompt format 1. Media z niekanonicznym layoutem są odrzucane
+obsługują PL/EN w prompt format 2. Media z niekanonicznym layoutem są odrzucane
 z 422. Evidence nadal używa własnego promptu canonical. Dla bounded batch
 evidence z niekanonicznym layoutem ma status `unmodelled` i jest odrzucane,
 zamiast przyjmować nieudowodniony budżet pamięci.

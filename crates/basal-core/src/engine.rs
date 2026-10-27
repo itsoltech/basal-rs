@@ -793,6 +793,7 @@ impl<B: Backend> Engine<B> {
                         finalists: None,
                         final_p: vec![],
                         tokens: 0,
+                        longest: 0,
                         prompts: 0,
                         rounds: 1,
                         first_round: self.trace_large_choice.then(|| {
@@ -836,6 +837,7 @@ impl<B: Backend> Engine<B> {
             for (((li, g, last), r), p) in owners.into_iter().zip(res).zip(&prep) {
                 let l = &mut large[li];
                 l.tokens += p.orders.iter().map(|o| o.input_ids.len()).sum::<usize>();
+                l.longest = p.orders.iter().map(|o| o.input_ids.len()).fold(l.longest, usize::max);
                 l.prompts += p.orders.len();
                 l.last.push(l.groups.len());
                 if last {
@@ -854,6 +856,14 @@ impl<B: Backend> Engine<B> {
             let second_order_branches = (self.manifest.orders == OptionOrders::Auto)
                 .then(|| second_tokens[off..end].iter().filter(|n| **n > 0).count());
             let mut final_round_tokens = second_tokens[off..end].iter().sum();
+            let mut longest_prompt_tokens = plan
+                .prepared
+                .iter()
+                .flat_map(|p| &p.orders)
+                .map(|o| o.input_ids.len())
+                .chain(second_tokens[off..end].iter().copied())
+                .max()
+                .unwrap_or(0);
             let mut extra_prompts = 0;
             let mut finalists = Vec::with_capacity(plan.questions.len());
             let mut first_round = Vec::with_capacity(plan.questions.len());
@@ -872,6 +882,7 @@ impl<B: Backend> Engine<B> {
                         let l = &large[li];
                         li += 1;
                         final_round_tokens += l.tokens;
+                        longest_prompt_tokens = longest_prompt_tokens.max(l.longest);
                         extra_prompts += l.prompts;
                         let f = l.finalists.clone().unwrap_or_default();
                         let t = self.manifest.temperature(item.temp_kind());
@@ -899,14 +910,6 @@ impl<B: Backend> Engine<B> {
             for (item, _) in &finals {
                 evidence.push(if item.evidence { Some(self.evidence_for(item, plan.evidence_limit)?) } else { None });
             }
-            let longest_prompt_tokens = plan
-                .prepared
-                .iter()
-                .flat_map(|p| &p.orders)
-                .map(|o| o.input_ids.len())
-                .chain(second_tokens[off..end].iter().copied())
-                .max()
-                .unwrap_or(0);
             outs.push(PlanOutput {
                 task_response: None,
                 task_error: None,
@@ -1218,6 +1221,8 @@ struct Large {
     finalists: Option<Vec<usize>>,
     final_p: Vec<f64>,
     tokens: usize,
+    /// Longest prompt of the rounds after the first.
+    longest: usize,
     prompts: usize,
     rounds: usize,
     first_round: Option<Vec<f64>>,

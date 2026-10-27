@@ -86,7 +86,7 @@ impl ModelProfile {
         let mut describe = engine.backend.describe();
         mask_device_ordinals(&mut describe);
         let options = engine.plan_options();
-        let numeric = serde_json::json!({
+        let mut numeric = serde_json::json!({
             "model": name,
             "version": engine.manifest.version,
             "backend": describe,
@@ -96,15 +96,8 @@ impl ModelProfile {
             "mark_state": options.mark_state,
             "large_choice": options.large_choice,
             "large_choice_strategy": format!("{:?}", options.large_choice_strategy),
-            "orders": engine.manifest.orders.metadata(),
-            "layout": engine.manifest.layout.as_str(),
-            "calibration": {
-                "content_sha256": engine.manifest.calibration_provenance.content_sha256,
-                "off": engine.manifest.calibration_provenance.off,
-                "strict": engine.manifest.calibration_provenance.strict,
-            },
-            "auto_orders": engine.auto_orders(),
         });
+        crate::model_options::record_effective_settings(&mut numeric, &engine.manifest, engine.auto_orders());
         Ok(Self {
             name,
             dir: engine.manifest.dir.clone(),

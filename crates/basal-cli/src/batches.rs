@@ -13,7 +13,7 @@
 //! `--batch-data-dir` or the user data directory, with its SQLite file `batches.sqlite3` there.
 //!
 //! Catalog file (`--catalog`): `{"version": 1, "default_model": "<name>", "models": [{"name": "<name>",
-//! "fingerprint": "<fp1-…>", "planner_version": "basal-planner.1"}]}`. `basal serve` logs the fingerprint of every
+//! "fingerprint": "<fp1-…>", "planner_version": "basal-planner.2"}]}`. `basal serve` logs the fingerprint of every
 //! served model and `/health/batches` lists them; a new revision applies to batches created after it, and queued
 //! batches keep the revision they pinned.
 

@@ -25,10 +25,11 @@ Tokio, bez serwera i jego harmonogramu. Wybór tabel GEMM używa konfiguracji `s
 pozostaje w `basal-core`. Interfejs i przykłady: [CLIENT.md](CLIENT.md).
 
 `basal-cli/src/model_options.rs` łączy CLI/YAML z `ModelLoadOptions` i waliduje
-progi `AutoOrderSettings`. Efektywne opcje są stosowane w preflight, przed wagami
-i GEMM oraz w każdym osobno ładowanym silniku i replice. Forki long/tła kopiują
-manifest i progi auto. Tożsamość jawnej kalibracji pochodzi z rzeczywistego
-repozytorium/ścieżki; ścieżka snapshotu HF dostarcza repo i rozwiązany commit.
+progi `AutoOrderSettings`. Efektywne opcje są stosowane w preflight, po plikach
+modelu, przed wyborem GEMM i wagami na GPU, oraz w każdym osobno ładowanym
+silniku i replice. Forki long/tła kopiują manifest i progi auto. Tożsamość
+jawnej kalibracji pochodzi z rzeczywistego repozytorium/ścieżki; ścieżka
+snapshotu HF dostarcza repo i rozwiązany commit.
 `serve` buduje metadane z silnika, a planer batchy z jego sklonowanego manifestu.
 API pokazuje ostrzeżenie kalibracji bez lokalnych ścieżek i tożsamości.
 
