@@ -43,14 +43,18 @@ Liczniki sumują żądania decyzji online ze wszystkich modeli i replik, obu
 API oraz obu torów kolejek. Jedno żądanie jest liczone raz, niezależnie od
 liczby pytań, promptów i gałęzi. Nie obejmują files/batches ani wykonywania
 trwałych batches w tle. Liczenie zaczyna się po dekodowaniu body, przy
-wejściu do obsługi decyzji, i kończy przy odpowiedzi, błędzie lub porzuceniu
-handlera. Odczyt body i dekodowanie nie należą do tych liczników.
+wejściu do obsługi decyzji, i kończy, gdy handler otrzyma wynik silnika lub
+informację o jego zatrzymaniu, odpowie wcześniej (529, nieznany model, błąd
+wejścia) albo zostanie porzucony. Odczyt body, dekodowanie i budowa
+odpowiedzi HTTP po wyniku silnika nie należą do tych liczników. Żądanie
+odrzucone z 529 przez chwilę wlicza się do `running`, zanim handler odpowie.
 
 `queued` oznacza oczekiwanie na przyjęcie do partii silnika: kanał wejściowy,
 planowanie, kolejkę schedulera i przekazanie do toru długiego. `running`
-obejmuje pozostałe aktywne żądania, w tym pracę serwera przed kolejką i po
-obliczeniach. Para jest odczytywana razem; `running + queued = 0` oznacza brak
-aktywnych żądań klientów, niekoniecznie bezczynność GPU. Po porzuceniu handlera
+obejmuje pozostałe aktywne żądania, w tym pracę serwera przed kolejką oraz
+pracę workera po obliczeniach, do przekazania wyniku handlerowi. Para jest
+odczytywana razem; `running + queued = 0` oznacza brak aktywnych żądań
+klientów, niekoniecznie bezczynność GPU. Po porzuceniu handlera
 żądanie znika z obu liczników, choć rozpoczęte obliczenia mogą nadal trwać.
 Odrzucenie, błąd planowania i zakończenie workera także zwalniają `queued`.
 Drugi przebieg `orders=auto` pozostaje `running`: nasz silnik wykonuje go

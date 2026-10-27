@@ -542,21 +542,14 @@ kolejność decyduje harmonogram zamiast sterownika. Różne GPU mają osobne
 `gate` i liczą jednocześnie; limit `max_inflight`, router HTTP i `/health`
 pozostają wspólne dla procesu.
 
-`/health` dodaje do informacji o gotowości pola `running` i `queued`, sumowane
-po wszystkich modelach, replikach i obu torach online. Liczą żądania klientów,
-nie prompty ani gałęzie; trwałe batches w tle są wyłączone. Liczenie trwa od
-wejścia do obsługi decyzji po dekodowaniu body do odpowiedzi, błędu lub
-porzucenia handlera. `queued` obejmuje kanał wejściowy, planowanie, oczekiwanie
-w schedulerze i przekazanie do toru długiego, aż do admission do partii.
-`running` to pozostałe aktywne żądania, także praca serwera przed kolejką i po
-silniku. Wspólny stan liczników zapewnia spójny odczyt obu wartości; znacznik
-oczekiwania współdzielony przez handler i job zwalnia `queued` dokładnie raz
-przy admission, błędzie, rozłączeniu lub usunięciu kolejki workera. Nie zmienia
-to rezerwacji replik ani admission. Po rozłączeniu rozpoczęta praca GPU może
-trwać poza tymi licznikami. Drugi przebieg `orders=auto` pozostaje `running`,
-bo odbywa się w tym samym wywołaniu silnika, bez kolejnego wpisu w kolejce
-jak upstream. Gotowość, degraded/unavailable i ich statusy HTTP pozostają
-bez zmian; szczegóły kontraktu: [OBSERVABILITY.md](OBSERVABILITY.md#health-i-błędy-api).
+`/health` dodaje do informacji o gotowości pola `running` i `queued`: żądania
+decyzji online sumowane po wszystkich modelach, replikach i obu torach, bez
+trwałych batches w tle. Obie wartości pochodzą ze wspólnego stanu liczników
+pod jednym mutexem, więc odczyt jest spójny. Znacznik oczekiwania współdzielony
+przez handler i job zwalnia `queued` dokładnie raz: przy admission do partii,
+błędzie, rozłączeniu lub usunięciu kolejki workera. Liczniki nie zmieniają
+rezerwacji replik ani admission. Okno liczenia, znaczenie obu pól i statusy
+gotowości opisuje [OBSERVABILITY.md](OBSERVABILITY.md#health-i-błędy-api).
 
 Tożsamością GPU w harmonogramie jest numer `device` z konfiguracji, czyli
 indeks CUDA widoczny dla procesu (po `CUDA_VISIBLE_DEVICES`), a nie

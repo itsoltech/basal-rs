@@ -308,7 +308,7 @@ struct App {
     media_requests: Arc<Semaphore>,
     systemone_decoders: Arc<Semaphore>,
     default_model: String,
-    inflight: Arc<Mutex<LoadCounts>>,
+    load: Arc<Mutex<LoadCounts>>,
     max_inflight: usize,
     release_date: String,
 }
@@ -640,7 +640,8 @@ impl RequestLoad {
     }
 }
 
-/// One slot of `App::inflight`, released when the handler finishes or is dropped (client disconnect).
+/// One slot of `App::load`, released when the engine's reply arrives, on an early answer, or when the handler is
+/// dropped (client disconnect).
 struct Inflight(Arc<RequestLoad>);
 
 impl Inflight {
@@ -692,7 +693,7 @@ async fn decide(
     if let (Some(label), Ok(m)) = (label, model) {
         let _ = label.0.set(m.to_string());
     }
-    let (slot, previous) = Inflight::new(&app.inflight);
+    let (slot, previous) = Inflight::new(&app.load);
     if previous >= app.max_inflight {
         // 529 as the TypeSafe API when it is overloaded; its SDKs (and most HTTP clients) retry 5xx with backoff
         return overloaded(
@@ -762,6 +763,7 @@ async fn decide(
         _job_permit: job_permit,
     });
     let reply = if sent { rx.await.ok() } else { None };
+    drop(slot);
     drop(admitted);
     let Some((result, timing)) = reply else {
         return error_response(
@@ -956,7 +958,7 @@ async fn health(State(app): State<Arc<App>>) -> Response {
         }
     }
     let (running, queued) = {
-        let counts = app.inflight.lock().unwrap_or_else(|e| e.into_inner());
+        let counts = app.load.lock().unwrap_or_else(|e| e.into_inner());
         (counts.inflight - counts.queued, counts.queued)
     };
     let mut body = json!({"status": "ok", "models": app.names, "default_model": app.default_model,
@@ -1281,7 +1283,7 @@ fn serve_inner<B: Backend + Send + 'static>(
             media_requests: Arc::new(Semaphore::new(4)),
             systemone_decoders: Arc::new(Semaphore::new(opts.max_inflight)),
             default_model,
-            inflight: Arc::new(Mutex::new(LoadCounts::default())),
+            load: Arc::new(Mutex::new(LoadCounts::default())),
             max_inflight: opts.max_inflight,
             release_date: opts.release_date.clone(),
         });
