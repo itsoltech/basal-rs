@@ -130,6 +130,7 @@ impl Server {
         let addr = listener.local_addr()?;
         let opts = ServeOptions {
             systemone_dialect: crate::serve::SystemOneDialect::TypeSafe,
+            log_decisions: None,
             addr,
             release_date: "2026-10-05".into(),
             max_inflight: options.max_inflight,
@@ -488,7 +489,12 @@ fn execute(
     if let Some(split) = &g.layer_split {
         report["settings"]["layer_split"] = json!(split.stages());
     }
-    crate::model_options::record_effective_settings(&mut report["settings"], &engine.manifest, engine.auto_orders());
+    crate::model_options::record_effective_settings(
+        &mut report["settings"],
+        &engine.manifest,
+        engine.auto_orders(),
+        engine.context_overflow(),
+    );
     let probes = engine.backend.memory_probes();
     let host = host_memory()?;
     let gpu = engine.backend.memory()?;

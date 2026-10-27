@@ -281,6 +281,7 @@ pub struct Engine<B: Backend> {
     /// Keep the joint fit after the first round of grouped large choices in [`PlanOutput::first_round`] (evaluation).
     pub trace_large_choice: bool,
     auto_orders: AutoOrderSettings,
+    overflow: crate::overflow::OverflowSettings,
     /// Stop token of background work, checked between rounds ([`Engine::set_stop_token`]); `None` online.
     stop: Option<StopToken>,
 }
@@ -303,6 +304,7 @@ impl<B: Backend> Engine<B> {
             large_choice_strategy: crate::large_choice::Strategy::DEFAULT,
             trace_large_choice: false,
             auto_orders: AutoOrderSettings::default(),
+            overflow: crate::overflow::OverflowSettings::default(),
             stop: None,
         })
     }
@@ -318,6 +320,7 @@ impl<B: Backend> Engine<B> {
         e.large_choice_strategy = self.large_choice_strategy;
         e.trace_large_choice = self.trace_large_choice;
         e.auto_orders = self.auto_orders;
+        e.overflow = self.overflow;
         Ok(e)
     }
 
@@ -327,6 +330,14 @@ impl<B: Backend> Engine<B> {
 
     pub fn auto_orders(&self) -> AutoOrderSettings {
         self.auto_orders
+    }
+
+    pub fn set_context_overflow(&mut self, settings: crate::overflow::OverflowSettings) {
+        self.overflow = settings;
+    }
+
+    pub fn context_overflow(&self) -> crate::overflow::OverflowSettings {
+        self.overflow
     }
 
     /// Precompute the prompt template up to the state for both languages: the longest common token prefix of two
@@ -462,6 +473,7 @@ impl<B: Backend> Engine<B> {
     /// Planning options of this engine, for an offline [`RequestPlanner`].
     pub fn plan_options(&self) -> PlanOptions {
         PlanOptions {
+            overflow: self.overflow,
             mark_state: self.mark_state,
             large_choice: self.large_choice,
             large_choice_strategy: self.large_choice_strategy,
@@ -478,11 +490,12 @@ impl<B: Backend> Engine<B> {
         RequestPlanner::load(self.manifest.clone(), self.plan_options(), self.plan_caps())
     }
 
-    /// The online planning context: this engine's tokenizer and backend, an unbounded budget, no stop token.
+    /// This engine's tokenizer, backend and stop token; host memory is accounted by its caller during execution.
     fn with_planner<R>(&self, f: impl FnOnce(&PlanContext<'_>) -> R) -> R {
         let budget = PlanBudget::unbounded();
         let caps = BackendCaps(&self.backend);
-        let ctx = PlanContext::with_caps(&self.manifest, &self.tok, self.plan_options(), &caps, &budget);
+        let ctx =
+            PlanContext::with_caps(&self.manifest, &self.tok, self.plan_options(), &caps, &budget, self.stop.as_ref());
         f(&ctx)
     }
 
@@ -707,6 +720,12 @@ impl<B: Backend> Engine<B> {
                 if let Some(n) = next["usage"]["longest_prompt_tokens"].as_u64() {
                     raw["usage"]["longest_prompt_tokens"] =
                         n.max(raw["usage"]["longest_prompt_tokens"].as_u64().unwrap_or(0)).into();
+                }
+                // Continuations use the original state too. Report the most extensive actual cut of either round.
+                if next["usage"]["truncated"]["dropped_tokens"].as_u64().unwrap_or(0)
+                    > raw["usage"]["truncated"]["dropped_tokens"].as_u64().unwrap_or(0)
+                {
+                    raw["usage"]["truncated"] = next["usage"]["truncated"].clone();
                 }
                 let empty = serde_json::Map::new();
                 let thresholds = if plans[i].media.is_some() { &empty } else { &self.manifest.task_thresholds };
@@ -1273,6 +1292,9 @@ pub struct RequestPlan {
     pub dialect: crate::request::Dialect,
     pub calibration_unvalidated: bool,
     pub media: Option<Arc<crate::media::ProcessedMedia>>,
+    pub truncated: Option<crate::overflow::Truncation>,
+    /// Conservative retained task-expansion bytes captured before expansion under a bounded budget.
+    pub(crate) task_bytes: u64,
     /// With adaptive option orders: token lengths of the reversed-order prompts an uncertain first-round answer may
     /// run (computed by the context check, which tokenizes both orders anyway); bounds the device shape of that
     /// round ([`crate::planner::DeviceWorkShape`]).
@@ -1318,6 +1340,9 @@ pub fn plan_response(model: &str, plan: &RequestPlan, out: &PlanOutput) -> Resul
     let mut response = json!({"model": model, "answers": answers, "usage": {"input_tokens": input_tokens, "output_tokens": 0,
                                                              "questions": plan.questions.len(), "branches": branches}});
     response["usage"]["longest_prompt_tokens"] = out.longest_prompt_tokens.into();
+    if let Some(truncated) = plan.truncated {
+        response["usage"]["truncated"] = json!(truncated);
+    }
     if let Some(n) = out.second_order_branches {
         response["usage"]["second_order_branches"] = n.into();
     }

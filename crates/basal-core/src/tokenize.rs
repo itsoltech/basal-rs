@@ -90,6 +90,11 @@ impl BasalTokenizer {
         Ok(enc.get_ids().to_vec())
     }
 
+    /// Decode a complete-character token slice, retaining special tokens like upstream `tok.decode`.
+    pub(crate) fn decode(&self, ids: &[u32]) -> Result<String> {
+        self.inner.decode(ids, false).map_err(|e| anyhow!("tokenizer decode: {e}"))
+    }
+
     pub fn token_id(&self, token: &str) -> Option<u32> {
         self.inner.token_to_id(token)
     }

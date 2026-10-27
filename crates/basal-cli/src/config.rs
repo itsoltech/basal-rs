@@ -48,6 +48,9 @@ pub const INVARIANT_CLASSES: [usize; 25] = [
 pub struct ServeConfig {
     #[serde(default)]
     pub systemone_dialect: crate::serve::SystemOneDialect,
+    /// Append final successful online decisions; absent: no log file, hashing or record serialization.
+    #[serde(default)]
+    pub log_decisions: Option<PathBuf>,
     #[serde(default = "default_addr")]
     pub addr: SocketAddr,
     /// Waiting + running requests of all models; more are refused with 529.

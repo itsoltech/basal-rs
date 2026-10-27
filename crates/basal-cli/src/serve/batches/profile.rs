@@ -22,7 +22,7 @@ use super::store::{Fingerprint, PlannerVersion, WorkerTarget};
 
 /// Contract version of offline planning: bump it whenever prompts, planning or result serialization change, so
 /// queued batches are never executed by a different planner.
-pub(crate) const PLANNER_VERSION: &str = "basal-planner.2";
+pub(crate) const PLANNER_VERSION: &str = "basal-planner.3";
 
 /// Files of a model directory that change its results (in this order); missing optional files are recorded as
 /// absent. Safetensors shards come from `model.safetensors.index.json` when present.
@@ -97,7 +97,12 @@ impl ModelProfile {
             "large_choice": options.large_choice,
             "large_choice_strategy": format!("{:?}", options.large_choice_strategy),
         });
-        crate::model_options::record_effective_settings(&mut numeric, &engine.manifest, engine.auto_orders());
+        crate::model_options::record_effective_settings(
+            &mut numeric,
+            &engine.manifest,
+            engine.auto_orders(),
+            engine.context_overflow(),
+        );
         Ok(Self {
             name,
             dir: engine.manifest.dir.clone(),

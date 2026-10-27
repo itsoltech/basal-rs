@@ -120,8 +120,8 @@ Anulowane żądania nie trafiają do histogramu opóźnienia. Pomiar HTTP obejmu
 odczyt body, parsowanie, walidację, planowanie, oczekiwanie, obliczenia i
 serializację JSON; nie obejmuje wysyłania odpowiedzi po sieci do klienta.
 
-Prompt dłuższy niż kontekst modelu wątek modelu odrzuca już podczas planowania
-żądania (`Engine::plan_request_as`, kontrola `check_context`), zanim żądanie
+Przy domyślnym `context_overflow: refuse` prompt dłuższy niż kontekst modelu
+wątek modelu odrzuca już podczas planowania żądania (`Engine::plan_request_as`), zanim żądanie
 trafi do kolejki partii. Oba API odpowiadają 422: `/v1/systemone` błędem typu
 `context_length_exceeded` w `detail`, `/v1/basal` polem `error` z komunikatem
 „maximum context length”. Takie żądanie zwiększa `basal_http_requests_total` i
@@ -131,9 +131,45 @@ pytań i nie trafia do histogramów kolejki ani partii. Metryki nie rozróżniaj
 przyczyn statusu 422: ten sam status mają błędy walidacji i inne żądania
 nieobsługiwane przez model, a przyczynę podaje tylko treść odpowiedzi.
 
+Jawne `truncate` może skrócić tekst przed kolejką partii; faktyczne cięcie
+opisuje `usage.truncated`. Nieudane skrócenie nadal daje powyższe 422.
+Odmowa evidence po cięciu również następuje przed GPU, a media nie są przycinane.
+
 Gauge modelu zwalnia miejsce także po porzuceniu handlera. Obliczenia już
 uruchomione na GPU mogą wówczas nadal trwać. Jest to liczba oczekujących
 handlerów, a nie pomiar zajętości GPU ani dokładnej długości kolejki.
+
+## Rejestr decyzji
+
+`basal serve --log-decisions ./decisions.jsonl` lub globalne YAML
+`log_decisions: ./decisions.jsonl` włącza procesowe dopisywanie JSONL.
+Jawne CLI zastępuje YAML; względna ścieżka jest względem katalogu procesu.
+Bez opcji nie ma otwarcia pliku, dodatkowej kopii body, hashowania ani
+serializacji rekordu. Błąd otwarcia pliku blokuje start przed gotowością.
+
+Jeden finalny sukces online w dowolnym dialekcie daje jeden rekord, po auto
+i kontynuacjach zadań. Rekordy batchy w tle nie są rejestrowane. Pola to `ts`
+(sekundy Unix jako float), `model`, `request_sha256`, `reviewed: null` oraz
+`answers` z wyłącznie `type`, `choice`, `action`, `selected`, `tool`, `tools`,
+`probabilities`, `confidence`. Hash SHA-256 obejmuje oryginalne
+`[body.get("state"), body.get("questions")]` jako Python JSON z rekurencyjnie
+posortowanymi kluczami, `ensure_ascii=False`, domyślnymi separatorami i
+reprezentacją float. Nie obejmuje stanu po facts/cięciu ani pytań wewnętrznych
+zadań. Rekord nie zapisuje surowego stanu, pytań, tekstu evidence czy opcji;
+wartości odpowiedzi, w tym nazwy wybranych opcji/narzędzi, są zachowane.
+TypeSafe `noul` udostępnia tylko P(true); log zapisuje odpowiadający mu rozkład
+`true: p`, `false: 1-p` i jego maksimum jako confidence, bez zmiany odpowiedzi HTTP.
+
+Hash i serializacja dużych danych odbywają się poza executorem Tokio i wątkiem
+GPU. Ograniczona kolejka mieści 32 końcowe odpowiedzi plus rekord w zapisie;
+hashowanie zachowuje permit żądania i dużego body również po anulowaniu
+handlera. Writer potwierdza zapis i flush przed odpowiedzią 200; pełna kolejka,
+zatrzymany writer lub błąd zapisu zwracają 500 w bieżącym dialekcie. Po błędzie
+zapisu writer odmawia kolejnym rekordom. Liczniki lifecycle obejmują oczekiwanie
+na potwierdzenie; nagłówki queue/compute zachowują swoje dotychczasowe znaczenie.
+Zamknięcie HTTP zwalnia nadawców, a osobny wątek opróżnia kolejkę, flushuje plik
+i jest dołączany poza executorem. Nie ma rotacji ani fsync per linia. Awaria I/O
+może pozostawić częściową linię; taka próba nigdy nie jest potwierdzana jako sukces.
 
 ## Tokeny i pytania
 

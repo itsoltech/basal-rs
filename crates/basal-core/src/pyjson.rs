@@ -16,11 +16,18 @@ pub fn text(v: &Value) -> String {
 /// `json.dumps(v, ensure_ascii=False)`.
 pub fn dumps(v: &Value) -> String {
     let mut out = String::new();
-    write_value(&mut out, v);
+    write_value(&mut out, v, false);
     out
 }
 
-fn write_value(out: &mut String, v: &Value) {
+/// `json.dumps(v, ensure_ascii=False, sort_keys=True)`, recursively, with the same floats and separators.
+pub fn dumps_sorted(v: &Value) -> String {
+    let mut out = String::new();
+    write_value(&mut out, v, true);
+    out
+}
+
+fn write_value(out: &mut String, v: &Value, sorted: bool) {
     match v {
         Value::Null => out.push_str("null"),
         Value::Bool(true) => out.push_str("true"),
@@ -33,22 +40,32 @@ fn write_value(out: &mut String, v: &Value) {
                 if i > 0 {
                     out.push_str(", ");
                 }
-                write_value(out, x);
+                write_value(out, x, sorted);
             }
             out.push(']');
         }
         Value::Object(m) => {
             out.push('{');
-            for (i, (k, x)) in m.iter().enumerate() {
-                if i > 0 {
-                    out.push_str(", ");
-                }
-                write_str(out, k);
-                out.push_str(": ");
-                write_value(out, x);
+            if sorted {
+                let mut entries: Vec<_> = m.iter().collect();
+                entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
+                write_members(out, entries, true);
+            } else {
+                write_members(out, m, false);
             }
             out.push('}');
         }
+    }
+}
+
+fn write_members<'a>(out: &mut String, entries: impl IntoIterator<Item = (&'a String, &'a Value)>, sorted: bool) {
+    for (i, (key, value)) in entries.into_iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        write_str(out, key);
+        out.push_str(": ");
+        write_value(out, value, sorted);
     }
 }
 

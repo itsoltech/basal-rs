@@ -117,6 +117,9 @@ struct Cli {
     /// /v1/systemone dialect for serve; default typesafe (YAML can also select it)
     #[arg(long, global = true, value_enum)]
     systemone_dialect: Option<serve::SystemOneDialect>,
+    /// Append final online decisions to this JSONL file (serve only; YAML log_decisions)
+    #[arg(long, global = true)]
+    log_decisions: Option<PathBuf>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -657,6 +660,7 @@ fn planning_engine(
     let manifest = options.load_manifest(&config::model_dir(&model)?, orders, &model.source_name())?;
     let mut engine = Engine::new(manifest, NoBackend)?;
     engine.set_auto_orders(options.auto_orders()?);
+    engine.set_context_overflow(options.overflow()?);
     Ok(engine)
 }
 
@@ -807,6 +811,7 @@ fn planned_engine_at(dir: &Path, g: &GpuArgs, source: &str) -> Result<PlannedEng
     backend.set_state_cache_bytes(g.state_cache_mb.checked_mul(1 << 20).context("state cache budget overflow")?)?;
     let mut engine = Engine::new(manifest, backend)?;
     engine.set_auto_orders(g.model_options.auto_orders()?);
+    engine.set_context_overflow(g.model_options.overflow()?);
     engine.mark_state = g.state_cache_mb > 0;
     engine.tree_max_tokens = g.tree_max_tokens;
     if !g.no_prefix_cache && engine.backend.supports_prefix_cache() {
@@ -1105,6 +1110,9 @@ fn run() -> Result<()> {
             });
             let (source, mut c) = config::select(config, &models)?;
             c.systemone_dialect = cli.systemone_dialect.unwrap_or(c.systemone_dialect);
+            if cli.log_decisions.is_some() {
+                c.log_decisions = cli.log_decisions;
+            }
             for model in &mut c.models {
                 model.model_options.apply_cli(&g.model_options);
                 model.model_options.validate()?;
@@ -1313,6 +1321,7 @@ fn run() -> Result<()> {
             }
             let opts = serve::ServeOptions {
                 systemone_dialect: c.systemone_dialect,
+                log_decisions: c.log_decisions,
                 addr,
                 release_date: c.release_date,
                 max_inflight: c.max_inflight,

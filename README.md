@@ -703,7 +703,7 @@ curl --fail-with-body localhost:8000/v1/systemone -H 'content-type: application/
 Opcje modelu (klucze YAML w `models`; dla jednego modelu te same opcje
 wiersza poleceń, np. `--max-batch-tokens`):
 
-Layout, kalibrację i progi `orders: auto` można ustawić także w `decide`,
+Layout, kalibrację, progi `orders: auto` i politykę długiego kontekstu można ustawić także w `decide`,
 `prepare`, `check-prompts`, `export`, poleceniach pomiarowych z opcjami GPU
 oraz `client --local`. Przykład:
 
@@ -712,7 +712,7 @@ basal serve --model 2.0-mini --layout qfirst --no-calibration --orders auto --au
 ```
 
 Jawne `--layout`, `--calibration` / `--no-calibration`, `--strict-calibration`,
-`--auto-tau` i `--auto-band` nadpisują odpowiednie ustawienia **każdego** modelu
+`--auto-tau`, `--auto-band`, `--context-overflow` i `--truncate-head` nadpisują odpowiednie ustawienia **każdego** modelu
 z YAML, również przy `--config`. CLI wybiera jedno źródło kalibracji zamiast
 źródła z YAML; `--calibration` i `--no-calibration` wykluczają się. Brak tych
 flag zachowuje YAML. `--strict-calibration` włącza strict; brak flagi nie wyłącza
@@ -720,11 +720,26 @@ strict z YAML. Dotychczasowe `orders` ma inne pierwszeństwo: wartość modelu
 w YAML, następnie wspólne `--orders`, następnie domyślna wartość formatu.
 Ścieżki kalibracji, jak lokalne ścieżki modeli, są względem katalogu procesu.
 
+`--context-overflow refuse|truncate` domyślnie odmawia przekroczenia kontekstu
+(upstream 2.4.1 domyślnie skraca). `truncate` usuwa środek stanu, zachowując
+pytania i opcje; `--truncate-head` to skończony udział początku w [0,1], domyślnie
+1/3. Faktyczne skrócenie opisuje `usage.truncated`. Media nadal odmawiają
+przekroczenia kontekstu, a evidence ze skracanym stanem otrzymuje 422 przed GPU.
+Szczegóły i granice: [SYSTEM_ONE.md](docs/SYSTEM_ONE.md#długi-kontekst).
+
+Procesowy `--log-decisions FILE` lub YAML `log_decisions` dopisuje jeden JSONL
+z hashem oryginalnego wejścia i końcowymi prawdopodobieństwami żądania online
+w obu dialektach, po wszystkich rundach. Domyślnie jest wyłączony; błąd otwarcia
+blokuje gotowość, a błąd kolejki/zapisu daje 500. Zawartość i lifecycle:
+[OBSERVABILITY.md](docs/OBSERVABILITY.md#rejestr-decyzji).
+
 | Klucz | Domyślnie | Znaczenie |
 |---|---|---|
 | `repo`, `revision` | | repozytorium Hugging Face `owner/name` i gałąź, tag albo commit (domyślnie `main`); pobierane do cache Hugging Face (`HF_HOME`, w obrazie `/data/hf`), przy braku dostępu do Hub z cache |
 | `path` | | lokalny katalog modelu (zamiast `repo`) |
 | `layout` | deklaracja `basal.json`, inaczej `canonical` | `canonical`, `qfirst` lub `state_twice`; dwa ostatnie wymagają prompt format 2 |
+| `context_overflow` | `refuse` | `refuse` lub `truncate`; skracanie dotyczy tekstu |
+| `truncate_head` | 1/3 | skończony udział początku zachowanego stanu w [0,1] |
 | `orders` | format 1: `2`, format 2: `1` | `1`, `2`, `auto` lub `2le<N>` |
 | `calibration`, `no_calibration` | automatycznie | jawny plik albo wyłączenie (`true`); wzajemnie wykluczające się |
 | `strict_calibration` | `false` | jawny plik dla innego modelu lub rozpoznanej rewizji HF odmawia startu; bez strict ostrzega i zachowuje progi |

@@ -27,11 +27,29 @@ pozostaje w `basal-core`. Interfejs i przykłady: [CLIENT.md](CLIENT.md).
 `basal-cli/src/model_options.rs` łączy CLI/YAML z `ModelLoadOptions` i waliduje
 progi `AutoOrderSettings`. Efektywne opcje są stosowane w preflight, po plikach
 modelu, przed wyborem GEMM i wagami na GPU, oraz w każdym osobno ładowanym
-silniku i replice. Forki long/tła kopiują manifest i progi auto. Tożsamość
+silniku i replice. Forki long/tła kopiują manifest, progi auto i politykę
+`OverflowSettings` (domyślnie refuse, head 1/3). Tożsamość
 jawnej kalibracji pochodzi z rzeczywistego repozytorium/ścieżki; ścieżka
 snapshotu HF dostarcza repo i rozwiązany commit.
 `serve` buduje metadane z silnika, a planer batchy z jego sklonowanego manifestu.
 API pokazuje ostrzeżenie kalibracji bez lokalnych ścieżek i tożsamości.
+
+`planner.rs` realizuje odmowę albo maksymalnie dwie próby skracania tekstu na
+CPU, przed forwardem. Sprawdza retokenizowane prompty obu potencjalnych
+porządków auto i kopie stanu layoutu; usuwa wyłącznie środek oryginalnego stanu.
+Plan zachowuje język i task candidates/source spans, a skrócone evidence jest
+odrzucane przed GPU. Media nie są przycinane. PlanBudget rezerwuje także
+transienty cięcia, kopii i retokenizacji, zwalnia odrzucone próby i sprawdza
+stop między etapami. Usage i host bounds obejmują metadane skrócenia oraz
+planowanie kontynuacji z oryginału. Szczegóły: [SYSTEM_ONE.md](SYSTEM_ONE.md#długi-kontekst).
+
+Opcjonalny procesowy `serve/decisions.rs` obsługuje finalny wynik obu dialektów
+online, po wszystkich rundach zadań i auto. Oryginalny JSON jest przenoszony
+do zadania blokującego do hashowania (z permitami admission), bez kopii body.
+Dedykowany wątek zapisuje przez ograniczoną kolejkę 32 rekordów i asynchroniczny
+ack; finalna odpowiedź wraca po flush. Plik otwiera się przed gotowością,
+a drain/flush/join kończą się poza executorem po zatrzymaniu HTTP. Błędy
+kolejki/zapisu dają 500 z zachowaniem dialektu; tło batchy nie używa tej ścieżki.
 
 Procesowy `systemone_dialect` (globalna flaga CLI lub YAML, domyślnie typesafe)
 wybiera trasę `/v1/systemone`. W trybie upstream jest to kopia trasy `/v1/basal`

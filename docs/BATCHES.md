@@ -339,9 +339,10 @@ nie jest tożsamością modelu. Nowy katalog tworzy rewizję. Przyjęte batche
 pozostają przypięte do poprzedniej rewizji; utrzymuj zgodnych workerów do ich
 zakończenia lub świadomego wygaśnięcia.
 
-Wersja planera `basal-planner.2` rozróżnia obsługę layoutów oraz metadane usage.
+Wersja planera `basal-planner.3` rozróżnia również skracanie kontekstu i jego usage.
 Fingerprint obejmuje efektywne `orders`, layout (także override), SHA-256
-wybranej kalibracji lub stan off/brak, strict oraz auto tau/band.
+wybranej kalibracji lub stan off/brak, strict, auto tau/band oraz
+`context_overflow` i `truncate_head` (także przy polityce refuse).
 Zachowuje też hashowanie `basal.json` i plików `CALIBRATION*.json` w katalogu
 modelu. Pełna ścieżka jawnego pliku, lokalna tożsamość i ostrzeżenie o niej
 nie zastępują hasha treści i nie wchodzą do odcisku; numer urządzenia również nie.
@@ -349,6 +350,11 @@ Planner CPU dostaje migawkę manifestu i opcji faktycznie załadowanego silnika;
 fork tła dziedziczy te same opcje. Bounded evidence przy niekanonicznym layoutcie
 jest odrzucane jako `unmodelled`, ponieważ jego budżet nie jest zamodelowany.
 Wybór online `systemone_dialect` nie zmienia kontraktu trwałych rekordów batchy.
+Procesowy `log_decisions` nie jest częścią odcisku i nie zapisuje rekordów
+batchy w tle. Planer CPU stosuje tę samą politykę skracania co online;
+przejściowe kopie/retokenizacja, oryginalny stan kontynuacji i wynikowe usage
+pozostają objęte budżetami hosta. Przekroczenie budżetu nadal odmawia rekordu,
+nawet gdy krótszy prompt zmieściłby się w kontekście modelu.
 
 ## Wykonanie i kwalifikacja GPU
 

@@ -38,6 +38,7 @@ pub const MAX_RESULT_BYTES: u64 = 64 * 1024 * 1024;
 /// Planning options of an engine (copied from [`crate::Engine`]).
 #[derive(Clone, Copy, Debug)]
 pub struct PlanOptions {
+    pub overflow: crate::overflow::OverflowSettings,
     pub mark_state: bool,
     pub large_choice: bool,
     pub large_choice_strategy: crate::large_choice::Strategy,
@@ -299,6 +300,14 @@ impl PlanBudget {
         self.peak.set(0);
         self.retained.set(0);
     }
+
+    /// A failed CPU attempt has been dropped. Its retained prompt/branch buffers no longer consume the slot.
+    /// The caller must keep earlier allocations and live transient reservations counted.
+    fn release_attempt(&self, before: u64) {
+        let freed = self.retained.get().saturating_sub(before);
+        self.retained.set(before);
+        self.used.set(self.used.get().saturating_sub(freed));
+    }
 }
 
 /// Reserved bytes of a [`PlanBudget`], returned on drop unless retained.
@@ -427,8 +436,9 @@ impl<'a> PlanContext<'a> {
         options: PlanOptions,
         caps: &'a dyn PlanCapabilities,
         budget: &'a PlanBudget,
+        stop: Option<&'a StopToken>,
     ) -> Self {
-        Self { manifest, tok, options, caps, budget, stop: None }
+        Self { manifest, tok, options, caps, budget, stop }
     }
 
     pub fn budget(&self) -> &PlanBudget {
@@ -492,6 +502,19 @@ impl<'a> PlanContext<'a> {
     /// prompts that keep the state and change the question. Format 2 takes the exact rendered prefix through the
     /// first state copy; qfirst includes the actual question in that prefix and cache reuse requires a token match.
     pub(crate) fn state_len(&self, p: &Prepared) -> anyhow::Result<usize> {
+        self.check_stop()?;
+        // Prefix-cache probes also render/tokenize after a cut. Count both live token lists and tokenizer scratch
+        // before creating the probe strings, just as for the full prompt.
+        let _probe = match self.bounded() {
+            Some(b) => {
+                let bytes = p.orders.iter().map(|o| o.prompt.len() as u64).max().unwrap_or(0);
+                Some(b.reserve(
+                    PlanStage::Tokens,
+                    bytes.saturating_mul(TOKENIZER_BYTES_PER_BYTE + 16).saturating_add(4096),
+                )?)
+            }
+            None => None,
+        };
         let it = &p.item;
         if self.manifest.prompt_format == PromptFormat::Two {
             if it.state.is_empty() {
@@ -527,7 +550,8 @@ impl<'a> PlanContext<'a> {
 
     /// Parse, validate and prepare a System One request without running the model.
     pub fn prepare_request(&self, body: &Value) -> Result<Vec<Prepared>, PlanError> {
-        if self.manifest.prompt_format == PromptFormat::Two
+        if self.options.overflow.policy() == crate::overflow::ContextOverflow::Truncate
+            || self.manifest.prompt_format == PromptFormat::Two
             || body.get("media").is_some_and(|v| !v.is_null())
             || body.get("assets").is_some()
         {
@@ -555,20 +579,33 @@ impl<'a> PlanContext<'a> {
     /// [`PlanContext::plan_request`] for an endpoint dialect (upstream: no model check, 2..10 options only).
     pub fn plan_request_as(&self, body: &Value, dialect: crate::request::Dialect) -> Result<RequestPlan, PlanError> {
         self.check_stop()?;
+        // Parsing and task expansion clone state, options and JSON before token preparation. Include the retained
+        // task text/character indexes and transient expansion copies, not only the final rendered prompts.
+        let items_bound = if self.budget.is_bounded() {
+            (crate::request::prepared_input_bytes(body)? as u64).saturating_mul(16).saturating_add(65536)
+        } else {
+            0
+        };
+        let items = self.budget.reserve(PlanStage::Items, items_bound)?;
         if dialect == crate::request::Dialect::TypeSafe {
             crate::systemone::check_features(body)?;
             // Asset questions are restricted to the TypeSafe primitives before native task expansion.
             if body.get("assets").is_some() {
-                return self.plan_decision_request_as(body, dialect);
+                let plan = self.plan_decision_request_as(body, dialect)?;
+                items.retain();
+                return Ok(plan);
             }
         }
-        if let Some(expansion) = crate::tasks::expand(body, self.manifest.prompt_format.max_options())? {
+        let plan = if let Some(expansion) = crate::tasks::expand(body, self.manifest.prompt_format.max_options())? {
             let mut plan = self.plan_decision_request_as(&expansion.request, dialect)?;
             plan.tasks = Some(expansion.plan);
-            Ok(plan)
+            plan.task_bytes = items_bound;
+            plan
         } else {
-            self.plan_decision_request_as(body, dialect)
-        }
+            self.plan_decision_request_as(body, dialect)?
+        };
+        items.retain();
+        Ok(plan)
     }
 
     /// Media preparation errors: input errors as online (422 on the media field); typed planning conditions of a
@@ -718,7 +755,7 @@ impl<'a> PlanContext<'a> {
                 return Err(DecideError::Unsupported(errs).into());
             }
         }
-        let mut plan = self.plan_items_with_media(req.items, media)?;
+        let mut plan = self.plan_with_overflow(req.items, media)?;
         if let (Some(media), crate::architecture::Architecture::Gemma4(cfg)) = (&plan.media, &self.manifest.config) {
             let image_tokens: usize = media
                 .items
@@ -752,7 +789,6 @@ impl<'a> PlanContext<'a> {
                 }
             }
         }
-        plan.auto_reverse = self.check_context(&plan)?;
         plan.evidence_limit = req.facts_limit;
         plan.dialect = dialect;
         Ok(plan)
@@ -761,11 +797,13 @@ impl<'a> PlanContext<'a> {
     /// Prompts longer than the model's position limit are refused before the forward (422, "maximum context length",
     /// the marker benchmark runners read as a capacity limit), not left to fail inside the backend (500).
     /// With adaptive orders also returns the token lengths of the reversed-order prompts of the probe.
-    fn check_context(&self, plan: &RequestPlan) -> Result<Option<ReverseTokens>, PlanError> {
+    fn context_lengths(&self, plan: &RequestPlan) -> Result<ContextLengths, PlanError> {
         let limit = self.manifest.config.max_positions();
         let mut errs = Vec::new();
+        let mut request_longest = 0;
         let mut reverse = (self.manifest.orders == OptionOrders::Auto).then_some(ReverseTokens::default());
         for p in &plan.prepared {
+            self.check_stop()?;
             // a transient probe of every option order (at most three times this question's buffers, plus the
             // tokenizer's transient per prompt byte), returned at the end of this iteration
             let _probe = match self.bounded() {
@@ -805,6 +843,7 @@ impl<'a> PlanContext<'a> {
                 }
             }
             let longest = possible.as_ref().unwrap_or(p).orders.iter().map(|o| o.input_ids.len()).max().unwrap_or(0);
+            request_longest = request_longest.max(longest);
             if longest > limit {
                 let name = p.item.name.split('#').next().unwrap_or(&p.item.name).to_string();
                 if errs.iter().any(|e: &crate::request::FieldError| e.loc.get(2) == Some(&Value::from(name.clone()))) {
@@ -821,16 +860,137 @@ impl<'a> PlanContext<'a> {
                 ));
             }
         }
-        if errs.is_empty() {
-            Ok(reverse)
-        } else {
-            Err(DecideError::Unsupported(errs).into())
-        }
+        Ok(ContextLengths { reverse, longest: request_longest, errors: errs })
     }
 
-    /// Plan validated items (see [`PlanContext::plan_request`]).
+    /// Only state text is replaced. Parsed items keep their original language, question/options, facts metadata
+    /// and task-generated candidate labels. Retokenization has at most two CPU attempts, without GPU calls.
+    fn plan_with_overflow(
+        &self,
+        items: Vec<Item>,
+        media: Option<Arc<crate::media::ProcessedMedia>>,
+    ) -> Result<RequestPlan, PlanError> {
+        let before = self.budget.retained();
+        let mut plan = self.plan_items_with_media(items, media)?;
+        let mut lengths = self.context_lengths(&plan)?;
+        if lengths.errors.is_empty() {
+            plan.auto_reverse = lengths.reverse;
+            return Ok(plan);
+        }
+        if self.options.overflow.policy() == crate::overflow::ContextOverflow::Refuse || plan.media.is_some() {
+            return Err(DecideError::Unsupported(lengths.errors).into());
+        }
+        let original_state = &question_item(&plan.questions[0], &plan.prepared).state;
+        if plan.questions.iter().any(|q| &question_item(q, &plan.prepared).state != original_state) {
+            return Err(DecideError::Unsupported(vec![crate::request::FieldError::new(
+                vec!["body".into(), "state".into()],
+                "context truncation requires one shared state; plan different states as separate requests",
+                "unsupported_feature",
+            )])
+            .into());
+        }
+        self.check_stop()?;
+        let original_bytes = if self.budget.is_bounded() {
+            plan.questions
+                .iter()
+                .map(|q| item_bytes(question_item(q, &plan.prepared)))
+                .sum::<u64>()
+                .saturating_add(plan.questions.len() as u64 * std::mem::size_of::<Item>() as u64)
+        } else {
+            0
+        };
+        let _originals = self.budget.reserve(PlanStage::Items, original_bytes)?;
+        let originals: Vec<Item> = plan.questions.iter().map(|q| question_item(q, &plan.prepared).clone()).collect();
+        drop(plan);
+        self.budget.release_attempt(before);
+        // An overflowing prompt necessarily belongs to a question.
+        let state = &originals[0].state;
+        // Tokenizer normalization/alignments, ids and offsets stay counted through both attempts. Decode may hold
+        // a vocabulary string per token; the reservation also covers the UTF-8 cut buffers.
+        let _cut = self
+            .budget
+            .reserve(PlanStage::Tokens, (state.len() as u64).saturating_mul(TOKENIZER_BYTES_PER_BYTE + 64))?;
+        self.check_stop()?;
+        let (ids, offsets) = self.tok.encode_char_offsets(state)?;
+        let mut excess = 0usize;
+        for _ in 0..2 {
+            self.check_stop()?;
+            excess = excess.saturating_add(lengths.longest - self.manifest.config.max_positions());
+            let Some(keep) = ids.len().checked_sub(excess.saturating_add(32)).filter(|k| *k >= 32) else {
+                break;
+            };
+            // Python round uses ties-to-even. A byte-fallback character can occupy several tokens with overlapping
+            // offsets; move each boundary inward before decode so it never produces a partial Unicode character.
+            let mut head = (keep as f64 * self.options.overflow.head_share()).round_ties_even() as usize;
+            let mut tail = keep - head;
+            while head > 0 && head < offsets.len() && offsets[head].0 < offsets[head - 1].1 {
+                head -= 1;
+            }
+            while tail > 0
+                && tail < offsets.len()
+                && offsets[offsets.len() - tail].0 < offsets[offsets.len() - tail - 1].1
+            {
+                tail -= 1;
+            }
+            if head + tail < 32 {
+                break;
+            }
+            let mut cut = self.tok.decode(&ids[..head])?;
+            cut.push_str("\n[…]\n");
+            if tail > 0 {
+                cut.push_str(&self.tok.decode(&ids[ids.len() - tail..])?);
+            }
+            if originals.iter().any(|it| it.evidence) {
+                return Err(DecideError::Unsupported(vec![crate::request::FieldError::new(
+                    vec!["body".into(), "evidence".into()],
+                    "evidence is not available for a state truncated to the context (shorten the state)",
+                    "unsupported_feature",
+                )])
+                .into());
+            }
+            self.check_stop()?;
+            // Reserve before cloning (including the transient original state inside each clone).
+            let copies = self.budget.reserve(
+                PlanStage::Items,
+                original_bytes.saturating_add((cut.len() as u64).saturating_mul(originals.len() as u64)),
+            )?;
+            let items = originals
+                .iter()
+                .map(|it| {
+                    let mut it = it.clone();
+                    it.state.clone_from(&cut);
+                    it
+                })
+                .collect();
+            plan = self.plan_items_with_media(items, None)?;
+            lengths = self.context_lengths(&plan)?;
+            if lengths.errors.is_empty() {
+                plan.auto_reverse = lengths.reverse;
+                plan.truncated = Some(crate::overflow::Truncation {
+                    state_tokens: ids.len(),
+                    head_tokens: head,
+                    tail_tokens: tail,
+                    dropped_tokens: ids.len() - head - tail,
+                    head_share: self.options.overflow.head_share(),
+                });
+                copies.retain();
+                return Ok(plan);
+            }
+            drop(plan);
+            self.budget.release_attempt(before);
+        }
+        Err(DecideError::Unsupported(lengths.errors).into())
+    }
+
+    /// Plan validated items (see [`PlanContext::plan_request`]). Truncation requires one shared request state.
     pub fn plan_items(&self, items: Vec<Item>) -> Result<RequestPlan, PlanError> {
-        self.plan_items_with_media(items, None)
+        if self.options.overflow.policy() == crate::overflow::ContextOverflow::Truncate {
+            self.plan_with_overflow(items, None)
+        } else {
+            // Preserve the low-level wrapper: refusal/context checks belong to plan_request, without adding
+            // reversed-order tokenization to existing callers of plan_items.
+            self.plan_items_with_media(items, None)
+        }
     }
 
     fn plan_items_with_media(
@@ -847,6 +1007,8 @@ impl<'a> PlanContext<'a> {
             calibration_unvalidated: self.manifest.calibration_unvalidated.is_some(),
             media,
             auto_reverse: None,
+            truncated: None,
+            task_bytes: 0,
         };
         let budget = self.bounded();
         for mut it in items {
@@ -932,6 +1094,19 @@ impl<'a> PlanContext<'a> {
             }
         }
         Ok(plan)
+    }
+}
+
+struct ContextLengths {
+    reverse: Option<ReverseTokens>,
+    longest: usize,
+    errors: Vec<crate::request::FieldError>,
+}
+
+fn question_item<'a>(q: &'a QuestionPlan, prepared: &'a [Prepared]) -> &'a Item {
+    match q {
+        QuestionPlan::Direct(i) => &prepared[*i].item,
+        QuestionPlan::Fixed(it) | QuestionPlan::Groups { item: it, .. } | QuestionPlan::Multi { item: it, .. } => it,
     }
 }
 
@@ -1041,6 +1216,9 @@ pub fn result_bound(model: &str, plan: &RequestPlan) -> u64 {
     if plan.media.is_some() {
         bytes = bytes.saturating_add(256);
     }
+    if plan.truncated.is_some() {
+        bytes = bytes.saturating_add(256);
+    }
     for q in &plan.questions {
         let item = match q {
             QuestionPlan::Direct(i) => &plan.prepared[*i].item,
@@ -1142,7 +1320,7 @@ pub fn retained_bound(plan: &RequestPlan) -> u64 {
             }
         })
         .sum();
-    let tasks = if plan.tasks.is_some() { 1 << 20 } else { 0 };
+    let tasks = if plan.tasks.is_some() { plan.task_bytes.max(1 << 20) } else { 0 };
     prepared
         .saturating_add(questions)
         .saturating_add(plan.media.as_deref().map_or(0, media_bytes))
@@ -1534,7 +1712,12 @@ pub fn exec_bound(
     let continuation = if plan.tasks.is_some() {
         let body =
             json_value_bound(input_bytes.saturating_add(result_bound) / 2, input_bytes.saturating_add(result_bound));
-        body.saturating_add(retained_bound(plan)).saturating_add(response)
+        // A truncated first round can be much smaller than the continuation's ORIGINAL state. `task_bytes`
+        // reserves 16 × the original expansion; another factor of 32 covers tokenizer/decoder scratch, the
+        // two state copies of state_twice, auto probes and live retry buffers of continuation planning.
+        body.saturating_add(retained_bound(plan))
+            .saturating_add(response)
+            .saturating_add(plan.task_bytes.saturating_mul(32))
     } else {
         0
     };

@@ -145,6 +145,50 @@ brzegowych, [raport](../reports/typesafe-api-edge-cases/README.md)):
   komunikat zawiera „maximum context length”; sprawdzane przed forwardem).
   `/v1/basal` zwraca wtedy 422 `{"error": ...}` z tym samym komunikatem.
 
+### Długi kontekst
+
+CLI `--context-overflow refuse|truncate` i per-model YAML `context_overflow`
+wybierają politykę przed inferencją. **Domyślnie `refuse`**, w odróżnieniu od
+domyślnego `truncate` upstream 2.4.1. `--truncate-head` / YAML `truncate_head`
+to skończona liczba w [0,1], domyślnie 1/3. Jawne CLI nadpisuje odpowiednie
+pole każdego modelu YAML. Opcje działają również w lokalnym kliencie,
+prepare/check-prompts, eksporcie i poleceniach z opcjami GPU.
+
+Planer CPU sprawdza rzeczywisty najdłuższy prompt wszystkich gałęzi, również
+możliwy odwrócony porządek `orders: auto` i obie kopie `state_twice`.
+Po przekroczeniu limitu `truncate` zachowuje początek i koniec **oryginalnego**
+stanu, wstawiając `\n[…]\n`. Odejmowane są nadmiar i margines 32 tokenów;
+musi pozostać co najmniej 32 tokeny. Udział początku jest zaokrąglany jak
+Python `round` (remisy do parzystej). Granica wewnątrz wielotokenowego znaku
+Unicode jest przesuwana do środka, aby nie dekodować części znaku; liczniki
+podają faktycznie zachowane tokeny. Najwyżej dwie próby CPU za każdym razem
+tną oryginał z narastającym nadmiarem i ponownie tokenizują pełne prompty.
+Jeśli wynik się nie mieści, odpowiedź to zwykła odmowa kontekstu 422; długie
+pytania/opcje lub zbyt mały stan mogą uniemożliwić skrócenie. Nie ma retry GPU.
+
+Pytania, opcje, ich kolejność i język wykryty z całego stanu pozostają zachowane.
+`facts: auto` jest wstrzykiwane przed cięciem. Zadania zachowują oryginalne
+teksty kandydatów, schema, source spans i metadane; cięciu podlega wyłącznie
+stan ich promptów decyzyjnych. Kontynuacja jest planowana tym samym mechanizmem
+z oryginalnego stanu. Jej tokeny/gałęzie nadal są doliczane, długość jest
+maksimum, a `usage.truncated` opisuje większe faktyczne cięcie obu rund.
+
+Media/TypeSafe assets zachowują odmowę kontekstu również w trybie `truncate`,
+tak jak ścieżka mediów upstream; placeholdery nie są przycinane. Evidence
+z faktycznie skracanym stanem otrzymuje 422 **przed forwardem**, bez przesuniętych
+spanów. Stan mieszczący się w limicie zachowuje dotychczasową obsługę evidence.
+Planowanie offline i forki long/tła używają tych samych efektywnych opcji;
+budżet hosta i anulowanie nadal mogą odmówić planowania.
+Biblioteczne `plan_items` wymaga jednego wspólnego stanu, gdy konieczne jest
+skrócenie; dla różnych stanów należy planować osobne żądania. Niskopoziomowe
+`prepare(Item)` / `prepare_orders` przygotowują surowy protokół diagnostyczny,
+bez polityki całego żądania (dotyczy też części bench surowego eksportu).
+
+Tylko po faktycznym skróceniu pojawia się `usage.truncated` z polami
+`state_tokens`, `head_tokens`, `tail_tokens`, `dropped_tokens`, `head_share`.
+Tokeny markera nie są zachowanymi tokenami stanu; `input_tokens` liczy pełne
+wykonane prompty po skróceniu. Brak skrócenia oznacza brak tego pola.
+
 ### Odpowiedź
 
 | Typ | Pola |

@@ -57,6 +57,7 @@ use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot, Semaphore};
 
 pub(crate) mod batches;
+mod decisions;
 mod http;
 mod metrics;
 mod systemone;
@@ -77,6 +78,7 @@ pub enum SystemOneDialect {
 
 pub struct ServeOptions {
     pub systemone_dialect: SystemOneDialect,
+    pub log_decisions: Option<std::path::PathBuf>,
     pub addr: SocketAddr,
     /// `release_date` of GET /v1/models (TypeSafe ModelMetadata; upstream reports its engine release date)
     pub release_date: String,
@@ -311,6 +313,7 @@ fn least_loaded(replicas: &[ReplicaRoute], start: usize) -> Option<&ReplicaRoute
 
 struct App {
     systemone_dialect: SystemOneDialect,
+    decisions: Option<decisions::DecisionLog>,
     metrics: Option<Metrics>,
     /// Queues of every served model, by name.
     routes: HashMap<String, Route>,
@@ -721,7 +724,7 @@ async fn decide(
         );
     }
     let model = match model {
-        Ok(m) => m,
+        Ok(m) => m.to_owned(),
         Err(m) => return error_body(dialect, basal_core::request::api_usage_error(format!("Unknown model: {m}"))),
     };
     let job_permit = match app.jobs.clone().try_acquire_owned() {
@@ -767,22 +770,31 @@ async fn decide(
     } else {
         None
     };
-    let admitted = app.metrics.as_ref().map(|metrics| metrics.admitted(model));
-    let sent = app.routes[model].send(Job {
+    let admitted = app.metrics.as_ref().map(|metrics| metrics.admitted(&model));
+    let queued = slot.queue();
+    // Hash only when enabled, on the original incoming body. Moving admission permits through the blocking
+    // worker keeps cancelled hashing jobs bounded and retains their large-body allocation until it is released.
+    let (body, request_sha256, job_permit, large) = if app.decisions.is_some() {
+        match decisions::DecisionLog::hash_request(body, job_permit, large).await {
+            Ok(hashed) => (hashed.body, Some(hashed.hash), hashed.job, hashed.large),
+            Err(error) => return error_body(dialect, DecideError::Internal(error)),
+        }
+    } else {
+        (body, None, job_permit, large)
+    };
+    let sent = app.routes[&model].send(Job {
         body,
         dialect,
         arrived,
         reply: tx,
         load: None,
         online_demand: None,
-        queued: Some(slot.queue()),
+        queued: Some(queued),
         _media_permit: media_permit,
         _large_body_permit: large,
         _job_permit: job_permit,
     });
     let reply = if sent { rx.await.ok() } else { None };
-    drop(slot);
-    drop(admitted);
     let Some((result, timing)) = reply else {
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -792,6 +804,13 @@ async fn decide(
             },
         );
     };
+    // One final dispatch point for both online dialects, after auto orders and native task continuations.
+    let result = match (result, &app.decisions, request_sha256) {
+        (Ok(response), Some(log), Some(hash)) => log.record(hash, response).await.map_err(DecideError::Internal),
+        (result, _, _) => result,
+    };
+    drop(slot);
+    drop(admitted);
     match result {
         Ok(mut v) => {
             // upstream basal-1.5 usage field: wall time of the request in the server
@@ -1180,6 +1199,8 @@ fn serve_inner<B: Backend + Send + 'static>(
     let mut threads = Vec::new();
     let batches_enabled = opts.batches.is_some();
     let (device_budget, online_reserves) = background_limits(&models, batches_enabled)?;
+    // Synchronous startup, before any readiness message or HTTP runtime. Every subsequent exit joins it below.
+    let decisions = opts.log_decisions.as_deref().map(decisions::DecisionWriter::open).transpose()?;
     let result = (|| -> Result<()> {
         let mut routes = HashMap::new();
         let mut batch_profiles = Vec::new();
@@ -1302,6 +1323,7 @@ fn serve_inner<B: Backend + Send + 'static>(
         let batch_default_model = default_model.clone();
         let app = Arc::new(App {
             systemone_dialect: opts.systemone_dialect,
+            decisions: decisions.as_ref().map(decisions::DecisionWriter::log),
             metrics,
             routes,
             names,
@@ -1422,7 +1444,9 @@ fn serve_inner<B: Backend + Send + 'static>(
     for thread in threads {
         panicked |= thread.join().is_err();
     }
+    let decisions_result = decisions.map(decisions::DecisionWriter::finish).transpose();
     result?;
+    decisions_result?;
     anyhow::ensure!(!panicked, "GPU worker panicked");
     Ok(())
 }

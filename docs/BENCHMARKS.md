@@ -486,6 +486,10 @@ tabela GEMM tylko nazwą pliku, bez ścieżki katalogu użytkownika.
 Opcje `--max-batch-tokens`, `--max-inflight`, `--max-large-inflight`, `--schedule`, `--long-tokens`
 i `--long-slice-ms` mają takie same domyślne wartości jak `serve`.
 Benchmark nie czyta ambientowej konfiguracji `basal-serve.yml`.
+`settings` zawiera efektywne `context_overflow` i `truncate_head`, tak jak
+profil batchy. Domyślne `refuse` zachowuje pomiar limitu kontekstu; przy
+jawnym `--context-overflow truncate` wynik może opisywać skrócone wejście,
+oznaczone w `usage.truncated`. Benchmark nie włącza rejestru decyzji serwera.
 Dla izolowanego pomiaru nasycenia dobierz `--max-inflight` i
 `--max-large-inflight` z zapasem względem liczby klientów i pamięci hosta.
 Domyślny limit dużych żądań wynosi 4 i może zatrzymać rampę wcześniej niż GPU.

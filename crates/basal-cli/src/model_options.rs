@@ -6,6 +6,7 @@ use anyhow::{ensure, Context, Result};
 use basal_core::calibration::{CalibrationSource, ServedIdentity};
 use basal_core::engine::AutoOrderSettings;
 use basal_core::manifest::ModelLoadOptions;
+use basal_core::overflow::{ContextOverflow, OverflowSettings};
 use basal_core::prompt::PromptLayout;
 use basal_core::ModelManifest;
 use clap::Args;
@@ -38,6 +39,14 @@ pub(crate) struct ModelOptions {
     #[arg(long, num_args = 2, value_names = ["LO", "HI"])]
     #[serde(default)]
     pub auto_band: Option<Vec<f64>>,
+    /// Long text context: refuse (default), or drop the state's middle before inference
+    #[arg(long, value_parser = ["refuse", "truncate"])]
+    #[serde(default)]
+    pub context_overflow: Option<String>,
+    /// Fraction of retained state tokens taken from its start, finite in `[0,1]` (default 1/3)
+    #[arg(long)]
+    #[serde(default)]
+    pub truncate_head: Option<f64>,
 }
 
 impl ModelOptions {
@@ -48,6 +57,8 @@ impl ModelOptions {
             || self.strict_calibration
             || self.auto_tau.is_some()
             || self.auto_band.is_some()
+            || self.context_overflow.is_some()
+            || self.truncate_head.is_some()
     }
     /// Explicit shared CLI values override per-model YAML; one calibration source replaces the other.
     pub(crate) fn apply_cli(&mut self, cli: &Self) {
@@ -65,6 +76,21 @@ impl ModelOptions {
         if cli.auto_band.is_some() {
             self.auto_band.clone_from(&cli.auto_band);
         }
+        if cli.context_overflow.is_some() {
+            self.context_overflow.clone_from(&cli.context_overflow);
+        }
+        if cli.truncate_head.is_some() {
+            self.truncate_head = cli.truncate_head;
+        }
+    }
+
+    pub(crate) fn overflow(&self) -> Result<OverflowSettings> {
+        let policy = match self.context_overflow.as_deref().unwrap_or("refuse") {
+            "refuse" => ContextOverflow::Refuse,
+            "truncate" => ContextOverflow::Truncate,
+            other => anyhow::bail!("unknown context_overflow {other:?} (refuse, truncate)"),
+        };
+        Ok(OverflowSettings::new(policy, self.truncate_head.unwrap_or(1.0 / 3.0))?)
     }
 
     pub(crate) fn auto_orders(&self) -> Result<AutoOrderSettings> {
@@ -82,6 +108,7 @@ impl ModelOptions {
             PromptLayout::parse(layout)?;
         }
         self.auto_orders()?;
+        self.overflow()?;
         Ok(())
     }
 
@@ -133,13 +160,20 @@ impl ModelOptions {
 
 /// Effective prompt, calibration and adaptive-order settings that change results (batch fingerprints, benchmark
 /// reports): the calibration by exact content hash, never by path or identity. Absent hash without `off`: no file.
-pub(crate) fn record_effective_settings(target: &mut Value, manifest: &ModelManifest, auto: AutoOrderSettings) {
+pub(crate) fn record_effective_settings(
+    target: &mut Value,
+    manifest: &ModelManifest,
+    auto: AutoOrderSettings,
+    overflow: OverflowSettings,
+) {
     let calibration = &manifest.calibration_provenance;
     target["orders"] = manifest.orders.metadata();
     target["layout"] = manifest.layout.as_str().into();
     target["calibration"] =
         json!({"content_sha256": calibration.content_sha256, "off": calibration.off, "strict": calibration.strict});
     target["auto_orders"] = json!(auto);
+    target["context_overflow"] = overflow.policy().as_str().into();
+    target["truncate_head"] = overflow.head_share().into();
 }
 
 /// API metadata warning without local source identities or the calibration's full path.
