@@ -2,6 +2,15 @@
 
 Opis projektu: [README.md](README.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
+## Plany i stan pracy
+
+- Plany implementacji, briefy subagentów, zapisy przeglądów oraz bieżący stan
+  zadań przechowuj lokalnie w ignorowanym `.itsol/`, poza Gitem. Nie umieszczaj
+  ich w `docs/` ani commitach. Subagentom przekazuj je w zleceniu lub przez
+  wskazanie lokalnej ścieżki; worktree nie kopiuje ignorowanych plików.
+- W repozytorium pozostają trwałe instrukcje, dokumentacja wdrożonego zachowania
+  i końcowe raporty wyników. Nie publikuj w nich roboczego planu ani kolejki zadań.
+
 ## Jakość kodu Rust
 
 - Przy zmianach ownership, publicznego API, błędów, async/współbieżności,
@@ -11,6 +20,18 @@ Opis projektu: [README.md](README.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.
   Zasady projektu, w tym ograniczenia testów i pomiarów, mają pierwszeństwo.
 - Najpierw poprawność i czytelność. Optymalizacje, dodatkowe alokacje i kopie
   oceniaj na podstawie wymagań i pomiarów, bez komplikowania API na zapas.
+- Każda dodatkowa abstrakcja, zależność lub warstwa konfiguracji musi służyć
+  wymaganej funkcjonalności, mierzalnej poprawie wydajności albo konkretnemu
+  uproszczeniu utrzymania. Wybieraj najmniejsze rozwiązanie spełniające kontrakt;
+  nie buduj mechanizmów rozszerzania dla hipotetycznych potrzeb.
+- Każda faza implementacji ma przegląd poprawności oraz osobny etap upraszczania
+  kodu przez Opus 5.5 przed integracją. Uproszczenie zachowuje kontrakt i obliczenia;
+  brak uzasadnionych zmian jest poprawnym wynikiem tego etapu. Nie nazywaj
+  niezmierzonej zmiany optymalizacją. Po zmianach ponów właściwe kontrole.
+- Przy równoległej pracy używaj osobnych worktree i jawnej własności plików.
+  Wspólne kontrakty i pliki integruj kolejno, po przeglądzie; agenci nie scalają
+  samodzielnie do `main`. Izolacja worktree nie zastępuje przeglądu konfliktów
+  semantycznych po integracji.
 - Dla danych tylko odczytywanych preferuj referencje i slice'y. Ograniczaj
   widoczność API, waliduj dane na granicach i dokumentuj invariants.
 - W publicznym API bibliotek preferuj typowane błędy; w CLI `anyhow` z kontekstem.

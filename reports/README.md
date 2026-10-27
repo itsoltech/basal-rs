@@ -1,5 +1,9 @@
 # Raporty
 
+[API względem upstream basal-serve v2.4.1](upstream-api-audit-2026-10-27/README.md)
+— przegląd kontraktów HTTP, klientów, layoutów, MCP i opcji serwera;
+ustalenia na podstawie źródeł, bez uruchamiania inferencji.
+
 [Pico: refaktor bez zmiany obliczeń, RTX 4060](pico-refactor-rtx4060-2026-10-27/README.md)
 — uporządkowanie backendu z Opus 5.5, bitowa kwalifikacja 13 konfiguracji
 i ABBA dla długiego oraz czterech krótkich dokumentów.
