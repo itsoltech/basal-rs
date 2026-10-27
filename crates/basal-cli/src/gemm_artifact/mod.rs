@@ -407,19 +407,19 @@ fn pinned_problem(v: &Value, dtype: &str, shapes: &[(usize, usize)]) -> Option<S
     }
 }
 
-/// Why the Gemma backend would refuse table `v` in a `dtype` forward (None: it would not): a batch-invariant table
+/// Why a backend requiring invariant GEMMs would refuse table `v` in a `dtype` forward: a batch-invariant table
 /// with at least one entry, all of `dtype`. Shapes it does not cover keep the fixed per-prompt GEMMs.
-fn gemma_problem(v: &Value, dtype: &str) -> Option<String> {
+fn invariant_problem(v: &Value, dtype: &str) -> Option<String> {
     let entries = v["entries"].as_array().map_or(&[][..], Vec::as_slice);
     if v["invariant"].as_bool() != Some(true) {
-        Some("not a batch-invariant table (the Gemma backend loads only those)".into())
+        Some("not a batch-invariant table (this backend loads only those)".into())
     } else if entries.is_empty() {
         Some("a table without entries".into())
     } else {
         entries
             .iter()
             .find(|e| e["dtype"].as_str() != Some(dtype))
-            .map(|e| format!("entry of dtype {} in a {dtype} Gemma forward", e["dtype"]))
+            .map(|e| format!("entry of dtype {} in a {dtype} forward", e["dtype"]))
     }
 }
 
@@ -457,6 +457,13 @@ pub fn resolve(
     let pinned = reproducibility == Reproducibility::Pinned;
     let name = &manifest.name;
     let device = *devices.first().with_context(|| format!("{name}: no GPU for the GEMM table"))?;
+    if profile.kernel_set == basal_gpu::KernelSet::Qwen35V1 {
+        ensure!(
+            matches!(request, TableRequest::Auto | TableRequest::None),
+            "{name}: Qwen3.5 reference GEMMs support gemm_table auto or none only"
+        );
+        return Ok(ResolvedGemm { table: None, tables_apply: false, reproducibility });
+    }
     // The algorithm search and the tables support half precision only; FP32 uses the reference matmul path, and
     // Metal / Intel have no cuBLASLt: nothing to choose or pin.
     let version = basal_gpu::cublaslt_version().filter(|_| precision != Precision::F32);
@@ -472,14 +479,17 @@ pub fn resolve(
     // algorithms are checked on every GPU for a reproducible plan, for a table several GPUs share and for Gemma
     // (whose backend accepts only an invariant table of entries in its compute dtype; partial coverage stays allowed)
     let shared = devices.len() > 1;
-    let gemma = matches!(manifest.config, basal_core::architecture::Architecture::Gemma4(_));
+    let gemma = matches!(
+        manifest.config,
+        basal_core::architecture::Architecture::Gemma4(_) | basal_core::architecture::Architecture::Qwen35(_)
+    );
     let dtype = precision_name(precision);
     let found = |stored: Option<StoredFile>, snapshot: Snapshot, provenance: GemmProvenance| -> Result<ResolvedGemm> {
         let algorithms = pinned || gemma || (shared && snapshot.value["invariant"].as_bool() == Some(true));
         let context =
             || format!("{name}: GEMM table {}:{} on the model's GPUs", provenance.as_str(), &snapshot.digest[..16]);
         if gemma {
-            if let Some(why) = gemma_problem(&snapshot.value, dtype) {
+            if let Some(why) = invariant_problem(&snapshot.value, dtype) {
                 return Err(anyhow::anyhow!(why)).with_context(context);
             }
         }
@@ -582,9 +592,12 @@ pub fn resolve(
             basal_gpu::gemm_search_version()
         );
     }
-    if matches!(manifest.config, basal_core::architecture::Architecture::Gemma4(_)) {
+    if matches!(
+        manifest.config,
+        basal_core::architecture::Architecture::Gemma4(_) | basal_core::architecture::Architecture::Qwen35(_)
+    ) {
         crate::note!(
-            "{name}: using fixed per-prompt GEMMs; an invariant Gemma table for this GPU can be generated with gemm-search"
+            "{name}: using fixed per-prompt GEMMs; an invariant table for this GPU can be generated with gemm-search"
         );
         return Ok(ResolvedGemm { table: None, tables_apply: true, reproducibility });
     }

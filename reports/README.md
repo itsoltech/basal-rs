@@ -1,5 +1,13 @@
 # Raporty
 
+[Pico: refaktor bez zmiany obliczeń, RTX 4060](pico-refactor-rtx4060-2026-10-27/README.md)
+— uporządkowanie backendu z Opus 5.5, bitowa kwalifikacja 13 konfiguracji
+i ABBA dla długiego oraz czterech krótkich dokumentów.
+
+[Pico: pojedyncze FP16 i kopie DeltaNet, RTX 4060](pico-singlepass-rtx4060-2026-10-27/README.md)
+— emulacja FP16 nie spełniła progu jakości; osobne potwierdzenie ABBA
+usunięcia ponownego stack i profile rzeczywistych żądań HTTP.
+
 Nowe raporty zapisują tylko: co sprawdzono, wynik, zmierzoną poprawę lub
 regresję oraz zakres weryfikacji. Warunki i ograniczenia podajemy krótko,
 gdy są potrzebne do interpretacji liczb. Hipotezy i plany nie trafiają do
@@ -19,6 +27,13 @@ Odsyłacze starszych raportów do lokalnego katalogu `.itsol/` mają
 
 | Katalog | Zawartość |
 |---|---|
+| [pico-cpu-graphs-rtx4060-2026-10-26](pico-cpu-graphs-rtx4060-2026-10-26/README.md) | Budżety CPU 1/2/4/8, profil GPU, rezydentne projekcje FP32; odrzucone grafy MLP z OOM oraz globalny fragment FP32 512 z regresją krótkiego dokumentu |
+| [pico-fast-fp32-audit-rtx4060-2026-10-26](pico-fast-fp32-audit-rtx4060-2026-10-26/README.md) | Audyt zachowanych odpowiedzi upstream fast około 270 ms: decyzje zgodne na zbadanym zestawie, lecz próg ≤0,0001 względem FP32 przekroczony; osobno eager BF16 i v4 |
+| [pico-f32-fast-rtx4060-2026-10-26](pico-f32-fast-rtx4060-2026-10-26/README.md) | Odrzucony prototyp bliski FP32: próg ≤0,0001 i zgodne decyzje na zbadanym zestawie, regresja krótkich i długich dokumentów względem fast i v4; zachowane FAIL i SIGNAL |
+| [pico-parallel-rtx4060-2026-10-26](pico-parallel-rtx4060-2026-10-26/README.md) | Pico CUDA v4: C1/5080 szybsze od eager w ABBA, Tensor Cores długiego attention, FP32 DeltaNet, kontrola decyzji i osobny pomiar fast |
+| [pico-long-c1-rtx4060-2026-10-26](pico-long-c1-rtx4060-2026-10-26/README.md) | Pico CUDA v3: C1 i 5080 tokenów względem v2 i eager, maskowanie na GPU, kafelki attention, kontrola FP32 i niezmienności krótkich promptów oraz rozwidleń długiego prefiksu |
+| [pico-speed-rtx4060-2026-10-26](pico-speed-rtx4060-2026-10-26/README.md) | Pico CUDA v2: ABBA eager/fast, krótkie C1/C8/C32, 255/5080 tokenów, szybsze krótkie zadania, wolniejszy długi kontekst, OOM fast i zwiększona różnica BF16 względem FP32 |
+| [pico-rtx4060-2026-10-26](pico-rtx4060-2026-10-26/README.md) | Pico Qwen3.5: FP32/BF16 względem upstream FP32, obie kolejności, 255 opcji i 5080 tokenów, bitowe single/tree, oba endpointy C1/C4; zakres i niepowodzenia przygotowania zachowane |
 | [latency-basal2-ada-2026-10-15](latency-basal2-ada-2026-10-15/README.md) | mini/4.5B/max: jedno pytanie, jeden klient HTTP, 128–32768 tokenów; 25 par upstream fast vs basal-rs oraz osobne profile GPU |
 | [perf-basal2-fivegpu-2026-10-14](perf-basal2-fivegpu-2026-10-14/README.md) | mini/4.5B/max 2.0 na pięciu GPU NVIDIA: HTTP 1/8/32, energia, ruch mieszany i zgodność z FP32; FAIL powtarzalności upstream i przerwane sesje zachowane |
 | [upstream-2.0-refactor-2026-10-14](upstream-2.0-refactor-2026-10-14/README.md) | review Opus 5.5, precyzja nieznanych repozytoriów, wspólne serializery 529/metadanych i bitowe A/B Intel |

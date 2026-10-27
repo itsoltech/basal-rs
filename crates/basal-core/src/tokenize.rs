@@ -44,6 +44,18 @@ impl BasalTokenizer {
                     == Some(&serde_json::json!({"type":"Replace", "pattern":{"String":" "}, "content":"▁"})),
                 "unsupported Gemma normalizer"
             );
+        } else if style == ChatStyle::Qwen35 {
+            // Qwen's NFC + byte-level BPE is used as shipped, with no Llama Metaspace rewrite.
+            ensure!(
+                json.get("normalizer") == Some(&serde_json::json!({"type":"NFC"})),
+                "unsupported Qwen3.5 normalizer"
+            );
+            ensure!(
+                json.pointer("/pre_tokenizer/type").and_then(|v| v.as_str()) == Some("Sequence")
+                    && json.pointer("/pre_tokenizer/pretokenizers/1/type").and_then(|v| v.as_str())
+                        == Some("ByteLevel"),
+                "unsupported Qwen3.5 pre-tokenizer"
+            );
         } else {
             // basal-1.0 ships "always" and transformers 5 runs it as "first"; basal-1.5 ships "first".
             let pre = json.get_mut("pre_tokenizer").context("tokenizer.json: pre_tokenizer missing")?;

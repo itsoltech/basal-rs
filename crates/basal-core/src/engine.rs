@@ -245,7 +245,7 @@ pub struct Engine<B: Backend> {
 impl<B: Backend> Engine<B> {
     pub fn new(manifest: ModelManifest, backend: B) -> Result<Self> {
         let tok = BasalTokenizer::load_for(&manifest.dir.join("tokenizer.json"), manifest.chat_style)?;
-        if tok.token_id(&manifest.bos_token).is_none() {
+        if manifest.chat_style != ChatStyle::Qwen35 && tok.token_id(&manifest.bos_token).is_none() {
             bail!("bos token {} is not in the vocabulary", manifest.bos_token);
         }
         Ok(Self {

@@ -119,7 +119,7 @@ struct Cli {
 #[derive(Args, Clone)]
 struct ModelArgs {
     /// Model: a local directory (config.json, basal.json, tokenizer.json, model.safetensors, CALIBRATION.json) or a
-    /// Hugging Face repository: name (owner Remek; mini, 4.5B, max), owner/name, with @revision
+    /// Hugging Face repository: name (owner Remek; pico, mini, 4.5B, max), owner/name, with @revision
     #[arg(long, default_value = ".models/basal-1.5-max")]
     model: String,
 }
@@ -141,7 +141,7 @@ struct GpuArgs {
     /// Option orders: 1, 2, auto or `2le<N>`; default 2 for format 1, 1 for format 2
     #[arg(long)]
     orders: Option<String>,
-    /// Weight/activation precision: auto (Llama f16; measured Omni/GPU pairs f16, other Gemma bf16), f16, bf16 or f32
+    /// Weight/activation precision: auto (Llama f16; Gemma profile default; Qwen3.5 CUDA bf16, Metal f32), f16, bf16 or f32
     #[arg(long, default_value = "auto")]
     dtype: String,
     /// Attention arithmetic: auto, accurate (Llama original, Gemma FP32 products), or balanced (CUDA f16 Llama)
@@ -461,7 +461,7 @@ enum Cmd {
     },
     /// Write a configuration file for `basal serve` (basal-serve.yml in the working directory)
     Init {
-        /// Served models: 2.0-mini/2.0-4.5B/2.0-max, omni-mini/omni-max, name (owner Remek), owner/name,
+        /// Served models: pico, 2.0-mini/2.0-4.5B/2.0-max, omni-mini/omni-max, name (owner Remek), owner/name,
         /// @revision, or a local directory; mini/4.5B/max select basal-1.5. Repeat
         /// for several (default: basal-2.0-4.5B)
         #[arg(long = "model")]
@@ -481,7 +481,7 @@ enum Cmd {
         /// admission options below. Default: BASAL_CONFIG, else basal-serve.yml in the working directory
         #[arg(long, conflicts_with_all = ["models", "gemm_table", "device", "replica_devices", "layer_split"])]
         config: Option<PathBuf>,
-        /// Model to serve: 2.0-mini/2.0-4.5B/2.0-max, omni-mini/omni-max, name (owner Remek), owner/name,
+        /// Model to serve: pico, 2.0-mini/2.0-4.5B/2.0-max, omni-mini/omni-max, name (owner Remek), owner/name,
         /// @revision, or a local directory; mini/4.5B/max select basal-1.5. Repeat
         /// for several (the options below apply to each). Without --model and a configuration file: basal-2.0-4.5B
         #[arg(long = "model")]

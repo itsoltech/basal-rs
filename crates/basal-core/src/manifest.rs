@@ -140,6 +140,7 @@ impl ModelManifest {
         let mut chat_style = match &config {
             crate::architecture::Architecture::Llama(_) => ChatStyle::Llama,
             crate::architecture::Architecture::Gemma4(_) => ChatStyle::Gemma4,
+            crate::architecture::Architecture::Qwen35(_) => ChatStyle::Qwen35,
         };
         let basal = read_json(&dir.join("basal.json"))?;
         let prompt_format = match basal.get("prompt") {
@@ -192,6 +193,15 @@ impl ModelManifest {
         }
         let tmpl = std::fs::read_to_string(dir.join("chat_template.jinja")).context("chat_template.jinja")?;
         match chat_style {
+            ChatStyle::Qwen35 => {
+                use sha2::{Digest, Sha256};
+                ensure!(
+                    format!("{:x}", Sha256::digest(tmpl.as_bytes()))
+                        == "273d8e0e683b885071fb17e08d71e5f2a5ddfb5309756181681de4f5a1822d80",
+                    "unsupported Qwen3.5 chat template"
+                );
+                ensure!(prompt_format == PromptFormat::Two, "Qwen3.5 Basal needs prompt format 2");
+            }
             ChatStyle::Llama => {
                 ensure!(tmpl == CHAT_TEMPLATE, "chat_template.jinja differs from the implemented template")
             }
@@ -217,8 +227,12 @@ impl ModelManifest {
             }
         }
         let tcfg = read_json(&dir.join("tokenizer_config.json"))?;
-        let bos_token =
-            tcfg.get("bos_token").and_then(Value::as_str).context("tokenizer_config.json: bos_token")?.to_string();
+        let bos_token = if chat_style == ChatStyle::Qwen35 {
+            ensure!(tcfg.get("bos_token").is_none_or(Value::is_null), "Qwen3.5 expects no BOS token");
+            String::new()
+        } else {
+            tcfg.get("bos_token").and_then(Value::as_str).context("tokenizer_config.json: bos_token")?.to_string()
+        };
         let base = dir.join("CALIBRATION.json");
         let mut calibration = if base.exists() { read_json(&base)? } else { serde_json::json!({}) };
         let fitted_orders = |c: &Value| -> Result<Option<OptionOrders>> {

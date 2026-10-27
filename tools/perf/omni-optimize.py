@@ -72,6 +72,10 @@ def main():
     p.add_argument('--candidate-gemm-table', help='auto, none, or invariant table path; supports {model} and {dtype}')
     p.add_argument('--cpu-threads', type=int, help='OMP, MKL and Rayon thread budget for both engines')
     p.add_argument('--candidate-cpu-threads', type=int, help='optional candidate override within the same external CPU quota')
+    p.add_argument('--candidate-diagnostic', nargs='+', choices=['phase-timing', 'qwen-f32-resident', 'qwen-packed-recurrence'],
+                   default=[], help='explicit, recorded native experiment overrides; inherited BASAL_* variables are cleared')
+    p.add_argument('--baseline-diagnostic', nargs='+', choices=['qwen-f32-resident', 'qwen-packed-recurrence'],
+                   default=[], help='explicit baseline overrides for comparisons using the same precision policy')
     p.add_argument('--candidate-dtype', choices=['auto', 'bf16', 'f16', 'f32'], default='bf16')
     p.add_argument('--candidate-inference-mode', choices=['auto', 'accurate', 'balanced'], default='auto')
     p.add_argument('--reference-python', type=Path, required=True)
@@ -97,6 +101,8 @@ def main():
     p.add_argument('--text-phases', nargs='+', choices=['ladder', 'short', 'mixed'],
                    help='select text workloads; defaults to ladder/short and optionally --mixed')
     p.add_argument('--load-samples', type=int, help='minimum requests per load phase, rounded up to complete corpus repetitions')
+    p.add_argument('--short-clients', type=int, nargs='+', default=[1, 8, 32],
+                   help='short-document client counts; use 1 for an isolated latency check')
     p.add_argument('--media-warmup-repeats', type=int, default=1, help='discarded passes over the media corpus')
     p.add_argument('--media-sequential-repeats', type=int, help='measured media corpus passes at one client')
     p.add_argument('--media-load-repeats', type=int, help='measured media corpus passes at four clients')
@@ -115,6 +121,8 @@ def main():
         p.error('models and surfaces must be unique')
     if not math.isfinite(a.deadline):
         p.error('deadline must be finite')
+    if len(set(a.short_clients)) != len(a.short_clients) or any(c <= 0 for c in a.short_clients):
+        p.error('short client counts must be positive and unique')
     if min(a.max_text_tokens, a.startup_timeout, a.request_timeout, a.native_long_slice_ms, a.native_batch_tokens) <= 0 or a.native_long_tokens < 0:
         p.error('limits must be positive; the lane threshold can be zero')
     if a.cpu_threads is not None and a.cpu_threads <= 0:
@@ -152,16 +160,21 @@ def main():
     gemm_policy = 'explicit' if table_template else a.candidate_gemm_table or 'none'
     candidate_tables = ({model: Path(table_template.format(model=model, dtype=a.candidate_dtype)) for model in selected_models} if table_template else {})
     a.out.mkdir(parents=True, exist_ok=False)
-    ladder = [json.loads(x) for x in (root / 'text-ladder.jsonl').read_text().splitlines()]
-    media = [json.loads(x) for x in (root / 'cases-real-media.jsonl').read_text().splitlines()]
-    short = [json.loads(x) for x in (root / 'benchmark-short.jsonl').read_text().splitlines()]
-    if not ladder or not media or not short:
-        raise ValueError('each required input corpus must be nonempty')
+    def corpus(name, required):
+        rows = [json.loads(x) for x in (root / name).read_text().splitlines()] if required else []
+        if required and not rows:
+            raise ValueError('required input corpus must be nonempty: ' + name)
+        return rows
+
+    text = 'text' in a.surfaces
+    ladder = corpus('text-ladder.jsonl', text and any(x in text_phases for x in ['ladder', 'mixed']))
+    media = corpus('cases-real-media.jsonl', 'media' in a.surfaces)
+    short = corpus('benchmark-short.jsonl', text)
     for rows in [ladder, media, short]:
         if len({row['id'] for row in rows}) != len(rows):
             raise ValueError('input corpus has duplicate IDs')
     for model in selected_models:
-        if not any(row['model'] == model
+        if ladder and not any(row['model'] == model
                    and row['target_tokens'] <= a.max_text_tokens for row in ladder):
             raise ValueError('no ladder input in the requested model/token range')
     if 'mixed' in text_phases and any(not any(row['model'] == model and row['target_tokens'] == 8192
@@ -170,19 +183,21 @@ def main():
     schedule = (a.variants if a.phase == 'screen' else [a.variants[i] for i in [0, 1, 1, 0, 0, 1, 1, 0]])
     method = dict(phase=a.phase, schedule=schedule, models=a.models, model_names=selected_models, surfaces=a.surfaces, runner_sha256=digest(Path(__file__)),
                   candidate_dtype=a.candidate_dtype, candidate_inference_mode=a.candidate_inference_mode,
+                  candidate_diagnostics=a.candidate_diagnostic,
                   baseline_dtype=a.baseline_dtype, baseline_inference_mode=a.baseline_inference_mode,
+                  baseline_diagnostics=a.baseline_diagnostic,
                   baseline_gemm_table=digest(a.baseline_gemm_table) if a.baseline_gemm_table else None,
                   native_library_path_explicit=bool(a.native_library_path), candidate_gemm_tables={m: digest(p) for m, p in candidate_tables.items()}, cpu_threads=a.cpu_threads, candidate_cpu_threads=a.candidate_cpu_threads, binaries={'baseline': digest(a.binary), **({'candidate': digest(a.candidate)} if a.candidate else {})},
                   candidate_gemm_policy=gemm_policy,
                   upstream_commit=upstream_commit, upstream_batch_tokens=a.upstream_batch_tokens, inputs=provenance, text_limit=a.max_text_tokens,
-                  distinct_short_documents=len(short), requested_load_samples=a.load_samples, initial_warmup_s=initial_warmup_s,
+                  distinct_short_documents=len(short), short_clients=a.short_clients, requested_load_samples=a.load_samples, initial_warmup_s=initial_warmup_s,
                   latency_samples=a.latency_samples or (4 if a.phase == 'screen' else 10),
                   latency_warmup_samples=a.latency_warmup_samples,
                   mixed_warmup_repeats_per_document=a.latency_warmup_samples if 'mixed' in text_phases and 'ladder' not in text_phases else 0,
                   load_warmup_samples=min(a.load_warmup_samples, len(short)) if a.load_warmup_samples else 2 * len(short),
                   media_warmup_repeats=a.media_warmup_repeats,
                   media_sequential_repeats=a.media_sequential_repeats or (3 if a.phase == 'confirm' else 1),
-                  media_load_repeats=a.media_load_repeats or max(8 if a.phase == 'confirm' else 2, math.ceil(4 / len(media))),
+                  media_load_repeats=(a.media_load_repeats or max(8 if a.phase == 'confirm' else 2, math.ceil(4 / len(media)))) if media else 0,
                   timing='before JSON serialization through complete HTTP body read; parse after timing',
                   excluded_repetitions=[1] if a.phase == 'confirm' else [],
                   media_engine='upstream-eager; fast rejects media',
@@ -257,6 +272,12 @@ def main():
         if variant == 'candidate' and a.candidate_cpu_threads is not None:
             server_env = server_env | {key: str(a.candidate_cpu_threads)
                                       for key in ['OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'RAYON_NUM_THREADS']}
+        if variant in ('baseline', 'candidate'):
+            diagnostic_names = {'phase-timing': 'BASAL_PHASE_TIMING',
+                                'qwen-packed-recurrence': 'BASAL_QWEN_PACKED_RECURRENCE',
+                                'qwen-f32-resident': 'BASAL_QWEN_F32_RESIDENT'}
+            diagnostics = a.candidate_diagnostic if variant == 'candidate' else a.baseline_diagnostic
+            server_env = server_env | {diagnostic_names[name]: '1' for name in diagnostics}
         with (a.out / (tag + '-server.log')).open('x') as log:
             process = subprocess.Popen(cmd, env=server_env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
             try:
@@ -382,7 +403,7 @@ def main():
                                 else:
                                     phase(tag, variant, model, short[:a.load_warmup_samples], 1, 1, 'short-warmup')
                             if 'short' in text_phases:
-                                for clients in [1, 8, 32]:
+                                for clients in a.short_clients:
                                     phase(tag, variant, model, short, clients,
                                           max(1, math.ceil((a.load_samples or (64 if a.phase == 'screen' else 512)) / len(short))), 'short')
                             if 'mixed' in text_phases:

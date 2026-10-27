@@ -38,6 +38,69 @@ które odczytują archiwizowane wyniki, powinny przyjmować katalog przez
 To konwencja dla takich runnerów, np. `tools/perf/run-w4a16-cloud.py` i
 `tools/perf/run-layer-split-cloud.py`; CLI basal nie ma tej opcji.
 
+## Pico: refaktor bez zmiany obliczeń
+
+[Raport](../reports/pico-refactor-rtx4060-2026-10-27/README.md) opisuje
+refaktor z Opus 5.5, bitową zgodność 13 konfiguracji przed/po i osobne
+ABBA domyślnego BF16 oraz FP32 z obiema flagami optymalizacji. Korpus,
+źródła, eksporty, obserwacje HTTP i audyty są archiwizowane osobno od
+wcześniejszych kampanii. Nie zmienia to kwalifikacji względem upstream fast.
+
+Archiwum: `hf://buckets/itsoltech/basal-rs/measurements/pico-refactor-rtx4060-2026-10-27/12bc0b1ad6c3fb4b1dfe5f1c871a9bbcd89ea8f3c665f277ced53f251e44e2e8/measurement-data.tar.gz`,
+SHA-256 `12bc0b1ad6c3fb4b1dfe5f1c871a9bbcd89ea8f3c665f277ced53f251e44e2e8`,
+1 167 423 B. Pobranie z logowaniem i anonimowo potwierdziło SHA archiwum
+oraz 148/148 sum w obu kopiach. Dane są pod
+`reports/pico-refactor-rtx4060-2026-10-27/`; odtworzenie i audyt opisuje
+`REPRODUCE.md`. Kopia lokalna jest zachowana.
+
+## Pico: budżet precyzji i kopie DeltaNet
+
+[Raport](../reports/pico-singlepass-rtx4060-2026-10-27/README.md) zachowuje
+pięć odrzuconych prób zaokrąglania aktywacji projekcji, kwalifikację
+bezpośredniego bufora DeltaNet, ABBA i profile HTTP, również krótkich
+dokumentów. Usunięcie kopii nie zmienia arytmetyki; wariant jest jawny.
+Brak profilu upstream fast jest oznaczony GAP. Przewagi nad fast przy
+progu FP32 ≤0,0001 nie potwierdzono.
+
+Archiwum: `hf://buckets/itsoltech/basal-rs/measurements/pico-singlepass-rtx4060-2026-10-27/7ba3c8e317810fbfa02914b549d7460e07ef43a40ebeff0ce3281c65ecee31e4/measurement-data.tar.gz`,
+SHA-256 `7ba3c8e317810fbfa02914b549d7460e07ef43a40ebeff0ce3281c65ecee31e4`,
+1 023 267 B. Pobranie z logowaniem i anonimowo potwierdziło SHA archiwum
+i 128/128 sum w obu kopiach. Dane są pod
+`reports/pico-singlepass-rtx4060-2026-10-27/`; `REPRODUCE.md` opisuje
+odtworzenie i audyt przez `--measurement-artifacts`. Kopia lokalna zachowana.
+
+## Pico: CPU, CUDA Graphs i rezydentne FP32
+
+[Raport](../reports/pico-cpu-graphs-rtx4060-2026-10-26/README.md) zawiera
+budżety CPU 1/2/4/8, profil GPU i potwierdzenie ABBA rezydentnych projekcji
+FP32: C1/5080 spadło z 2374,18 do 1571,23 ms, bez regresji czterech krótkich
+dokumentów względem poprzedniego FP32. Próg ≤0,0001 i decyzje zachowano
+na badanym zestawie. Przewagi nad upstream fast nie osiągnięto.
+Odrzucone grafy MLP z OOM i globalny fragment FP32 512 z regresją krótkich
+dokumentów mają zachowane wyniki i źródła.
+
+Archiwum: `hf://buckets/itsoltech/basal-rs/measurements/pico-cpu-graphs-rtx4060-2026-10-26/9ee7a73bde6ec87f6666848d10d0fc967545e27b861008206f3f4c07171a1332/measurement-data.tar.gz`,
+SHA-256 `9ee7a73bde6ec87f6666848d10d0fc967545e27b861008206f3f4c07171a1332`,
+801 723 B. Ponowne pobranie z logowaniem i anonimowo potwierdziło SHA
+archiwum i 169/169 sum plików w obu kopiach. Dane są pod
+`reports/pico-cpu-graphs-rtx4060-2026-10-26/`; `REPRODUCE.md` opisuje
+odbudowę i audyt przez `--measurement-artifacts`. Lokalna kopia archiwum
+jest zachowana.
+
+## Pico: audyt upstream fast względem FP32
+
+[Raport](../reports/pico-fast-fp32-audit-rtx4060-2026-10-26/README.md)
+analizuje zachowane odpowiedzi HTTP z serii około 270 ms, bez nowej
+inferencji. Fast BF16 zachował decyzje na zbadanym zestawie, lecz przekroczył
+próg różnicy prawdopodobieństw ≤0,0001 względem FP32. Są też porównania
+eager BF16 i v4, dane źródłowe i zakres starszej serii dwóch dokumentów.
+
+Archiwum: `hf://buckets/itsoltech/basal-rs/measurements/pico-fast-fp32-audit-rtx4060-2026-10-26/4835989bc7c268fa187c9779f0235eb9dd9e639e7ebbd18213a384c10c78e2b2/measurement-data.tar.gz`,
+SHA-256 `4835989bc7c268fa187c9779f0235eb9dd9e639e7ebbd18213a384c10c78e2b2`,
+51 835 B. Pobranie z autoryzacją i anonimowo potwierdziło 26/26 sum w obu
+kopiach. Dane są pod `reports/pico-fast-fp32-audit-rtx4060-2026-10-26/`;
+`REPRODUCE.md` podaje odtworzenie. Lokalna kopia archiwum jest zachowana.
+
 ## Archiwum `upstream-2.0-2026-10-14`
 
 Zawiera 29 plików JSON i 5 oryginalnych raportów Markdown sprzed migracji oraz
@@ -299,3 +362,84 @@ podają pobranie, weryfikację i replay. Archiwum zawiera dokładne źródła tr
 wariantów, obserwacje, zasoby per GPU, referencje FP32/BF16, kontrole H100 i Llama,
 nieudane próby i audyty. Obrazy pozostają zewnętrzne i przypięte hashami; prywatne
 dane maszyn, biblioteki, checkpointy i binarki nie są publikowane.
+
+## Pico: zgodność na RTX 4060
+
+[Raport](../reports/pico-rtx4060-2026-10-26/README.md) opisuje tekstowy Qwen3.5
+Pico, FP32/BF16 względem upstream FP32, jedną i dwie kolejności, 255 opcji,
+5080 tokenów, bitowe single/tree i oba endpointy C1/C4. Zachowuje różnice
+prawdopodobieństw, niezgodną sumę README wydawcy i nieudane buildy środowiska.
+
+Archiwum: `hf://buckets/itsoltech/basal-rs/measurements/pico-rtx4060-2026-10-26/fa1f9d2e43e0f66e5e38d9a3d8e3311220a13ebaa15124d986ffa9d283a5f994/measurement-data.tar.gz`,
+SHA-256 `fa1f9d2e43e0f66e5e38d9a3d8e3311220a13ebaa15124d986ffa9d283a5f994`,
+363 686 B. Ponowne pobranie z autoryzacją i anonimowo potwierdziło **75/75 sum**.
+Dane są pod `reports/pico-rtx4060-2026-10-26/`; archiwalne `REPRODUCE.md`
+i `method.json` opisują odtworzenie, a `source/` zawiera dokładny patch i nowe
+pliki Rust. Prywatne logi, ścieżki, adresy, wagi i binarki nie są publikowane.
+
+## Pico: optymalizacja na RTX 4060
+
+[Raport](../reports/pico-speed-rtx4060-2026-10-26/README.md) opisuje profil
+CUDA v2, serie ABBA względem eager i fast, krótkie C1/C8/C32 oraz dokumenty
+255/5080 tokenów. Zachowuje wolniejszy długi kontekst, OOM fast C32,
+zwiększoną różnicę BF16 względem FP32 i odrzucone eksperymenty.
+
+Archiwum: `hf://buckets/itsoltech/basal-rs/measurements/pico-speed-rtx4060-2026-10-26/99b1d838e9d2c16344505ca68a815440fe7d30fd14d29412c521bab1eedafd74/measurement-data.tar.gz`,
+SHA-256 `99b1d838e9d2c16344505ca68a815440fe7d30fd14d29412c521bab1eedafd74`,
+1 121 338 B. Ponowne pobranie z autoryzacją i anonimowo potwierdziło
+**179/179 sum plików** w obu kopiach. Użyj procedury z nową nazwą,
+prefiksem i sumą. Dane są pod `reports/pico-speed-rtx4060-2026-10-26/`;
+`REPRODUCE.md` zawiera odtworzenie źródeł, audyt i replay. Archiwum
+zawiera odpowiedzi, porównania FP32, wszystkie nieudane fazy fast,
+kwalifikację GEMM, telemetrię, agregat profilu i źródła obu wariantów.
+Wagi, binarki, cache kompilatora, surowy Nsight i dane maszyn pozostają lokalnie.
+
+## Pico: C1 i 5080 tokenów
+
+[Raport](../reports/pico-long-c1-rtx4060-2026-10-26/README.md) opisuje profil
+CUDA v3 i potwierdzające A/B względem v2: 727,80 → 672,41 ms p50 na RTX 4060.
+Zachowuje wolniejszy wynik od eager, odrzucony blok 4096, wykluczone próby
+z nakładaniem pracy oraz różnice BF16 względem FP32.
+
+Archiwum: `hf://buckets/itsoltech/basal-rs/measurements/pico-long-c1-rtx4060-2026-10-26/2dd5352f02da4f7e31577d5ffd22f7b8b17988f8a3311534b425ec53a25af4ff/measurement-data.tar.gz`,
+SHA-256 `2dd5352f02da4f7e31577d5ffd22f7b8b17988f8a3311534b425ec53a25af4ff`,
+765 902 B. Pobranie z autoryzacją i anonimowo potwierdziło **145/145 sum plików**
+w obu kopiach. Dane są pod `reports/pico-long-c1-rtx4060-2026-10-26/`;
+`REPRODUCE.md` podaje odtworzenie źródeł v2/v3, audyt i replay.
+Archiwum zawiera pełne odpowiedzi ABBA, kontrole eager i ruchu mieszanego,
+referencje FP32, kontrolę rozwidleń 5k, eksploracje, telemetrię i agregat
+profilu v2. Surowy Nsight, logi maszyn, cache, wagi i binarki pozostają lokalnie.
+
+## Pico v4: C1/5080 względem eager i fast
+
+[Raport](../reports/pico-parallel-rtx4060-2026-10-26/README.md) opisuje
+CUDA v4: ABBA 536,42 ms vs 553,58 ms eager, osobną kontrolę fast 270,19 ms,
+zmianę numeryki długiego attention, zachowany tryb accurate i odrzucony WY16.
+
+Archiwum: `hf://buckets/itsoltech/basal-rs/measurements/pico-parallel-rtx4060-2026-10-26/e8dbadd48311f2d9bae58021c01fd8932c8d79b19cd927860ca3d0ff858649a7/measurement-data.tar.gz`,
+SHA-256 `e8dbadd48311f2d9bae58021c01fd8932c8d79b19cd927860ca3d0ff858649a7`,
+646 249 B. Ponowne pobranie z autoryzacją i anonimowo potwierdziło
+**123/123 sum plików** w obu kopiach. Dane są pod
+`reports/pico-parallel-rtx4060-2026-10-26/`; `REPRODUCE.md` podaje
+odtworzenie źródeł v3/v4, audyt i replay. Zachowano odpowiedzi ABBA,
+fast i mieszanej partii, referencje i porównania FP32, kontrolę rozwidleń,
+eksploracje, zbiorcze profile i telemetrię. Binarki, surowy Nsight, prywatne
+logi, wagi i cache pozostają lokalnie.
+
+## Pico: próg FP32 i kontrola krótkich dokumentów
+
+[Raport](../reports/pico-f32-fast-rtx4060-2026-10-26/README.md) zachowuje
+odrzucony prototyp: zgodne decyzje i maksymalna różnica skalibrowanego
+prawdopodobieństwa 0,000020713 na zbadanym zestawie, ale regresja krótkich
+i długich dokumentów względem fast i v4. Profil v4 przywrócono bez zmiany
+binarnego SHA-256. Zachowano początkowy FAIL niestabilnej rekurencji,
+SIGNAL pomiarów i FAIL kontroli istniejących zależności zstd.
+
+Archiwum: `hf://buckets/itsoltech/basal-rs/measurements/pico-f32-fast-rtx4060-2026-10-26/dc59ed449a91742c55cdbcc44bd311250de88fcbe7d7b2c7568539f0c3bdfa90/measurement-data.tar.gz`,
+SHA-256 `dc59ed449a91742c55cdbcc44bd311250de88fcbe7d7b2c7568539f0c3bdfa90`,
+602 232 B, 118 plików. Pobranie z autoryzacją i anonimowo potwierdziło
+118/118 sum w obu kopiach. Dane są pod
+`reports/pico-f32-fast-rtx4060-2026-10-26/`. `REPRODUCE.md` opisuje replay
+audytu i źródeł ostatniego prototypu. W archiwum są odpowiedzi HTTP,
+porównania FP32, osobne czasy krótkich przypadków, profile zagregowane,
+diagnostyka bitowa i źródła. Wagi, binarki i prywatne surowe dane są lokalne.

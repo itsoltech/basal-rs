@@ -14,9 +14,13 @@ Reference requests in tools/reference include examples from basal/examples.
 The basal model weights (Remek/basal-1.0-*, Remek/basal-1.5-*, Remek/basal-2.0-*, Remek/basal-omni-1.0-*) are not part of this repository; they are released by
 their author under the Apache License 2.0.
 
-Native Gemma 4 decoders and media processors/encoders follow Hugging Face Transformers 5.17.0
+Native Gemma 4 and text-only Qwen3.5 decoders, and media processors/encoders, follow Hugging Face Transformers 5.17.0
 (https://github.com/huggingface/transformers, Copyright Hugging Face, Apache License 2.0).
+The Qwen3.5 port adapts modeling_qwen3_5.py: Copyright 2025 The Qwen Team
+and The HuggingFace Inc. team. All rights reserved. Licensed under Apache License 2.0.
 The port also follows PyTorch antialiased bicubic resampling (PyTorch contributors, BSD-3-Clause).
+Basal Pico (Remek/basal-omni-pico) is fine-tuned from Qwen/Qwen3.5-0.8B-Base
+(Qwen team, Apache License 2.0); its weights are not included in this repository.
 The copyright notices, redistribution conditions and disclaimer are reproduced in licenses/PYTORCH-BSD.txt.
 
 The FP16 GELU arithmetic in crates/basal-gpu/src/kernels.cu follows candle-kernels 0.11.0

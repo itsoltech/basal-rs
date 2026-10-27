@@ -1,5 +1,9 @@
 # Basal Omni: tekst, obraz i audio
 
+Pico (`pico`, `Remek/basal-omni-pico`) jest modelem wyłącznie tekstowym,
+z osobnym backendem Qwen3.5. Opis Gemma poniżej go nie dotyczy;
+[użycie i ograniczenia Pico](PICO.md).
+
 Katalog zawiera `omni-mini` (`Remek/basal-omni-1.0-mini`, Gemma 4) oraz `omni-max`
 (`Remek/basal-omni-1.0-max`, Gemma 4 Unified). Rewizje są przypięte w konfiguracji;
 [pierwotny audyt](../reports/upstream-2.0-discovery-2026-10-14/README.md) opisuje metadane.

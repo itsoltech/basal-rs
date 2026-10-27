@@ -24,6 +24,7 @@ pub const DEFAULT_OWNER: &str = "Remek";
 /// The published models of the catalog.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModelId {
+    OmniPico,
     Basal15Mini,
     Basal15_4_5B,
     Basal15Max,
@@ -57,11 +58,14 @@ impl CatalogEntry {
         self.repo.rsplit('/').next().unwrap_or(self.repo)
     }
 
-    /// `dtype` of `--model NAME` for this model: Omni (Gemma) resolves its precision with the GPU (`auto`), Llama
-    /// runs f16.
+    /// `dtype` of `--model NAME`: Gemma and Qwen3.5 resolve their architecture/device default (`auto`), Llama f16.
     pub fn cli_dtype(&self) -> &'static str {
         match self.profile.dispatch {
-            DispatchRule::GemmaV1 { .. } => "auto",
+            DispatchRule::GemmaV1 { .. }
+            | DispatchRule::Qwen35V1
+            | DispatchRule::Qwen35V2
+            | DispatchRule::Qwen35V3
+            | DispatchRule::Qwen35V4 => "auto",
             _ => "f16",
         }
     }
@@ -356,7 +360,34 @@ static LLAMA_GENERIC: Profile = llama("llama-generic.v1", LLAMA_V1, GEMM_ANY_V1)
 /// Profile of a Gemma (Omni) model outside the catalog: BF16 `auto`, FP32 attention products.
 static GEMMA_GENERIC: Profile = gemma("gemma-generic.v1", GEMMA_V1, GEMM_ANY_V1, SchedulingPolicy::Immediate);
 
-pub static CATALOG: [CatalogEntry; 10] = [
+static OMNI_PICO: Profile = Profile {
+    id: "basal-omni-pico.v4",
+    kernel_set: KernelSet::Qwen35V4,
+    dispatch: DispatchRule::Qwen35V4,
+    gemm: &[&[pin(
+        "nvidia-geforce-rtx-4060--basal-omni-pico--bf16--cublaslt120901.json",
+        "72fb35fcb899c71c6ed7e52ddb64e20686848f2f7ed8304401147bdac1bdee2e",
+    )]],
+    scheduling: SchedulingPolicy::Immediate,
+    legacy_cache_import: false,
+};
+static QWEN35_GENERIC: Profile = Profile {
+    id: "qwen35-generic.v1",
+    kernel_set: KernelSet::Qwen35V1,
+    dispatch: DispatchRule::Qwen35V1,
+    gemm: &[],
+    ..OMNI_PICO
+};
+
+pub static CATALOG: [CatalogEntry; 11] = [
+    entry(
+        ModelId::OmniPico,
+        "pico",
+        "Remek/basal-omni-pico",
+        "a959cef1ea65fb4824e86df3d9d6b38a0db0f4a9",
+        1.51,
+        &OMNI_PICO,
+    ),
     entry(
         ModelId::Basal15Mini,
         "mini",
@@ -462,6 +493,9 @@ pub fn default_model() -> &'static CatalogEntry {
 
 /// A catalog model by its short name, `owner/name` repository or repository name (case-insensitive).
 pub fn find(name: &str) -> Option<&'static CatalogEntry> {
+    if name.eq_ignore_ascii_case("omni-pico") {
+        return Some(get(ModelId::OmniPico));
+    }
     CATALOG.iter().find(|m| {
         m.short.eq_ignore_ascii_case(name) || m.repo.eq_ignore_ascii_case(name) || m.name().eq_ignore_ascii_case(name)
     })
@@ -481,5 +515,6 @@ pub fn profile_for(manifest: &ModelManifest) -> &'static Profile {
     match manifest.config {
         Architecture::Llama(_) => &LLAMA_GENERIC,
         Architecture::Gemma4(_) => &GEMMA_GENERIC,
+        Architecture::Qwen35(_) => &QWEN35_GENERIC,
     }
 }

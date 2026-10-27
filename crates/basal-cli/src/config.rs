@@ -97,7 +97,7 @@ pub struct ModelConfig {
     /// Branch, tag or commit of `repo` (default: main). A commit pins the weights.
     #[serde(default)]
     pub revision: Option<String>,
-    /// auto (Llama f16; measured Omni/GPU pairs f16, other Gemma bf16), f16, bf16 or f32.
+    /// auto (Llama f16; Gemma profile default; Qwen3.5 CUDA bf16, Metal f32), f16, bf16 or f32.
     #[serde(default = "default_dtype")]
     pub dtype: String,
     /// Format of the projection weights: `none` (default, dense weights of `dtype`), `q8_0` (GGML Q8_0 blocks) or
@@ -341,6 +341,13 @@ fn static_precision(model: &str, dtype: &str) -> Result<Precision> {
 /// before any GEMM table or load. Gemma needs dense weights; a split additionally requires independent KV layers
 /// and no per-layer input embeddings.
 pub fn check_architecture(manifest: &ModelManifest, quantization: Quantization, split: bool) -> Result<()> {
+    if let basal_core::architecture::Architecture::Qwen35(_) = &manifest.config {
+        ensure!(
+            quantization == Quantization::None && !split,
+            "model {}: Qwen3.5 requires `quantization: none` and a single device per replica",
+            manifest.name
+        );
+    }
     if let basal_core::architecture::Architecture::Gemma4(cfg) = &manifest.config {
         ensure!(
             quantization == Quantization::None,
@@ -394,7 +401,12 @@ pub fn check_table_on_devices(
     }
     let split = matches!(placement, Placement::Split(_));
     let Some(table) = table else {
-        if split || matches!(manifest.config, basal_core::architecture::Architecture::Gemma4(_)) {
+        if split
+            || matches!(
+                manifest.config,
+                basal_core::architecture::Architecture::Gemma4(_) | basal_core::architecture::Architecture::Qwen35(_)
+            )
+        {
             return Ok(());
         }
         bail!("{name}: several `replica_devices` need a batch-invariant GEMM table (CUDA build, gemm_table not none)")

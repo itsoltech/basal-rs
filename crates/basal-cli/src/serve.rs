@@ -470,7 +470,16 @@ fn scheduler<B: Backend>(
             if job.reply.is_closed() {
                 continue;
             }
-            match engine.plan_request_as(&job.body, job.dialect) {
+            let phase_start = basal_gpu::DiagnosticOverrides::process().phase_timing().then(Instant::now);
+            let planned = engine.plan_request_as(&job.body, job.dialect);
+            if let Some(start) = phase_start {
+                eprintln!(
+                    "{}",
+                    json!({"cpu_planning":true,"elapsed_ms":start.elapsed().as_secs_f64()*1000.0,
+                    "ok":planned.is_ok()})
+                );
+            }
+            match planned {
                 Ok(plan) => {
                     let mut size = TrieSize::default();
                     size.insert(&plan_prompts(&plan));

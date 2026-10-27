@@ -135,6 +135,8 @@ pub const PREFILL: &str = "{\"answer\": \"";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChatStyle {
     Llama,
+    /// Qwen3.5 ChatML with thinking explicitly disabled and no BOS token.
+    Qwen35,
     Gemma4,
     /// Validated Gemma template with a closed empty thought block (Unified and Ultra checkpoints).
     Gemma4Unified,
@@ -273,6 +275,12 @@ pub fn render_model(
     let t = fmt.template(lang);
     let opts = options.iter().zip(fmt.codes()).map(|(o, code)| format!("{code}. {o}")).collect::<Vec<_>>().join("\n");
     let user = format_user(t.user, state, question, &opts);
+    if chat == ChatStyle::Qwen35 {
+        return Ok(format!(
+            "<|im_start|>system\n{}<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n{PREFILL}",
+            python_trim(t.system), python_trim(&user)
+        ));
+    }
     Ok(format!(
         "{bos}<|turn>system\n{}<turn|>\n<|turn>user\n{}<turn|>\n<|turn>model\n{}{PREFILL}",
         python_trim(t.system),
@@ -294,7 +302,9 @@ pub fn render_media(
     media: &crate::media::ProcessedMedia,
 ) -> anyhow::Result<String> {
     anyhow::ensure!(
-        chat != ChatStyle::Llama && fmt == PromptFormat::Two && (2..=fmt.max_options()).contains(&options.len()),
+        matches!(chat, ChatStyle::Gemma4 | ChatStyle::Gemma4Unified)
+            && fmt == PromptFormat::Two
+            && (2..=fmt.max_options()).contains(&options.len()),
         "unsupported media prompt format/options"
     );
     let t = fmt.template(lang);

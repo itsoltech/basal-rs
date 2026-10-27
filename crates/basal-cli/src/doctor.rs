@@ -866,6 +866,9 @@ fn split_bytes(
         .enumerate()
         .map(|(i, s)| {
             match &cfg {
+                basal_core::architecture::Architecture::Qwen35(_) => {
+                    anyhow::bail!("Qwen3.5 does not support layer split")
+                }
                 basal_core::architecture::Architecture::Llama(c) => {
                     basal_gpu::estimated_stage_weight_bytes(c, checkpoint, q, s.layers, i == 0, i == last)
                 }

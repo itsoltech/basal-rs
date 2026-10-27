@@ -88,12 +88,16 @@ Docker: [niżej](#uruchomienie-w-dockerze). Wymagania, ścieżki i szczegóły:
 
 | Model | Status |
 |---|---|
+| `Remek/basal-omni-pico` (0.8B), alias `pico` | tekstowy Qwen3.5; CUDA RTX 4060: decyzje zgodne z upstream FP32 w zbadanych zestawach; Metal niepotwierdzony; [użycie i ograniczenia](docs/PICO.md), [zgodność](reports/pico-rtx4060-2026-10-26/README.md), [wydajność v2 i różnice BF16](reports/pico-speed-rtx4060-2026-10-26/README.md), [C1 5k w v3](reports/pico-long-c1-rtx4060-2026-10-26/README.md) |
 | `Remek/basal-1.5-max` (11B), rewizja `be1b5ee7` | CUDA, Metal ([M2 Max](reports/metal-m2-max-1.5/README.md), [M1 Pro](reports/metal-m1-pro-1.5/README.md)) |
 | `Remek/basal-1.5-4.5B`, rewizja `784a683b` | CUDA ([zgodność](reports/compat-1.5-small/README.md), [wydajność](reports/perf-1.5-small/README.md)), Metal ([M2 Max](reports/metal-m2-max-1.5/README.md), [M1 Pro](reports/metal-m1-pro-1.5/README.md)) |
 | `Remek/basal-1.5-mini` (1.5B), rewizja `1978d070` | CUDA ([zgodność](reports/compat-1.5-small/README.md), [wydajność](reports/perf-1.5-small/README.md)), Metal ([M2 Max](reports/metal-m2-max-1.5/README.md), [M1 Pro](reports/metal-m1-pro-1.5/README.md)) |
 | `Remek/basal-1.0-4.5B`, rewizja `b9528804` | CUDA, Metal ([M1 Pro](reports/metal-m1-pro/README.md)) |
 | basal-2.0 mini / 4.5B / max, podstawowe BF16 | format 2, CUDA H100 i Metal M2 Max; Intel mini/4.5B, max niepotwierdzony; [wyniki i ograniczenia](reports/upstream-2.0-final-2026-10-14/README.md); [kontrakt i aliasy](docs/UPSTREAM_2.0.md) |
 | basal-omni mini / max, podstawowe BF16 | natywne Gemma 4 / Unified, CUDA; [realne media, kontekst i wydajność](reports/upstream-2.0-final-2026-10-14/README.md); [obraz i audio](docs/OMNI.md) |
+
+[Pico v4 na RTX 4060](reports/pico-parallel-rtx4060-2026-10-26/README.md):
+C1/5080 tokenów 536,42 ms wobec 553,58 ms eager upstream w ABBA.
 
 Nowe aliasy `omni-1.1-max` oraz `omni-ultra` i eksperymentalne zadania upstream 2.1
 opisuje [docs/TASKS.md](docs/TASKS.md). Zakres potwierdzenia GPU tych modeli jest

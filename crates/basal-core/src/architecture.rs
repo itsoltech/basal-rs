@@ -5,10 +5,14 @@ use serde_json::Value;
 
 use crate::manifest::{parse_config, LlamaConfig};
 
+mod qwen35;
+pub use qwen35::{Qwen35Config, Qwen35Layer};
+
 #[derive(Clone, Debug)]
 pub enum Architecture {
     Llama(LlamaConfig),
     Gemma4(GemmaConfig),
+    Qwen35(Qwen35Config),
 }
 
 #[derive(Clone, Debug)]
@@ -66,6 +70,7 @@ impl Architecture {
             "serialized checkpoint quantization (including ModelOpt FP8) is not supported; use the base BF16 checkpoint");
         let unified = match config.get("model_type").and_then(Value::as_str) {
             Some("llama") => return Ok(Self::Llama(parse_config(config)?)),
+            Some("qwen3_5_text") => return Ok(Self::Qwen35(Qwen35Config::parse(config)?)),
             Some("gemma4") => false,
             Some("gemma4_unified") => true,
             _ => anyhow::bail!("config.json: unsupported architecture"),
@@ -219,12 +224,14 @@ impl Architecture {
         match self {
             Self::Llama(c) => c.max_positions,
             Self::Gemma4(c) => c.max_positions,
+            Self::Qwen35(c) => c.max_positions,
         }
     }
     pub fn num_layers(&self) -> usize {
         match self {
             Self::Llama(c) => c.num_layers,
             Self::Gemma4(c) => c.layers.len(),
+            Self::Qwen35(c) => c.layers.len(),
         }
     }
 }

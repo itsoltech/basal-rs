@@ -27,6 +27,17 @@ pozostaje w `basal-core`. Interfejs i przykłady: [CLIENT.md](CLIENT.md).
 Nowe rodziny, format 2, wybór kolejności i kalibracja: [UPSTREAM_2.0.md](UPSTREAM_2.0.md).
 Profile modeli i plan wykonania: [sekcja niżej](#profile-modeli-i-plan-wykonania).
 Natywne architektury i lifecycle mediów omni: [OMNI.md](OMNI.md).
+Tekstowy Qwen3.5 Pico: [PICO.md](PICO.md). Ma osobny kontrakt architektury,
+profil i backend `basal-gpu/src/qwen35.rs`. Prywatne moduły `qwen35/` rozdzielają
+ładowanie wag, attention, DeltaNet, prefill i niemutowalne prefiksy;
+operacje CUDA tej rodziny są w `fused/qwen35.rs`. Gałęzie mają własne stany konwolucji,
+DeltaNet i attention. Profil v3 potrafi kontynuować niemutowalny snapshot
+wspólnego prefiksu i grupować projekcje pod kwalifikowaną tabelą GEMM;
+nie stosuje Llama KV tree ani reguł Gemma. Nie obsługuje batchy w tle.
+CUDA half precision zachowuje osobne granice fragmentów i wybór attention
+dla pełnej długości każdego promptu, także w partii mieszającej długości
+i przy kontynuacji prefiksu. Długi kontekst używa kafelków wyników FP32
+do 64 MiB i maskowania z softmax na GPU.
 
 Opcjonalna sekcja `database:` i moduł `basal-cli/src/database/` posiadają konfigurację
 bazy, opcje połączeń, wybór konta oraz moment migracji schematu
@@ -90,13 +101,14 @@ politykę wykonania. Katalog zawiera repozytorium, przypiętą rewizję, rozmiar
 skrót dla `--model` i profil każdego opublikowanego modelu; domyślny model
 wskazuje identyfikator (`DEFAULT_MODEL_ID`), nie pozycja w tablicy. Profil jest
 dopasowywany po nazwie z `basal.json`. Model spoza katalogu dostaje profil
-ogólny swojej architektury (`llama-generic.v1`, `gemma-generic.v1`) bez
+ogólny swojej architektury (`llama-generic.v1`, `gemma-generic.v1`, `qwen35-generic.v1`) bez
 zmierzonych reguł model/GPU. Metadane, tokenizer, prompt i kalibracja zawsze
 pochodzą z plików modelu (`ModelManifest` w `basal-core`); `basal-core` nie ma
 katalogu produktów.
 
-Profil (`<model>.v1`) zawiera wyłącznie dane: zestaw kerneli (`KernelSet::V1`),
-wersjonowaną regułę dispatchu (`DispatchRule::LlamaV1` albo `GemmaV1`) z listami
+Profil (`<model>.v<N>`) zawiera wyłącznie dane: wersjonowany zestaw kerneli
+(`KernelSet::V1` dla Llama/Gemma, `Qwen35V1/V2/V3/V4` dla Qwen3.5),
+wersjonowaną regułę dispatchu (`DispatchRule::LlamaV1`, `GemmaV1` lub `Qwen35V1/V2/V3`) z listami
 GPU, na których obowiązują zmierzone polityki, uporządkowaną listę tabel GEMM
 wbudowanych w build (nazwa pliku i SHA-256 znormalizowanej treści) oraz
 politykę harmonogramu `serve`. Zmiana zmierzonej polityki to nowa wersja

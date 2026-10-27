@@ -114,9 +114,8 @@ fn reduce(f: &std::path::Path, name: &str, search: u64, cublaslt: Option<u64>) -
     if v["invariant"].as_bool() != Some(true) {
         return Err("not a batch-invariant table".into());
     }
-    if v["dtype"].as_str() != Some("f16") {
-        return Err(format!("dtype {}, only f16 tables are built in", v["dtype"]));
-    }
+    let dtype =
+        v["dtype"].as_str().filter(|d| matches!(*d, "f16" | "bf16")).ok_or("only f16 and bf16 tables are built in")?;
     if v["gemm_search_version"].as_u64() != Some(search) {
         return Err(format!("search version {}, this build searches with {search}", v["gemm_search_version"]));
     }
@@ -129,7 +128,7 @@ fn reduce(f: &std::path::Path, name: &str, search: u64, cublaslt: Option<u64>) -
         .filter(|w| !w.is_empty())
         .collect::<Vec<_>>()
         .join("-");
-    let expected = format!("{slug}--{model}--f16--cublaslt{version}.json");
+    let expected = format!("{slug}--{model}--{dtype}--cublaslt{version}.json");
     if name != expected {
         return Err(format!("the file name must be {expected}"));
     }
@@ -140,13 +139,13 @@ fn reduce(f: &std::path::Path, name: &str, search: u64, cublaslt: Option<u64>) -
         if !shapes.iter().any(|s| s[0] == *n && s[1] == *k) {
             return Err(format!("entry for {n}x{k}, not one of the shapes"));
         }
-        if e["dtype"].as_str() != Some("f16") || e["algo"].as_array().is_none_or(|a| a.len() != 8) {
-            return Err("entry without f16 dtype or 8 algo words".into());
+        if e["dtype"].as_str() != Some(dtype) || e["algo"].as_array().is_none_or(|a| a.len() != 8) {
+            return Err("entry without matching dtype or 8 algo words".into());
         }
-        entries.push(json!({"m_class": e["m_class"], "n": n, "k": k, "dtype": "f16", "algo": e["algo"]}));
+        entries.push(json!({"m_class": e["m_class"], "n": n, "k": k, "dtype": dtype, "algo": e["algo"]}));
     }
     Ok(json!({
-        "gpu": gpu, "model": model, "cublaslt_version": version, "dtype": "f16", "invariant": true,
+        "gpu": gpu, "model": model, "cublaslt_version": version, "dtype": dtype, "invariant": true,
         "gemm_search_version": search, "shapes": shapes, "entries": entries,
     }))
 }

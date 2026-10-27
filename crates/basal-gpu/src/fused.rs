@@ -245,6 +245,15 @@ fn no_cpu() -> Result<(CpuStorage, Shape)> {
     candle_core::bail!("fused kernels run on Metal or CUDA only")
 }
 
+// Declared after `by_dtype!` and `view!`, which the Qwen3.5 operations use through textual macro scope.
+#[cfg(feature = "cuda")]
+mod qwen35;
+#[cfg(feature = "cuda")]
+pub(crate) use qwen35::{
+    qwen35_attention, qwen35_attention_scores, qwen35_conv, qwen35_gated_norm, qwen35_norm, qwen35_prepare,
+    qwen35_recurrent, qwen35_recurrent_packed, qwen35_swiglu,
+};
+
 struct BiasSiluMul;
 
 impl CustomOp2 for BiasSiluMul {
@@ -1460,7 +1469,7 @@ pub(crate) struct GemmaMask {
 }
 
 #[cfg(feature = "cuda")]
-struct GemmaMaskedSoftmax(GemmaMask);
+struct GemmaMaskedSoftmax(GemmaMask, DType);
 
 #[cfg(feature = "cuda")]
 impl CustomOp2 for GemmaMaskedSoftmax {
@@ -1487,32 +1496,41 @@ impl CustomOp2 for GemmaMaskedSoftmax {
         let sv = view!(scores, f32, contiguous(sl, "Gemma scores")?);
         let gv = view!(groups, u32, contiguous(gl, "Gemma image groups")?);
         let dev = scores.device.clone();
-        // SAFETY: validated nonzero score dimensions fit u32. One block owns each row;
-        // its strided loops write every one of the row's key columns exactly once.
-        let out = unsafe { dev.alloc::<f32>(n)? };
-        let f = cu::func(&dev, "gemma_masked_softmax_f32", "basal_fused", cu::ptx)?;
-        let mut a = f.builder();
-        let args = [
-            *queries as u32,
-            *keys as u32,
-            self.0.query_start as u32,
-            self.0.key_start as u32,
-            self.0.window as u32,
-            u32::from(self.0.use_groups),
-        ];
-        a.arg(&sv).arg(&gv).arg(&out);
-        for arg in &args {
-            a.arg(arg);
-        }
-        let threads = if *keys >= 1024 { 256 } else { 128 };
-        let config = LaunchConfig { grid_dim: (rows as u32, 1, 1), block_dim: (threads, 1, 1), shared_mem_bytes: 0 };
-        // SAFETY: the wrapper validates contiguous FP32 scores, U32 groups on the same device,
-        // all absolute group indexes and the launch dimensions. Without image groups the kernel
-        // never reads the one-element sentinel. Blocks own disjoint rows and synchronize their
-        // reduction storage. Borrowed views and driver guards remain alive through enqueue;
-        // owned output and Cudarc's stream tracking preserve storage lifetimes after return.
-        unsafe { a.launch(config) }.w()?;
-        Ok((CudaStorage { slice: Cs::F32(out), device: dev }, sl.shape().clone()))
+        let storage = by_dtype!(self.1, |T, S| {
+            // SAFETY: validated nonzero score dimensions fit u32. One block owns each row;
+            // its strided loops write every one of the row's key columns exactly once.
+            let out = unsafe { dev.alloc::<T>(n)? };
+            let name = if self.1 == DType::F32 {
+                "gemma_masked_softmax_f32".to_owned()
+            } else {
+                format!("qwen35_masked_softmax_{S}")
+            };
+            let f = cu::func(&dev, &name, "basal_fused", cu::ptx)?;
+            let mut a = f.builder();
+            let args = [
+                *queries as u32,
+                *keys as u32,
+                self.0.query_start as u32,
+                self.0.key_start as u32,
+                self.0.window as u32,
+                u32::from(self.0.use_groups),
+            ];
+            a.arg(&sv).arg(&gv).arg(&out);
+            for arg in &args {
+                a.arg(arg);
+            }
+            let threads = if *keys >= 1024 { 256 } else { 128 };
+            let config =
+                LaunchConfig { grid_dim: (rows as u32, 1, 1), block_dim: (threads, 1, 1), shared_mem_bytes: 0 };
+            // SAFETY: the wrapper validates contiguous FP32 scores, U32 groups on the same device,
+            // all absolute group indexes and the launch dimensions. Without image groups the kernel
+            // never reads the one-element sentinel. Blocks own disjoint rows and synchronize their
+            // reduction storage. Borrowed views and driver guards remain alive through enqueue;
+            // owned output and Cudarc's stream tracking preserve storage lifetimes after return.
+            unsafe { a.launch(config) }.w()?;
+            <T as candle_core::cuda_backend::CudaDType>::wrap_cuda_slice(out, dev.clone())
+        });
+        Ok((storage, sl.shape().clone()))
     }
 }
 
@@ -1520,6 +1538,20 @@ impl CustomOp2 for GemmaMaskedSoftmax {
 /// The reduction tree differs from Candle's standalone softmax; compare with upstream FP32.
 #[cfg(feature = "cuda")]
 pub(crate) fn gemma_masked_softmax(scores: &Tensor, groups: &Tensor, mask: GemmaMask) -> Result<Tensor> {
+    positional_masked_softmax(scores, groups, mask, DType::F32)
+}
+
+/// The same FP32 softmax followed by one storage-type rounding, without a separate FP32 probability tensor.
+#[cfg(feature = "cuda")]
+pub(crate) fn qwen35_masked_softmax(scores: &Tensor, groups: &Tensor, mask: GemmaMask, dtype: DType) -> Result<Tensor> {
+    if !matches!(dtype, DType::F16 | DType::BF16 | DType::F32) {
+        candle_core::bail!("Qwen3.5 softmax requires a floating output dtype");
+    }
+    positional_masked_softmax(scores, groups, mask, dtype)
+}
+
+#[cfg(feature = "cuda")]
+fn positional_masked_softmax(scores: &Tensor, groups: &Tensor, mask: GemmaMask, dtype: DType) -> Result<Tensor> {
     let (heads, queries, keys) = scores.dims3()?;
     let group_len = groups.dims1()?;
     let query_end = mask.query_start.checked_add(queries);
@@ -1539,5 +1571,5 @@ pub(crate) fn gemma_masked_softmax(scores: &Tensor, groups: &Tensor, mask: Gemma
     {
         candle_core::bail!("invalid Gemma masked-softmax dimensions, groups or positions");
     }
-    scores.apply_op2_no_bwd(groups, &GemmaMaskedSoftmax(mask))
+    scores.apply_op2_no_bwd(groups, &GemmaMaskedSoftmax(mask, dtype))
 }

@@ -361,7 +361,7 @@ fn execute(
     let (weight_bytes, method) = (match &manifest.config {
             basal_core::architecture::Architecture::Llama(c) => basal_gpu::estimated_weight_bytes(c, checkpoint_bytes, quantization)?,
             // dense weights only (checked above)
-            basal_core::architecture::Architecture::Gemma4(_) => checkpoint_bytes,
+            basal_core::architecture::Architecture::Gemma4(_) | basal_core::architecture::Architecture::Qwen35(_) => checkpoint_bytes,
         },
         "estimate from format arithmetic (checkpoint size; q8_0 / q4_k: projection matrices at Q8_0 / Q4_K block size with padding), not a measurement");
     report["model"]["estimated_weight_bytes"] =
@@ -382,6 +382,9 @@ fn execute(
             let mut checks = Vec::with_capacity(stages.len());
             for (i, stage) in stages.iter().enumerate() {
                 let bytes = match &manifest.config {
+                    basal_core::architecture::Architecture::Qwen35(_) => {
+                        anyhow::bail!("Qwen3.5 does not support layer split")
+                    }
                     basal_core::architecture::Architecture::Llama(cfg) => {
                         basal_gpu::estimated_stage_weight_bytes(
                             cfg,

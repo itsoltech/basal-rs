@@ -27,6 +27,18 @@ pub const PLAN_SCHEMA: &str = "basal-execution-plan.2";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum KernelSet {
+    /// Reference Candle operations for text-only Qwen3.5, with sequential FP32 DeltaNet recurrence.
+    Qwen35V1,
+    /// CUDA half-precision prefill in chunks up to 512, merged projections, FP32 online attention (D=256, context
+    /// <=2048), otherwise bounded batched FP32 attention. Qualified invariant GEMMs permit arbitrary short prefix
+    /// forks and shared projections; uncovered shapes use separate Candle GEMMs. FP32/Metal retain reference shapes.
+    Qwen35V2,
+    /// CUDA half-precision long prefill in chunks up to 2048, bounded batched FP32 attention and GPU causal
+    /// softmax. Contexts up to 2048 retain v2's 512-token chunks and online attention; FP32/Metal retain v1.
+    Qwen35V3,
+    /// v3 with half-input Tensor Core long attention in auto, FP32 softmax with a fused half store, and two
+    /// independent recurrent value columns per warp. Accurate keeps v3 attention; recurrent arithmetic is unchanged.
+    Qwen35V4,
     /// The kernels of kernels.cu, kernels.metal, gemma_ops and the cuBLASLt GEMM path of this crate as measured
     /// before the execution plans were introduced (attention hi/lo, QK1, WGMMA, fused Gemma FP16 operations).
     V1,
@@ -34,11 +46,16 @@ pub enum KernelSet {
 
 impl KernelSet {
     /// The sets this build implements.
-    pub const SUPPORTED: &'static [KernelSet] = &[KernelSet::V1];
+    pub const SUPPORTED: &'static [KernelSet] =
+        &[KernelSet::V1, KernelSet::Qwen35V1, KernelSet::Qwen35V2, KernelSet::Qwen35V3, KernelSet::Qwen35V4];
 
     pub fn id(self) -> &'static str {
         match self {
             Self::V1 => "basal-kernels.1",
+            Self::Qwen35V1 => "basal-qwen35-reference.1",
+            Self::Qwen35V2 => "basal-qwen35.2",
+            Self::Qwen35V3 => "basal-qwen35.3",
+            Self::Qwen35V4 => "basal-qwen35.4",
         }
     }
 }
@@ -69,6 +86,14 @@ pub struct DiagnosticOverrides {
     cuda_sync: Option<String>,
     /// `BASAL_HOST_TIMING` is set (any value): CUDA readout timings on stderr.
     host_timing: bool,
+    /// Unsynchronized wall timings of CPU planning and Pico enqueue/readout phases.
+    phase_timing: bool,
+    /// CUDA profiler ranges around Pico prompt forwards, excluding loading and CPU planning.
+    cuda_profile: bool,
+    /// Experimental resident FP32 Qwen weights instead of widening BF16 weights for each projection.
+    qwen_f32_resident: bool,
+    /// Avoid restacking the already-packed output of Qwen DeltaNet preparation (same arithmetic).
+    qwen_packed_recurrence: bool,
 }
 
 impl DiagnosticOverrides {
@@ -91,6 +116,10 @@ impl DiagnosticOverrides {
             norm: text("BASAL_NORM"),
             cuda_sync: text("BASAL_CUDA_SYNC"),
             host_timing: std::env::var_os("BASAL_HOST_TIMING").is_some(),
+            phase_timing: std::env::var_os("BASAL_PHASE_TIMING").is_some(),
+            cuda_profile: std::env::var_os("BASAL_CUDA_PROFILE").is_some(),
+            qwen_f32_resident: std::env::var_os("BASAL_QWEN_F32_RESIDENT").is_some(),
+            qwen_packed_recurrence: std::env::var_os("BASAL_QWEN_PACKED_RECURRENCE").is_some(),
         }
     }
 
@@ -126,6 +155,18 @@ impl DiagnosticOverrides {
     pub fn host_timing(&self) -> bool {
         self.host_timing
     }
+    pub fn phase_timing(&self) -> bool {
+        self.phase_timing
+    }
+    pub fn cuda_profile(&self) -> bool {
+        self.cuda_profile
+    }
+    pub fn qwen_f32_resident(&self) -> bool {
+        self.qwen_f32_resident
+    }
+    pub fn qwen_packed_recurrence(&self) -> bool {
+        self.qwen_packed_recurrence
+    }
 
     /// The overrides that are set, by variable name.
     fn identity(&self) -> Value {
@@ -144,6 +185,10 @@ impl DiagnosticOverrides {
         put("BASAL_NORM", self.norm.as_deref());
         put("BASAL_CUDA_SYNC", self.cuda_sync.as_deref());
         put("BASAL_HOST_TIMING", self.host_timing.then_some("set"));
+        put("BASAL_PHASE_TIMING", self.phase_timing.then_some("set"));
+        put("BASAL_CUDA_PROFILE", self.cuda_profile.then_some("set"));
+        put("BASAL_QWEN_F32_RESIDENT", self.qwen_f32_resident.then_some("set"));
+        put("BASAL_QWEN_PACKED_RECURRENCE", self.qwen_packed_recurrence.then_some("set"));
         Value::Object(m)
     }
 }
@@ -295,6 +340,14 @@ impl DeviceDefaultRule {
 #[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
 pub enum DispatchRule {
+    /// Reference Qwen3.5: separate complete prompts and FP32 recurrent state, no tuned GEMM policies.
+    Qwen35V1,
+    /// Qwen3.5 v2: same precision defaults and FP32 attention, with optional qualified invariant cuBLASLt projections.
+    Qwen35V2,
+    /// Qwen3.5 v3: v2 options, selecting the long-prefill CUDA kernel set explicitly.
+    Qwen35V3,
+    /// Qwen3.5 v4: v3 chunking, Tensor Core long attention in auto, unchanged FP32 recurrence arithmetic.
+    Qwen35V4,
     /// Llama v1. `auto`: f16. Attention for every stage alike (a layer split computes as on one GPU):
     /// `accurate` the portable hi/lo kernel; `balanced` the QK1 specialization (CUDA f16, fused kernels, f32
     /// readout, else refused); `auto` QK1 when that is available, `BASAL_ATT` is not set and the GPU of every stage
@@ -316,6 +369,10 @@ impl DispatchRule {
         match self {
             Self::LlamaV1 { .. } => "llama-dispatch.1",
             Self::GemmaV1 { .. } => "gemma-dispatch.1",
+            Self::Qwen35V1 => "qwen35-dispatch.1",
+            Self::Qwen35V2 => "qwen35-dispatch.2",
+            Self::Qwen35V3 => "qwen35-dispatch.3",
+            Self::Qwen35V4 => "qwen35-dispatch.4",
         }
     }
 
@@ -332,6 +389,13 @@ impl DispatchRule {
             return Precision::parse(dtype).map_err(|e| PlanError::Option(format!("{e:#}")));
         }
         Ok(match self {
+            Self::Qwen35V1 | Self::Qwen35V2 | Self::Qwen35V3 | Self::Qwen35V4 => {
+                if cfg!(target_os = "macos") {
+                    Precision::F32
+                } else {
+                    Precision::Bf16
+                }
+            }
             Self::LlamaV1 { .. } => Precision::F16,
             Self::GemmaV1 { f16_decoder_auto_gpus, .. } => {
                 if first_gpu().is_some_and(|name| f16_decoder_auto_gpus.contains(&name.as_str())) {
@@ -345,6 +409,7 @@ impl DispatchRule {
 
     fn check_family(&self, arch: &Architecture) -> Result<(), PlanError> {
         match (self, arch) {
+            (Self::Qwen35V1 | Self::Qwen35V2 | Self::Qwen35V3 | Self::Qwen35V4, Architecture::Qwen35(_)) => Ok(()),
             (Self::LlamaV1 { .. }, Architecture::Llama(_)) | (Self::GemmaV1 { .. }, Architecture::Gemma4(_)) => Ok(()),
             _ => Err(PlanError::Family(self.id())),
         }
@@ -353,6 +418,20 @@ impl DispatchRule {
     fn policy(&self, o: &PlanOptions, gpus: &InstanceGpus) -> Result<ExecutionPolicy, PlanError> {
         let overrides = DiagnosticOverrides::process();
         match self {
+            Self::Qwen35V1 | Self::Qwen35V2 | Self::Qwen35V3 | Self::Qwen35V4 => {
+                if o.mode == InferenceMode::Balanced {
+                    return Err(PlanError::Inference(InferenceConfigError::UnsupportedBalanced));
+                }
+                if o.quantization != Quantization::None || gpus.stages() != 1 {
+                    return Err(PlanError::Option("Qwen3.5 requires dense weights on a single device".into()));
+                }
+                Ok(ExecutionPolicy::Qwen35 {
+                    tensor_attention: matches!(self, Self::Qwen35V4)
+                        && o.mode == InferenceMode::Auto
+                        && o.precision != Precision::F32
+                        && BackendKind::llama() == BackendKind::Cuda,
+                })
+            }
             Self::LlamaV1 { balanced_auto_gpus } => {
                 let backend = BackendKind::llama();
                 let capable = backend == BackendKind::Cuda
@@ -470,6 +549,8 @@ pub struct GemmaStagePolicy {
 /// The execution policy of a model family.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExecutionPolicy {
+    /// Qwen3.5 with fresh recurrent state; optional half-input Tensor Core products for long-context attention.
+    Qwen35 { tensor_attention: bool },
     /// Llama: one attention choice for every stage; `default_kernels` is the kernel of `device_default` for the GPU
     /// of each stage (CUDA; empty for other backends), used by [`LlamaAttention::DeviceDefault`].
     Llama {
@@ -485,6 +566,9 @@ pub enum ExecutionPolicy {
 impl ExecutionPolicy {
     fn identity(&self) -> Value {
         match self {
+            Self::Qwen35 { tensor_attention } => {
+                json!({"family":"qwen3_5_text", "execution":"immutable_prefix_forks", "recurrent_state":"f32", "attention_products":if *tensor_attention { "half_input_f32_accumulation_long_context" } else { "f32" }})
+            }
             Self::Llama { backend, attention, device_default, default_kernels } => json!({
                 "family": "llama", "backend": backend.as_str(), "attention": attention.as_str(),
                 "device_default": {"rule": device_default.id(), "kernels": default_kernels},
@@ -685,12 +769,32 @@ impl ResolvedExecutionPlan {
             return Err(PlanError::KernelSet(kernel_set.id()));
         }
         rule.check_family(arch)?;
+        if matches!(arch, Architecture::Qwen35(_))
+            != matches!(
+                kernel_set,
+                KernelSet::Qwen35V1 | KernelSet::Qwen35V2 | KernelSet::Qwen35V3 | KernelSet::Qwen35V4
+            )
+        {
+            return Err(PlanError::Option("kernel set does not match model architecture".into()));
+        }
+        if matches!(arch, Architecture::Qwen35(_))
+            && !matches!(
+                (rule, kernel_set),
+                (DispatchRule::Qwen35V1, KernelSet::Qwen35V1)
+                    | (DispatchRule::Qwen35V2, KernelSet::Qwen35V2)
+                    | (DispatchRule::Qwen35V3, KernelSet::Qwen35V3)
+                    | (DispatchRule::Qwen35V4, KernelSet::Qwen35V4)
+            )
+        {
+            return Err(PlanError::Option("Qwen3.5 dispatch and kernel set versions must match".into()));
+        }
         let pinned = options.reproducibility == Reproducibility::Pinned;
         let fallback = match arch {
             _ if !tables_apply => GemmFallback::NotApplicable,
             Architecture::Llama(_) if pinned => GemmFallback::Refused,
             Architecture::Llama(_) => GemmFallback::RuntimeTiming,
             Architecture::Gemma4(_) => GemmFallback::FixedPerPrompt,
+            Architecture::Qwen35(_) => GemmFallback::FixedPerPrompt,
         };
         if pinned && tables_apply {
             match &table {
@@ -754,6 +858,7 @@ impl ResolvedExecutionPlan {
         match &self.policy {
             ExecutionPolicy::Gemma { stages } => stages.first().map(|s| s.attention_products),
             ExecutionPolicy::Llama { .. } => None,
+            ExecutionPolicy::Qwen35 { .. } => None,
         }
     }
 

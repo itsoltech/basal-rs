@@ -16,6 +16,11 @@ Stare modele format 1 zachowują dziesięć liter i istniejącą strategię duż
 | `omni-mini` | `Remek/basal-omni-1.0-mini` | Gemma 4 |
 | `omni-max` | `Remek/basal-omni-1.0-max` | Gemma 4 Unified |
 
+Późniejsze Pico ma osobną architekturę: aliasy `pico` i `omni-pico` wskazują
+`Remek/basal-omni-pico` (Qwen3.5, tylko tekst). Backend referencyjny sprawdzono
+na RTX 4060 względem upstream FP32; inne GPU i Metal pozostają niepotwierdzone;
+[konfiguracja i ograniczenia](PICO.md).
+
 Suma samych pięciu checkpointów to około 75 GB; jednoczesne serwowanie wymaga
 dodatkowej pamięci na aktywacje/KV i należy dobrać listę do dostępnej VRAM.
 

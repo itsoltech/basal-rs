@@ -66,9 +66,15 @@ def main():
         path = (a.inputs / rel).resolve()
         if not path.is_relative_to(a.inputs.resolve()) or runner.digest(path) != expected:
             p.error('input checksum mismatch: ' + rel)
-    ladder = read_rows(a.inputs / 'text-ladder.jsonl')
-    short = read_rows(a.inputs / 'benchmark-short.jsonl')
-    media = read_rows(a.inputs / 'cases-real-media.jsonl')
+    text_phases = method.get('text_phases', ['ladder', 'short'] + (['mixed'] if method.get('mixed') else []))
+    short_clients = method.get('short_clients', [1, 8, 32])
+    if (not isinstance(short_clients, list) or not short_clients
+            or any(type(c) is not int or c <= 0 for c in short_clients)
+            or len(set(short_clients)) != len(short_clients)):
+        p.error('invalid scheduled short client counts')
+    ladder = read_rows(a.inputs / 'text-ladder.jsonl') if 'text' in surfaces and any(x in text_phases for x in ['ladder', 'mixed']) else []
+    short = read_rows(a.inputs / 'benchmark-short.jsonl') if 'text' in surfaces else []
+    media = read_rows(a.inputs / 'cases-real-media.jsonl') if 'media' in surfaces else []
     events = read_rows(root / 'progress.jsonl')
     issues = [dict(kind='run_failure', **x) for x in complete['failures']
               if not a.surfaces or x.get('surface') is None or x['surface'] in surfaces]
@@ -76,9 +82,8 @@ def main():
         issues.append(dict(kind='execution_incomplete'))
     seen, phases, aggregated = {}, [], collections.defaultdict(list)
     token_counts = {}
-    class_groups, case_groups = collections.defaultdict(list), collections.defaultdict(list)
+    class_groups, case_groups, short_case_groups = (collections.defaultdict(list) for _ in range(3))
     confirmed = method['phase'] == 'confirm'
-    text_phases = method.get('text_phases', ['ladder', 'short'] + (['mixed'] if method.get('mixed') else []))
     if (not text_phases or len(set(text_phases)) != len(text_phases)
             or not set(text_phases).issubset({'ladder', 'short', 'mixed'})
             or bool(method.get('mixed')) != ('mixed' in text_phases)):
@@ -107,7 +112,7 @@ def main():
                             expected[('ladder', 1, row['id'])] = ([row], method.get('latency_samples', 10 if confirmed else 4))
                     repeats = max(1, math.ceil((method.get('requested_load_samples') or (512 if confirmed else 64)) / len(short)))
                     if 'short' in text_phases:
-                        for clients in [1, 8, 32]:
+                        for clients in short_clients:
                             expected[('short', clients, 'all')] = (short, repeats)
                     if 'mixed' in text_phases:
                         longs = [r for r in ladder if r['model'] == model and r['target_tokens'] == 8192]
@@ -189,6 +194,10 @@ def main():
                                        samples=len(observed), **metrics))
                     if retained:
                         aggregated[(model, surface, name, clients, scope, variant)].append(metrics)
+                        if name == 'short':
+                            for case in corpus:
+                                members = [row for row in observed if row['id'] == case['id']]
+                                short_case_groups[(model, clients, case['id'], variant)].append(latency_metrics(members))
                         if name == 'mixed':
                             short_members = [row for row in observed if row['workload_class'].startswith('distinct-short-')]
                             if short_members:
@@ -205,6 +214,7 @@ def main():
                   checked_input_token_counts=len(token_counts),
                   class_summary=summarize_groups(class_groups, ['model', 'phase', 'clients', 'workload_class', 'variant']),
                   media_case_summary=summarize_groups(case_groups, ['model', 'id', 'variant']),
+                  short_case_summary=summarize_groups(short_case_groups, ['model', 'clients', 'id', 'variant']),
                   summary_method='median of retained repetition metrics; ranges retain between-run variation',
                   inputs_sha256=hashlib.sha256((a.inputs/'provenance.json').read_bytes()).hexdigest())
     if a.ladder_choice:

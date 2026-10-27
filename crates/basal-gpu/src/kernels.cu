@@ -17,21 +17,282 @@ template <> __device__ __forceinline__ __nv_bfloat16 from_f<__nv_bfloat16>(float
 // round through T
 template <typename T> __device__ __forceinline__ float rt(float v) { return to_f<T>(from_f<T>(v)); }
 
+// Qwen3.5 reference recurrence, Dk = Dv = 128. One warp owns Values independent
+// value columns and four key rows per lane. Values=2 reuses Q/K loads while
+// keeping each column's arithmetic and reduction tree unchanged. Keep state in
+// registers across the chunk; never mutate the input (a sibling may own the
+// same snapshot). CUDA-only state is [head,value,key], so a warp loads/stores
+// consecutive keys with coalesced transactions. The reduction is Candle
+// fast_sum's 128-element halving tree: 64, 32, 16, 8, 4, 2, 1. Explicit rounded
+// operations prevent contraction of the separate reference multiplies/adds into
+// FMA.
+template <unsigned Values>
+__device__ void qwen35_recurrent(const float *qkv, const float *gates,
+                                 const float *initial, float *out,
+                                 unsigned tokens, unsigned heads) {
+  const unsigned lane = threadIdx.x & 31;
+  const unsigned first_value = (blockIdx.y * 4 + threadIdx.x / 32) * Values;
+  const unsigned head = blockIdx.x;
+  const size_t plane = (size_t)tokens * heads * 128;
+  const size_t state_base = ((size_t)head * 128 + first_value) * 128;
+  float state[Values][4];
+#pragma unroll
+  for (unsigned v = 0; v < Values; ++v)
+#pragma unroll
+    for (unsigned r = 0; r < 4; ++r)
+      state[v][r] = initial[state_base + v * 128 + lane + 32 * r];
+  for (unsigned t = 0; t < tokens; ++t) {
+    const size_t base = ((size_t)t * heads + head) * 128;
+    const float decay = gates[(size_t)t * heads + head];
+    float key[4], query[4];
+#pragma unroll
+    for (unsigned r = 0; r < 4; ++r) {
+      key[r] = qkv[plane + base + lane + 32 * r];
+      query[r] = qkv[base + lane + 32 * r];
+    }
+#pragma unroll
+    for (unsigned v = 0; v < Values; ++v) {
+      float products[4];
+#pragma unroll
+      for (unsigned r = 0; r < 4; ++r) {
+        state[v][r] = __fmul_rn(state[v][r], decay);
+        products[r] = __fmul_rn(state[v][r], key[r]);
+      }
+      float memory = __fadd_rn(__fadd_rn(products[0], products[2]),
+                               __fadd_rn(products[1], products[3]));
+#pragma unroll
+      for (int step = 16; step > 0; step >>= 1)
+        memory = __fadd_rn(memory, __shfl_down_sync(0xffffffff, memory, step));
+      memory = __shfl_sync(0xffffffff, memory, 0);
+      const float beta =
+          gates[(size_t)tokens * heads + (size_t)t * heads + head];
+      const float delta = __fmul_rn(
+          __fsub_rn(qkv[2 * plane + base + first_value + v], memory), beta);
+#pragma unroll
+      for (unsigned r = 0; r < 4; ++r) {
+        state[v][r] = __fadd_rn(state[v][r], __fmul_rn(key[r], delta));
+        products[r] = __fmul_rn(state[v][r], query[r]);
+      }
+      float result = __fadd_rn(__fadd_rn(products[0], products[2]),
+                               __fadd_rn(products[1], products[3]));
+#pragma unroll
+      for (int step = 16; step > 0; step >>= 1)
+        result = __fadd_rn(result, __shfl_down_sync(0xffffffff, result, step));
+      if (lane == 0)
+        out[base + first_value + v] = result;
+    }
+  }
+#pragma unroll
+  for (unsigned v = 0; v < Values; ++v)
+#pragma unroll
+    for (unsigned r = 0; r < 4; ++r)
+      out[plane + state_base + v * 128 + lane + 32 * r] = state[v][r];
+}
+
+extern "C" __global__ void
+qwen35_recurrent_f32(const float *qkv, const float *gates, const float *initial,
+                     float *out, unsigned tokens, unsigned heads) {
+  qwen35_recurrent<1>(qkv, gates, initial, out, tokens, heads);
+}
+extern "C" __global__ void
+qwen35_recurrent_wide_f32(const float *qkv, const float *gates,
+                          const float *initial, float *out, unsigned tokens,
+                          unsigned heads) {
+  qwen35_recurrent<2>(qkv, gates, initial, out, tokens, heads);
+}
+
 // Reorder independent attention matrices and expand GQA heads. FP16 -> FP32
-// is exact; this replaces gather, permutation, copies and casts, not arithmetic.
-extern "C" __global__ void gemma_attention_pack_f32(const __half *x, float *out, unsigned tokens,
-                                                    unsigned source_heads, unsigned heads, unsigned dim,
-                                                    unsigned total, unsigned transpose) {
+// is exact; this replaces gather, permutation, copies and casts, not
+// arithmetic.
+extern "C" __global__ void
+gemma_attention_pack_f32(const __half *x, float *out, unsigned tokens,
+                         unsigned source_heads, unsigned heads, unsigned dim,
+                         unsigned total, unsigned transpose) {
+  const unsigned id = blockIdx.x * blockDim.x + threadIdx.x;
+  if (id >= total)
+    return;
+  const unsigned feature = transpose ? (id / tokens) % dim : id % dim;
+  const unsigned token = transpose ? id % tokens : (id / dim) % tokens;
+  const unsigned head = (id / (tokens * dim)) % heads;
+  const unsigned batch = id / (tokens * dim * heads);
+  const unsigned source_head = head / (heads / source_heads);
+  const unsigned source =
+      ((batch * tokens + token) * source_heads + source_head) * dim + feature;
+  out[id] = __half2float(x[source]);
+}
+
+// Qwen zero-centered RMSNorm. Match Candle's fast_sum halving tree and separate FP32 rounding points.
+template <typename T>
+__device__ void qwen35_norm(const T *x, const float *w, T *out, unsigned width, float eps, float power) {
+    __shared__ float sums[1024];
+    const unsigned tid = threadIdx.x;
+    const size_t base = (size_t)blockIdx.x * width;
+    float sum = 0.0f;
+    for (unsigned j = tid; j < width; j += blockDim.x) sum = __fadd_rn(sum, __fmul_rn(to_f(x[base + j]), to_f(x[base + j])));
+    sums[tid] = sum;
+    for (unsigned step = blockDim.x / 2; step; step >>= 1) {
+        __syncthreads();
+        if (tid < step) sums[tid] = __fadd_rn(sums[tid], sums[tid + step]);
+    }
+    __syncthreads();
+    const float mean = __fmul_rn(sums[0], 1.0f / width);
+    const float scale = powf(__fadd_rn(mean, eps), power);
+    for (unsigned j = tid; j < width; j += blockDim.x)
+        out[base + j] = from_f<T>(__fmul_rn(__fmul_rn(to_f(x[base + j]), scale), __fadd_rn(1.0f, w[j])));
+}
+#define QWEN35_NORM(T, S) \
+extern "C" __global__ void qwen35_norm_##S(const T *x, const float *w, T *out, unsigned width, float eps, float power) { \
+    qwen35_norm(x, w, out, width, eps, power); \
+}
+QWEN35_NORM(float, f32)
+QWEN35_NORM(__half, f16)
+QWEN35_NORM(__nv_bfloat16, bf16)
+
+// Four-tap causal convolution, with the model-type store before SiLU and its type-specific intermediates.
+template <typename T>
+__device__ void qwen35_conv(const T *all, const float *w, T *out, unsigned channels, unsigned total) {
     const unsigned id = blockIdx.x * blockDim.x + threadIdx.x;
     if (id >= total) return;
-    const unsigned feature = transpose ? (id / tokens) % dim : id % dim;
-    const unsigned token = transpose ? id % tokens : (id / dim) % tokens;
-    const unsigned head = (id / (tokens * dim)) % heads;
-    const unsigned batch = id / (tokens * dim * heads);
-    const unsigned source_head = head / (heads / source_heads);
-    const unsigned source = ((batch * tokens + token) * source_heads + source_head) * dim + feature;
-    out[id] = __half2float(x[source]);
+    const unsigned col = id % channels;
+    float sum = 0.0f;
+#pragma unroll
+    for (unsigned tap = 0; tap < 4; ++tap) sum = __fadd_rn(sum, __fmul_rn(to_f(all[id + tap * channels]), w[col * 4 + tap]));
+    const T x = from_f<T>(sum);
+    const T e = from_f<T>(expf(-to_f(x)));
+    out[id] = x / (from_f<T>(1.0f) + e);
 }
+#define QWEN35_CONV(T, S) \
+extern "C" __global__ void qwen35_conv_##S(const T *all, const float *w, T *out, unsigned channels, unsigned total) { \
+    qwen35_conv(all, w, out, channels, total); \
+}
+QWEN35_CONV(float, f32)
+QWEN35_CONV(__half, f16)
+QWEN35_CONV(__nv_bfloat16, bf16)
+
+// Q/K L2 normalization and scalar DeltaNet gates. Equal key/value head counts, head dimension 128.
+template <typename T>
+__device__ void qwen35_prepare(const T *mixed, const T *ab, const float *params, float *out,
+                              unsigned tokens, unsigned heads, float power) {
+    __shared__ float qs[128], ks[128];
+    const unsigned j = threadIdx.x, h = blockIdx.x % heads, t = blockIdx.x / heads;
+    const size_t plane = (size_t)tokens * heads * 128;
+    const size_t base = ((size_t)t * heads + h) * 128;
+    const size_t input = (size_t)t * heads * 3 * 128 + h * 128 + j;
+    const float q = to_f(mixed[input]), k = to_f(mixed[input + heads * 128]);
+    qs[j] = __fmul_rn(q, q); ks[j] = __fmul_rn(k, k);
+    for (unsigned step = 64; step; step >>= 1) {
+        __syncthreads();
+        if (j < step) {
+            qs[j] = __fadd_rn(qs[j], qs[j + step]);
+            ks[j] = __fadd_rn(ks[j], ks[j + step]);
+        }
+    }
+    __syncthreads();
+    out[base + j] = __fmul_rn(__fmul_rn(q, powf(__fadd_rn(qs[0], 1e-6f), power)), 0.08838834764831845f);
+    out[plane + base + j] = __fmul_rn(k, powf(__fadd_rn(ks[0], 1e-6f), power));
+    out[2 * plane + base + j] = to_f(mixed[input + 2 * heads * 128]);
+    if (j == 0) {
+        const unsigned nh = tokens * heads;
+        const float a = __fadd_rn(to_f(ab[t * heads + h]), params[heads + h]);
+        const float sp = __fadd_rn(fmaxf(a, 0.0f), logf(__fadd_rn(expf(-fabsf(a)), 1.0f)));
+        out[3 * plane + t * heads + h] = expf(-__fmul_rn(sp, expf(params[h])));
+        const T b = ab[nh + t * heads + h];
+        const T denom = from_f<T>(1.0f) + from_f<T>(expf(-to_f(b)));
+        out[3 * plane + nh + t * heads + h] = to_f(from_f<T>(1.0f) / denom);
+    }
+}
+#define QWEN35_PREPARE(T, S) \
+extern "C" __global__ void qwen35_prepare_##S(const T *mixed, const T *ab, const float *params, float *out, unsigned tokens, unsigned heads, float power) { \
+    qwen35_prepare(mixed, ab, params, out, tokens, heads, power); \
+}
+QWEN35_PREPARE(float, f32)
+QWEN35_PREPARE(__half, f16)
+QWEN35_PREPARE(__nv_bfloat16, bf16)
+
+template <typename T>
+__device__ void qwen35_gated_norm(const T *x, const T *z, const float *w, T *out, unsigned width, float eps, float power) {
+    __shared__ float sums[256];
+    const unsigned j = threadIdx.x;
+    const size_t base = (size_t)blockIdx.x * width;
+    const float value = j < width ? to_f(x[base + j]) : 0.0f;
+    sums[j] = __fmul_rn(value, value);
+    for (unsigned step = blockDim.x / 2; step; step >>= 1) {
+        __syncthreads();
+        if (j < step) sums[j] = __fadd_rn(sums[j], sums[j + step]);
+    }
+    __syncthreads();
+    if (j < width) {
+        const float scale = powf(__fadd_rn(__fmul_rn(sums[0], 1.0f / width), eps), power);
+        const float normalized = rt<T>(__fmul_rn(value, scale));
+        const float gate = to_f(z[base + j]);
+        const float silu = gate / __fadd_rn(1.0f, expf(-gate));
+        out[base + j] = from_f<T>(__fmul_rn(__fmul_rn(normalized, w[j]), silu));
+    }
+}
+#define QWEN35_GATED_NORM(T, S) \
+extern "C" __global__ void qwen35_gated_norm_##S(const T *x, const T *z, const float *w, T *out, unsigned width, float eps, float power) { \
+    qwen35_gated_norm(x, z, w, out, width, eps, power); \
+}
+QWEN35_GATED_NORM(float, f32)
+QWEN35_GATED_NORM(__half, f16)
+QWEN35_GATED_NORM(__nv_bfloat16, bf16)
+
+template <typename T>
+__device__ void qwen35_swiglu(const T *gu, T *out, unsigned width, unsigned total) {
+    const unsigned id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (id >= total) return;
+    const unsigned input = (id / width) * 2 * width + id % width;
+    const T gate = gu[input];
+    const T silu = gate / (from_f<T>(1.0f) + from_f<T>(expf(-to_f(gate))));
+    out[id] = silu * gu[input + width];
+}
+#define QWEN35_SWIGLU(T, S) \
+extern "C" __global__ void qwen35_swiglu_##S(const T *gu, T *out, unsigned width, unsigned total) { \
+    qwen35_swiglu(gu, out, width, total); \
+}
+QWEN35_SWIGLU(float, f32)
+QWEN35_SWIGLU(__half, f16)
+QWEN35_SWIGLU(__nv_bfloat16, bf16)
+
+// Qwen full attention, D=256: one warp per (query,head), FP32 online softmax and accumulation in absolute key
+// order. A query's arithmetic never depends on the chunk size or on later keys, allowing immutable prefix forks.
+template <typename T>
+__device__ void qwen35_attention(const T *q, const T *k, const T *v, T *out,
+                                unsigned tokens, unsigned total, unsigned heads, unsigned kv_heads, unsigned start) {
+    const unsigned warp = (blockIdx.x * blockDim.x + threadIdx.x) / 32;
+    const unsigned lane = threadIdx.x & 31;
+    if (warp >= tokens * heads) return;
+    const unsigned head = warp % heads, token = warp / heads;
+    const unsigned kv = head / (heads / kv_heads);
+    float query[8], result[8] = {};
+#pragma unroll
+    for (unsigned r = 0; r < 8; ++r) query[r] = to_f(q[((size_t)head * tokens + token) * 256 + lane + 32 * r]);
+    float maximum = -INFINITY, denominator = 0.0f;
+    for (unsigned key = 0; key <= start + token; ++key) {
+        const size_t base = ((size_t)kv * total + key) * 256;
+        float score = 0.0f;
+#pragma unroll
+        for (unsigned r = 0; r < 8; ++r) score = __fadd_rn(score, __fmul_rn(query[r], to_f(k[base + lane + 32 * r])));
+#pragma unroll
+        for (int step = 16; step; step >>= 1) score = __fadd_rn(score, __shfl_xor_sync(0xffffffff, score, step));
+        score *= 0.0625f;
+        const float next = fmaxf(maximum, score);
+        const float alpha = expf(maximum - next), beta = expf(score - next);
+        denominator = __fadd_rn(__fmul_rn(denominator, alpha), beta);
+#pragma unroll
+        for (unsigned r = 0; r < 8; ++r)
+            result[r] = __fadd_rn(__fmul_rn(result[r], alpha), __fmul_rn(beta, to_f(v[base + lane + 32 * r])));
+        maximum = next;
+    }
+#pragma unroll
+    for (unsigned r = 0; r < 8; ++r) out[(size_t)warp * 256 + lane + 32 * r] = from_f<T>(result[r] / denominator);
+}
+#define QWEN35_ATTENTION(T, S) \
+extern "C" __global__ void qwen35_attention_##S(const T *q, const T *k, const T *v, T *out, unsigned tokens, unsigned total, unsigned heads, unsigned kv_heads, unsigned start) { \
+    qwen35_attention(q, k, v, out, tokens, total, heads, kv_heads, start); \
+}
+QWEN35_ATTENTION(__half, f16)
+QWEN35_ATTENTION(__nv_bfloat16, bf16)
 
 // X[B,N,H,D], cos/sin[1,N,1,D]. Keep the FP16 store after each multiply,
 // then add the two rounded products, as in Gemma's separate Candle operations.
@@ -1651,3 +1912,36 @@ extern "C" __global__ void gemma_masked_softmax_f32(const float *scores, const u
     const float inverse = 1.0f / sum;
     for (unsigned j = threadIdx.x; j < keys; j += blockDim.x) y[j] *= inverse;
 }
+
+// Same FP32 mask, reductions and exp as above, with one final half-precision rounding. Recompute exp
+// instead of materializing an intermediate FP32 probability matrix before a separate cast kernel.
+template <typename T>
+__device__ void qwen35_masked_softmax(const float *scores, const unsigned *groups, T *out,
+                                     unsigned queries, unsigned keys, unsigned query_start,
+                                     unsigned key_start, unsigned window, unsigned use_groups) {
+    __shared__ float reduction[32];
+    const size_t row = blockIdx.x;
+    const unsigned query = query_start + row % queries;
+    const unsigned group = use_groups && window ? groups[query] : 0xffffffffu;
+    const float *x = scores + row * keys;
+    float maximum = -INFINITY;
+    for (unsigned j = threadIdx.x; j < keys; j += blockDim.x)
+        maximum = fmaxf(maximum, gemma_mask_value(x, groups, j, query, key_start, window, group));
+    maximum = block_reduce<true>(maximum, reduction);
+    float sum = 0.0f;
+    for (unsigned j = threadIdx.x; j < keys; j += blockDim.x)
+        sum += expf(gemma_mask_value(x, groups, j, query, key_start, window, group) - maximum);
+    sum = block_reduce<false>(sum, reduction);
+    const float inverse = 1.0f / sum;
+    for (unsigned j = threadIdx.x; j < keys; j += blockDim.x) {
+        const float value = expf(gemma_mask_value(x, groups, j, query, key_start, window, group) - maximum);
+        out[row * keys + j] = from_f<T>(__fmul_rn(value, inverse));
+    }
+}
+#define QWEN35_SOFTMAX(T, S) \
+extern "C" __global__ void qwen35_masked_softmax_##S(const float *scores, const unsigned *groups, T *out, \
+    unsigned queries, unsigned keys, unsigned query_start, unsigned key_start, unsigned window, unsigned use_groups) { \
+    qwen35_masked_softmax(scores, groups, out, queries, keys, query_start, key_start, window, use_groups); \
+}
+QWEN35_SOFTMAX(__half, f16)
+QWEN35_SOFTMAX(__nv_bfloat16, bf16)

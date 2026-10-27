@@ -28,6 +28,7 @@ pub enum PlannedPlacement<'a> {
 }
 
 pub enum RuntimeBackend {
+    Qwen35(Box<crate::qwen35::Qwen35Backend>),
     Llama(Box<crate::GpuBackend>),
     Gemma(Box<crate::gemma::GemmaBackend>),
     #[cfg(all(feature = "intel", not(target_os = "macos")))]
@@ -64,7 +65,7 @@ impl RuntimeBackend {
             (plan.precision(), plan.readout(), plan.kernels(), plan.quantization());
         let mut backend = match placement {
             PlannedPlacement::Single(device) => {
-                Self::load(dir, cfg, precision, readout, kernels, quantization, device, media)?
+                Self::load(dir, cfg, precision, readout, kernels, quantization, device, media, plan.kernel_set())?
             }
             PlannedPlacement::Split(split) => {
                 Self::load_split_with_media(dir, cfg, precision, readout, kernels, quantization, split, media)?
@@ -85,6 +86,7 @@ impl RuntimeBackend {
     /// Apply the execution policy of `plan`; refused once K/V or an execution lane exists.
     fn apply_plan(&mut self, plan: &ResolvedExecutionPlan) -> Result<(), InferenceConfigError> {
         match self {
+            Self::Qwen35(b) => b.apply_plan(plan),
             Self::Llama(b) => b.apply_plan(plan),
             Self::Gemma(b) => b.apply_plan(plan),
             #[cfg(all(feature = "intel", not(target_os = "macos")))]
@@ -92,7 +94,7 @@ impl RuntimeBackend {
                 crate::inference::check_plan(plan)?;
                 match plan.policy() {
                     crate::plan::ExecutionPolicy::Llama { .. } => Ok(()),
-                    crate::plan::ExecutionPolicy::Gemma { .. } => {
+                    crate::plan::ExecutionPolicy::Gemma { .. } | crate::plan::ExecutionPolicy::Qwen35 { .. } => {
                         Err(InferenceConfigError::PlanMismatch("a Gemma policy for the Intel backend"))
                     }
                 }
@@ -113,8 +115,18 @@ impl RuntimeBackend {
         quantization: Quantization,
         device: usize,
         media: bool,
+        kernel_set: crate::KernelSet,
     ) -> Result<Self> {
         match cfg {
+            Architecture::Qwen35(c) => {
+                anyhow::ensure!(
+                    !media && quantization == Quantization::None,
+                    "Qwen3.5 requires text-only input and quantization none"
+                );
+                Ok(Self::Qwen35(Box::new(crate::qwen35::Qwen35Backend::load(
+                    dir, c, precision, readout, device, kernel_set,
+                )?)))
+            }
             Architecture::Gemma4(c) => {
                 anyhow::ensure!(
                     quantization == Quantization::None,
@@ -161,6 +173,7 @@ impl RuntimeBackend {
         split: &LayerSplit,
         media: bool,
     ) -> Result<Self> {
+        anyhow::ensure!(!matches!(cfg, Architecture::Qwen35(_)), "Qwen3.5 does not support layer split");
         if let Architecture::Gemma4(c) = cfg {
             anyhow::ensure!(quantization == Quantization::None, "Gemma layer split needs quantization none");
             return Ok(Self::Gemma(Box::new(crate::gemma::GemmaBackend::load_split(
@@ -191,6 +204,7 @@ impl RuntimeBackend {
         match self {
             Self::Llama(b) => b.stage_transfers(),
             Self::Gemma(b) => b.stage_transfers(),
+            Self::Qwen35(_) => None,
             #[cfg(all(feature = "intel", not(target_os = "macos")))]
             Self::Intel(_) => None,
         }
@@ -200,7 +214,7 @@ impl RuntimeBackend {
     pub fn dequant_profile(&self) -> Option<(Quantization, f64, u64)> {
         match self {
             Self::Llama(b) => b.dequant_profile(),
-            Self::Gemma(_) => None,
+            Self::Gemma(_) | Self::Qwen35(_) => None,
             #[cfg(all(feature = "intel", not(target_os = "macos")))]
             Self::Intel(b) => b.dequant_profile(),
         }
@@ -210,6 +224,7 @@ impl RuntimeBackend {
         match self {
             Self::Llama(b) => b.load_s,
             Self::Gemma(b) => b.load_s,
+            Self::Qwen35(b) => b.load_s,
             #[cfg(all(feature = "intel", not(target_os = "macos")))]
             Self::Intel(b) => b.load_s,
         }
@@ -218,7 +233,9 @@ impl RuntimeBackend {
     pub fn set_state_cache_bytes(&mut self, bytes: usize) -> Result<()> {
         match self {
             Self::Llama(b) => b.state_cache_bytes = bytes,
-            Self::Gemma(_) => anyhow::ensure!(bytes == 0, "Gemma cross-request state cache is not supported; use 0"),
+            Self::Gemma(_) | Self::Qwen35(_) => {
+                anyhow::ensure!(bytes == 0, "this architecture does not support cross-request state cache; use 0")
+            }
             #[cfg(all(feature = "intel", not(target_os = "macos")))]
             Self::Intel(b) => {
                 anyhow::ensure!(bytes == 0, "Intel cross-request state cache is not supported");
@@ -231,20 +248,21 @@ impl RuntimeBackend {
     pub fn state_cache_stats(&self) -> (u64, u64) {
         match self {
             Self::Llama(b) => (b.state_cache_hits, b.state_cache_inserts),
-            Self::Gemma(_) => (0, 0),
+            Self::Gemma(_) | Self::Qwen35(_) => (0, 0),
             #[cfg(all(feature = "intel", not(target_os = "macos")))]
             Self::Intel(b) => (b.state_cache_hits, b.state_cache_inserts),
         }
     }
 
     pub fn supports_prefix_cache(&self) -> bool {
-        !matches!(self, Self::Gemma(_))
+        !matches!(self, Self::Gemma(_) | Self::Qwen35(_))
     }
 
     pub fn gemm_table_missing(&self) -> Vec<(usize, usize)> {
         match self {
             Self::Llama(b) => b.gemm_table_missing(),
             Self::Gemma(b) => b.gemm_table_missing(),
+            Self::Qwen35(_) => vec![],
             #[cfg(all(feature = "intel", not(target_os = "macos")))]
             Self::Intel(b) => b.gemm_table_missing(),
         }
@@ -255,6 +273,7 @@ impl RuntimeBackend {
         match self {
             Self::Llama(b) => b.load_gemm_table(v, name, table_only),
             Self::Gemma(b) => b.load_gemm_table(v, name),
+            Self::Qwen35(b) => b.load_gemm_table(v, name),
             #[cfg(all(feature = "intel", not(target_os = "macos")))]
             Self::Intel(b) => b.load_gemm_table(v, name),
         }
@@ -268,7 +287,9 @@ impl RuntimeBackend {
                     b.residual_max = Some(Default::default());
                 }
             }
-            Self::Gemma(_) => anyhow::bail!("per-section profiling is not implemented for Gemma"),
+            Self::Gemma(_) | Self::Qwen35(_) => {
+                anyhow::bail!("per-section profiling is not implemented for this architecture")
+            }
             #[cfg(all(feature = "intel", not(target_os = "macos")))]
             Self::Intel(b) => {
                 b.profile = Some(Default::default());
@@ -283,7 +304,7 @@ impl RuntimeBackend {
     pub fn take_profile(&mut self) -> BTreeMap<&'static str, f64> {
         match self {
             Self::Llama(b) => b.profile.take().map(|p| p.into_inner()).unwrap_or_default(),
-            Self::Gemma(_) => Default::default(),
+            Self::Gemma(_) | Self::Qwen35(_) => Default::default(),
             #[cfg(all(feature = "intel", not(target_os = "macos")))]
             Self::Intel(b) => b.profile.take().map(|p| p.into_inner()).unwrap_or_default(),
         }
@@ -292,7 +313,7 @@ impl RuntimeBackend {
     pub fn take_residual_max(&mut self) -> Vec<f32> {
         match self {
             Self::Llama(b) => b.residual_max.take().map(|p| p.into_inner()).unwrap_or_default(),
-            Self::Gemma(_) => vec![],
+            Self::Gemma(_) | Self::Qwen35(_) => vec![],
             #[cfg(all(feature = "intel", not(target_os = "macos")))]
             Self::Intel(b) => b.residual_max.take().map(|p| p.into_inner()).unwrap_or_default(),
         }
@@ -302,6 +323,7 @@ impl RuntimeBackend {
         match self {
             Self::Llama(b) => b.memory_probe(),
             Self::Gemma(b) => GpuMemoryProbe::candle(b.dev.clone()),
+            Self::Qwen35(b) => GpuMemoryProbe::candle(b.dev.clone()),
             #[cfg(all(feature = "intel", not(target_os = "macos")))]
             Self::Intel(b) => b.memory_probe(),
         }
@@ -315,6 +337,7 @@ impl RuntimeBackend {
         match self {
             Self::Llama(b) => b.memory_probes(),
             Self::Gemma(b) => vec![(b.device, GpuMemoryProbe::candle(b.dev.clone()))],
+            Self::Qwen35(b) => vec![(b.device, GpuMemoryProbe::candle(b.dev.clone()))],
             #[cfg(all(feature = "intel", not(target_os = "macos")))]
             Self::Intel(b) => vec![(0, b.memory_probe())],
         }
@@ -366,6 +389,7 @@ impl Backend for RuntimeBackend {
         match self {
             Self::Llama(b) => b.describe(),
             Self::Gemma(b) => b.describe(),
+            Self::Qwen35(b) => b.describe(),
             #[cfg(all(feature = "intel", not(target_os = "macos")))]
             Self::Intel(b) => b.describe(),
         }
@@ -374,6 +398,7 @@ impl Backend for RuntimeBackend {
         match self {
             Self::Llama(b) => b.letter_logits(rows, codes),
             Self::Gemma(b) => b.letter_logits(rows, codes),
+            Self::Qwen35(b) => b.letter_logits(rows, codes),
             #[cfg(all(feature = "intel", not(target_os = "macos")))]
             Self::Intel(b) => b.letter_logits(rows, codes),
         }
@@ -381,7 +406,7 @@ impl Backend for RuntimeBackend {
     fn add_prefix(&mut self, ids: &[u32]) -> Result<()> {
         match self {
             Self::Llama(b) => b.add_prefix(ids),
-            Self::Gemma(_) => Ok(()),
+            Self::Gemma(_) | Self::Qwen35(_) => Ok(()),
             #[cfg(all(feature = "intel", not(target_os = "macos")))]
             Self::Intel(b) => b.add_prefix(ids),
         }
@@ -389,7 +414,7 @@ impl Backend for RuntimeBackend {
     fn has_evidence(&self) -> bool {
         match self {
             Self::Llama(b) => b.has_evidence(),
-            Self::Gemma(_) => false,
+            Self::Gemma(_) | Self::Qwen35(_) => false,
             #[cfg(all(feature = "intel", not(target_os = "macos")))]
             Self::Intel(b) => b.has_evidence(),
         }
@@ -397,7 +422,7 @@ impl Backend for RuntimeBackend {
     fn evidence_scores(&mut self, ids: &[u32], t0: usize, t1: usize) -> Result<(Vec<f32>, Vec<f32>)> {
         match self {
             Self::Llama(b) => b.evidence_scores(ids, t0, t1),
-            Self::Gemma(_) => anyhow::bail!("Gemma model has no evidence head"),
+            Self::Gemma(_) | Self::Qwen35(_) => anyhow::bail!("this architecture has no evidence head"),
             #[cfg(all(feature = "intel", not(target_os = "macos")))]
             Self::Intel(b) => b.evidence_scores(ids, t0, t1),
         }
@@ -406,6 +431,7 @@ impl Backend for RuntimeBackend {
         match self {
             Self::Llama(b) => Ok(Self::Llama(Box::new(b.fork()?))),
             Self::Gemma(b) => Ok(Self::Gemma(Box::new(b.fork()?))),
+            Self::Qwen35(b) => Ok(Self::Qwen35(Box::new(b.fork()?))),
             #[cfg(all(feature = "intel", not(target_os = "macos")))]
             Self::Intel(b) => Ok(Self::Intel(Box::new(b.fork()?))),
         }
@@ -414,6 +440,7 @@ impl Backend for RuntimeBackend {
         match self {
             Self::Llama(b) => b.set_gate(gate, urgent),
             Self::Gemma(b) => b.set_gate(gate, urgent),
+            Self::Qwen35(b) => b.set_gate(gate, urgent),
             #[cfg(all(feature = "intel", not(target_os = "macos")))]
             Self::Intel(b) => b.set_gate(gate, urgent),
         }
@@ -422,6 +449,7 @@ impl Backend for RuntimeBackend {
         match self {
             Self::Llama(b) => b.set_device_gate(device, gate, urgent),
             Self::Gemma(b) => b.set_device_gate(device, gate, urgent),
+            Self::Qwen35(b) => b.set_device_gate(device, gate, urgent),
             #[cfg(all(feature = "intel", not(target_os = "macos")))]
             Self::Intel(b) => b.set_device_gate(device, gate, urgent),
         }
@@ -430,6 +458,7 @@ impl Backend for RuntimeBackend {
         match self {
             Self::Llama(b) => b.device_health(),
             Self::Gemma(b) => b.device_health(),
+            Self::Qwen35(b) => b.device_health(),
             #[cfg(all(feature = "intel", not(target_os = "macos")))]
             Self::Intel(b) => b.device_health(),
         }
@@ -443,6 +472,7 @@ impl Backend for RuntimeBackend {
         match self {
             Self::Llama(b) => b.set_device_work_class(device, gate, class),
             Self::Gemma(b) => b.set_device_work_class(device, gate, class),
+            Self::Qwen35(b) => b.set_device_work_class(device, gate, class),
             #[cfg(all(feature = "intel", not(target_os = "macos")))]
             Self::Intel(b) => b.set_device_work_class(device, gate, class),
         }
@@ -451,6 +481,7 @@ impl Backend for RuntimeBackend {
         match self {
             Self::Llama(b) => b.background_support(max_forward_tokens),
             Self::Gemma(b) => b.background_support(max_forward_tokens),
+            Self::Qwen35(b) => b.background_support(max_forward_tokens),
             #[cfg(all(feature = "intel", not(target_os = "macos")))]
             Self::Intel(b) => b.background_support(max_forward_tokens),
         }
@@ -459,6 +490,7 @@ impl Backend for RuntimeBackend {
         match self {
             Self::Llama(b) => b.set_stop_token(stop),
             Self::Gemma(b) => b.set_stop_token(stop),
+            Self::Qwen35(b) => b.set_stop_token(stop),
             #[cfg(all(feature = "intel", not(target_os = "macos")))]
             Self::Intel(b) => b.set_stop_token(stop),
         }
@@ -467,6 +499,7 @@ impl Backend for RuntimeBackend {
         match self {
             Self::Llama(b) => b.configure_background(),
             Self::Gemma(b) => b.configure_background(),
+            Self::Qwen35(b) => b.configure_background(),
             #[cfg(all(feature = "intel", not(target_os = "macos")))]
             Self::Intel(b) => b.configure_background(),
         }
@@ -475,6 +508,7 @@ impl Backend for RuntimeBackend {
         match self {
             Self::Llama(b) => b.work_health(),
             Self::Gemma(b) => b.work_health(),
+            Self::Qwen35(b) => b.work_health(),
             #[cfg(all(feature = "intel", not(target_os = "macos")))]
             Self::Intel(b) => b.work_health(),
         }
@@ -483,6 +517,7 @@ impl Backend for RuntimeBackend {
         match self {
             Self::Llama(b) => b.release_work(),
             Self::Gemma(b) => b.release_work(),
+            Self::Qwen35(b) => b.release_work(),
             #[cfg(all(feature = "intel", not(target_os = "macos")))]
             Self::Intel(b) => b.release_work(),
         }
@@ -491,6 +526,7 @@ impl Backend for RuntimeBackend {
         match self {
             Self::Llama(b) => b.device_work_bound(shape),
             Self::Gemma(b) => b.device_work_bound(shape),
+            Self::Qwen35(b) => b.device_work_bound(shape),
             #[cfg(all(feature = "intel", not(target_os = "macos")))]
             Self::Intel(b) => b.device_work_bound(shape),
         }
@@ -505,6 +541,7 @@ impl Backend for RuntimeBackend {
         match self {
             Self::Llama(b) => b.host_staging(),
             Self::Gemma(b) => b.host_staging(),
+            Self::Qwen35(b) => b.host_staging(),
             #[cfg(all(feature = "intel", not(target_os = "macos")))]
             Self::Intel(b) => b.host_staging(),
         }

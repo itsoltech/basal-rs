@@ -53,6 +53,7 @@ pub use plan::{
     ResolvedExecutionPlan,
 };
 mod quant;
+mod qwen35;
 mod runtime;
 mod split;
 pub use memory::{gpu_memory, pool_probe, GpuMemory, GpuMemoryProbe, PoolProbe, PoolUsage};
@@ -103,6 +104,13 @@ pub fn model_precision(value: &str, cfg: &basal_core::architecture::Architecture
         Ok(match cfg {
             basal_core::architecture::Architecture::Llama(_) => Precision::F16,
             basal_core::architecture::Architecture::Gemma4(_) => Precision::Bf16,
+            basal_core::architecture::Architecture::Qwen35(_) => {
+                if cfg!(target_os = "macos") {
+                    Precision::F32
+                } else {
+                    Precision::Bf16
+                }
+            }
         })
     } else {
         Precision::parse(value)
@@ -305,6 +313,21 @@ pub fn projection_shapes(c: &LlamaConfig) -> Vec<(usize, usize)> {
 /// Decoder projection shapes (N, K), including Gemma's per-layer embeddings and separate Q/K/V.
 pub fn architecture_projection_shapes(cfg: &basal_core::architecture::Architecture) -> Result<Vec<(usize, usize)>> {
     use basal_core::architecture::Architecture;
+    if let Architecture::Qwen35(c) = cfg {
+        c.validate()?;
+        let kd = c.linear_key_heads * c.linear_key_dim;
+        let vd = c.linear_value_heads * c.linear_value_dim;
+        let shapes = vec![
+            (2 * c.heads * c.head_dim, c.hidden),
+            (c.kv_heads * c.head_dim, c.hidden),
+            (c.hidden, c.heads * c.head_dim),
+            (2 * kd + 2 * vd + 2 * c.linear_value_heads, c.hidden),
+            (c.hidden, vd),
+            (2 * c.intermediate, c.hidden),
+            (c.hidden, c.intermediate),
+        ];
+        return Ok(shapes.into_iter().collect::<std::collections::BTreeSet<_>>().into_iter().collect());
+    }
     let Architecture::Gemma4(c) = cfg else {
         return Ok(projection_shapes(cfg.llama()?));
     };
