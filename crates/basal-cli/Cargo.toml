@@ -28,7 +28,7 @@ hyper-util = { version = "=0.1.21", default-features = false, features = ["serve
 hyper = { version = "=1.11.1", default-features = false }
 base64 = "0.22"
 flate2 = "1"
-zstd = { version = "0.13", default-features = false }
+zstd = { version = "0.14.3", default-features = false }
 prometheus = { version = "0.14", default-features = false }
 # HTTP (doctor: Hugging Face Hub) and system calls; the versions hf-hub already brings
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
