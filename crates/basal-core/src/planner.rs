@@ -22,7 +22,7 @@ use crate::engine::{prepare_protocol, Prepared, QuestionPlan, RequestPlan};
 use crate::execution::{Interrupted, StopToken};
 use crate::manifest::ModelManifest;
 use crate::pack::{pack, TrieSize};
-use crate::prompt::{render_model, ChatStyle, OptionOrders, PromptFormat};
+use crate::prompt::{render_model_with_layout, ChatStyle, OptionOrders, PromptFormat, PromptLayout};
 use crate::request::{check_capability_with_limit, DecideError, Item};
 use crate::tokenize::BasalTokenizer;
 
@@ -466,6 +466,7 @@ impl<'a> PlanContext<'a> {
             item,
             self.manifest.prompt_format,
             self.manifest.chat_style,
+            self.manifest.layout,
             media,
             budget,
         )?;
@@ -488,7 +489,8 @@ impl<'a> PlanContext<'a> {
     }
 
     /// Tokens of the prompt up to and including the state: the common prefix of the item's prompt with two probe
-    /// prompts that keep the state and change the question.
+    /// prompts that keep the state and change the question. Format 2 takes the exact rendered prefix through the
+    /// first state copy; qfirst includes the actual question in that prefix and cache reuse requires a token match.
     pub(crate) fn state_len(&self, p: &Prepared) -> anyhow::Result<usize> {
         let it = &p.item;
         if self.manifest.prompt_format == PromptFormat::Two {
@@ -507,9 +509,10 @@ impl<'a> PlanContext<'a> {
         }
 
         let probe = |q: &str| {
-            self.tok.encode(&render_model(
+            self.tok.encode(&render_model_with_layout(
                 self.manifest.chat_style,
                 self.manifest.prompt_format,
+                self.manifest.layout,
                 &self.manifest.bos_token,
                 &it.state,
                 q,
@@ -596,6 +599,18 @@ impl<'a> PlanContext<'a> {
         body: &Value,
         dialect: crate::request::Dialect,
     ) -> Result<RequestPlan, PlanError> {
+        if self.manifest.layout != PromptLayout::Canonical {
+            if let Some(field) =
+                ["media", "assets"].into_iter().find(|field| body.get(*field).is_some_and(|v| !v.is_null()))
+            {
+                return Err(DecideError::Validation(vec![crate::request::FieldError::new(
+                    vec!["body".into(), field.into()],
+                    "images and audio require the canonical layout",
+                    "value_error",
+                )])
+                .into());
+            }
+        }
         for field in ["early_exit", "thinking"] {
             if body.get(field).is_some_and(|v| !v.is_null()) {
                 return Err(DecideError::Unsupported(vec![crate::request::FieldError::new(
@@ -774,6 +789,7 @@ impl<'a> PlanContext<'a> {
                     p.item.clone(),
                     self.manifest.prompt_format,
                     self.manifest.chat_style,
+                    self.manifest.layout,
                     plan.media.as_deref(),
                     None,
                 )?)

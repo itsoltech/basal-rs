@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, ensure, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -18,7 +18,7 @@ use crate::planner::{
     BackendCaps, HostStaging, PlanBudget, PlanCaps, PlanContext, PlanError, PlanOptions, PlanStage, PlannerLoadError,
     RequestPlanner, TOKENIZER_BYTES_PER_BYTE,
 };
-use crate::prompt::{render_model, ChatStyle, OptionOrders, PromptFormat};
+use crate::prompt::{render_model_with_layout, ChatStyle, OptionOrders, PromptFormat, PromptLayout};
 use crate::request::{DecideError, Item};
 use crate::tokenize::BasalTokenizer;
 
@@ -220,6 +220,48 @@ pub const TREE_MAX_TOKENS: usize = 32768;
 /// Most tokens of one [`Batching::Tree`] forward (sum of its rows); more rows go to further forwards.
 pub const FORWARD_MAX_TOKENS: usize = 8192;
 
+/// Validated uncertainty thresholds for adaptive option orders, on the calibrated first-order distribution.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
+pub struct AutoOrderSettings {
+    tau: f64,
+    band: [f64; 2],
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("auto tau and band must be finite and in [0, 1], with band[0] <= band[1]")]
+pub struct InvalidAutoOrderSettings;
+
+impl Default for AutoOrderSettings {
+    fn default() -> Self {
+        Self { tau: 0.6, band: [0.2, 0.8] }
+    }
+}
+
+impl AutoOrderSettings {
+    pub fn new(tau: f64, band: [f64; 2]) -> std::result::Result<Self, InvalidAutoOrderSettings> {
+        if ![tau, band[0], band[1]].iter().all(|x| x.is_finite() && (0.0..=1.0).contains(x)) || band[0] > band[1] {
+            return Err(InvalidAutoOrderSettings);
+        }
+        Ok(Self { tau, band })
+    }
+
+    pub fn tau(self) -> f64 {
+        self.tau
+    }
+
+    pub fn band(self) -> [f64; 2] {
+        self.band
+    }
+
+    fn uncertain(self, kind: crate::request::QType, probabilities: &[f64]) -> bool {
+        if kind == crate::request::QType::Noul {
+            (self.band[0]..=self.band[1]).contains(&probabilities[0])
+        } else {
+            probabilities.iter().copied().fold(f64::NEG_INFINITY, f64::max) < self.tau
+        }
+    }
+}
+
 pub struct Engine<B: Backend> {
     pub manifest: ModelManifest,
     pub tok: BasalTokenizer,
@@ -238,6 +280,7 @@ pub struct Engine<B: Backend> {
     pub large_choice_strategy: crate::large_choice::Strategy,
     /// Keep the joint fit after the first round of grouped large choices in [`PlanOutput::first_round`] (evaluation).
     pub trace_large_choice: bool,
+    auto_orders: AutoOrderSettings,
     /// Stop token of background work, checked between rounds ([`Engine::set_stop_token`]); `None` online.
     stop: Option<StopToken>,
 }
@@ -259,6 +302,7 @@ impl<B: Backend> Engine<B> {
             large_choice: true,
             large_choice_strategy: crate::large_choice::Strategy::DEFAULT,
             trace_large_choice: false,
+            auto_orders: AutoOrderSettings::default(),
             stop: None,
         })
     }
@@ -273,29 +317,41 @@ impl<B: Backend> Engine<B> {
         e.large_choice = self.large_choice;
         e.large_choice_strategy = self.large_choice_strategy;
         e.trace_large_choice = self.trace_large_choice;
+        e.auto_orders = self.auto_orders;
         Ok(e)
     }
 
+    pub fn set_auto_orders(&mut self, settings: AutoOrderSettings) {
+        self.auto_orders = settings;
+    }
+
+    pub fn auto_orders(&self) -> AutoOrderSettings {
+        self.auto_orders
+    }
+
     /// Precompute the prompt template up to the state for both languages: the longest common token prefix of two
-    /// prompts that differ only in the state. Rows reuse it only on an exact token match.
+    /// prompts that differ in the state (and question for noncanonical layouts). Rows reuse it only on an exact
+    /// token match; varying both prevents the qfirst probe question from entering the static prefix.
     pub fn warm_static_prefixes(&mut self) -> Result<Vec<usize>> {
         let mut lens = Vec::new();
         for lang in [crate::prompt::Lang::Pl, crate::prompt::Lang::En] {
-            let a = self.tok.encode(&render_model(
+            let a = self.tok.encode(&render_model_with_layout(
                 self.manifest.chat_style,
                 self.manifest.prompt_format,
+                self.manifest.layout,
                 &self.manifest.bos_token,
                 "a",
                 "q",
                 &["x", "y"],
                 lang,
             )?)?;
-            let b = self.tok.encode(&render_model(
+            let b = self.tok.encode(&render_model_with_layout(
                 self.manifest.chat_style,
                 self.manifest.prompt_format,
+                self.manifest.layout,
                 &self.manifest.bos_token,
                 "b",
-                "q",
+                if self.manifest.layout == PromptLayout::Canonical { "q" } else { "r" },
                 &["x", "y"],
                 lang,
             )?)?;
@@ -491,7 +547,8 @@ impl<B: Backend> Engine<B> {
             forward_max_tokens: self.forward_max_tokens,
             max_positions: self.manifest.config.max_positions(),
             max_options: self.manifest.prompt_format.max_options(),
-            evidence_matches_prompt: self.manifest.chat_style == ChatStyle::Llama,
+            evidence_matches_prompt: self.manifest.chat_style == ChatStyle::Llama
+                && self.manifest.layout == PromptLayout::Canonical,
             adaptive_orders: self.manifest.orders == OptionOrders::Auto,
         }
     }
@@ -563,8 +620,8 @@ impl<B: Backend> Engine<B> {
 
     /// Run a plan: one round for direct questions; grouped questions get a second, final round with their strongest
     /// candidates. Returns the final (calibrated) distribution of every planned question.
-    /// Evidence spans of one question (upstream `Evidence.spans`): a separate forward of its prompt in the original
-    /// option order; empty when no token lies inside the state.
+    /// Evidence spans of one question (upstream `Evidence.spans`): a separate canonical prompt forward in the
+    /// original option order, including when decisions use another layout; empty when no token lies in the state.
     fn evidence_for(&mut self, item: &Item, limit: Option<usize>) -> Result<Value> {
         let Some(inp) =
             crate::evidence::input_format(&self.tok, &self.manifest.bos_token, item, self.manifest.prompt_format)?
@@ -688,11 +745,7 @@ impl<B: Backend> Engine<B> {
                     continue;
                 }
                 let probabilities = &results[i].p_cal;
-                let uncertain = if p.item.temp_kind() == crate::request::QType::Noul {
-                    (0.2..=0.8).contains(&probabilities[0])
-                } else {
-                    probabilities.iter().copied().fold(f64::NEG_INFINITY, f64::max) < 0.6
-                };
+                let uncertain = self.auto_orders.uncertain(p.item.temp_kind(), probabilities);
                 if uncertain {
                     let mut redo = prepare_protocol(
                         &self.tok,
@@ -700,6 +753,7 @@ impl<B: Backend> Engine<B> {
                         p.item.clone(),
                         self.manifest.prompt_format,
                         self.manifest.chat_style,
+                        self.manifest.layout,
                         None,
                         None,
                     )?;
@@ -895,11 +949,7 @@ impl<B: Backend> Engine<B> {
                 let mut owners = Vec::new();
                 for (i, p) in plan.prepared.iter().enumerate() {
                     let values = &results[i].p_cal;
-                    let uncertain = if p.item.temp_kind() == crate::request::QType::Noul {
-                        (0.2..=0.8).contains(&values[0])
-                    } else {
-                        values.iter().copied().fold(f64::NEG_INFINITY, f64::max) < 0.6
-                    };
+                    let uncertain = self.auto_orders.uncertain(p.item.temp_kind(), values);
                     if uncertain {
                         let mut reverse = prepare_protocol(
                             &self.tok,
@@ -907,6 +957,7 @@ impl<B: Backend> Engine<B> {
                             p.item.clone(),
                             self.manifest.prompt_format,
                             self.manifest.chat_style,
+                            self.manifest.layout,
                             Some(media),
                             None,
                         )?;
@@ -1034,7 +1085,18 @@ pub fn prepare(tok: &BasalTokenizer, bos: &str, item: Item) -> Result<Prepared> 
 }
 
 pub fn prepare_format(tok: &BasalTokenizer, bos: &str, item: Item, fmt: PromptFormat) -> Result<Prepared> {
-    prepare_protocol(tok, bos, item, fmt, ChatStyle::Llama, None, None)
+    prepare_format_with_layout(tok, bos, item, fmt, PromptLayout::Canonical)
+}
+
+/// Offline Llama preparation with an explicit layout. Model-aware callers can use [`RequestPlanner`].
+pub fn prepare_format_with_layout(
+    tok: &BasalTokenizer,
+    bos: &str,
+    item: Item,
+    fmt: PromptFormat,
+    layout: PromptLayout,
+) -> Result<Prepared> {
+    prepare_protocol(tok, bos, item, fmt, ChatStyle::Llama, layout, None, None)
 }
 
 /// Upper bound of a rendered prompt of `item` with `opts` (template text, the item's strings and media
@@ -1058,15 +1120,22 @@ fn render_bound(bos: &str, item: &Item, opts: &[&str], media: Option<&crate::med
 /// Prepare the option-order prompts of `item`. With a bounded `budget` every allocation of the prompts, token ids
 /// and packed row is reserved before it is made (retained until the end of the plan); the tokenizer's transient
 /// allocations are reserved for the duration of each encode. `None` keeps the online path without accounting.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "One internal preparation boundary for model protocol and bounded allocations"
+)]
 pub(crate) fn prepare_protocol(
     tok: &BasalTokenizer,
     bos: &str,
     mut item: Item,
     fmt: PromptFormat,
     chat: ChatStyle,
+    layout: PromptLayout,
     media: Option<&crate::media::ProcessedMedia>,
     budget: Option<&PlanBudget>,
 ) -> Result<Prepared> {
+    layout.validate(fmt)?;
+    ensure!(media.is_none() || layout == PromptLayout::Canonical, "images and audio require the canonical layout");
     item.prompt_format = fmt;
     let k = item.options.len();
     let mut orders = Vec::new();
@@ -1079,7 +1148,8 @@ pub(crate) fn prepare_protocol(
         let mut asset_order = None;
         let prompt = match media {
             Some(media) if media.asset_markers.is_some() => {
-                let raw = render_model(chat, fmt, bos, &item.state, &item.question, &opts, item.lang)?;
+                let raw =
+                    render_model_with_layout(chat, fmt, layout, bos, &item.state, &item.question, &opts, item.lang)?;
                 let (prompt, indices) = crate::systemone::substitute(
                     &raw,
                     media.asset_markers.as_deref().unwrap_or_default(),
@@ -1091,7 +1161,7 @@ pub(crate) fn prepare_protocol(
             Some(media) => {
                 crate::prompt::render_media(chat, fmt, bos, &item.state, &item.question, &opts, item.lang, media)?
             }
-            None => render_model(chat, fmt, bos, &item.state, &item.question, &opts, item.lang)?,
+            None => render_model_with_layout(chat, fmt, layout, bos, &item.state, &item.question, &opts, item.lang)?,
         };
         let (ids, transient) = match (budget, rendered.as_mut()) {
             (Some(b), Some(r)) => {

@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, ensure, Context, Result};
 use serde_json::Value;
 
-use crate::prompt::{ChatStyle, Lang, OptionOrders, PromptFormat, CHAT_TEMPLATE, LETTERS, PREFILL};
+use crate::calibration::{CalibrationProvenance, CalibrationSource, ServedIdentity};
+use crate::prompt::{ChatStyle, Lang, OptionOrders, PromptFormat, PromptLayout, CHAT_TEMPLATE, LETTERS, PREFILL};
 use crate::request::QType;
 
 #[derive(Clone, Debug)]
@@ -40,6 +41,8 @@ pub struct ModelManifest {
     pub task_thresholds: serde_json::Map<String, Value>,
     pub bos_token: String,
     pub prompt_format: PromptFormat,
+    pub layout: PromptLayout,
+    pub calibration_provenance: CalibrationProvenance,
     pub orders: OptionOrders,
     pub temperature_buckets: HashMap<QType, Vec<TemperatureBucket>>,
     /// Calibration fallback rules keyed by upstream label_set_id.
@@ -54,6 +57,17 @@ pub struct TemperatureBucket {
     pub lo: usize,
     pub hi: usize,
     pub temperature: f64,
+}
+
+/// Additional serving settings. Existing loaders use these defaults and honor basal.json's layout.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ModelLoadOptions<'a> {
+    pub orders: Option<&'a str>,
+    pub layout: Option<PromptLayout>,
+    pub calibration: CalibrationSource<'a>,
+    pub strict_calibration: bool,
+    /// When unavailable here, the application must call `calibration_provenance.check_identity` later.
+    pub served_identity: Option<ServedIdentity<'a>>,
 }
 
 fn read_json(path: &Path) -> Result<Value> {
@@ -136,6 +150,10 @@ impl ModelManifest {
 
     /// Select a trained protocol and calibration matching the served option-order policy.
     pub fn load_with_orders(dir: &Path, orders: Option<&str>) -> Result<Self> {
+        Self::load_with_options(dir, ModelLoadOptions { orders, ..Default::default() })
+    }
+
+    pub fn load_with_options(dir: &Path, options: ModelLoadOptions<'_>) -> Result<Self> {
         let config = crate::architecture::Architecture::parse(&read_json(&dir.join("config.json"))?)?;
         let mut chat_style = match &config {
             crate::architecture::Architecture::Llama(_) => ChatStyle::Llama,
@@ -147,8 +165,21 @@ impl ModelManifest {
             None => PromptFormat::One,
             Some(v) => PromptFormat::parse(v.as_u64().context("basal.json: prompt must be an integer")?)?,
         };
-        let orders =
-            orders.map(OptionOrders::parse).transpose()?.unwrap_or_else(|| OptionOrders::default_for(prompt_format));
+        let orders = options
+            .orders
+            .map(OptionOrders::parse)
+            .transpose()?
+            .unwrap_or_else(|| OptionOrders::default_for(prompt_format));
+        let model_layout = basal
+            .get("layout")
+            .map(|v| {
+                PromptLayout::parse(v.as_str().context("basal.json: layout must be a string")?)
+                    .map_err(anyhow::Error::from)
+            })
+            .transpose()?
+            .unwrap_or_default();
+        let layout = options.layout.unwrap_or(model_layout);
+        layout.validate(prompt_format)?;
         let ro = basal.get("readout").context("basal.json: readout missing")?;
         ensure!(ro.get("prefill").and_then(Value::as_str) == Some(PREFILL), "basal.json: prefill differs");
         match prompt_format {
@@ -233,32 +264,19 @@ impl ModelManifest {
         } else {
             tcfg.get("bos_token").and_then(Value::as_str).context("tokenizer_config.json: bos_token")?.to_string()
         };
-        let base = dir.join("CALIBRATION.json");
-        let mut calibration = if base.exists() { read_json(&base)? } else { serde_json::json!({}) };
-        let fitted_orders = |c: &Value| -> Result<Option<OptionOrders>> {
-            let value = c.pointer("/fitted_on/orders").or_else(|| c.get("orders"));
-            value
-                .filter(|v| !v.is_null())
-                .map(|v| {
-                    let s = v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string());
-                    OptionOrders::parse(&s)
-                })
-                .transpose()
-        };
-        if fitted_orders(&calibration)?.is_some_and(|o| o != orders) {
-            let alt = dir.join(format!("CALIBRATION.o{orders}.json"));
-            if alt.exists() {
-                calibration = read_json(&alt)?;
-            }
-        }
+        let (calibration, calibration_provenance, calibration_unvalidated) = crate::calibration::load(
+            dir,
+            options.calibration,
+            layout,
+            orders,
+            options.strict_calibration,
+            options.served_identity,
+        )?;
         let calibration_prompt = match calibration.get("prompt") {
             None => prompt_format,
             Some(v) => PromptFormat::parse(v.as_u64().context("CALIBRATION.json: prompt must be an integer")?)?,
         };
         ensure!(calibration_prompt == prompt_format, "calibration was fitted for another prompt format");
-        let calibration_unvalidated = fitted_orders(&calibration)?
-            .filter(|o| *o != orders)
-            .map(|o| format!("calibration was fitted on {o} option order(s), served with {orders}"));
         let mut temperatures = HashMap::new();
         let mut temperature_buckets = HashMap::new();
         let temperature = |v: &Value| -> Result<f64> {
@@ -319,6 +337,8 @@ impl ModelManifest {
             task_thresholds,
             bos_token,
             prompt_format,
+            layout,
+            calibration_provenance,
             orders,
             temperature_buckets,
             multi_calibration,

@@ -1,6 +1,6 @@
-//! Prompt protocol of basal-1.0 (port of upstream `basal/prompt.py` at 3fa2eeab). The model was trained on exactly
-//! this text: fixed system prompt, state, question, lettered options, chat template and the answer prefill
-//! `{"answer": "`. The decision is read from the next-token logits of the option letters.
+//! Trained prompt protocol and format-2 layouts from upstream v2.4.1 `basal/prompt.py` (b20f0f9b). The fixed
+//! system/user templates, option codes, chat template and answer prefill `{"answer": "` determine the readout.
+//! Existing render entry points retain the canonical layout.
 
 use std::fmt;
 
@@ -11,6 +11,71 @@ pub enum PromptFormat {
     #[default]
     One,
     Two,
+}
+
+/// Format-2 user-turn layout. Existing renderers continue to use canonical.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptLayout {
+    #[default]
+    Canonical,
+    Qfirst,
+    StateTwice,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PromptLayoutError {
+    #[error("unknown prompt layout {0:?} (supported: canonical, qfirst, state_twice)")]
+    Unknown(String),
+    #[error("layout {0} needs prompt format 2")]
+    NeedsFormatTwo(PromptLayout),
+}
+
+impl PromptLayout {
+    pub fn parse(value: &str) -> Result<Self, PromptLayoutError> {
+        match value {
+            "canonical" => Ok(Self::Canonical),
+            "qfirst" => Ok(Self::Qfirst),
+            "state_twice" => Ok(Self::StateTwice),
+            _ => Err(PromptLayoutError::Unknown(value.to_owned())),
+        }
+    }
+
+    pub fn validate(self, fmt: PromptFormat) -> Result<(), PromptLayoutError> {
+        if self != Self::Canonical && fmt != PromptFormat::Two {
+            return Err(PromptLayoutError::NeedsFormatTwo(self));
+        }
+        Ok(())
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Canonical => "canonical",
+            Self::Qfirst => "qfirst",
+            Self::StateTwice => "state_twice",
+        }
+    }
+
+    fn user_template(self, fmt: PromptFormat, lang: Lang) -> Result<&'static str, PromptLayoutError> {
+        self.validate(fmt)?;
+        Ok(match (self, lang) {
+            (Self::Canonical, _) => fmt.template(lang).user,
+            (Self::Qfirst, Lang::Pl) => "Pytanie: {q}\n\nStan:\n{state}\n\nPytanie: {q}\nOpcje:\n{opts}",
+            (Self::Qfirst, Lang::En) => "Question: {q}\n\nState:\n{state}\n\nQuestion: {q}\nOptions:\n{opts}",
+            (Self::StateTwice, Lang::Pl) => {
+                "Stan:\n{state}\n\nStan (ponownie):\n{state}\n\nPytanie: {q}\nOpcje:\n{opts}"
+            }
+            (Self::StateTwice, Lang::En) => {
+                "State:\n{state}\n\nState (again):\n{state}\n\nQuestion: {q}\nOptions:\n{opts}"
+            }
+        })
+    }
+}
+
+impl fmt::Display for PromptLayout {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 impl From<PromptFormat> for u8 {
@@ -249,13 +314,27 @@ pub fn render_format(
     options: &[&str],
     lang: Lang,
 ) -> anyhow::Result<String> {
+    render_format_with_layout(fmt, PromptLayout::Canonical, bos, state, question, options, lang)
+}
+
+/// Checked renderer with an explicit layout override.
+pub fn render_format_with_layout(
+    fmt: PromptFormat,
+    layout: PromptLayout,
+    bos: &str,
+    state: &str,
+    question: &str,
+    options: &[&str],
+    lang: Lang,
+) -> anyhow::Result<String> {
     anyhow::ensure!(
         (2..=fmt.max_options()).contains(&options.len()),
         "{} options (supported: 2..{})",
         options.len(),
         fmt.max_options()
     );
-    Ok(render_inner(fmt, bos, state, question, options, lang))
+    let user_template = layout.user_template(fmt, lang)?;
+    Ok(render_inner(fmt, user_template, bos, state, question, options, lang))
 }
 
 /// The system/user/assistant subset of the validated model chat template, with thinking disabled.
@@ -268,13 +347,28 @@ pub fn render_model(
     options: &[&str],
     lang: Lang,
 ) -> anyhow::Result<String> {
+    render_model_with_layout(chat, fmt, PromptLayout::Canonical, bos, state, question, options, lang)
+}
+
+/// Model renderer with the selected user-turn layout; chat grammar and readout stay unchanged.
+#[expect(clippy::too_many_arguments, reason = "Preserves render_model's public contract with one layout option")]
+pub fn render_model_with_layout(
+    chat: ChatStyle,
+    fmt: PromptFormat,
+    layout: PromptLayout,
+    bos: &str,
+    state: &str,
+    question: &str,
+    options: &[&str],
+    lang: Lang,
+) -> anyhow::Result<String> {
     if chat == ChatStyle::Llama {
-        return render_format(fmt, bos, state, question, options, lang);
+        return render_format_with_layout(fmt, layout, bos, state, question, options, lang);
     }
     anyhow::ensure!((2..=fmt.max_options()).contains(&options.len()), "unsupported option count {}", options.len());
     let t = fmt.template(lang);
     let opts = options.iter().zip(fmt.codes()).map(|(o, code)| format!("{code}. {o}")).collect::<Vec<_>>().join("\n");
-    let user = format_user(t.user, state, question, &opts);
+    let user = format_user(layout.user_template(fmt, lang)?, state, question, &opts);
     if chat == ChatStyle::Qwen35 {
         return Ok(format!(
             "<|im_start|>system\n{}<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n{PREFILL}",
@@ -323,10 +417,18 @@ pub fn render_media(
     ))
 }
 
-fn render_inner(fmt: PromptFormat, bos: &str, state: &str, question: &str, options: &[&str], lang: Lang) -> String {
+fn render_inner(
+    fmt: PromptFormat,
+    user_template: &str,
+    bos: &str,
+    state: &str,
+    question: &str,
+    options: &[&str],
+    lang: Lang,
+) -> String {
     let t = fmt.template(lang);
     let opts = options.iter().zip(fmt.codes()).map(|(o, c)| format!("{c}. {o}")).collect::<Vec<_>>().join("\n");
-    let user = format_user(t.user, state, question, &opts);
+    let user = format_user(user_template, state, question, &opts);
     let mut s = String::new();
     s.push_str(bos);
     for (role, content) in [("system", t.system), ("user", user.as_str())] {

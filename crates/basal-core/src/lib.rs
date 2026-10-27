@@ -3,6 +3,7 @@
 
 pub mod architecture;
 mod budget;
+pub mod calibration;
 pub mod checkpoint;
 pub mod decision;
 pub mod engine;
