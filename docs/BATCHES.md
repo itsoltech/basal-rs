@@ -355,6 +355,14 @@ batchy w tle. Planer CPU stosuje tę samą politykę skracania co online;
 przejściowe kopie/retokenizacja, oryginalny stan kontynuacji i wynikowe usage
 pozostają objęte budżetami hosta. Przekroczenie budżetu nadal odmawia rekordu,
 nawet gdy krótszy prompt zmieściłby się w kontekście modelu.
+Nowe rezerwacje kopii wejścia i narzuty kontynuacji skracania dotyczą `truncate`;
+domyślne `refuse` zachowuje wcześniejsze zasady tych budżetów.
+Sonda grupowego `choice` wybiera najdłuższe indywidualnie opcje i oba porządki;
+jest heurystyką BPE, bez pomiarowego potwierdzenia wystarczalności marginesu.
+W obu politykach rzeczywiste późniejsze rundy są sprawdzane przed GPU.
+Przekroczenie kontekstu odmawia tylko danego rekordu, z pominięciem jego
+pozostałych pytań i kontynuacji; inne rekordy mikroserii zachowują wyniki.
+Nie wszystkie rundy zależne są znane przed pierwszym forwardem.
 
 ## Wykonanie i kwalifikacja GPU
 

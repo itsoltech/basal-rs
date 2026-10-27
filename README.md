@@ -725,12 +725,16 @@ w YAML, następnie wspólne `--orders`, następnie domyślna wartość formatu.
 pytania i opcje; `--truncate-head` to skończony udział początku w [0,1], domyślnie
 1/3. Faktyczne skrócenie opisuje `usage.truncated`. Media nadal odmawiają
 przekroczenia kontekstu, a evidence ze skracanym stanem otrzymuje 422 przed GPU.
+Planer `truncate` dodatkowo sonduje grupę najdłuższych opcji; to heurystyka BPE.
+Rzeczywiste późniejsze rundy są sprawdzane przed GPU w obu politykach.
+Przekroczenie limitu odmawia całego danego planu (422), zachowując wyniki innych żądań mikroserii.
 Szczegóły i granice: [SYSTEM_ONE.md](docs/SYSTEM_ONE.md#długi-kontekst).
 
 Procesowy `--log-decisions FILE` lub YAML `log_decisions` dopisuje jeden JSONL
 z hashem oryginalnego wejścia i końcowymi prawdopodobieństwami żądania online
 w obu dialektach, po wszystkich rundach. Domyślnie jest wyłączony; błąd otwarcia
-blokuje gotowość, a błąd kolejki/zapisu daje 500. Zawartość i lifecycle:
+blokuje gotowość. Pełna ograniczona kolejka czeka asynchronicznie; zatrzymany
+writer lub błąd zapisu daje 500. Zawartość i lifecycle:
 [OBSERVABILITY.md](docs/OBSERVABILITY.md#rejestr-decyzji).
 
 | Klucz | Domyślnie | Znaczenie |

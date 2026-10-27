@@ -77,14 +77,14 @@ impl DecisionLog {
         .context("decision log request hashing worker stopped")
     }
 
-    /// A full queue or failed line is an explicit internal request error. Return the response only after the write;
-    /// moving it through the worker avoids a large clone/serialization on the executor.
+    /// A full queue waits asynchronously; a closed writer or failed line is an explicit internal request error.
+    /// Return the response only after the write; moving it avoids a large clone/serialization on the executor.
     pub(super) async fn record(&self, request_sha256: String, response: Value) -> Result<Value> {
         let (reply, ack) = oneshot::channel();
-        self.tx.try_send(Record { request_sha256, response, reply }).map_err(|e| match e {
-            mpsc::error::TrySendError::Full(_) => anyhow!("decision log queue is full"),
-            mpsc::error::TrySendError::Closed(_) => anyhow!("decision log writer stopped"),
-        })?;
+        self.tx
+            .send(Record { request_sha256, response, reply })
+            .await
+            .map_err(|_| anyhow!("decision log writer stopped"))?;
         ack.await.context("decision log writer stopped before acknowledging the line")?
     }
 }

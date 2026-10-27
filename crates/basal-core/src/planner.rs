@@ -506,14 +506,14 @@ impl<'a> PlanContext<'a> {
         // Prefix-cache probes also render/tokenize after a cut. Count both live token lists and tokenizer scratch
         // before creating the probe strings, just as for the full prompt.
         let _probe = match self.bounded() {
-            Some(b) => {
+            Some(b) if self.options.overflow.policy() == crate::overflow::ContextOverflow::Truncate => {
                 let bytes = p.orders.iter().map(|o| o.prompt.len() as u64).max().unwrap_or(0);
                 Some(b.reserve(
                     PlanStage::Tokens,
                     bytes.saturating_mul(TOKENIZER_BYTES_PER_BYTE + 16).saturating_add(4096),
                 )?)
             }
-            None => None,
+            _ => None,
         };
         let it = &p.item;
         if self.manifest.prompt_format == PromptFormat::Two {
@@ -581,7 +581,9 @@ impl<'a> PlanContext<'a> {
         self.check_stop()?;
         // Parsing and task expansion clone state, options and JSON before token preparation. Include the retained
         // task text/character indexes and transient expansion copies, not only the final rendered prompts.
-        let items_bound = if self.budget.is_bounded() {
+        let items_bound = if self.budget.is_bounded()
+            && self.options.overflow.policy() == crate::overflow::ContextOverflow::Truncate
+        {
             (crate::request::prepared_input_bytes(body)? as u64).saturating_mul(16).saturating_add(65536)
         } else {
             0
@@ -755,7 +757,12 @@ impl<'a> PlanContext<'a> {
                 return Err(DecideError::Unsupported(errs).into());
             }
         }
-        let mut plan = self.plan_with_overflow(req.items, media)?;
+        // Media never truncates. Validate its placeholders before context refusal, as before overflow support.
+        let mut plan = if media.is_some() {
+            self.plan_items_with_media(req.items, media)?
+        } else {
+            self.plan_with_overflow(req.items, None)?
+        };
         if let (Some(media), crate::architecture::Architecture::Gemma4(cfg)) = (&plan.media, &self.manifest.config) {
             let image_tokens: usize = media
                 .items
@@ -788,6 +795,13 @@ impl<'a> PlanContext<'a> {
                     }
                 }
             }
+        }
+        if plan.media.is_some() {
+            let lengths = self.context_lengths(&plan)?;
+            if !lengths.errors.is_empty() {
+                return Err(DecideError::Unsupported(lengths.errors).into());
+            }
+            plan.auto_reverse = lengths.reverse;
         }
         plan.evidence_limit = req.facts_limit;
         plan.dialect = dialect;
@@ -849,15 +863,44 @@ impl<'a> PlanContext<'a> {
                 if errs.iter().any(|e: &crate::request::FieldError| e.loc.get(2) == Some(&Value::from(name.clone()))) {
                     continue;
                 }
-                errs.push(crate::request::FieldError::new(
-                    vec!["body".into(), "questions".into(), name.into()],
-                    format!(
-                        "the prompt has {longest} tokens, more than the maximum context length of {limit} tokens of \
-                         model {}",
-                        self.manifest.name
-                    ),
-                    "context_length_exceeded",
-                ));
+                errs.push(context_error(&name, longest, limit, &self.manifest.name));
+            }
+        }
+        if self.options.overflow.policy() == crate::overflow::ContextOverflow::Truncate && plan.media.is_none() {
+            for q in &plan.questions {
+                let QuestionPlan::Groups { item, .. } = q else { continue };
+                self.check_stop()?;
+                // One bounded heuristic, not a search of score-dependent combinations. Reserve the item clone,
+                // index/length pairs and single-option tokenizer scratch before making any of them.
+                let scratch = item.options.iter().map(|s| s.len() as u64).max().unwrap_or(0);
+                let _items = self.budget.reserve(
+                    PlanStage::Items,
+                    item_bytes(item)
+                        .saturating_mul(2)
+                        .saturating_add(item.options.len() as u64 * 32)
+                        .saturating_add(scratch.saturating_mul(TOKENIZER_BYTES_PER_BYTE + 8)),
+                )?;
+                let mut lengths = Vec::with_capacity(item.options.len());
+                for (i, option) in item.options.iter().enumerate() {
+                    self.check_stop()?;
+                    lengths.push((i, self.tok.encode(option)?.len()));
+                }
+                lengths.sort_unstable_by_key(|&(i, n)| (std::cmp::Reverse(n), i));
+                lengths.truncate(crate::prompt::MAX_OPTIONS);
+                lengths.sort_unstable_by_key(|&(i, _)| i);
+                let mut sub = item.clone();
+                sub.keys = lengths.iter().map(|&(i, _)| item.keys[i].clone()).collect();
+                sub.options = lengths.iter().map(|&(i, _)| item.options[i].clone()).collect();
+                self.check_stop()?;
+                let before = self.budget.retained();
+                let probe = self.prepare_orders_for(sub, 2, None)?;
+                let longest = probe.orders.iter().map(|o| o.input_ids.len()).max().unwrap_or(0);
+                request_longest = request_longest.max(longest);
+                if longest > limit && !errs.iter().any(|e| e.loc.get(2) == Some(&Value::from(item.name.clone()))) {
+                    errs.push(context_error(&item.name, longest, limit, &self.manifest.name));
+                }
+                drop(probe);
+                self.budget.release_attempt(before);
             }
         }
         Ok(ContextLengths { reverse, longest: request_longest, errors: errs })
@@ -1101,6 +1144,16 @@ struct ContextLengths {
     reverse: Option<ReverseTokens>,
     longest: usize,
     errors: Vec<crate::request::FieldError>,
+}
+
+pub(crate) fn context_error(name: &str, longest: usize, limit: usize, model: &str) -> crate::request::FieldError {
+    crate::request::FieldError::new(
+        vec!["body".into(), "questions".into(), name.into()],
+        format!(
+            "the prompt has {longest} tokens, more than the maximum context length of {limit} tokens of model {model}"
+        ),
+        "context_length_exceeded",
+    )
 }
 
 fn question_item<'a>(q: &'a QuestionPlan, prepared: &'a [Prepared]) -> &'a Item {
@@ -1380,8 +1433,7 @@ pub struct ShapeLimits {
     pub batching: crate::Batching,
     pub tree_max_tokens: usize,
     pub forward_max_tokens: usize,
-    /// The model's position limit: every executed prompt is at most this long (the context check for planned
-    /// rounds; the backends' own position checks for later rounds).
+    /// The model's position limit: planned prompts and actual dependent orders are checked before their forwards.
     pub max_positions: usize,
     /// Most options of one readout of the prompt format (later grouped rounds included).
     pub max_options: usize,

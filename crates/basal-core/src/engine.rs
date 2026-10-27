@@ -687,6 +687,9 @@ impl<B: Backend> Engine<B> {
         let mut continuations = Vec::new();
         let mut owners = Vec::new();
         for (i, plan) in plans.iter().enumerate() {
+            if !outputs[i].context_errors.is_empty() {
+                continue;
+            }
             let Some(mut task) = plan.tasks.clone() else { continue };
             let raw = plan_response(&self.manifest.name, plan, &outputs[i])?;
             if let Some(mut body) = task.second_round(&raw, self.manifest.prompt_format.max_options())? {
@@ -695,6 +698,11 @@ impl<B: Backend> Engine<B> {
                     Ok(next) => {
                         continuations.push(next);
                         owners.push((i, task, raw));
+                    }
+                    Err(DecideError::Unsupported(errors))
+                        if errors.iter().any(|e| e.kind == "context_length_exceeded") =>
+                    {
+                        outputs[i].context_errors = errors;
                     }
                     Err(error) => outputs[i].task_error = Some(error.to_string()),
                 }
@@ -710,6 +718,10 @@ impl<B: Backend> Engine<B> {
             let refs: Vec<_> = continuations.iter().collect();
             let second = self.run_decision_plans(&refs)?;
             for ((next, output), (i, task, mut raw)) in continuations.iter().zip(second).zip(owners) {
+                if !output.context_errors.is_empty() {
+                    outputs[i].context_errors = output.context_errors;
+                    continue;
+                }
                 let next = plan_response(&self.manifest.name, next, &output)?;
                 for key in ["input_tokens", "branches", "second_order_branches"] {
                     if let Some(n) = next["usage"][key].as_u64() {
@@ -755,11 +767,18 @@ impl<B: Backend> Engine<B> {
             all.extend(p.prepared.iter().cloned());
         }
         let mut results = self.run(&all, self.request_batching)?;
+        // A dependent prompt may overflow even after the planner's heuristic probe. Refuse its whole plan,
+        // including sibling grouped questions and task continuations, while keeping other requests in the batch.
+        let mut context_errors = vec![Vec::new(); plans.len()];
         let mut second_tokens = vec![0usize; all.len()];
         if self.manifest.orders == OptionOrders::Auto {
             let mut reverse = Vec::new();
             let mut owners = Vec::new();
             for (i, p) in all.iter().enumerate() {
+                let pi = offs.partition_point(|&off| off <= i) - 1;
+                if !context_errors[pi].is_empty() {
+                    continue;
+                }
                 if p.orders.len() != 1 {
                     continue;
                 }
@@ -777,6 +796,10 @@ impl<B: Backend> Engine<B> {
                         None,
                     )?;
                     redo.orders.remove(0);
+                    if let Some(error) = self.prepared_context_error(&redo) {
+                        context_errors[pi].push(error);
+                        continue;
+                    }
                     redo.packed = pack(&redo.orders.iter().map(|o| o.input_ids.clone()).collect::<Vec<_>>());
                     if self.mark_state {
                         redo.state_len = self.state_len(&redo)?;
@@ -786,6 +809,13 @@ impl<B: Backend> Engine<B> {
                     reverse.push(redo);
                 }
             }
+            let mut i = 0;
+            reverse.retain(|_| {
+                let pi = offs.partition_point(|&off| off <= owners[i]) - 1;
+                i += 1;
+                context_errors[pi].is_empty()
+            });
+            owners.retain(|&i| context_errors[offs.partition_point(|&off| off <= i) - 1].is_empty());
             self.check_stop()?;
             let rerun = self.run(&reverse, self.request_batching)?;
             for ((i, p2), r2) in owners.into_iter().zip(&reverse).zip(rerun) {
@@ -801,10 +831,14 @@ impl<B: Backend> Engine<B> {
         // share the forwards of a round
         let strategy = self.large_choice_strategy;
         let mut large: Vec<Large> = Vec::new();
-        for (plan, &off) in plans.iter().zip(&offs) {
+        for (pi, (plan, &off)) in plans.iter().zip(&offs).enumerate() {
+            if !context_errors[pi].is_empty() {
+                continue;
+            }
             for q in &plan.questions {
                 if let QuestionPlan::Groups { item, groups, parts } = q {
                     large.push(Large {
+                        owner: pi,
                         item: item.clone(),
                         groups: groups.clone(),
                         targets: parts.iter().map(|&i| results[off + i].p_avg.clone()).collect(),
@@ -827,7 +861,11 @@ impl<B: Backend> Engine<B> {
         loop {
             let mut prep = Vec::new();
             let mut owners = Vec::new();
-            for (li, l) in large.iter().enumerate().filter(|(_, l)| l.finalists.is_none()) {
+            for (li, l) in large.iter().enumerate() {
+                if l.finalists.is_some() || !context_errors[l.owner].is_empty() {
+                    continue;
+                }
+                self.check_stop()?;
                 let n = l.item.options.len();
                 let (round, last) =
                     match crate::large_choice::next_round(&strategy, n, &l.groups, &l.targets, &l.last, l.rounds) {
@@ -835,20 +873,35 @@ impl<B: Backend> Engine<B> {
                         crate::large_choice::Round::Groups(g) => (g, false),
                     };
                 for g in round {
+                    self.check_stop()?;
                     let mut sub = l.item.clone();
                     sub.keys = g.iter().map(|&i| l.item.keys[i].clone()).collect();
                     sub.options = g.iter().map(|&i| l.item.options[i].clone()).collect();
-                    prep.push(self.prepare_orders(sub, if last { 2 } else { strategy.screen_orders })?);
+                    let p = self.prepare_orders(sub, if last { 2 } else { strategy.screen_orders })?;
+                    if let Some(error) = self.prepared_context_error(&p) {
+                        context_errors[l.owner].push(error);
+                        break;
+                    }
+                    prep.push(p);
                     owners.push((li, g, last));
                 }
             }
+            // Discard every question already queued for an overflowing plan, even when its other grouped
+            // question was encountered first. Keep both vectors aligned before the next GPU launch.
+            let mut i = 0;
+            prep.retain(|_| {
+                let keep = context_errors[large[owners[i].0].owner].is_empty();
+                i += 1;
+                keep
+            });
+            owners.retain(|&(li, _, _)| context_errors[large[li].owner].is_empty());
             if prep.is_empty() {
                 break;
             }
             self.check_stop()?;
             let res = self.run(&prep, self.request_batching)?;
             for l in large.iter_mut() {
-                if l.finalists.is_none() {
+                if l.finalists.is_none() && context_errors[l.owner].is_empty() {
                     l.last.clear();
                     l.rounds += 1;
                 }
@@ -869,7 +922,14 @@ impl<B: Backend> Engine<B> {
         }
         let mut li = 0;
         let mut outs = Vec::with_capacity(plans.len());
-        for (plan, &off) in plans.iter().zip(&offs) {
+        for (pi, (plan, &off)) in plans.iter().zip(&offs).enumerate() {
+            if !context_errors[pi].is_empty() {
+                while large.get(li).is_some_and(|l| l.owner == pi) {
+                    li += 1;
+                }
+                outs.push(PlanOutput { context_errors: std::mem::take(&mut context_errors[pi]), ..Default::default() });
+                continue;
+            }
             let mut finals = Vec::with_capacity(plan.questions.len());
             let end = off + plan.prepared.len();
             let second_order_branches = (self.manifest.orders == OptionOrders::Auto)
@@ -930,6 +990,7 @@ impl<B: Backend> Engine<B> {
                 evidence.push(if item.evidence { Some(self.evidence_for(item, plan.evidence_limit)?) } else { None });
             }
             outs.push(PlanOutput {
+                context_errors: Vec::new(),
                 task_response: None,
                 task_error: None,
                 asset_media_tokens: None,
@@ -944,6 +1005,15 @@ impl<B: Backend> Engine<B> {
             });
         }
         Ok(outs)
+    }
+
+    fn prepared_context_error(&self, prepared: &Prepared) -> Option<crate::request::FieldError> {
+        let limit = self.manifest.config.max_positions();
+        let longest = prepared.orders.iter().map(|o| o.input_ids.len()).max().unwrap_or(0);
+        (longest > limit).then(|| {
+            let name = prepared.item.name.split('#').next().unwrap_or(&prepared.item.name);
+            crate::planner::context_error(name, longest, limit, &self.manifest.name)
+        })
     }
 
     fn run_media_plan(&mut self, plan: &RequestPlan) -> Result<PlanOutput> {
@@ -984,6 +1054,9 @@ impl<B: Backend> Engine<B> {
                             None,
                         )?;
                         reverse.orders.remove(0);
+                        if let Some(error) = self.prepared_context_error(&reverse) {
+                            return Ok(PlanOutput { context_errors: vec![error], ..Default::default() });
+                        }
                         owners.push(i);
                         redo.push(reverse);
                     }
@@ -1023,6 +1096,7 @@ impl<B: Backend> Engine<B> {
             }
             let n = finals.len();
             Ok(PlanOutput {
+                context_errors: Vec::new(),
                 task_response: None,
                 task_error: None,
                 asset_media_tokens,
@@ -1233,6 +1307,8 @@ pub(crate) fn prepare_protocol(
 /// A grouped large choice between rounds: the groups asked so far with their distributions (`p_avg`), the groups of
 /// the latest round, and the final group with its calibrated readout once asked.
 struct Large {
+    /// Index of the request plan: one failed question cancels all further work of that plan.
+    owner: usize,
     item: Item,
     groups: Vec<Vec<usize>>,
     targets: Vec<Vec<f64>>,
@@ -1249,7 +1325,10 @@ struct Large {
 
 /// Answers of a planned request: final distribution per question, and the prompt tokens of the rounds after the
 /// first of grouped large choices (counted in `usage.input_tokens`).
+#[derive(Default)]
 pub struct PlanOutput {
+    /// Context refusal of this plan only; no partial answers or further task rounds are served.
+    context_errors: Vec<crate::request::FieldError>,
     task_response: Option<Value>,
     task_error: Option<String>,
     asset_media_tokens: Option<usize>,
@@ -1302,6 +1381,9 @@ pub struct RequestPlan {
 }
 
 pub fn plan_response(model: &str, plan: &RequestPlan, out: &PlanOutput) -> Result<Value, DecideError> {
+    if !out.context_errors.is_empty() {
+        return Err(DecideError::Unsupported(out.context_errors.clone()));
+    }
     if let Some(error) = &out.task_error {
         return Err(crate::tasks::invalid(error));
     }

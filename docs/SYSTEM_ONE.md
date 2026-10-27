@@ -154,8 +154,13 @@ to skończona liczba w [0,1], domyślnie 1/3. Jawne CLI nadpisuje odpowiednie
 pole każdego modelu YAML. Opcje działają również w lokalnym kliencie,
 prepare/check-prompts, eksporcie i poleceniach z opcjami GPU.
 
-Planer CPU sprawdza rzeczywisty najdłuższy prompt wszystkich gałęzi, również
+Planer CPU sprawdza rzeczywisty najdłuższy prompt przygotowanych gałęzi, również
 możliwy odwrócony porządek `orders: auto` i obie kopie `state_twice`.
+W trybie `truncate` dla grupowego `choice` dodatkowo wybiera do `MAX_OPTIONS`
+opcji o największych indywidualnych długościach tokenowych, zachowuje ich
+pierwotną kolejność i sprawdza oba porządki. Sonda jest uwzględniana również
+w obu próbach cięcia. To ograniczona heurystyka BPE, nie ścisłe maksimum
+wszystkich kombinacji zależnych od wyników; margines nie ma kwalifikacji pomiarowej.
 Po przekroczeniu limitu `truncate` zachowuje początek i koniec **oryginalnego**
 stanu, wstawiając `\n[…]\n`. Odejmowane są nadmiar i margines 32 tokenów;
 musi pozostać co najmniej 32 tokeny. Udział początku jest zaokrąglany jak
@@ -165,6 +170,12 @@ podają faktycznie zachowane tokeny. Najwyżej dwie próby CPU za każdym razem
 tną oryginał z narastającym nadmiarem i ponownie tokenizują pełne prompty.
 Jeśli wynik się nie mieści, odpowiedź to zwykła odmowa kontekstu 422; długie
 pytania/opcje lub zbyt mały stan mogą uniemożliwić skrócenie. Nie ma retry GPU.
+W obu politykach rzeczywiste przygotowane porządki późniejszych rund są
+sprawdzane przed ich forwardem. Przekroczenie limitu daje odmowę kontekstu 422
+całego planu i pomija jego pozostałe pytania oraz kontynuacje tasks.
+Inne plany we wspólnej mikroserii zachowują swoje wyniki. Taka odmowa może
+nastąpić po wykonaniu wcześniejszych rund; nie oznacza sprawdzenia wszystkich
+rund zależnych przed pierwszym GPU.
 
 Pytania, opcje, ich kolejność i język wykryty z całego stanu pozostają zachowane.
 `facts: auto` jest wstrzykiwane przed cięciem. Zadania zachowują oryginalne

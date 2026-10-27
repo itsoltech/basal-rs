@@ -120,7 +120,7 @@ Anulowane żądania nie trafiają do histogramu opóźnienia. Pomiar HTTP obejmu
 odczyt body, parsowanie, walidację, planowanie, oczekiwanie, obliczenia i
 serializację JSON; nie obejmuje wysyłania odpowiedzi po sieci do klienta.
 
-Przy domyślnym `context_overflow: refuse` prompt dłuższy niż kontekst modelu
+Przy domyślnym `context_overflow: refuse` przygotowany początkowy prompt dłuższy niż kontekst modelu
 wątek modelu odrzuca już podczas planowania żądania (`Engine::plan_request_as`), zanim żądanie
 trafi do kolejki partii. Oba API odpowiadają 422: `/v1/systemone` błędem typu
 `context_length_exceeded` w `detail`, `/v1/basal` polem `error` z komunikatem
@@ -134,6 +134,11 @@ nieobsługiwane przez model, a przyczynę podaje tylko treść odpowiedzi.
 Jawne `truncate` może skrócić tekst przed kolejką partii; faktyczne cięcie
 opisuje `usage.truncated`. Nieudane skrócenie nadal daje powyższe 422.
 Odmowa evidence po cięciu również następuje przed GPU, a media nie są przycinane.
+Sonda najdłuższych opcji przy `truncate` jest heurystyką. W obu politykach
+rzeczywiste późniejsze porządki są sprawdzane przed swoim forwardem; odmowa
+kontekstu 422 dotyczy całego danego planu, bez dalszych pytań i kontynuacji,
+i zachowuje wyniki pozostałych planów mikroserii. Wcześniejsze rundy mogły już
+zostać wykonane, więc taka późna odmowa może trafić do metryk partii/kolejki.
 
 Gauge modelu zwalnia miejsce także po porzuceniu handlera. Obliczenia już
 uruchomione na GPU mogą wówczas nadal trwać. Jest to liczba oczekujących
@@ -163,8 +168,12 @@ TypeSafe `noul` udostępnia tylko P(true); log zapisuje odpowiadający mu rozkł
 Hash i serializacja dużych danych odbywają się poza executorem Tokio i wątkiem
 GPU. Ograniczona kolejka mieści 32 końcowe odpowiedzi plus rekord w zapisie;
 hashowanie zachowuje permit żądania i dużego body również po anulowaniu
-handlera. Writer potwierdza zapis i flush przed odpowiedzią 200; pełna kolejka,
-zatrzymany writer lub błąd zapisu zwracają 500 w bieżącym dialekcie. Po błędzie
+handlera. Pełna kolejka czeka asynchronicznie, bez odrzucenia zwykłego burstu.
+Oczekujące handlery pozostają objęte limitem inflight także podczas enqueue
+i potwierdzenia. Anulowanie przed enqueue usuwa oczekujący rekord; rekord już
+przyjęty pozostaje w ograniczonej kolejce i może zostać zapisany po rozłączeniu.
+Writer potwierdza zapis i flush przed odpowiedzią 200; zatrzymany writer lub
+błąd zapisu zwracają 500 w bieżącym dialekcie. Po błędzie
 zapisu writer odmawia kolejnym rekordom. Liczniki lifecycle obejmują oczekiwanie
 na potwierdzenie; nagłówki queue/compute zachowują swoje dotychczasowe znaczenie.
 Zamknięcie HTTP zwalnia nadawców, a osobny wątek opróżnia kolejkę, flushuje plik
