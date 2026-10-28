@@ -87,6 +87,9 @@ pub struct DiagnosticOverrides {
     gemm: Option<String>,
     /// `BASAL_GEMM_EQUIV`: log the equivalence groups of the batch-invariant search.
     gemm_equiv: bool,
+    /// `BASAL_THINK_GEMM=heuristic`: upstream-bf16-pointwise bias GEMMs use cuBLASLt's first heuristic algorithm of
+    /// each exact shape instead of run-time timing (diagnostic; other kernel sets ignore it).
+    think_gemm: Option<String>,
     /// `BASAL_WGP_LOAD`: Hopper WGP K/V load layout.
     wgp_load: Option<String>,
     /// `BASAL_SILU_BLOCK`: block size of the SiLU kernel.
@@ -122,6 +125,7 @@ impl DiagnosticOverrides {
             att_sg: text("BASAL_ATT_SG"),
             gemm: text("BASAL_GEMM"),
             gemm_equiv: std::env::var("BASAL_GEMM_EQUIV").is_ok(),
+            think_gemm: text("BASAL_THINK_GEMM"),
             wgp_load: text("BASAL_WGP_LOAD"),
             silu_block: text("BASAL_SILU_BLOCK"),
             norm: text("BASAL_NORM"),
@@ -150,6 +154,9 @@ impl DiagnosticOverrides {
     }
     pub fn gemm_equiv(&self) -> bool {
         self.gemm_equiv
+    }
+    pub fn think_gemm(&self) -> Option<&str> {
+        self.think_gemm.as_deref()
     }
     pub fn wgp_load(&self) -> Option<&str> {
         self.wgp_load.as_deref()
@@ -191,6 +198,7 @@ impl DiagnosticOverrides {
         put("BASAL_ATT_SG", self.att_sg.as_deref());
         put("BASAL_GEMM", self.gemm.as_deref());
         put("BASAL_GEMM_EQUIV", self.gemm_equiv.then_some("set"));
+        put("BASAL_THINK_GEMM", self.think_gemm.as_deref());
         put("BASAL_WGP_LOAD", self.wgp_load.as_deref());
         put("BASAL_SILU_BLOCK", self.silu_block.as_deref());
         put("BASAL_NORM", self.norm.as_deref());
@@ -801,6 +809,9 @@ impl ResolvedExecutionPlan {
                 return Err(PlanError::Option(
                     "upstream-bf16-pointwise requires cuBLASLt bias epilogues; BASAL_GEMM=cublas is unsupported".into(),
                 ));
+            }
+            if !matches!(DiagnosticOverrides::process().think_gemm(), None | Some("heuristic")) {
+                return Err(PlanError::Option("BASAL_THINK_GEMM accepts only `heuristic`".into()));
             }
         }
         rule.check_family(arch)?;

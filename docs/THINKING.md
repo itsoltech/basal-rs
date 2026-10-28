@@ -71,6 +71,14 @@ dlatego włączenie profilu wyłącza cały background executor tego silnika,
 także dla requestów z `think: off`. Ścieżka online nie wymaga background
 qualification; praca w tle wymaga `inherit` i warunków opisanych niżej.
 
+Diagnostyczne `BASAL_THINK_GEMM=heuristic` zastępuje w tym profilu pomiar czasu
+pierwszym wynikiem heurystyki cuBLASLt dla dokładnego M, bez ponownego użycia
+algorytmu między różnymi M. Wybór nie zależy wtedy od czasu ani historii wywołań.
+Inne wartości są odrzucane przy planie profilu; pozostałe plany nie zmieniają
+obliczeń, ale zmienna trafia do tożsamości każdego planu procesu.
+`gemm_tuning()` podaje konfigurację wybranych algorytmów (ID, tile, split-K,
+schemat redukcji). Nie jest to potwierdzony wybór upstream ani tryb parytetu.
+
 To **nie jest tryb parytetu**. Redukcje GEMM (w tym split-K), FA2, normy
 i lm_head oraz implementacje pow/sin/cos/exp/div pozostają źródłami różnic.
 Zgodność nowych kerneli z deklaracją wymaga operatorowego replay. Wyniki wobec

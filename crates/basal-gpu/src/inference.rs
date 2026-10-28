@@ -82,6 +82,14 @@ impl GpuBackend {
         if numerics == LlamaNumerics::ThinkBf16 && self.stages.iter().any(|s| s.w.get().lt.is_none()) {
             return Err(InferenceConfigError::PlanMismatch("thinking requires cuBLASLt"));
         }
+        #[cfg(feature = "cuda")]
+        if numerics == LlamaNumerics::ThinkBf16 && crate::plan::DiagnosticOverrides::process().think_gemm().is_some() {
+            for s in &self.stages {
+                if let Some(lt) = &s.w.get().lt {
+                    lt.set_bias_heuristic_first();
+                }
+            }
+        }
         if numerics == LlamaNumerics::ThinkBf16 {
             let d = self.cfg.head_dim;
             let mut rope = vec![0f32; self.cfg.max_positions * d];

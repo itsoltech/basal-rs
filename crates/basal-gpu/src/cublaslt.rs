@@ -15,6 +15,8 @@
 //! store, without a separate bias allocation or pass. Its descriptors and algorithm classes are isolated from
 //! ordinary matmuls and tables. Use a dedicated `Lt` for bias projections: [`Tuned`] retains its untagged diagnostic
 //! format, so bias timings in [`Lt::tuned`] are not ordinary table entries and must not be exported/imported as such.
+//! [`Lt::set_bias_heuristic_first`] (diagnostic) replaces that timing with cuBLASLt's first heuristic result for each
+//! exact (M, N, K): no timing and no reuse across M, so the choice does not depend on run time or call history.
 
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -68,6 +70,44 @@ pub fn version() -> usize {
     unsafe { sys::cublasLtGetVersion() }
 }
 
+/// The configuration of opaque algorithm bytes, as cuBLASLt reports it: (attribute name, value) for algorithm, tile,
+/// stages, split-K count, reduction scheme, CTA swizzling, custom option, inner and cluster shape. An attribute
+/// cuBLASLt does not report is omitted.
+pub fn algo_config(data: &[u64; 8]) -> Vec<(&'static str, u64)> {
+    use sys::cublasLtMatmulAlgoConfigAttributes_t as A;
+    let algo = sys::cublasLtMatmulAlgo_t { data: *data };
+    [
+        ("algo_id", A::CUBLASLT_ALGO_CONFIG_ID),
+        ("tile_id", A::CUBLASLT_ALGO_CONFIG_TILE_ID),
+        ("stages_id", A::CUBLASLT_ALGO_CONFIG_STAGES_ID),
+        ("splitk_num", A::CUBLASLT_ALGO_CONFIG_SPLITK_NUM),
+        ("reduction_scheme", A::CUBLASLT_ALGO_CONFIG_REDUCTION_SCHEME),
+        ("cta_swizzling", A::CUBLASLT_ALGO_CONFIG_CTA_SWIZZLING),
+        ("custom_option", A::CUBLASLT_ALGO_CONFIG_CUSTOM_OPTION),
+        ("inner_shape_id", A::CUBLASLT_ALGO_CONFIG_INNER_SHAPE_ID),
+        ("cluster_shape_id", A::CUBLASLT_ALGO_CONFIG_CLUSTER_SHAPE_ID),
+    ]
+    .into_iter()
+    .filter_map(|(name, attr)| {
+        // Every attribute is an unsigned or non-negative integer of at most 4 bytes, written into the low bytes
+        // of the zeroed little-endian buffer.
+        let mut value = 0u64;
+        let mut written = 0usize;
+        // SAFETY: a host-only read of the local algorithm copy into a live 8-byte buffer of the size given.
+        let s = unsafe {
+            sys::cublasLtMatmulAlgoConfigGetAttribute(
+                &algo,
+                attr,
+                &mut value as *mut u64 as *mut c_void,
+                std::mem::size_of_val(&value),
+                &mut written,
+            )
+        };
+        (s == sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS && written <= 4).then_some((name, value))
+    })
+    .collect()
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 struct Key {
     n: usize,
@@ -114,6 +154,11 @@ pub struct Lt {
     /// A reproducible plan: only the algorithms of the batch-invariant table run; a shape without one is an error,
     /// never timed or chosen by heuristic. Set once before the first inference matmul.
     table_only: std::sync::atomic::AtomicBool,
+    /// Bias matmuls use the first heuristic algorithm of their exact (M, N, K) instead of timing (diagnostic).
+    /// Set once before the first inference matmul.
+    bias_heuristic: std::sync::atomic::AtomicBool,
+    /// The first heuristic algorithm of each exact bias shape (M, N, K), in `bias_heuristic` mode.
+    bias_first: Mutex<HashMap<(usize, usize, usize), sys::cublasLtMatmulAlgo_t>>,
 }
 
 // SAFETY: an `Lt` belongs to one GPU (`ctx`) and is shared only by the engines (lanes) of one model on that GPU,
@@ -166,7 +211,15 @@ impl Lt {
             invariant: Mutex::new(HashMap::new()),
             chosen: Mutex::new(HashMap::new()),
             table_only: std::sync::atomic::AtomicBool::new(false),
+            bias_heuristic: std::sync::atomic::AtomicBool::new(false),
+            bias_first: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// From now on bias matmuls run cuBLASLt's first heuristic algorithm of their exact shape, never a timed one.
+    pub fn set_bias_heuristic_first(&self) {
+        // Release/Acquire: the flag is set on the loading thread before the backend is shared with lanes.
+        self.bias_heuristic.store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// From now on run only the algorithms of the batch-invariant table (a reproducible plan).
@@ -999,6 +1052,7 @@ impl Lt {
             };
             // Set before heuristic/check as well as before every execution; no query sees a previous call's bias.
             self.set_bias_pointer(p, bp)?;
+            let first = self.bias_heuristic_first(p, m, n, k)?;
             let key = Key { n, k, m_class: m_class(m), dt: DType::BF16, bias: true };
             let known = self
                 .algos
@@ -1006,15 +1060,16 @@ impl Lt {
                 .map_err(|_| candle_core::Error::Msg("cuBLASLt bias matmul: algorithms lock poisoned".into()))?
                 .get(&key)
                 .copied();
-            let algo = match known {
-                Some(a) if self.check(p, &a) => a,
-                Some(_) => {
+            let algo = match (first, known) {
+                (Some(a), _) => a,
+                (None, Some(a)) if self.check(p, &a) => a,
+                (None, Some(_)) => {
                     self.heuristics(p)?
                         .first()
                         .ok_or_else(|| candle_core::Error::Msg("cuBLASLt bias matmul: no algorithm".into()))?
                         .algo
                 }
-                None => {
+                (None, None) => {
                     let cands = self.heuristics(p)?;
                     let mut best = (
                         f64::INFINITY,
@@ -1068,6 +1123,44 @@ impl Lt {
             unsafe { self.run_bias(p, &algo, wp, xp, bp, yp, &stream)? };
         }
         Ok((CudaStorage { slice: Cs::BF16(out), device: dev }, Shape::from((m, n))))
+    }
+
+    /// In `bias_heuristic` mode the first heuristic algorithm of the exact bias shape (queried once, recorded untimed
+    /// in `tuned` with the exact M as `m_class`); otherwise `None`. Caller holds the plans lock with the bias set.
+    fn bias_heuristic_first(
+        &self,
+        p: &Plan,
+        m: usize,
+        n: usize,
+        k: usize,
+    ) -> Result<Option<sys::cublasLtMatmulAlgo_t>> {
+        if !self.bias_heuristic.load(std::sync::atomic::Ordering::Acquire) {
+            return Ok(None);
+        }
+        let mut first = self
+            .bias_first
+            .lock()
+            .map_err(|_| candle_core::Error::Msg("cuBLASLt bias matmul: heuristic lock poisoned".into()))?;
+        if let Some(a) = first.get(&(m, n, k)) {
+            return Ok(Some(*a));
+        }
+        let cands = self.heuristics(p)?;
+        let a = cands.first().ok_or_else(|| candle_core::Error::Msg("cuBLASLt bias matmul: no algorithm".into()))?.algo;
+        self.tuned
+            .lock()
+            .map_err(|_| candle_core::Error::Msg("cuBLASLt bias matmul: timings lock poisoned".into()))?
+            .push(Tuned {
+                m_class: m,
+                n,
+                k,
+                dtype: DType::BF16,
+                algo: a.data,
+                ms: f64::NAN,
+                heuristic_ms: f64::NAN,
+                tried: cands.len(),
+            });
+        first.insert((m, n, k), a);
+        Ok(Some(a))
     }
 
     /// Caller holds the plans lock and a live, guarded BF16 `bias[N]` on the handle's context and execution stream.

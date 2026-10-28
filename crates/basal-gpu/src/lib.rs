@@ -3181,6 +3181,9 @@ impl GpuBackend {
 
     fn gemm_desc(&self) -> &'static str {
         if self.numerics == LlamaNumerics::ThinkBf16 {
+            if crate::plan::DiagnosticOverrides::process().think_gemm().is_some() {
+                return "cuBLASLt bias epilogues, f32 accumulation, first heuristic algorithm per exact M (BASAL_THINK_GEMM, untimed); split-K may round partial sums to BF16";
+            }
             return "cuBLASLt bias epilogues, f32 accumulation, heuristic RuntimeTiming; split-K may round partial sums to BF16";
         }
         #[cfg(feature = "cuda")]
@@ -3199,11 +3202,23 @@ impl GpuBackend {
     pub fn gemm_tuning(&self) -> Value {
         #[cfg(feature = "cuda")]
         {
+            // the chosen configuration (opaque bytes decoded by cuBLASLt), to compare choices between processes
+            let algo = |data: &[u64; 8]| {
+                cublaslt::algo_config(data)
+                    .into_iter()
+                    .map(|(k, v)| (k.to_owned(), Value::from(v)))
+                    .collect::<serde_json::Map<_, _>>()
+            };
             let tuning = |lt: &cublaslt::Lt| {
                 let t = lt.tuned.lock().unwrap();
-                let mut v = json!({"from_table": *lt.from_table.lock().unwrap(), "tuned_at_run_time": t.iter().map(|e| json!({"m_class": e.m_class, "n": e.n, "k": e.k, "ms": e.ms, "heuristic_first_ms": e.heuristic_ms})).collect::<Vec<_>>()});
+                let mut v = json!({"from_table": *lt.from_table.lock().unwrap(), "tuned_at_run_time": t.iter().map(|e| json!({"m_class": e.m_class, "n": e.n, "k": e.k, "ms": e.ms, "heuristic_first_ms": e.heuristic_ms, "tried": e.tried, "algo": algo(&e.algo), "algo_bytes": e.algo})).collect::<Vec<_>>()});
                 if self.numerics == LlamaNumerics::ThinkBf16 {
-                    v["kind"] = "bias_epilogue_timings_not_table_entries".into();
+                    v["kind"] = if crate::plan::DiagnosticOverrides::process().think_gemm().is_some() {
+                        "bias_epilogue_first_heuristic_exact_m_untimed"
+                    } else {
+                        "bias_epilogue_timings_not_table_entries"
+                    }
+                    .into();
                 }
                 v
             };
