@@ -2656,6 +2656,7 @@ impl GpuBackend {
             };
             #[cfg(not(feature = "cuda"))]
             let (_flat, q, k, v) = fused::qkv_rope(&qkv, bias.as_ref(), &cs, f.dims, self.numerics)?;
+            drop(bias);
             self.mark(dev, t, "bias+rope+heads")?;
             #[cfg(feature = "cuda")]
             let ragged_o = if ragged_cuda {
