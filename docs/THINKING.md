@@ -72,12 +72,16 @@ także dla requestów z `think: off`. Ścieżka online nie wymaga background
 qualification; praca w tle wymaga `inherit` i warunków opisanych niżej.
 
 Diagnostyczne `BASAL_THINK_GEMM=heuristic` zastępuje w tym profilu pomiar czasu
-pierwszym wynikiem heurystyki cuBLASLt dla dokładnego M, bez ponownego użycia
-algorytmu między różnymi M. Wybór nie zależy wtedy od czasu ani historii wywołań.
+pierwszym wynikiem heurystyki cuBLASLt dla dokładnego M, bez pomiaru czasu i bez
+użycia algorytmu wybranego dla innego M. Powtarzalność tego wyboru między
+procesami wymaga pomiaru.
 Inne wartości są odrzucane przy planie profilu; pozostałe plany nie zmieniają
 obliczeń, ale zmienna trafia do tożsamości każdego planu procesu.
-`gemm_tuning()` podaje konfigurację wybranych algorytmów (ID, tile, split-K,
-schemat redukcji). Nie jest to potwierdzony wybór upstream ani tryb parytetu.
+`gemm_tuning()` podaje surowe bajty i konfigurację wybranych algorytmów (ID, tile,
+split-K, schemat redukcji); atrybut, którego cuBLASLt nie zwrócił, ma wartość
+`null`. W trybie z pomiarem czasu wpis opisuje zwycięzcę pierwszego pomiaru
+klasy M, a nie algorytm wykonany dla każdego późniejszego M. Nie jest to
+potwierdzony wybór upstream ani tryb parytetu.
 
 To **nie jest tryb parytetu**. Redukcje GEMM (w tym split-K), FA2, normy
 i lm_head oraz implementacje pow/sin/cos/exp/div pozostają źródłami różnic.

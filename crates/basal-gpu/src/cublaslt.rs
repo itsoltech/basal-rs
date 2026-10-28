@@ -16,7 +16,10 @@
 //! ordinary matmuls and tables. Use a dedicated `Lt` for bias projections: [`Tuned`] retains its untagged diagnostic
 //! format, so bias timings in [`Lt::tuned`] are not ordinary table entries and must not be exported/imported as such.
 //! [`Lt::set_bias_heuristic_first`] (diagnostic) replaces that timing with cuBLASLt's first heuristic result for each
-//! exact (M, N, K): no timing and no reuse across M, so the choice does not depend on run time or call history.
+//! exact (M, N, K): no timing and no algorithm chosen for another M. Whether that result repeats across processes is a
+//! property of cuBLASLt that requires measurement. In the timed mode a [`Tuned`] bias record is the winner of its
+//! class's first timing, not a record of the algorithm each later M executed (`check` may reject it; the heuristic's
+//! first choice then runs unrecorded).
 
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -71,39 +74,44 @@ pub fn version() -> usize {
 }
 
 /// The configuration of opaque algorithm bytes, as cuBLASLt reports it: (attribute name, value) for algorithm, tile,
-/// stages, split-K count, reduction scheme, CTA swizzling, custom option, inner and cluster shape. An attribute
-/// cuBLASLt does not report is omitted.
-pub fn algo_config(data: &[u64; 8]) -> Vec<(&'static str, u64)> {
+/// stages, split-K count, reduction scheme, CTA swizzling, custom option, inner and cluster shape. `None` marks an
+/// attribute cuBLASLt did not return in full (a failed decode, never a value).
+pub fn algo_config(data: &[u64; 8]) -> Vec<(&'static str, Option<i64>)> {
     use sys::cublasLtMatmulAlgoConfigAttributes_t as A;
+    // The storage type of each attribute (cublasLt.h); cuBLASLt rejects a buffer of any other size.
+    enum Ty {
+        I32,
+        U32,
+        U16,
+    }
     let algo = sys::cublasLtMatmulAlgo_t { data: *data };
     [
-        ("algo_id", A::CUBLASLT_ALGO_CONFIG_ID),
-        ("tile_id", A::CUBLASLT_ALGO_CONFIG_TILE_ID),
-        ("stages_id", A::CUBLASLT_ALGO_CONFIG_STAGES_ID),
-        ("splitk_num", A::CUBLASLT_ALGO_CONFIG_SPLITK_NUM),
-        ("reduction_scheme", A::CUBLASLT_ALGO_CONFIG_REDUCTION_SCHEME),
-        ("cta_swizzling", A::CUBLASLT_ALGO_CONFIG_CTA_SWIZZLING),
-        ("custom_option", A::CUBLASLT_ALGO_CONFIG_CUSTOM_OPTION),
-        ("inner_shape_id", A::CUBLASLT_ALGO_CONFIG_INNER_SHAPE_ID),
-        ("cluster_shape_id", A::CUBLASLT_ALGO_CONFIG_CLUSTER_SHAPE_ID),
+        ("algo_id", A::CUBLASLT_ALGO_CONFIG_ID, Ty::I32),
+        ("tile_id", A::CUBLASLT_ALGO_CONFIG_TILE_ID, Ty::U32),
+        ("stages_id", A::CUBLASLT_ALGO_CONFIG_STAGES_ID, Ty::U32),
+        ("splitk_num", A::CUBLASLT_ALGO_CONFIG_SPLITK_NUM, Ty::I32),
+        ("reduction_scheme", A::CUBLASLT_ALGO_CONFIG_REDUCTION_SCHEME, Ty::U32),
+        ("cta_swizzling", A::CUBLASLT_ALGO_CONFIG_CTA_SWIZZLING, Ty::U32),
+        ("custom_option", A::CUBLASLT_ALGO_CONFIG_CUSTOM_OPTION, Ty::U32),
+        ("inner_shape_id", A::CUBLASLT_ALGO_CONFIG_INNER_SHAPE_ID, Ty::U16),
+        ("cluster_shape_id", A::CUBLASLT_ALGO_CONFIG_CLUSTER_SHAPE_ID, Ty::U16),
     ]
     .into_iter()
-    .filter_map(|(name, attr)| {
-        // Every attribute is an unsigned or non-negative integer of at most 4 bytes, written into the low bytes
-        // of the zeroed little-endian buffer.
-        let mut value = 0u64;
+    .map(|(name, attr, ty)| {
+        let size = if matches!(ty, Ty::U16) { 2 } else { 4 };
+        let mut buf = [0u8; 4];
         let mut written = 0usize;
-        // SAFETY: a host-only read of the local algorithm copy into a live 8-byte buffer of the size given.
+        // SAFETY: a host-only read of the local algorithm copy; `buf` is live and holds at least `size` bytes.
         let s = unsafe {
-            sys::cublasLtMatmulAlgoConfigGetAttribute(
-                &algo,
-                attr,
-                &mut value as *mut u64 as *mut c_void,
-                std::mem::size_of_val(&value),
-                &mut written,
-            )
+            sys::cublasLtMatmulAlgoConfigGetAttribute(&algo, attr, buf.as_mut_ptr() as *mut c_void, size, &mut written)
         };
-        (s == sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS && written <= 4).then_some((name, value))
+        let [b0, b1, ..] = buf;
+        let value = match ty {
+            Ty::I32 => i64::from(i32::from_ne_bytes(buf)),
+            Ty::U32 => i64::from(u32::from_ne_bytes(buf)),
+            Ty::U16 => i64::from(u16::from_ne_bytes([b0, b1])),
+        };
+        (name, (s == sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS && written == size).then_some(value))
     })
     .collect()
 }
@@ -1127,6 +1135,8 @@ impl Lt {
 
     /// In `bias_heuristic` mode the first heuristic algorithm of the exact bias shape (queried once, recorded untimed
     /// in `tuned` with the exact M as `m_class`); otherwise `None`. Caller holds the plans lock with the bias set.
+    /// Later calls of the shape reuse it without `check`, with another bias pointer; this relies on the callers'
+    /// biases being whole tensors at the start of their allocations (as the thinking projections pass them).
     fn bias_heuristic_first(
         &self,
         p: &Plan,
@@ -1378,12 +1388,14 @@ impl CustomOp3 for LtMatmulBias<'_> {
 
 /// `x[M,K] @ w[N,K]^T + b[N]` with BF16 operands/output and F32 accumulation/scale (alpha=1, beta=0).
 /// The cuBLASLt epilogue adds the bias before the final BF16 store; no separate bias pass or fallback. The split-K
-/// reduction scheme follows the timed heuristic and may round partial sums to BF16, so this promises neither a single
-/// rounding nor upstream parity.
+/// reduction scheme follows the timed heuristic (or, after [`Lt::set_bias_heuristic_first`], the untimed first
+/// heuristic of the exact shape) and may round partial sums to BF16, so this promises neither a single rounding nor
+/// upstream parity.
 /// Requires nonempty contiguous operands on this `Lt`'s CUDA context. Invariant/table-only modes are errors.
-/// Allocates the output and caches host descriptors/algorithm timings, using the existing 32 MiB workspace.
-/// First-use timing may synchronize the stream. As with [`matmul_nt`], the model gate must serialize shared lanes
-/// through their GPU drain. Use a dedicated `Lt`; its untagged [`Tuned`] bias diagnostics are not ordinary tables.
+/// Allocates the output and caches host descriptors and algorithm timings (or first heuristics), using the existing
+/// 32 MiB workspace. First-use timing may synchronize the stream. As with [`matmul_nt`], the model gate must
+/// serialize shared lanes through their GPU drain. Use a dedicated `Lt`; its untagged [`Tuned`] bias diagnostics are
+/// not ordinary tables.
 /// Static checks do not establish numerical parity with another backend or algorithm.
 pub fn matmul_nt_bias(lt: &Lt, x: &Tensor, w: &Tensor, b: &Tensor) -> Result<Tensor> {
     x.apply_op3_no_bwd(w, b, &LtMatmulBias(lt))

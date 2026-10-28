@@ -83,7 +83,7 @@ impl GpuBackend {
             return Err(InferenceConfigError::PlanMismatch("thinking requires cuBLASLt"));
         }
         #[cfg(feature = "cuda")]
-        if numerics == LlamaNumerics::ThinkBf16 && crate::plan::DiagnosticOverrides::process().think_gemm().is_some() {
+        if numerics == LlamaNumerics::ThinkBf16 && plan.overrides().think_gemm().is_some() {
             for s in &self.stages {
                 if let Some(lt) = &s.w.get().lt {
                     lt.set_bias_heuristic_first();
