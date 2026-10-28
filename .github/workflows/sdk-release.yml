@@ -35,7 +35,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: "3.11"
       - name: Select SDK and validate its manifest/lock and publishing tag
@@ -71,7 +71,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: "3.11"
       - name: Install only the hash-locked backend and build wheel from sdist
@@ -81,7 +81,7 @@ jobs:
           python tools/sdk/build-python.py
       - name: Collect distributions and SHA-256
         run: python3 tools/sdk/package-artifact.py python
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         id: upload
         with:
           name: sdk-python
@@ -99,7 +99,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "24"
       - name: Build npm distribution
@@ -109,7 +109,7 @@ jobs:
           npm pack --pack-destination dist
       - name: Collect distributions and SHA-256
         run: python3 tools/sdk/package-artifact.py typescript
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         id: upload
         with:
           name: sdk-typescript
@@ -127,7 +127,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
         with:
           dotnet-version: "10.0.401"
       - name: Restore only mapped sources, then build and pack
@@ -137,7 +137,7 @@ jobs:
           dotnet pack sdk/csharp/ITSOL.Basal.Client/ITSOL.Basal.Client.csproj --no-restore --configuration Release -p:ContinuousIntegrationBuild=true --output sdk/csharp/dist
       - name: Collect distributions and SHA-256
         run: python3 tools/sdk/package-artifact.py csharp
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         id: upload
         with:
           name: sdk-csharp
@@ -155,11 +155,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
         with:
           toolchain: "1.95.0"
           components: rustfmt, clippy
-      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91
         with:
           tool: cargo-deny@0.19.8
       - name: Compile, verify and audit without publishing permissions
@@ -174,7 +174,7 @@ jobs:
           cargo deny --manifest-path "target/package/basal-client-$sdk_version/Cargo.toml" --locked check --config sdk/rust/deny.toml --hide-inclusion-graph
       - name: Collect distributions and SHA-256
         run: python3 tools/sdk/package-artifact.py rust
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         id: upload
         with:
           name: sdk-rust
@@ -198,14 +198,14 @@ jobs:
         env:
           SDK_ARTIFACT_ID: ${{ needs.build-typescript.outputs.artifact-id }}
         run: '[[ "$SDK_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]'
-      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           artifact-ids: ${{ needs.build-typescript.outputs.artifact-id }}
           path: sdk-artifact
           merge-multiple: true
       - name: Verify downloaded artifact
         run: python3 tools/sdk/verify-artifact.py sdk-artifact
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "24"
           registry-url: https://registry.npmjs.org
@@ -234,7 +234,7 @@ jobs:
         env:
           SDK_ARTIFACT_ID: ${{ needs.build-python.outputs.artifact-id }}
         run: '[[ "$SDK_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]'
-      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           artifact-ids: ${{ needs.build-python.outputs.artifact-id }}
           path: sdk-artifact
@@ -273,17 +273,17 @@ jobs:
         env:
           SDK_ARTIFACT_ID: ${{ needs.build-csharp.outputs.artifact-id }}
         run: '[[ "$SDK_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]'
-      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           artifact-ids: ${{ needs.build-csharp.outputs.artifact-id }}
           path: sdk-artifact
           merge-multiple: true
       - name: Verify downloaded artifact
         run: python3 tools/sdk/verify-artifact.py sdk-artifact
-      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
         with:
           dotnet-version: "10.0.401"
-      - uses: NuGet/login@ebc737b6fc418a6ca0073cf116ec8dc156d8b81e
+      - uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841
         id: login
         with:
           user: ${{ secrets.NUGET_USER }}
@@ -309,14 +309,14 @@ jobs:
         env:
           SDK_ARTIFACT_ID: ${{ needs.build-rust.outputs.artifact-id }}
         run: '[[ "$SDK_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]'
-      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           artifact-ids: ${{ needs.build-rust.outputs.artifact-id }}
           path: sdk-artifact
           merge-multiple: true
       - name: Verify downloaded artifact
         run: python3 tools/sdk/verify-artifact.py sdk-artifact
-      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
         with:
           toolchain: "1.95.0"
       # No compilation/procedural macros/build scripts anywhere in this OIDC-enabled job.
@@ -335,7 +335,7 @@ jobs:
           else
             echo "present=false" >> "$GITHUB_OUTPUT"
           fi
-      - uses: rust-lang/crates-io-auth-action@9c067fc5d5c254b33978fed918cb50c032549d0e
+      - uses: rust-lang/crates-io-auth-action@d6b091a10d7f9b30e4c05478289e94fb309882c5
         if: steps.bootstrap.outputs.present == 'false'
         id: auth
       - name: Publish without executing dependency code
