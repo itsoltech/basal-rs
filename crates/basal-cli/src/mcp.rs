@@ -36,7 +36,7 @@ pub(crate) enum Switch {
 
 #[derive(clap::Args)]
 pub(crate) struct Args {
-    /// Running basal server (the bridge always posts native requests to /v1/basal)
+    /// Running basal server; /v1/basal and /v1/models are appended to its path. No query or fragment
     #[arg(long, default_value = "http://127.0.0.1:8000")]
     url: String,
     /// Finite positive seconds per HTTP decision request
@@ -314,9 +314,17 @@ async fn response_bytes(mut response: reqwest::Response, limit: usize) -> Result
     Ok(bytes)
 }
 
+/// Appends API segments to the base path (`http://proxy/basal/` -> `http://proxy/basal/v1/basal`), keeping existing
+/// percent-encoded segments. `Url::join` with an absolute path would drop the base path.
+fn endpoint(base: &reqwest::Url, path: [&str; 2]) -> Result<reqwest::Url> {
+    let mut url = base.clone();
+    url.path_segments_mut().map_err(|()| anyhow::anyhow!("--url cannot be a base URL"))?.pop_if_empty().extend(path);
+    Ok(url)
+}
+
 async fn remote_decide(client: &reqwest::Client, url: &reqwest::Url, body: Value) -> Result<Value> {
     let response = client
-        .post(url.join("/v1/basal")?)
+        .post(url.clone())
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .body(serde_json::to_vec(&body)?)
         .send()
@@ -331,7 +339,8 @@ async fn remote_decide(client: &reqwest::Client, url: &reqwest::Url, body: Value
             .and_then(|v| v.get("error")?.as_str().map(str::to_owned))
             .unwrap_or_else(|| String::from_utf8_lossy(&bytes).into_owned());
         anyhow::bail!(
-            "basal server {status}: {message}{}",
+            "basal server {}: {message}{}",
+            status.as_u16(),
             retry.map(|v| format!("; Retry-After: {v}")).unwrap_or_default()
         );
     }
@@ -339,7 +348,7 @@ async fn remote_decide(client: &reqwest::Client, url: &reqwest::Url, body: Value
 }
 
 async fn model_name(client: &reqwest::Client, url: &reqwest::Url) -> Option<String> {
-    let response = client.get(url.join("/v1/models").ok()?).timeout(Duration::from_secs(5)).send().await.ok()?;
+    let response = client.get(url.clone()).timeout(Duration::from_secs(5)).send().await.ok()?;
     let bytes = response_bytes(response.error_for_status().ok()?, 64 * 1024).await.ok()?;
     let value: Value = serde_json::from_slice(&bytes).ok()?;
     value["models"][0]["name"].as_str().map(str::to_owned)
@@ -472,10 +481,9 @@ impl Transport<RoleServer> for BoundedStdio {
             // Exactly one bounded SDK parser, plus at most four outstanding request/response allocations.
             // Notification handlers retain this decode slot, so they cannot accumulate detached tasks either.
             let decoding = Arc::new(self.decoding.clone().acquire_owned().await.ok()?);
-            let Some(mut message) = self.inner.receive().await else {
-                self.stop.cancel();
-                return None;
-            };
+            // EOF or a read error ends input only. Keeping `stop` uncancelled lets the SDK's bounded (5 s) drain
+            // still write replies of running calls; its close() then cancels the rest and any blocked write.
+            let mut message = self.inner.receive().await?;
             match &mut message {
                 JsonRpcMessage::Request(request) => {
                     let slot = match self.slots.clone().try_acquire_owned() {
@@ -483,9 +491,13 @@ impl Transport<RoleServer> for BoundedStdio {
                         Err(_) => {
                             // Retain exactly one rejection across SDK select cancellations; do not spawn a queue.
                             let reply = if matches!(request.request, ClientRequest::CallToolRequest(_)) {
-                                JsonRpcMessage::response(ServerResult::CallToolResult(CallToolResult::error(vec![
-                                    ContentBlock::text("MCP stdio bridge overloaded: at most four outstanding requests; retry after a short delay"),
-                                ])), request.id.clone())
+                                let mut result = CallToolResult::error(vec![ContentBlock::text(
+                                    "MCP stdio bridge overloaded: at most four outstanding requests; retry after a short delay",
+                                )]);
+                                // This reply bypasses the SDK's legacy-peer cleanup. Absent resultType means
+                                // "complete" in every protocol version.
+                                result.result_type = None;
+                                JsonRpcMessage::response(ServerResult::CallToolResult(result), request.id.clone())
                             } else {
                                 JsonRpcMessage::error(
                                     ErrorData::internal_error("MCP stdio bridge overloaded", None),
@@ -530,18 +542,21 @@ pub(crate) fn run(args: Args) -> Result<()> {
         matches!(url.scheme(), "http" | "https") && url.host_str().is_some(),
         "--url requires an HTTP(S) host"
     );
+    anyhow::ensure!(url.query().is_none() && url.fragment().is_none(), "--url must not contain a query or fragment");
+    let decide = endpoint(&url, ["v1", "basal"])?;
+    let models = endpoint(&url, ["v1", "models"])?;
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let result = runtime.block_on(async move {
         let stop = CancellationToken::new();
         let _stop = stop.clone().drop_guard();
         let client = reqwest::Client::builder().timeout(args.timeout).build().context("basal HTTP client")?;
         let name = tokio::select! {
-            name = model_name(&client, &url) => name.unwrap_or_else(|| "basal".into()),
+            name = model_name(&client, &models) => name.unwrap_or_else(|| "basal".into()),
             _ = crate::serve::shutdown_signal() => return Ok(()),
         };
         let pending = Arc::new(Mutex::new(HashMap::new()));
         let tools = StdioTools {
-            tools: Tools { backend: Backend::Remote { client, url }, model_name: name },
+            tools: Tools { backend: Backend::Remote { client, url: decide }, model_name: name },
             pending: pending.clone(),
         };
         let (read, write) = rmcp::transport::stdio_pipes();

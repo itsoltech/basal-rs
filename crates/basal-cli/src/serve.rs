@@ -782,7 +782,7 @@ impl DispatchError {
         match self {
             Self::Api(error) => {
                 let (status, body) = error_parts(Dialect::Upstream, error);
-                format!("basal server {status}: {}", body["error"].as_str().unwrap_or("decision failed"))
+                format!("basal server {}: {}", status.as_u16(), body["error"].as_str().unwrap_or("decision failed"))
             }
             Self::Overloaded { upstream, .. } => format!("basal server 529: {upstream}; Retry-After: 1"),
             Self::Stopped => "basal server 500: engine stopped".into(),

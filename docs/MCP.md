@@ -47,16 +47,21 @@ Natywne pytania i zadania: [SYSTEM_ONE.md](SYSTEM_ONE.md).
 ```
 
 Domyślny URL to `http://127.0.0.1:8000`, timeout decyzji 60 sekund.
-`--timeout` musi być skończony i dodatni. Most zawsze wysyła natywne body
-do `/v1/basal`, niezależnie od `systemone_dialect`. Nie wymaga `--mcp on`
-na zdalnym serwerze. Nie ładuje wag, nie uruchamia serwera i nie deleguje
-wykonania do binarki CUDA ani procesu sidecar.
+`--timeout` musi być skończony i dodatni. Most dopisuje `/v1/basal`
+i `/v1/models` do ścieżki `--url`, zachowując jej segmenty (także
+percent-encoded); `http://proxy/basal/` daje `http://proxy/basal/v1/basal`.
+URL z query lub fragmentem jest odrzucany przy starcie. Most zawsze wysyła
+natywne body do `/v1/basal`, niezależnie od `systemone_dialect`. Nie wymaga
+`--mcp on` na zdalnym serwerze. Nie ładuje wag, nie uruchamia serwera i nie
+deleguje wykonania do binarki CUDA ani procesu sidecar.
 
 Odczyt `/v1/models` jest best effort z limitem 5 sekund; fallback to `basal`.
 Pierwsza nazwa modelu służy tylko instrukcjom MCP i nie zmienia żądania ani
 wyboru domyślnego modelu. Stdout zawiera wyłącznie protokół; komunikaty CLI
-trafiają na stderr. EOF, Ctrl-C i SIGTERM zamykają transport i anulują
-oczekujące wywołania HTTP. Linux używa nieblokujących potoków stdio SDK;
+trafiają na stderr. Ctrl-C i SIGTERM zamykają transport i anulują
+oczekujące wywołania HTTP. EOF stdin kończy tylko odbiór: SDK przez najwyżej
+5 sekund wysyła odpowiedzi trwających wywołań, potem anuluje pozostałe
+i zamyka transport. Linux używa nieblokujących potoków stdio SDK;
 fallback odczytu terminala ma ograniczony czas zamykania runtime.
 
 ## Limity, lifecycle i dostęp
