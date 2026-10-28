@@ -776,7 +776,7 @@ impl<B: Backend> Engine<B> {
         let mut continuations = Vec::new();
         let mut owners = Vec::new();
         for (i, plan) in plans.iter().enumerate() {
-            if !outputs[i].context_errors.is_empty() {
+            if !outputs[i].context_errors.is_empty() || outputs[i].thinking_error.is_some() {
                 continue;
             }
             let Some(mut task) = plan.tasks.clone() else { continue };
@@ -1223,9 +1223,24 @@ impl<B: Backend> Engine<B> {
                 if plan.thinking.mode == ThinkMode::Auto && threshold.is_some_and(|t| confidence >= t) {
                     continue;
                 }
-                let mut thought = thinking.think(item, self.stop.as_ref())?;
-                out.think_tokens =
-                    out.think_tokens.checked_add(thought.tokens).context("thinking output count overflow")?;
+                let mut thought = match thinking.think(item, self.stop.as_ref()).and_then(|thought| {
+                    out.think_tokens =
+                        out.think_tokens.checked_add(thought.tokens).context("thinking output count overflow")?;
+                    Ok(thought)
+                }) {
+                    Ok(thought) => thought,
+                    Err(error) => {
+                        // Cooperative stops and unconfirmed device work still abort the call for stop/drain
+                        // and quarantine. Other failures belong only to this request, after its completed P1.
+                        if crate::execution::interrupted(&error).is_some()
+                            || thinking.backend.work_health().is_some_and(|h| h.is_lost())
+                        {
+                            return Err(error);
+                        }
+                        out.thinking_error = Some(format!("{error:#}"));
+                        break;
+                    }
+                };
                 let Some(p2) = thought.probabilities else {
                     out.thoughts[i] = Some(thought.details);
                     continue;
@@ -1462,6 +1477,8 @@ pub struct PlanOutput {
     thoughts: Vec<Option<Value>>,
     think_tokens: usize,
     think_questions: usize,
+    /// Full cause-chain text of a request-local thinking failure, preserved for repeated response building.
+    thinking_error: Option<String>,
     /// Context refusal of this plan only; no partial answers or further task rounds are served.
     context_errors: Vec<crate::request::FieldError>,
     task_response: Option<Value>,
@@ -1520,6 +1537,10 @@ pub struct RequestPlan {
 pub fn plan_response(model: &str, plan: &RequestPlan, out: &PlanOutput) -> Result<Value, DecideError> {
     if !out.context_errors.is_empty() {
         return Err(DecideError::Unsupported(out.context_errors.clone()));
+    }
+    if let Some(error) = &out.thinking_error {
+        // Keep Internal (including native OOM mapping), rather than the task validation-error path.
+        return Err(DecideError::Internal(anyhow::anyhow!(error.clone())));
     }
     if let Some(error) = &out.task_error {
         return Err(crate::tasks::invalid(error));

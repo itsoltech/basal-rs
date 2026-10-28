@@ -4,10 +4,11 @@
 checkpoincie `think/`**. Domyślne `--think off` nie pobiera ani nie ładuje
 drugiego modelu. Wspierana para to
 `Remek/basal-2.0-4.5B@e5ba9149760d99b73b1963d8e0ccf948b58afacb`.
-Loader sprawdza SHA-256 obu opublikowanych plików wag, konfigurację i zgodność
-tokenizerów. Mini i Pico nie mają tych wytrenowanych artefaktów; aktywacja
-na nich odmawia startu. Nie ma adaptera LoRA, zero-shot ani zastępowania P2
-modelem bazowym.
+Loader sprawdza SHA-256 obu opublikowanych plików wag, konfigurację, zgodność
+tokenizerów i efektywny zbiór EOS `[4, 2]`; hash pliku generation config
+pozostaje w tożsamości źródeł. Mini i Pico nie mają tych wytrenowanych
+artefaktów; aktywacja na nich odmawia startu. Nie ma adaptera LoRA, zero-shot
+ani zastępowania P2 modelem bazowym.
 
 ```sh
 basal serve --model 2.0-4.5B --think auto --think-tokens 256 --think-max-len 8192
@@ -48,7 +49,8 @@ extract wymagają `think: off`; aktywny tryb, również domyślny, odmawia przed
 
 Najpierw wykonuje się cały przebieg bazowy, razem z orders auto i kalibracją.
 Thinking obejmuje single-branch choice/noul/score/act/tool. Nie obejmuje multi,
-toolsets, pytań bez readoutu ani grouped choices. Faktycznie skrócony stan
+toolsets, pytań bez readoutu, grouped choices ani nieznanych typów natywnego
+dialektu mapowanych na nieskalibrowane choice. Faktycznie skrócony stan
 wyłącza thinking całego żądania, również przy force. Próg auto bierze maksimum
 skalibrowanego rozkładu P1, a nie przekształcone confidence TypeSafe; równość
 z progiem nie uruchamia thinking.
@@ -57,9 +59,13 @@ Head zawiera ten sam znormalizowany stan i facts, pytanie i canonical order1
 opcji w PL/EN. Końcowy PREFILL zastępuje `<think>\n`. Greedy wybiera największy
 logit z całego rzeczywistego słownika, przy remisie najniższy token ID.
 Kończy na `</think>` (także przez granicę tokenów), EOS lub limicie tokenów.
+Notatki są dekodowane z `skip_special_tokens=true`; ten tekst służy do szukania
+stopu i budowy P2. Licznik nadal obejmuje surowe wygenerowane ID, także special
+tokens. Dekodowanie stanu przy skracaniu kontekstu zachowuje special tokens.
 Implementacja ponownie oblicza pełny prefiks na każdym kroku.
 
-P2 ponownie koduje `head + notes.strip() + "\n</think>\n" + PREFILL`, sprawdza
+P2 ponownie koduje `head + notes.strip() + "\n</think>\n" + PREFILL`, z zakresem
+białych znaków Python `strip()` (wspólny helper promptu), sprawdza
 code IDs w tym konkretnym kontekście i czyta je na **tych samych wagach think**.
 Softmax i kalibracja readoutu są FP32; końcowy builder zachowuje formułę
 confidence właściwą dla dialektu. Act/tool odbudowują progi z kalibracji P2,
@@ -85,15 +91,28 @@ Fork tworzy osobny cache i stan obu backendów, zachowuje ustawienia
 i kalibrację. Gate, work class, stop, health oraz drain obejmują oba modele.
 Stop jest sprawdzany między tokenami i przed P2; nie przerywa kernela w toku.
 Cały request pozostaje w tym samym admission i lane aż do końcowego wyniku.
+Generacja jest sekwencyjna: także żądanie off w tym samym microbatchu czeka
+na zakończenie myślenia pozostałych żądań przed wysłaniem odpowiedzi. To źródło
+opóźnienia head-of-line, bez zmierzonej wartości latency. Błąd thinking jednego
+żądania kończy jego dalsze thoughts i daje `INTERNAL` z pełnym opisem przyczyn
+(natywne rozpoznanie OOM nadal daje 503); poprawne żądania współdzielące batch
+mogą otrzymać odpowiedź. Typowane przerwanie i utrata urządzenia nadal kończą
+wywołanie, z dotychczasowym drain i quarantine.
 
 Planer offline dostaje snapshot capabilities thinking. Dodatkowe host bounds
 obejmują P1, notatki, tokenizer/retokenizację, pełny słownik i staging.
 Bound notatek pochodzi z maksymalnej długości elementu zwalidowanego dekodera
 Metaspace/ByteFallback (z zapasem na zastępowanie błędnych bajtów UTF-8).
 Device bounds obejmują największy capped-prefix forward/P2 i pełny słownik;
-work cost obejmuje do `think_tokens + 1` pełnych forwardów na pytanie.
+work cost obejmuje do `think_tokens + 1` pełnych forwardów na kwalifikujące
+się pytanie Direct; inne pytania nie zwiększają tego kosztu.
 Pamięć rezydentna **obu** modeli i ich workspace musi być uwzględniona
 osobno w kwalifikacji i rezerwie serwera, tak jak pozostałe resident weights.
+
+Na włączonym silniku `background_support` backendu think musi pokrywać pełne
+`think_max_len`, także gdy konkretny request wybiera off. Brak tego wsparcia
+wyłącza cały background executor danego silnika. Silnik uruchomiony z off
+zachowuje dotychczasowe wymagania bazowego backendu.
 
 Bounded executor wymaga źródłowych host/device bounds, cooperative controls
 obu backendów, pokrycia GEMM wszystkich dopuszczonych klas M oraz limitów
@@ -103,6 +122,21 @@ przyczyną w planowaniu offline; nie wyłącza thinking po cichu. Przekroczenie
 skończonego limitu admission daje właściwy błąd budżetu. Zwykłe/off żądania
 nie dostają kosztu generacji. Online korzysta z tej samej rzeczywistej ścieżki
 generation + P2, bez wymagania background qualification.
+
+Background zachowuje odziedziczony limit polityki DRR:
+`max_record_cost = floor(exec_pool_bytes / max(1, host_staging.per_token)) * cost_ns_per_token`.
+Najpierw sprawdza bazowe `max(1, packed_tokens)` jak wcześniej
+(`HOST_BUDGET_EXCEEDED`). Potem sprawdza całkowitą pracę
+`max(1, packed_tokens) + eligible_direct * (think_tokens + 1) * think_max_len`,
+pomnożoną przez `cost_ns_per_token`, wobec tego samego limitu. Odmowa tej
+dodatkowej pracy ma kod `BUDGET_EXCEEDED` i podaje pracę, koszt oraz cap.
+To limit polityki planowania powiązany z pulą/staging, nie pomiar bajtów
+hosta zużywanych przez thinking. Przy domyślnych 256/8192 i staging 1280 B/token
+sama dodatkowa praca jednego eligible Direct wymaga puli co najmniej
+2 694 840 320 B (około 2,7 GB), plus udział promptu bazowego. Dlatego limit
+jest praktycznie restrykcyjny. Osobny rzeczywisty check `host_bound <= pool`
+nadal odmawia `HOST_BUDGET_EXCEEDED`, gdy źródłowy bound bajtów hosta nie mieści
+się w puli. Żaden z tych wzorów nie jest zmierzonym kosztem ani szczytem pamięci.
 
 `basal-planner.4` rozróżnia nowy kontrakt. Profile batchy i ustawienia benchmarku
 zawierają efektywne limity, osobną kalibrację (hash/off/missing), przypiętą
@@ -114,7 +148,10 @@ osobny plan obliczeń thinking. Nie zawierają lokalnych ścieżek tych źróde�
 Kod implementuje natywną generację i drugi readout; kontrole statyczne nie
 potwierdzają wyników, stop-token counting referencyjnego vLLM, jakości ani
 wydajności. Full-prefix recomputation nie daje obietnicy szybkości lub
-parytetu tokenów z vLLM. Pozytywna kwalifikacja wymaga obu przypiętych
+parytetu tokenów z vLLM. Pełny parytet detokenizacji (w tym początkowej spacji
+dekodera Strip), tokenów, stop/EOS i ich liczenia pozostaje **GAP** do porównania
+runtime. Czas `think.ms` pozostaje bez zaokrąglenia do dwóch miejsc stosowanego
+przez Python upstream. Pozytywna kwalifikacja wymaga obu przypiętych
 checkpointów i odpowiedniej pamięci. Pico/Mini mogą sprawdzić tylko off
 i odmowy; lokalna karta 8 GB nie mieści nawet jednego z tych niekwantyzowanych
 plików wag. Zmiana precyzji wymaga osobnej kwalifikacji.

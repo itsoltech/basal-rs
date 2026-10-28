@@ -95,6 +95,11 @@ impl BasalTokenizer {
         self.inner.decode(ids, false).map_err(|e| anyhow!("tokenizer decode: {e}"))
     }
 
+    /// Decode generated notes with vLLM's default special-token exclusion; truncation keeps using `decode`.
+    pub(crate) fn decode_thinking(&self, ids: &[u32]) -> Result<String> {
+        self.inner.decode(ids, true).map_err(|e| anyhow!("tokenizer thinking decode: {e}"))
+    }
+
     pub fn token_id(&self, token: &str) -> Option<u32> {
         self.inner.token_to_id(token)
     }

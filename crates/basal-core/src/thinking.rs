@@ -11,7 +11,7 @@ use crate::decision::{calibrate32, softmax32};
 use crate::execution::StopToken;
 use crate::manifest::ModelManifest;
 use crate::pack::pack;
-use crate::prompt::{render_model_with_layout, ChatStyle, OptionOrders, PromptLayout, PREFILL};
+use crate::prompt::{python_trim, render_model_with_layout, ChatStyle, OptionOrders, PromptLayout, PREFILL};
 use crate::request::{DecideError, Ext, FieldError, Item, QType};
 use crate::{tokenize::BasalTokenizer, Backend};
 
@@ -257,7 +257,7 @@ impl<B: Backend> Thinking<B> {
             if self.eos.contains(&id) {
                 break;
             }
-            notes = self.tok.decode(&generated)?;
+            notes = self.tok.decode_thinking(&generated)?;
             if let Some(end) = notes.find("</think>") {
                 notes.truncate(end);
                 break;
@@ -265,7 +265,7 @@ impl<B: Backend> Thinking<B> {
             prefix.push(id);
         }
         check()?;
-        let second = format!("{head}{}\n</think>\n{PREFILL}", notes.trim());
+        let second = format!("{head}{}\n</think>\n{PREFILL}", python_trim(&notes));
         let ids = self.tok.encode(&second)?;
         // Re-encoding may expand the prefix. Never infer this length from generated token count.
         if ids.len() > self.caps.settings.max_len {
@@ -336,6 +336,7 @@ impl ThinkCaps {
 
 pub(crate) fn eligible(item: &Item) -> bool {
     matches!(item.kind, QType::Choice | QType::Noul | QType::Score | QType::Act | QType::Tool)
+        && !item.uncalibrated
         && item.multi_spec().is_none()
         && item.options.len() >= 2
 }

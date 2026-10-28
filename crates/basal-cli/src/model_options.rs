@@ -276,6 +276,10 @@ impl ModelOptions {
             .map(|v| v.as_u64().and_then(|x| u32::try_from(x).ok()).context("invalid thinking EOS ID"))
             .collect::<Result<_>>()?;
         ensure!(!eos.is_empty() && eos.iter().all(|v| (*v as usize) < t.vocab), "invalid thinking EOS vocabulary");
+        ensure!(
+            eos.len() == 2 && eos.contains(&4) && eos.contains(&2),
+            "thinking requires the published effective EOS set [4, 2]"
+        );
         sources["files"]["think/generation_config.json"] = content_hash(&generation_bytes).into();
         // These digests bind the supported full checkpoint pair even when supplied through local directories.
         // Shards/alternate checkpoints require a separately qualified identity, rather than matching shape alone.

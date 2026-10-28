@@ -443,7 +443,7 @@ fn render_inner(
     s
 }
 
-fn python_trim(s: &str) -> &str {
+pub(crate) fn python_trim(s: &str) -> &str {
     s.trim_matches(|c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c))
 }
 

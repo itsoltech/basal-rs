@@ -38,7 +38,7 @@ pub(crate) struct PlannedRecord {
     /// Effective model (always the profile's model).
     pub(crate) model: String,
     pub(crate) plan: Option<basal_core::engine::RequestPlan>,
-    /// DRR cost: ns of device-gate time estimated as packed tokens (at least 1) × `cost_ns_per_token`.
+    /// DRR cost: (base packed tokens, at least 1, + bounded thinking token work) × `cost_ns_per_token`, in ns.
     pub(crate) cost: u64,
     /// Upper bound of the finished result line incl. LF.
     pub(crate) result_bound: u64,
@@ -287,10 +287,9 @@ fn plan_line(job: &PlanJob, limits: &PlanLimits) -> Result<PlannedRecord, PlanFa
             ),
         ));
     }
-    // DRR cost in ns of device-gate time: packed tokens × the profile's coefficient.
-    let packed = (cost.packed_tokens as u64).saturating_add(cost.thinking_tokens).max(1);
-    let cost_units = packed.checked_mul(profile.cost_ns_per_token).filter(|&c| c <= profile.max_record_cost);
-    let Some(cost_units) = cost_units else {
+    // Preserve the base packed-token admission, including its refusal code for off requests.
+    let packed = (cost.packed_tokens as u64).max(1);
+    if packed.checked_mul(profile.cost_ns_per_token).is_none_or(|c| c > profile.max_record_cost) {
         return Err(PlanFailure::data(
             codes::HOST_BUDGET_EXCEEDED,
             format!(
@@ -298,7 +297,22 @@ fn plan_line(job: &PlanJob, limits: &PlanLimits) -> Result<PlannedRecord, PlanFa
                 profile.max_record_cost / profile.cost_ns_per_token.max(1)
             ),
         ));
-    };
+    }
+    // Thinking adds full-prefix work, not packed host tokens. Keep the inherited DRR policy cap;
+    // use u128 for the diagnostic cost so multiplication overflow cannot hide the requested amount.
+    let total_work = packed.saturating_add(cost.thinking_tokens);
+    let total_cost = u128::from(total_work) * u128::from(profile.cost_ns_per_token);
+    if total_cost > u128::from(profile.max_record_cost) {
+        return Err(PlanFailure::data(
+            codes::BUDGET_EXCEEDED,
+            format!(
+                "the record needs {total_work} total token work (base packed plus thinking), costing {total_cost} ns; background record cost cap is {} ns",
+                profile.max_record_cost
+            ),
+        ));
+    }
+    // The policy cap is u64, and the comparison above proved this conversion fits.
+    let cost_units = total_cost as u64;
     let body_bound = planner::result_bound(&profile.name, &plan);
     let result_bound = result_line_bound(&record.custom_id, body_bound);
     let line_len = job.line.len() as u64;

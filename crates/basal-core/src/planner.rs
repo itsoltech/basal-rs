@@ -1752,7 +1752,8 @@ pub(crate) fn combine_sequential_bounds(a: DeviceWorkBound, b: DeviceWorkBound) 
 /// Neutral cost figures of a plan for admission and scheduling (no backend needed).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PlanCost {
-    /// Additional conservative full-prefix token work: up to token_cap generation forwards + P2 per question.
+    /// Additional conservative full-prefix token work: up to token_cap generation forwards + P2 per eligible
+    /// Direct question.
     pub thinking_tokens: u64,
     /// Packed tokens of the plan's prompts in one shared-prefix row (the server's admission size).
     pub packed_tokens: usize,
@@ -1779,7 +1780,11 @@ pub fn plan_cost(plan: &RequestPlan) -> PlanCost {
     let orders = plan.prepared.iter().flat_map(|p| &p.orders);
     PlanCost {
         thinking_tokens: crate::thinking::active_caps(plan).map_or(0, |c| {
-            (plan.questions.len() as u64)
+            (plan
+                .questions
+                .iter()
+                .filter(|q| matches!(q, QuestionPlan::Direct(i) if crate::thinking::eligible(&plan.prepared[*i].item)))
+                .count() as u64)
                 .saturating_mul(c.settings.tokens as u64 + 1)
                 .saturating_mul(c.settings.max_len as u64)
         }),

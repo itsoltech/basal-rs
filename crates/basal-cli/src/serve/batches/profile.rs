@@ -138,8 +138,8 @@ impl ModelProfile {
     /// old hosts drain their batches (conservative by design).
     pub(crate) fn resolve(mut self, limits: &PlanLimits) -> Result<ResolvedProfile, ProfileError> {
         let exec_pool_bytes = limits.pool_bytes;
-        // DRR costs are nanoseconds of device-gate time: packed tokens × the qualified coefficient (1 without a
-        // qualification, whose profile does not execute). A new coefficient is a new fingerprint.
+        // DRR costs are nanoseconds of device-gate time: (base packed tokens + thinking work) × the qualified
+        // coefficient (1 without a qualification, whose profile does not execute). A new coefficient is a new fingerprint.
         // Keep the measured memory and composition contract in the profile identity. Local shared-device
         // admission can be stricter and defers work; it cannot permanently reject a compatible record.
         // The evidence reference is a label and is left out.
@@ -176,6 +176,7 @@ impl ModelProfile {
         });
         let fingerprint = self.fingerprint()?;
         let planner_version = PlannerVersion::parse(PLANNER_VERSION).map_err(|e| self.invalid(e.to_string()))?;
+        // Inherited DRR policy cap, also applied to total thinking work; this is not a thinking host-byte bound.
         // P ≤ u32::MAX and the coefficient ≤ 1e9 keep this below i64::MAX / 2.
         let max_record_cost = match &self.host_staging {
             Some(staging) => (exec_pool_bytes / staging.per_token.max(1))
@@ -333,7 +334,7 @@ pub(crate) struct ResolvedProfile {
     /// Highest admissible record cost in ns: `P / max(1, host_staging.per_token) × cost_ns_per_token`; validation
     /// refuses records above it.
     pub(crate) max_record_cost: u64,
-    /// DRR cost coefficient (ns of device-gate time per packed token); 1 for an unqualified profile.
+    /// DRR cost coefficient (ns of device-gate time per token of base packed/thinking work); 1 if unqualified.
     pub(crate) cost_ns_per_token: u64,
 }
 

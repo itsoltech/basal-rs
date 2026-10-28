@@ -343,11 +343,33 @@ Wersja planera `basal-planner.4` rozróżnia również natywne thinking, jego os
 źródła/kalibrację, limity i usage, poza skracaniem kontekstu wprowadzonego w .3.
 Snapshot możliwości zachowuje default `think`, a aktywne rekordy mają dodatkowe
 bounds notatek/retokenizacji, pełnego słownika i capped-prefix/P2 oraz koszt do
-`think_tokens + 1` pełnych forwardów na pytanie. Nie wyłącza się generacji
-w background fork. Niewymodelowane konfiguracje drugiego backendu odmawiają
+`think_tokens + 1` pełnych forwardów na kwalifikujące się pytanie Direct.
+Nieznane typy mapowane na nieskalibrowane choice nie kwalifikują się.
+Nie wyłącza się generacji w background fork. Niewymodelowane konfiguracje
+drugiego backendu odmawiają
 `UNBOUNDED_FEATURE`; skończone limity admission nadal obowiązują.
 Kwalifikacja pamięci musi uwzględniać rezydentne wagi obu modeli i ich workspace.
-Szczegóły i ograniczenia: [THINKING.md](THINKING.md).
+
+Zachowany limit polityki DRR to
+`max_record_cost = floor(exec_pool_bytes / max(1, host_staging.per_token)) * cost_ns_per_token`.
+Bazowe `max(1, packed_tokens)` przechodzi dotychczasową kontrolę host-packed
+admission (`HOST_BUDGET_EXCEEDED`). Całkowita praca to te bazowe tokeny plus
+`eligible_direct * (think_tokens + 1) * think_max_len`; jej koszt po pomnożeniu
+przez `cost_ns_per_token` musi mieścić się w tym samym `max_record_cost`.
+Odmowa dodatkowej pracy thinking daje `BUDGET_EXCEEDED` z pracą, kosztem i cap,
+zamiast nazywać ją packed tokens. Przy domyślnych 256/8192 i staging 1280 B/token
+jedno eligible pytanie wymaga około 2,7 GB puli (2 694 840 320 B plus wkład
+promptu bazowego). To restrykcyjny odziedziczony limit polityki, nie oszacowanie
+bajtów hosta thinking ani wynik pomiaru. Niezależny check `host_bound <= P`
+nadal kontroluje źródłowy bound bajtów hosta i odmawia `HOST_BUDGET_EXCEEDED`.
+
+Włączony silnik wymaga `background_support(think_max_len)` backendu think
+również dla rekordów off; brak wsparcia wyłącza cały background executor tego
+silnika. All-off engine zachowuje dotychczasową ścieżkę. Odpowiedzi microbatcha
+czekają na wszystkie jego sekwencyjne thoughts, także gdy dany rekord jest off
+(head-of-line latency); opóźnienia nie zmierzono. Szczegóły i luki parytetu
+runtime: [THINKING.md](THINKING.md).
+
 Fingerprint obejmuje efektywne `orders`, layout (także override), SHA-256
 wybranej kalibracji lub stan off/brak, strict, auto tau/band oraz
 `context_overflow` i `truncate_head` (także przy polityce refuse).
