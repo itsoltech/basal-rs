@@ -34,6 +34,16 @@ Wynik: `bench.jsonl` (44 przykłady basal-bench: prompty, token IDs, logity
 liter obu porządków, rozkłady), `systemone.jsonl` (żądania System One wraz z
 odpowiedzią `Server.decide`) i `manifest.json` (rewizje, wersje, sumy SHA-256).
 
+`tools/reference/export_reference_v2.py --dtype float32` dla Qwen3.5 używa
+referencyjnych funkcji PyTorch z Transformers dla DeltaNet i splotu. Sam typ
+`float32` nie gwarantuje takiej referencji: zainstalowane FLA może automatycznie
+włączyć iloczyny TF32 w kernelach Triton. Eksporter zapisuje wybrane funkcje,
+wersje pakietów, hash źródła Transformers i ustawienia precyzji w
+`reference_execution`. `--qwen-delta auto` odtwarza automatyczny wybór pakietów;
+taki eksport wymaga osobnego opisu arytmetyki i nie jest ścisłą referencją FP32.
+Dla `bfloat16` domyślnie pozostaje wybór automatyczny. Ustawienia serwera
+upstream i natywne obliczenia basal-rs pozostają niezależne od eksportera.
+
 ## Zgodność runtime'u
 
 ```sh

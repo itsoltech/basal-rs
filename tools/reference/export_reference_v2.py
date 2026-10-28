@@ -8,6 +8,8 @@ Large raw exports belong in .cache, with a summary and their hashes in a new rep
 import argparse
 import asyncio
 import hashlib
+import importlib.metadata
+import inspect
 import json
 import os
 from pathlib import Path
@@ -21,6 +23,42 @@ import torch
 from basal.prompt import media_messages, lang_of, PREFILL
 from basal.server import Server, parser, to_items, temperature
 from export_reference import bench_items, system_one_cases, sha256, versions, _prefix_len
+
+
+def qwen_delta_reference(model_dir, dtype, requested):
+    """Pin Qwen3.5 quality references: FLA may use TF32 dots with FP32 inputs."""
+    config = json.loads((model_dir / "config.json").read_text())
+    text_config = config.get("text_config", config)
+    if text_config.get("model_type") not in ("qwen3_5", "qwen3_5_text"):
+        if requested is not None:
+            raise ValueError("--qwen-delta requires a Qwen3.5 model")
+        return None
+    from transformers.models.qwen3_5 import modeling_qwen3_5 as q35
+    policy = requested or ("torch" if dtype == "float32" else "auto")
+    selected = {}
+    for name in ("torch_chunk_gated_delta_rule", "torch_recurrent_gated_delta_rule",
+                 "causal_conv1d_fn", "causal_conv1d_update"):
+        wrapper = getattr(q35, name)
+        default = inspect.getclosurevars(wrapper).nonlocals.get("implementation")
+        if default is None:
+            raise RuntimeError(f"cannot identify the Transformers implementation of {name}")
+        used = default
+        if policy == "torch":
+            used = inspect.unwrap(wrapper)
+            if (used.__module__ != q35.__name__ or used.__name__ != name
+                    or inspect.getsourcefile(used) != q35.__file__):
+                raise RuntimeError(f"cannot pin the Transformers PyTorch reference for {name}")
+            setattr(q35, name, used)
+        selected[name] = {"default": f"{default.__module__}.{default.__qualname__}",
+                          "used": f"{used.__module__}.{used.__qualname__}"}
+    packages = {}
+    for package in ("transformers", "flash-linear-attention", "fla-core", "causal-conv1d"):
+        try:
+            packages[package] = importlib.metadata.version(package)
+        except importlib.metadata.PackageNotFoundError:
+            packages[package] = None
+    return dict(policy=policy, functions=selected, packages=packages,
+                transformers_source_sha256=sha256(q35.__file__))
 
 
 def pack_meta(ids):
@@ -150,6 +188,8 @@ def main():
     ap.add_argument("--model", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--dtype", choices=["float32", "bfloat16"], default="float32")
+    ap.add_argument("--qwen-delta", choices=["torch", "auto"],
+                    help="Qwen3.5 DeltaNet/convolution: default torch for float32, package auto for bfloat16")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--fp32-cpu-offload", action="store_true", help="Keep FP32 master weights in CPU RAM and stream layers to CUDA; quality reference only")
     ap.add_argument("--orders", default="1", choices=["1", "2"])
@@ -164,10 +204,11 @@ def main():
         ap.error("--cases-only/--exact-cases requires --cases")
     if a.fp32_cpu_offload and (a.dtype != "float32" or a.device != "cpu"):
         ap.error("--fp32-cpu-offload requires --dtype float32 --device cpu")
+    md = Path(a.model)
+    qwen_delta = qwen_delta_reference(md, a.dtype, a.qwen_delta)
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=False)
     start = time.monotonic()
-    md = Path(a.model)
     argv = ["--model", str(md), "--mode", "eager", "--device", a.device, "--dtype", a.dtype, "--orders", a.orders]
     if a.media:
         argv += ["--media", "on"]
@@ -197,6 +238,11 @@ def main():
                                "matmul_precision": torch.get_float32_matmul_precision(),
                                "cuda_tf32_allowed": torch.backends.cuda.matmul.allow_tf32,
                                "scope": "Quality reference only; excluded from all HTTP performance comparisons"}
+    reference_execution.update(matmul_precision=torch.get_float32_matmul_precision(),
+                               cuda_tf32_allowed=torch.backends.cuda.matmul.allow_tf32,
+                               cudnn_tf32_allowed=torch.backends.cudnn.allow_tf32)
+    if qwen_delta is not None:
+        reference_execution["qwen35_linear_attention"] = qwen_delta
     capture_codes(srv.backend)
     asyncio.run(export(srv, a, out))
     import subprocess
