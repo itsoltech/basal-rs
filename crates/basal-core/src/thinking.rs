@@ -197,18 +197,7 @@ impl<B: Backend> Thinking<B> {
                 && eos.iter().all(|id| (*id as usize) < vocab),
             "invalid thinking vocabulary/EOS"
         );
-        let shape = crate::planner::DeviceWorkShape {
-            forward_tokens: settings.max_len as u64,
-            longest_prompt: settings.max_len as u64,
-            forward_readouts: 1,
-            forward_letters: vocab as u64,
-            prompt_letters: vocab as u64,
-            short_prompts: false,
-            evidence: None,
-            media: Vec::new(),
-            worst_case_rounds: false,
-        };
-        let device_unavailable = match backend.generation_work_bound(&shape) {
+        let device_unavailable = match backend.generation_work_bound(&generation_shape(settings.max_len, vocab)) {
             crate::planner::DeviceWorkBound::Unknown(reason) => Some(reason),
             crate::planner::DeviceWorkBound::Estimate(_) => None,
         };
@@ -220,6 +209,11 @@ impl<B: Backend> Thinking<B> {
             device_unavailable,
         };
         Ok(Self { manifest, tok, backend, caps, calibration_label, sources, eos })
+    }
+
+    /// Device bound of one thought (generation, then P2), independent of the base plans it runs with.
+    pub(crate) fn device_work_bound(&self) -> crate::planner::DeviceWorkBound {
+        self.backend.generation_work_bound(&generation_shape(self.caps.settings.max_len, self.caps.vocab))
     }
 
     pub(crate) fn fork(&self) -> Result<Self> {
@@ -336,6 +330,22 @@ impl<B: Backend> Thinking<B> {
                 "calibration": self.calibration_label, "text": notes,
             }),
         })
+    }
+}
+
+/// Every thinking forward is one row of at most `max_len` tokens with one readout of at most the full vocabulary
+/// (generation steps and P2). Base evidence, media and later rounds never reach the thinking backend.
+fn generation_shape(max_len: usize, vocab: usize) -> crate::planner::DeviceWorkShape {
+    crate::planner::DeviceWorkShape {
+        forward_tokens: max_len as u64,
+        longest_prompt: max_len as u64,
+        forward_readouts: 1,
+        forward_letters: vocab as u64,
+        prompt_letters: vocab as u64,
+        short_prompts: false,
+        evidence: None,
+        media: Vec::new(),
+        worst_case_rounds: false,
     }
 }
 

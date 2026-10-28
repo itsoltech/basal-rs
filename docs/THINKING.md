@@ -120,8 +120,11 @@ obejmują P1, notatki, tokenizer/retokenizację, pełny słownik i staging.
 Bound notatek pochodzi z maksymalnej długości elementu zwalidowanego dekodera
 Metaspace/ByteFallback (z zapasem na zastępowanie błędnych bajtów UTF-8).
 Device bounds obejmują największy capped-prefix forward/P2 i pełny słownik.
+Liczą jeden wiersz o długości efektywnego `think_max_len` z jednym readoutem
+pełnego słownika, niezależnie od kształtu planów bazowych w microbatchu;
+z bazowym boundem łączy je maksimum na każdym urządzeniu, bo modele działają sekwencyjnie.
 Dla inkrementalnego CUDA doliczają jednocześnie stare i nowe K/V wszystkich
-warstw danego etapu do pełnego skonfigurowanego limitu kontekstu, również
+warstw danego etapu do tego limitu kontekstu (`context`), również
 bufory hi/lo oraz pamięć Q współdzieloną przez widoki K/V z prefillu.
 Dodatkowy konserwatywny bound na etap wynosi
 `2 * layers * context * (heads + 2 * kv_heads) * head_dim * 4` bajtów,

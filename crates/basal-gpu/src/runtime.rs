@@ -401,15 +401,14 @@ impl RuntimeBackend {
 
 impl Backend for RuntimeBackend {
     fn generation_logits(&mut self, prefix: &[u32], codes: &[u32]) -> Result<Vec<f32>> {
-        if let Self::Llama(b) = self {
-            return b.generation_logits(prefix, codes);
+        // Only Llama specializes generation; the others keep the trait's full-prefix default.
+        match self {
+            Self::Llama(b) => b.generation_logits(prefix, codes),
+            Self::Gemma(b) => b.generation_logits(prefix, codes),
+            Self::Qwen35(b) => b.generation_logits(prefix, codes),
+            #[cfg(all(feature = "intel", not(target_os = "macos")))]
+            Self::Intel(b) => b.generation_logits(prefix, codes),
         }
-        anyhow::ensure!(!prefix.is_empty() && !codes.is_empty(), "empty generation prefix/readout");
-        let row = basal_core::pack::pack(&[prefix.to_vec()]);
-        let codes = [codes.to_vec()];
-        let mut out = self.letter_logits(&[&row], &[&codes])?;
-        anyhow::ensure!(out.len() == 1 && out[0].len() == 1, "generation readout shape mismatch");
-        Ok(out.remove(0).remove(0))
     }
     fn end_generation(&mut self) -> Result<()> {
         match self {

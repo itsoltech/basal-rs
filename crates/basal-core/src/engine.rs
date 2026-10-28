@@ -748,10 +748,7 @@ impl<B: Backend> Engine<B> {
                 let base = self.backend.device_work_bound(&shape);
                 if let Some(t) = &self.thinking {
                     if plans.iter().any(|p| crate::thinking::active_caps(p).is_some()) {
-                        return crate::planner::combine_sequential_bounds(
-                            base,
-                            t.backend.generation_work_bound(&shape),
-                        );
+                        return crate::planner::combine_sequential_bounds(base, t.device_work_bound());
                     }
                 }
                 base
