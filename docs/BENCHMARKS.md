@@ -34,15 +34,22 @@ Wynik: `bench.jsonl` (44 przykłady basal-bench: prompty, token IDs, logity
 liter obu porządków, rozkłady), `systemone.jsonl` (żądania System One wraz z
 odpowiedzią `Server.decide`) i `manifest.json` (rewizje, wersje, sumy SHA-256).
 
-`tools/reference/export_reference_v2.py --dtype float32` dla Qwen3.5 używa
-referencyjnych funkcji PyTorch z Transformers dla DeltaNet i splotu. Sam typ
-`float32` nie gwarantuje takiej referencji: zainstalowane FLA może automatycznie
-włączyć iloczyny TF32 w kernelach Triton. Eksporter zapisuje wybrane funkcje,
-wersje pakietów, hash źródła Transformers i ustawienia precyzji w
-`reference_execution`. `--qwen-delta auto` odtwarza automatyczny wybór pakietów;
-taki eksport wymaga osobnego opisu arytmetyki i nie jest ścisłą referencją FP32.
-Dla `bfloat16` domyślnie pozostaje wybór automatyczny. Ustawienia serwera
-upstream i natywne obliczenia basal-rs pozostają niezależne od eksportera.
+`tools/reference/export_reference_v2.py --dtype float32` dla Qwen3.5 wybiera
+funkcje PyTorch z `modeling_qwen3_5.py` w Transformers dla DeltaNet i splotu.
+Ten wybór zapobiega automatycznemu przełączeniu tych czterech funkcji na kernele
+zainstalowanych pakietów. Sam typ `float32` tego nie zapewnia: zainstalowane FLA
+może użyć iloczynów TF32 w kernelach Triton. Eksporter nie wyłącza globalnie
+TF32; zapisuje flagi precyzji PyTorch (`--fp32-cpu-offload` dodatkowo ustawia
+`matmul_precision=highest`). W `reference_execution` zapisuje też wybrane i
+domyślne funkcje, wersje pakietów (Transformers, FLA, `causal-conv1d`,
+`kernels`, Triton) oraz SHA-256 pliku `modeling_qwen3_5.py`. Nie gwarantuje to
+ścisłej arytmetyki IEEE FP32 każdej operacji; zgodność z natywnym FP32
+potwierdza porównanie dla danej konfiguracji i korpusu. `--qwen-delta auto`
+zachowuje automatyczny wybór pakietów, przy którym wcześniejsze eksporty z FLA
+odbiegały od natywnego FP32; taki eksport wymaga osobnego opisu arytmetyki i
+nie jest ścisłą referencją FP32. Dla `bfloat16` domyślnie pozostaje wybór
+automatyczny. Ustawienia serwera upstream i natywne obliczenia basal-rs
+pozostają niezależne od eksportera.
 
 ## Zgodność runtime'u
 

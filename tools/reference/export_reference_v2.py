@@ -28,7 +28,7 @@ from export_reference import bench_items, system_one_cases, sha256, versions, _p
 def qwen_delta_reference(model_dir, dtype, requested):
     """Pin Qwen3.5 quality references: FLA may use TF32 dots with FP32 inputs."""
     config = json.loads((model_dir / "config.json").read_text())
-    text_config = config.get("text_config", config)
+    text_config = config.get("text_config") or config
     if text_config.get("model_type") not in ("qwen3_5", "qwen3_5_text"):
         if requested is not None:
             raise ValueError("--qwen-delta requires a Qwen3.5 model")
@@ -52,7 +52,7 @@ def qwen_delta_reference(model_dir, dtype, requested):
         selected[name] = {"default": f"{default.__module__}.{default.__qualname__}",
                           "used": f"{used.__module__}.{used.__qualname__}"}
     packages = {}
-    for package in ("transformers", "flash-linear-attention", "fla-core", "causal-conv1d"):
+    for package in ("transformers", "flash-linear-attention", "fla-core", "causal-conv1d", "kernels", "triton"):
         try:
             packages[package] = importlib.metadata.version(package)
         except importlib.metadata.PackageNotFoundError:
@@ -235,8 +235,6 @@ def main():
         be.dev = "cuda:0"
         reference_execution = {"forward_device": "cuda:0", "master_weights": "CPU FP32", "layer_streaming": True,
                                "resident_head_bytes": head.weight.numel() * head.weight.element_size(),
-                               "matmul_precision": torch.get_float32_matmul_precision(),
-                               "cuda_tf32_allowed": torch.backends.cuda.matmul.allow_tf32,
                                "scope": "Quality reference only; excluded from all HTTP performance comparisons"}
     reference_execution.update(matmul_precision=torch.get_float32_matmul_precision(),
                                cuda_tf32_allowed=torch.backends.cuda.matmul.allow_tf32,
