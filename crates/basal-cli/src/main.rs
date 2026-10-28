@@ -231,6 +231,15 @@ impl GpuArgs {
             cfg!(feature = "cuda"),
         )
     }
+
+    /// `--readout` (f32, bf16).
+    fn readout(&self) -> Result<Readout> {
+        match self.readout.as_str() {
+            "f32" => Ok(Readout::F32),
+            "bf16" => Ok(Readout::Bf16Rounded),
+            r => bail!("unknown readout {r:?} (f32, bf16)"),
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -735,11 +744,7 @@ fn planned_engine_from_manifest(
     let quantization = g.quantization(&manifest.name)?;
     // Validate architecture-specific quantization and split constraints before any weight is read.
     config::check_architecture(&manifest, quantization, g.layer_split.is_some())?;
-    let readout = match g.readout.as_str() {
-        "f32" => Readout::F32,
-        "bf16" => Readout::Bf16Rounded,
-        r => bail!("unknown readout {r:?} (f32, bf16)"),
-    };
+    let readout = g.readout()?;
     let profile = models::profile_for(&manifest);
     let kernels = Kernels::parse(&g.kernels)?;
     // Before precision/device/GEMM work below, heads are validated from the exact published model.
@@ -1335,11 +1340,7 @@ fn run() -> Result<()> {
                     mc.quantization.parse().with_context(|| format!("model {}", manifest.name))?;
                 config::check_architecture(manifest, quantization, placement.split().is_some())?;
                 if mc.model_options.exits_enabled() {
-                    let readout = match g.readout.as_str() {
-                        "f32" => Readout::F32,
-                        "bf16" => Readout::Bf16Rounded,
-                        value => bail!("unknown readout {value:?}"),
-                    };
+                    let readout = g.readout()?;
                     GpuBackend::check_early_exit(
                         Kernels::parse(&g.kernels)?,
                         quantization,

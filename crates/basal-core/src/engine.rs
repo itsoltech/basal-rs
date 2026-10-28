@@ -827,7 +827,9 @@ impl<B: Backend> Engine<B> {
         batching: Batching,
     ) -> Result<Vec<ItemResult>> {
         let Some(media) = media else {
-            return self.run(prepared, batching);
+            // One request: an active backend default gates all its questions together, unlike `run`.
+            let policy = self.backend.early_exit_caps().map(|c| c.default_policy().to_owned());
+            return self.run_with_policy(prepared, batching, policy.as_deref());
         };
         self.backend.begin_media(media)?;
         let result = (|| {

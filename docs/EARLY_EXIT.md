@@ -70,9 +70,12 @@ permutation, uśrednieniem, kalibracją i składaniem odpowiedzi. Próg >1 wył�
 daną warstwę. Warstwy są sprawdzane rosnąco. Zachowujemy dotychczasowe
 TypeSafe formuły po readoucie i wybór bazowej kalibracji, bez plików
 CALIBRATION zależnych od polityki. Pełne `off` używa dotychczasowej arytmetyki.
-Nieskończone lub NaN logity głowicy kończą żądanie błędem wewnętrznym.
-To zamierzona różnica względem upstream, gdzie nieudany gate dla NaN
-pozwala kontynuować do głębszych warstw.
+Nieskończone lub NaN logity głowicy przerywają całe wywołanie silnika
+błędem wewnętrznym. Online serve zwraca wtedy `Internal` wszystkim zadaniom
+tego batcha, również współbatchowanym żądaniom off i zwykłym. Background
+lane nie wykonuje aktywnej polityki: bounded planowanie odmawia z
+`UNBOUNDED_FEATURE`. To zamierzona różnica względem upstream, gdzie nieudany
+gate dla NaN pozwala kontynuować do głębszych warstw.
 
 Aktywne żądanie ma własną grupę wszystkich pytań, orders i label branches.
 Dokładny upstream `_pack` tworzy units; `_units` bisekuje zakres readoutów,
@@ -87,8 +90,13 @@ grouped rounds i tasks/continuations niosą tę samą efektywną politykę.
 Niskopoziomowe `Engine::run` z aktywnym defaultem traktuje każdy element
 `Prepared` jako osobną grupę jednego pytania, ze wszystkimi jego orders razem.
 Zachowuje kolejność wejść i wyników; skład i kolejność pozostałych elementów
-zbioru nie wpływają na gate tego pytania. Dotyczy to również diagnostycznych
-wywołań export, bench i profile. `run_decision_plans` zachowuje grupę całego
+zbioru nie wpływają na gate tego pytania. Tak działają niezależne elementy
+`bench.jsonl` w export, bench i profile. Surowe readouty przypadku
+`systemone.jsonl` w export (`run_prepared` bez media) tworzą natomiast jedną
+grupę całego żądania, jak `run_decision_plans`. Oba diagnostyczne readouty
+używają defaultu backendu; jawny `early_exit` w żądaniu przypadku steruje
+tylko porównywaną odpowiedzią decide, więc surowe readouty mogą użyć innej
+polityki niż ta odpowiedź. `run_decision_plans` zachowuje grupę całego
 żądania i jego jawną, zamrożoną politykę we wszystkich rundach.
 
 Inne żądanie nie zmienia wybranej głowicy: aktywne plany rozdzielamy przed

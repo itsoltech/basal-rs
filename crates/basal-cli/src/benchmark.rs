@@ -316,11 +316,7 @@ fn execute(
     // below creates one), as in serve: its model files come next; one GPU keeps its device check before them.
     let split_files = if g.model_options.exits_enabled() {
         let files = model_files(model, g, report)?;
-        let readout = match g.readout.as_str() {
-            "f32" => basal_gpu::Readout::F32,
-            "bf16" => basal_gpu::Readout::Bf16Rounded,
-            value => anyhow::bail!("unknown readout {value:?}"),
-        };
+        let readout = g.readout()?;
         GpuBackend::check_early_exit(
             basal_gpu::Kernels::parse(&g.kernels)?,
             quantization,
