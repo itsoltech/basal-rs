@@ -73,9 +73,16 @@ qualification; praca w tle wymaga `inherit` i warunków opisanych niżej.
 
 To **nie jest tryb parytetu**. Redukcje GEMM (w tym split-K), FA2, normy
 i lm_head oraz implementacje pow/sin/cos/exp/div pozostają źródłami różnic.
-Zgodność nowych kerneli z deklaracją, wyniki wobec upstream BF16 i FP32,
-deterministyczność po restarcie, pamięć i latency wymagają osobnych pomiarów.
+Zgodność nowych kerneli z deklaracją wymaga operatorowego replay. Wyniki wobec
+upstream BF16 i FP32, deterministyczność po restarcie, pamięć i latency trzeba
+kwalifikować osobno dla danej konfiguracji i korpusu.
 Historyczny FAIL pozostaje FAIL; kompilacja nie dowodzi jakości ani parytetu.
+
+[Pomiar J1/J2](../reports/upstream-api-241-thinking-rebuild-2026-10-28/README.md)
+potwierdził na skończonym korpusie zachowanie default/inherit oraz powtarzalność
+profilu po restarcie. Profil osiągnął 14/19 odpowiedzi w progu 1e-4 względem
+rzeczywistego upstream, ale nadal tylko 4/9 identycznych notatek i 7/9 argmax.
+To nadal FAIL parytetu; nie jest kwalifikacją operatorów ani granic alokatora.
 
 ## Żądanie i odpowiedź
 
