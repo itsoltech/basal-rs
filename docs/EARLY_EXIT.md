@@ -5,7 +5,9 @@ Jeżeli każde odczytanie w chunku spełnia próg polityki, zwraca jej rzeczywis
 logity i pomija pozostałe warstwy. Obsługiwany artefakt to wyłącznie
 `Remek/basal-1.0-4.5B@b95288041cb1975bb930c6f0410819273fd2f54f`.
 Pico, Mini, basal-1.0-1.5B oraz checkpoint thinking 2.0 nie są jego zamiennikami.
-Pozytywna kwalifikacja runtime, numeryki, pamięci i wydajności pozostaje **GAP**.
+[Skończony pomiar CUDA FP32](../reports/upstream-api-241-trained-2026-10-28/README.md)
+potwierdza readout, izolację badanych polityk i skip-tail. Ogólna kwalifikacja
+pamięci, wydajności oraz pozostałych konfiguracji pozostaje **GAP**.
 
 ## Włączenie i konfiguracja
 
@@ -137,8 +139,11 @@ estymatory host/device również zgłaszają brak boundu. Nie przypisujemy savin
 pomijaniu warstw i nie używamy starego ordinary Tree boundu jako dowodu.
 Online wykonuje rzeczywiste głowice i skip-tail; runtime może odmówić alokacji.
 
-Statyczne fmt/Clippy/Rustdoc nie potwierdzają obliczeń. Dodatnia kwalifikacja
-wymaga uprawnionych artefaktów 4.5B, odpowiedniej pamięci i porównania
-z przypiętym upstream FP32: każda polityka, wybrana głębokość, rozkłady,
-brak wykonania tail, kolejne rundy i izolacja ruchu. Pico/Mini kwalifikują
-jedynie brak/null, odmowy niedostępnych polityk i zwykłe regresje.
+Statyczne fmt/Clippy/Rustdoc nie potwierdzają obliczeń. Pomiar RTX 6000 Ada,
+orders 1, Candle FP32 daje 32/32 porównania z przypiętym upstream w progu
+0,0001, obejmując wszystkie cztery polityki. Profil native potwierdza
+wykonanie 30/50/60 warstw dla jednego wejścia; osiem współbieżnych wyników
+zgadza się bitowo z solo po usunięciu czasu. Nie kwalifikuje to kolejnych
+rund, pozostałych dtype, wszystkich kształtów, bounds ani szybkości.
+Zakres, adapter referencji i dane opisuje powyższy raport. Pico/Mini
+kwalifikują jedynie brak/null, odmowy niedostępnych polityk i zwykłe regresje.

@@ -151,13 +151,21 @@ osobny plan obliczeń thinking. Nie zawierają lokalnych ścieżek tych źróde�
 
 ## Zakres kwalifikacji
 
-Kod implementuje natywną generację i drugi readout; kontrole statyczne nie
-potwierdzają wyników, stop-token counting referencyjnego vLLM, jakości ani
-wydajności. Full-prefix recomputation nie daje obietnicy szybkości lub
-parytetu tokenów z vLLM. Pełny parytet detokenizacji (w tym początkowej spacji
-dekodera Strip), tokenów, stop/EOS i ich liczenia pozostaje **GAP** do porównania
-runtime. Czas `think.ms` pozostaje bez zaokrąglenia do dwóch miejsc stosowanego
-przez Python upstream. Pozytywna kwalifikacja wymaga obu przypiętych
-checkpointów i odpowiedniej pamięci. Pico/Mini mogą sprawdzić tylko off
-i odmowy; lokalna karta 8 GB nie mieści nawet jednego z tych niekwantyzowanych
-plików wag. Zmiana precyzji wymaga osobnej kwalifikacji.
+[Pomiar RTX 6000 Ada](../reports/upstream-api-241-trained-2026-10-28/README.md)
+potwierdza generację i P2 na przypiętej parze 4.5B: native FP32 zgadza się
+z diagnostycznym sidecarem PyTorch FP32 w 19/19 przypadków przy progu
+0,0001, z równym tekstem i liczbą tokenów dziewięciu notatek. Adapter
+referencji i konfiguracja orders 1 / context 2048 są jawnie opisane w raporcie.
+
+**Parytet z oryginalnym sidecarem vLLM BF16 ma status FAIL:** siedem z 19
+przypadków przekracza próg, a argmax P2 zgadza się w siedmiu z dziewięciu
+wygenerowanych odpowiedzi. Osobna kontrola native BF16 nie usuwa różnicy.
+Zachowano też FAIL bitowej równości P1 solo/batch w diagnostycznej konfiguracji
+FP32, odtworzony bez thinking. Nie potwierdza to regresji samego thinking.
+
+Full-prefix recomputation nie daje obietnicy szybkości lub parytetu z vLLM.
+Ogólny parytet detokenizacji, stop/EOS i ich liczenia poza badanym korpusem,
+jakość, bounds i wydajność pozostają **GAP**. Czas `think.ms` pozostaje bez
+zaokrąglenia do dwóch miejsc stosowanego przez Python upstream. Pico/Mini
+mogą sprawdzić tylko off i odmowy; karta 8 GB nie mieści nawet jednego
+z tych niekwantyzowanych plików wag. Zmiana precyzji wymaga osobnej kwalifikacji.
