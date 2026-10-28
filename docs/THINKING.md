@@ -84,6 +84,13 @@ profilu po restarcie. Profil osiągnął 14/19 odpowiedzi w progu 1e-4 względem
 rzeczywistego upstream, ale nadal tylko 4/9 identycznych notatek i 7/9 argmax.
 To nadal FAIL parytetu; nie jest kwalifikacją operatorów ani granic alokatora.
 
+[Izolacja score](../reports/upstream-api-241-score-isolation-2026-10-28/README.md)
+pokazała wpływ treści notatki na wybór poziomu i różnicę top-1 między KV
+a pełnym prefiksem na identycznych tokenach. W nowej kolejności odczytów P2
+profil BF16 dał też różne prawdopodobieństwa w dwóch procesach z tą samą
+tożsamością planu. Wcześniejsza powtarzalność dotyczy zatem wyłącznie
+zmierzonej serii HTTP; profil nie gwarantuje powtarzalności po restarcie.
+
 ## Żądanie i odpowiedź
 
 Oba dialekty HTTP oraz narzędzia MCP przyjmują requestowe `think`:
