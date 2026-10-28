@@ -1243,7 +1243,7 @@ impl RequestPlanner {
     pub fn load(manifest: ModelManifest, options: PlanOptions, caps: PlanCaps) -> Result<Self, PlannerLoadError> {
         let tok = BasalTokenizer::load_for(&manifest.dir.join("tokenizer.json"), manifest.chat_style)
             .map_err(|e| PlannerLoadError::Tokenizer { model: manifest.name.clone(), source: e.into() })?;
-        if tok.token_id(&manifest.bos_token).is_none() {
+        if manifest.chat_style != ChatStyle::Qwen35 && tok.token_id(&manifest.bos_token).is_none() {
             return Err(PlannerLoadError::MissingBos(manifest.bos_token.clone()));
         }
         Ok(Self { manifest, tok, options, caps })
