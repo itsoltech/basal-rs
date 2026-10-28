@@ -9,6 +9,9 @@
 - Add optional Usage lane/truncated/think_questions and ModelMetadata layout/
   calibration_warning/think/early_exit/early_exit_default. Policies are open strings;
   raw nested JSON and answer extra think/meta retain unknown keys. Required validation remains.
+- **Behavior change:** these Usage/ModelMetadata keys, including the always-emitted
+  `early_exit`, now bind to the typed fields and no longer appear in `extra`. Lookups such as
+  `model.extra.get("early_exit")` still compile but return `None`; read the typed fields.
 - New public Usage/ModelMetadata/DecisionOptions fields can break exhaustive struct literals.
   Existing constructors/call forms remain; Option does not guarantee source compatibility.
   No stable Rust ABI or new runtime parity is claimed. No dependencies changed.

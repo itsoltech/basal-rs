@@ -52,6 +52,11 @@ positional constructor i `Deconstruct` opcji. Nowe publiczne pola Rust `Usage`,
 zmiany silnika `PlanCost::thinking_tokens`, `PlanCaps::{thinking,early_exit}`,
 `RequestPlan::{thinking,early_exit}` i prywatne snapshoty ograniczają konstruowanie
 struktur z zewnątrz. Opcjonalność pola nie gwarantuje zgodności źródłowej ani binarnej.
+W Rust i C# klucze usage `lane`, `truncated`, `think_questions` oraz discovery `layout`,
+`calibration_warning`, `think`, `early_exit` i `early_exit_default` trafiają teraz do
+typowanych pól i znikają z map `extra`/`Extra`. Dotychczasowy odczyt z tych map nadal się
+kompiluje, ale nie znajduje klucza (Rust `None`, C# `KeyNotFoundException` przy indeksie);
+po migracji czytaj typowane pola.
 
 Hosty agentów mogą też użyć narzędzi `decide`/`decide_many` przez opcjonalne
 HTTP `/mcp` lub `basal mcp` (most stdio do `/v1/basal`). Transporty i schematy

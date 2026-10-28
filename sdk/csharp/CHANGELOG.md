@@ -9,6 +9,9 @@
 - Add optional Lane/Truncated/ThinkQuestions usage and Layout/CalibrationWarning/Think/
   EarlyExit/EarlyExitDefault discovery. Raw nested JSON and answer Extra think/meta retain
   unknown keys. Policies are open strings; required answer validation is unchanged.
+- **Behavior change:** these Usage/ModelMetadata keys, including the always-emitted
+  `early_exit`, now bind to the typed properties and no longer appear in `Extra`. Code such as
+  `model.Extra["early_exit"]` still compiles but throws `KeyNotFoundException`; read the typed properties.
 - Existing call forms remain; convenience result records use Raw.Answers[id].Extra for
   additions. Rebuild against the changed assembly version; no general source/binary
   compatibility or new runtime parity is claimed. No dependencies changed.

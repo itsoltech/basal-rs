@@ -681,7 +681,17 @@ impl Questions {
         }
         request.lang = options.lang;
         if let Some(think) = options.think {
-            request.extra.insert("think".into(), serde_json::to_value(think).map_err(Error::Encode)?);
+            request.extra.insert(
+                "think".into(),
+                Value::String(
+                    match think {
+                        ThinkMode::Off => "off",
+                        ThinkMode::Auto => "auto",
+                        ThinkMode::Force => "force",
+                    }
+                    .into(),
+                ),
+            );
         }
         if let Some(text) = options.think_text {
             request.extra.insert("think_text".into(), Value::Bool(text));

@@ -84,7 +84,7 @@ public sealed class DecisionRequest
     [JsonPropertyName("model")] public string? Model { get; init; }
     /// <summary>off or auto (basal-1.5).</summary>
     [JsonPropertyName("facts")] public string? Facts { get; init; }
-    /// <summary>off, auto or force. Null is omitted; use raw JSON to send an explicit wire null.</summary>
+    /// <summary>off, auto or force. Null is omitted; the server rejects an explicit wire null.</summary>
     [JsonPropertyName("think")] public string? Think { get; init; }
     /// <summary>Include generated notes, when explicitly requested.</summary>
     [JsonPropertyName("think_text")] public bool? ThinkText { get; init; }

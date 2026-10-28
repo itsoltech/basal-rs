@@ -56,8 +56,9 @@ Inventory pochodzi z przypiętego JSON i obejmuje `0.98`, `0.99`, `0.995`,
 podczas fit, bez gwarancji accuracy lub confidence na danych użytkownika.
 `GET /v1/models` pokazuje `early_exit: []` dla plain backendu; po aktywacji
 pokazuje rzeczywiste available oraz `early_exit_default`. Narzędzia MCP
-przekazują to samo opcjonalne pole. Synchronizacja OpenAPI i czterech typed
-SDK pozostaje osobną pracą; nie zakładaj jeszcze wsparcia ich nowych pól.
+przekazują to samo opcjonalne pole. Native OpenAPI i cztery typed SDK opisują
+te pola w lokalnych, nieopublikowanych wersjach ([SDK](SDK.md)); runtime
+nowych pól w klientach pozostaje do weryfikacji.
 
 ## Obliczenia, grupowanie i cache
 
