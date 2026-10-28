@@ -47,6 +47,18 @@ For Omni, select its exact discovery name and append `--media`. New run names
 must be unused; retain failed attempts. The auditor requires all SDK modes,
 named APIs, discovery metadata, HTTP 422 handling, empty-media rejection and native case references. It compares decoded
 answer fields and usage numerically by IEEE-754 binary64 bits, including signed
-zero. It does not compare raw JSON text, unknown response fields, timing fields
-or transport framing. Rust records typed projections and usage rather than a
-serialized copy of the complete raw response.
+zero. All adapters forward `facts`, `think`, `think_text` and `early_exit` when supplied,
+including the named API modes. Missing/null early-exit are semantically identical;
+ergonomic clients omit null. Corpus policies are strings/null and thinking options
+use valid strings/booleans, matching the ergonomic API. No orders/layout/tau/overflow
+request overrides are added.
+
+The auditor observes presence and values of optional usage `lane`, `truncated`,
+`think_questions`, discovery `layout`, `calibration_warning`, `think`, policy inventory/
+default, and raw answer `think`/`meta`, including their nested unknown keys. It compares
+only the presence of `think.ms`, not its nondeterministic value; latency remains excluded.
+Existing probability comparisons and required answer projections are unchanged.
+It does not compare raw JSON text, other unknown response fields or transport framing.
+Rust records typed projections, usage and raw think/meta rather than the complete response.
+Static compilation is not a live QA result. Pico/Mini cannot provide positive trained
+thinking/head observations; those remain a separate 4.5B runtime GAP.

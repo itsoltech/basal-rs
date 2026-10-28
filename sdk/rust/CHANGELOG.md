@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### 0.8.0 (local, unpublished)
+
+- Add ergonomic ThinkMode and DecisionOptions think/think_text/early_exit; omit unset
+  options. DecisionRequest.extra retains raw fields, including explicit null early_exit.
+- Add optional Usage lane/truncated/think_questions and ModelMetadata layout/
+  calibration_warning/think/early_exit/early_exit_default. Policies are open strings;
+  raw nested JSON and answer extra think/meta retain unknown keys. Required validation remains.
+- New public Usage/ModelMetadata/DecisionOptions fields can break exhaustive struct literals.
+  Existing constructors/call forms remain; Option does not guarantee source compatibility.
+  No stable Rust ABI or new runtime parity is claimed. No dependencies changed.
+
 ## 0.7.0 — 2026-10-21
 
 - **Breaking:** remove API-key configuration and bearer headers from client initialization.

@@ -84,6 +84,12 @@ public sealed class DecisionRequest
     [JsonPropertyName("model")] public string? Model { get; init; }
     /// <summary>off or auto (basal-1.5).</summary>
     [JsonPropertyName("facts")] public string? Facts { get; init; }
+    /// <summary>off, auto or force. Null is omitted; use raw JSON to send an explicit wire null.</summary>
+    [JsonPropertyName("think")] public string? Think { get; init; }
+    /// <summary>Include generated notes, when explicitly requested.</summary>
+    [JsonPropertyName("think_text")] public bool? ThinkText { get; init; }
+    /// <summary>Open policy string; omitted/null inherits the backend default.</summary>
+    [JsonPropertyName("early_exit")] public string? EarlyExit { get; init; }
     /// <summary>Explicit prompt language, pl or en.</summary>
     [JsonPropertyName("lang")] public string? Lang { get; init; }
     /// <summary>Inline media in processing order.</summary>
@@ -198,7 +204,7 @@ public sealed class Answer
     [JsonPropertyName("data")] public JsonObject? Data { get; init; }
     /// <summary>Extraction provenance.</summary>
     [JsonPropertyName("fields")] public Dictionary<string,ExtractField>? Fields { get; init; }
-    /// <summary>Future answer fields.</summary>
+    /// <summary>Future answer fields, including raw think and meta objects with all nested keys.</summary>
     [JsonExtensionData] public Dictionary<string, JsonElement>? Extra { get; init; }
 }
 
@@ -207,11 +213,11 @@ public sealed class Usage
 {
     /// <summary>Prompt tokens for option orders.</summary>
     [JsonPropertyName("input_tokens")] public required long InputTokens { get; init; }
-    /// <summary>Zero: the model does not generate text.</summary>
+    /// <summary>Generated notes/stop/EOS tokens may contribute, including a skipped second prompt.</summary>
     [JsonPropertyName("output_tokens")] public required long OutputTokens { get; init; }
     /// <summary>Optional question count.</summary>
     [JsonPropertyName("questions")] public long? Questions { get; init; }
-    /// <summary>Optional branch count.</summary>
+    /// <summary>Optional branch count; not multiplied by option orders.</summary>
     [JsonPropertyName("branches")] public long? Branches { get; init; }
     /// <summary>Server-side latency in milliseconds.</summary>
     [JsonPropertyName("latency_ms")] public double? LatencyMs { get; init; }
@@ -221,6 +227,12 @@ public sealed class Usage
     [JsonPropertyName("second_order_branches")] public long? SecondOrderBranches { get; init; }
     /// <summary>Media token accounting.</summary>
     [JsonPropertyName("media")] public MediaUsage? Media { get; init; }
+    /// <summary>Server scheduling lane, when reported.</summary>
+    [JsonPropertyName("lane"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? Lane { get; init; }
+    /// <summary>Raw truncation accounting: state/head/tail/dropped tokens and head_share; retains nested keys.</summary>
+    [JsonPropertyName("truncated"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public JsonElement? Truncated { get; init; }
+    /// <summary>Thinking question count; absent when the server does not report thinking.</summary>
+    [JsonPropertyName("think_questions"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public long? ThinkQuestions { get; init; }
     /// <summary>Future usage fields.</summary>
     [JsonExtensionData] public Dictionary<string, JsonElement>? Extra { get; init; }
 }
@@ -251,6 +263,16 @@ public sealed class ModelMetadata
     [JsonPropertyName("media")] public IReadOnlyList<string>? Media { get; init; }
     /// <summary>Temperature by primitive.</summary>
     [JsonPropertyName("temperature_per_prim")] public Dictionary<string,double>? TemperaturePerPrim { get; init; }
+    /// <summary>Effective prompt layout, when reported.</summary>
+    [JsonPropertyName("layout"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? Layout { get; init; }
+    /// <summary>Calibration warning, when reported.</summary>
+    [JsonPropertyName("calibration_warning"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? CalibrationWarning { get; init; }
+    /// <summary>Raw thinking default, available modes, limits and independent calibration identifier.</summary>
+    [JsonPropertyName("think"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public JsonElement? Think { get; init; }
+    /// <summary>Available policy strings; an empty inventory is meaningful.</summary>
+    [JsonPropertyName("early_exit"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public IReadOnlyList<string>? EarlyExit { get; init; }
+    /// <summary>Backend default policy, when heads are enabled.</summary>
+    [JsonPropertyName("early_exit_default"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? EarlyExitDefault { get; init; }
     /// <summary>Native metadata.</summary>
     [JsonExtensionData] public Dictionary<string, JsonElement>? Extra { get; init; }
 }

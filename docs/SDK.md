@@ -6,16 +6,52 @@ modelu po stronie aplikacji. Serwer uruchamiasz osobno przez `basal serve`.
 
 Serwer obsługuje opt-in [natywne thinking](THINKING.md): wire `think`
 off/auto/force i boolean `think_text`, odpowiedź `think`/`meta.think`, usage
-`think_questions` i faktyczne `output_tokens`. Typy czterech SDK i opis
-OpenAPI wymagają osobnej synchronizacji; ta implementacja silnika ich nie
-aktualizuje. Do czasu tej synchronizacji nie należy zakładać, że typed SDK
-udostępnia te opcje lub zachowuje nowe pola; można użyć bezpośredniego JSON HTTP
-albo dostarczanych narzędzi MCP.
+`think_questions` i faktyczne `output_tokens`. Lokalne wersje Python/npm/.NET
+**0.7.0**, Rust **0.8.0** i native OpenAPI **0.4.0** opisują te dodatki.
+Paczki nie zostały przez tę zmianę opublikowane; runtime nowych pól pozostaje
+do weryfikacji osobno od statycznej kompilacji klientów.
 
 Serwer obsługuje też [trained early-exit](EARLY_EXIT.md): `early_exit`
 missing/null wybiera default, jawny string wymaga head-capable backendu
 (również `off`). Discovery dodaje rzeczywiste available i `early_exit_default`.
-Typed SDK i OpenAPI wymagają osobnej synchronizacji także dla tych pól.
+Opcje ergonomiczne pomijają nieustawione wartości, bez materializowania defaults.
+`think` przyjmuje `off`/`auto`/`force`, `think_text` boolean; wire null dla obu
+jest błędem. `early_exit` jest otwartym stringiem, nie enumem odpowiedzi.
+Python używa keywordów `think`, `think_text`, `early_exit` we wszystkich sync/async
+wariantach; TS tych samych kluczy w `DecisionOptions`/`buildRequest`; C# właściwości
+init `Think`, `ThinkText`, `EarlyExit`; Rust `DecisionOptions::{think,think_text,early_exit}`
+z `ThinkMode`. None/null w opcjach ergonomicznych early-exit oznacza pominięcie.
+Jawne wire `early_exit: null` można zapisać w raw request (Rust: `DecisionRequest.extra`).
+Jawne `off` wymaga głowic. Nie dodano override request dla orders/layout/tau/overflow.
+
+Usage zachowuje opcjonalne `lane`, surowy `truncated` z `state_tokens`, `head_tokens`,
+`tail_tokens`, `dropped_tokens`, `head_share` oraz `think_questions`; brak pola nie
+staje się false, zerem ani pustym obiektem. Pozostają `longest_prompt_tokens` i
+`second_order_branches`. `branches` nie mnoży się przez orders. `output_tokens`
+może uwzględniać notes/stop/EOS również przy pominiętym drugim promptcie i nie
+wyznacza samodzielnie `meta.think.used`.
+
+Discovery zachowuje opcjonalne `layout`, `calibration_warning`, `think`
+(`default`, `available`, `limits`, `calibration` z `content_sha256` i `status`),
+inventory `early_exit` i `early_exit_default`. Klient nie syntetyzuje tych pól.
+`think`/`meta` w odpowiedzi są dodatkami do dotychczasowych odpowiedzi primitive/task.
+Raw `think` zawiera `{skipped:"context"}` albo `{tokens,ms,calibration,no_think:{probabilities,confidence},text?}`;
+`meta.think` zawiera `{used,tokens}` i przy enabled backendzie występuje także dla
+off/ineligible/tasks. Kalibracja thinking ma niezależny identyfikator, inny niż
+answer calibration `validated`/`unvalidated`/`text`.
+
+Python odczytuje dodatki z `response.raw["answers"][id]`, TS również z odpowiedzi
+typowanej, C# z `response.Raw.Answers[id].Extra`, Rust z `response.raw().answers[id].extra`.
+Surowe obiekty zachowują nieznane zagnieżdżone klucze. Convenience views Python/C#/Rust
+mogą pomijać te dodatki; walidacja wymaganych pól odpowiedzi pozostaje obowiązkowa.
+Zamknięte enumy rodzajów pytań nie gwarantują tolerowania dowolnego przyszłego schematu.
+
+Istniejące konstruktory i formy wywołań pozostają. C# zachowuje pięcioparametrowy
+positional constructor i `Deconstruct` opcji. Nowe publiczne pola Rust `Usage`,
+`ModelMetadata`, `DecisionOptions` mogą łamać pełne struct literals. Również wcześniejsze
+zmiany silnika `PlanCost::thinking_tokens`, `PlanCaps::{thinking,early_exit}`,
+`RequestPlan::{thinking,early_exit}` i prywatne snapshoty ograniczają konstruowanie
+struktur z zewnątrz. Opcjonalność pola nie gwarantuje zgodności źródłowej ani binarnej.
 
 Hosty agentów mogą też użyć narzędzi `decide`/`decide_many` przez opcjonalne
 HTTP `/mcp` lub `basal mcp` (most stdio do `/v1/basal`). Transporty i schematy
@@ -204,7 +240,7 @@ Omni z CUDA i włączonymi mediami. Status kalibracji `text` jest akceptowany,
 ale nie oznacza potwierdzonej kalibracji mediów. Typowane usage i metadane
 obejmują liczbę tokenów/mediów, kolejności oraz format promptu.
 
-Aktualne wersje z tym API i obsługą batchy: Python/npm/.NET **0.6.0**, Rust **0.7.0**. Zmiany modeli
+Lokalne wersje z tym API i obsługą batchy: Python/npm/.NET **0.7.0**, Rust **0.8.0**. Zmiany modeli
 odpowiedzi (opcjonalny threshold i nowe warianty) są opisane w changelogach.
 Samo scalenie kodu nie publikuje paczek. Runtime nadal sprawdza możliwości
 starszych modeli; SDK nie uruchamiają inferencji lokalnie.
@@ -521,7 +557,10 @@ porzuceniu future, a w Pythonie async na anulowaniu zadania. Anulowanie po stron
 klienta nie gwarantuje przerwania inferencji na serwerze.
 
 Błędy zachowują status HTTP, body oraz surowe `Retry-After`; dla body bez JSON
-zachowują tekst. Natywna walidacja daje 422, przeciążenie 529 z `Retry-After: 1`.
+zachowują tekst. Natywna walidacja/usage/unsupported daje 422, Internal 500,
+rozpoznany OOM po pełnym tekście przyczyn 503, a admission 529 z `Retry-After: 1`.
+Te odpowiedzi mają body `{error:string}`. Durable Internal pozostaje retry z końcowym
+`execution_failed`, a nie online 503. Limit body HTTP nadal daje 413.
 Brak połączenia, timeout i niepoprawna odpowiedź JSON są oddzielone od błędów
 HTTP. Nie ma automatycznych retry: ponowienie może uruchomić kolejną inferencję.
 Domyślne transporty nie podążają za przekierowaniami. Serwer i SDK nie obsługują
@@ -596,7 +635,8 @@ opisuje [raport live](../reports/sdk-live-and-hardening-2026-10-13/README.md).
 
 Liczby Rust dotyczą niezależnie spakowanego locka, bez crate'a SDK i zależności dev.
 Rozwiązanie grafu dla macOS/Windows nie oznacza wykonania na tych platformach.
-SDK nie wymusza `serde_json/arbitrary_precision`; `float_roundtrip` zachowuje liczby binary64.
+Rust SDK włącza `serde_json/{preserve_order,float_roundtrip,arbitrary_precision}`;
+`float_roundtrip` zachowuje liczby binary64, a raw JSON zachowuje zapis liczb.
 Grafy, wersje i ograniczenia audytu są zapisane w raporcie live. Aplikacje powinny utrzymywać
 własne locki: audyt przypiętego grafu nie obejmuje wszystkich przyszłych wersji dopuszczonych
 przez zakresy bibliotek. Mniejsza liczba zależności ogranicza powierzchnię ataku,

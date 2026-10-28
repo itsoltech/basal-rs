@@ -4,7 +4,7 @@ Serwer domyślnie udostępnia dwa kontrakty decyzji:
 
 - `POST /v1/systemone`: kontrakt TypeSafe System One. Na nim opiera się
   integracja z aplikacjami.
-- `POST /v1/basal`: konwencje `Server.decide` upstream basal v2.0.0, dla
+- `POST /v1/basal`: konwencje `Server.decide` upstream basal v2.4.1, dla
   klientów napisanych pod serwer upstream.
 
 `basal serve --systemone-dialect upstream` (globalna flaga) lub YAML

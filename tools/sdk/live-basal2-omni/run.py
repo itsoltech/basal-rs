@@ -33,7 +33,8 @@ def main():
               'required_sdks':['python-sync','python-async','python-schema','typescript-esm','typescript-cjs','csharp-map','rust-map'],
               'named_sdks':['typescript-esm-named','typescript-cjs-named','csharp-inline','csharp-prepared','csharp-explicit','rust-named'],
               'inputs_sha256':hashlib.sha256((root/'inputs/cases.jsonl').read_bytes()).hexdigest(),
-              'comparison':'decoded answers and usage, binary64 equality; sequential requests, caches disabled on server'}
+              'comparison':'decoded answers, optional thinking/meta, usage and discovery presence; binary64 equality excluding latency/ms; sequential requests, caches disabled on server',
+              'request_options':{c['id']:{k:c[k] for k in ('facts','think','think_text','early_exit') if k in c} for c in cases}}
     (out/'method.json').write_text(json.dumps(method,indent=2)+'\n')
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     def request(path, body=None):

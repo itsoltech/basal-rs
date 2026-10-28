@@ -168,7 +168,43 @@ fn project(answer: AnswerResult<'_>) -> Value {
 fn raw_metadata(response: &DecisionResponse) -> Value {
     let u = &response.usage;
     let media=u.media.as_ref().map(|m|json!({"images":m.images,"audio":m.audio,"media_tokens":m.media_tokens,"detail":match m.detail {MediaDetail::Default=>"default",MediaDetail::High=>"high"}}));
-    json!({"model":response.model,"usage":{"input_tokens":u.input_tokens,"output_tokens":u.output_tokens,"questions":u.questions,"branches":u.branches,"longest_prompt_tokens":u.longest_prompt_tokens,"second_order_branches":u.second_order_branches,"media":media}})
+    let mut usage = json!({"input_tokens":u.input_tokens,"output_tokens":u.output_tokens,"questions":u.questions,"branches":u.branches,"longest_prompt_tokens":u.longest_prompt_tokens,"second_order_branches":u.second_order_branches,"media":media});
+    if let Some(lane) = &u.lane {
+        usage["lane"] = json!(lane);
+    }
+    if let Some(truncated) = &u.truncated {
+        usage["truncated"] = truncated.clone();
+    }
+    if let Some(count) = u.think_questions {
+        usage["think_questions"] = json!(count);
+    }
+    let answers: serde_json::Map<_, _> = response
+        .answers
+        .iter()
+        .map(|(name, answer)| {
+            let additions: serde_json::Map<_, _> = ["think", "meta"]
+                .into_iter()
+                .filter_map(|key| answer.extra.get(key).map(|value| (key.to_owned(), value.clone())))
+                .collect();
+            (name.clone(), Value::Object(additions))
+        })
+        .collect();
+    json!({"model":response.model,"usage":usage,"answers":answers})
+}
+fn model_projection(model: &ModelMetadata) -> Value {
+    let mut value = json!({"name":model.name,"prompt_format":model.prompt_format,"orders":model.orders,"temperature_per_prim":model.temperature_per_prim,"media":model.media.as_ref().map(|ks|ks.iter().map(|k|match k {MediaKind::Image=>"image",MediaKind::Audio=>"audio"}).collect::<Vec<_>>())});
+    for (key, field) in [
+        ("layout", model.layout.as_ref().map(|v| json!(v))),
+        ("calibration_warning", model.calibration_warning.as_ref().map(|v| json!(v))),
+        ("think", model.think.clone()),
+        ("early_exit", model.early_exit.as_ref().map(|v| json!(v))),
+        ("early_exit_default", model.early_exit_default.as_ref().map(|v| json!(v))),
+    ] {
+        if let Some(field) = field {
+            value[key] = field;
+        }
+    }
+    value
 }
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -183,10 +219,7 @@ async fn main() -> Result<()> {
     })?;
     let model = env::var("BASAL_MODEL")?;
     let discovery = client.models().await?;
-    println!(
-        "{}",
-        json!({"sdk":"rust","models":discovery.models.iter().map(|m|json!({"name":m.name,"prompt_format":m.prompt_format,"orders":m.orders,"temperature_per_prim":m.temperature_per_prim,"media":m.media.as_ref().map(|ks|ks.iter().map(|k|match k {MediaKind::Image=>"image",MediaKind::Audio=>"audio"}).collect::<Vec<_>>())})).collect::<Vec<_>>()})
-    );
+    println!("{}", json!({"sdk":"rust","models":discovery.models.iter().map(model_projection).collect::<Vec<_>>()}));
     let diagnostic = Questions::new().with("n", &noul("Is this a diagnostic?")?)?;
     match client
         .decide_with_options(
@@ -244,6 +277,28 @@ async fn main() -> Result<()> {
         }
         let options = DecisionOptions {
             model: Some(&model),
+            facts: match case.get("facts") {
+                None => None,
+                Some(Value::String(v)) if v == "off" => Some(FactsMode::Off),
+                Some(Value::String(v)) if v == "auto" => Some(FactsMode::Auto),
+                _ => return Err("invalid diagnostic facts".into()),
+            },
+            think: match case.get("think") {
+                None => None,
+                Some(Value::String(v)) if v == "off" => Some(ThinkMode::Off),
+                Some(Value::String(v)) if v == "auto" => Some(ThinkMode::Auto),
+                Some(Value::String(v)) if v == "force" => Some(ThinkMode::Force),
+                _ => return Err("invalid diagnostic think".into()),
+            },
+            think_text: case
+                .get("think_text")
+                .map(|v| v.as_bool().ok_or("invalid diagnostic think_text"))
+                .transpose()?,
+            early_exit: match case.get("early_exit") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(v)) => Some(v),
+                _ => return Err("invalid diagnostic early_exit".into()),
+            },
             lang: match case["lang"].as_str() {
                 Some("pl") => Some(Language::Pl),
                 Some("en") => Some(Language::En),
@@ -255,7 +310,6 @@ async fn main() -> Result<()> {
                 _ => None,
             },
             media: case.get("media").map(|_| media.as_slice()),
-            ..Default::default()
         };
         let response = client.decide_with_options(case["state"].clone(), &definitions(&case)?, options).await?;
         let answers: serde_json::Map<_, _> =

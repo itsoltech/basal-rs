@@ -195,6 +195,13 @@ public sealed partial class BasalClient : IDisposable
         var request = new JsonObject { ["state"] = state.DeepClone(), ["questions"] = wireQuestions };
         if (options?.Model is string name) request["model"] = name;
         if (options?.Facts is FactsMode mode) request["facts"] = mode == FactsMode.Auto ? "auto" : "off";
+        if (options?.Think is string think)
+        {
+            if (think is not ("off" or "auto" or "force")) throw new ArgumentException("Invalid think");
+            request["think"] = think;
+        }
+        if (options?.ThinkText is bool thinkText) request["think_text"] = thinkText;
+        if (options?.EarlyExit is string earlyExit) request["early_exit"] = earlyExit;
         if(options?.Lang is string lang){if(lang is not ("pl" or "en"))throw new ArgumentException("Invalid lang");request["lang"]=lang;}
         if(options?.Detail is string detail){if(detail is not ("default" or "high"))throw new ArgumentException("Invalid detail");request["detail"]=detail;}
         if(options?.Media is { } media){

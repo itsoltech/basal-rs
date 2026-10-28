@@ -102,7 +102,8 @@ pub struct DecisionRequest {
     /// Image detail budget.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<MediaDetail>,
-    /// Optional native fields such as `facts: "auto"`. Do not repeat the fields above.
+    /// Optional native fields such as `facts`, `think`, `think_text` and `early_exit`.
+    /// Explicit `early_exit: null` is supported here. Do not repeat the fields above.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -221,7 +222,7 @@ pub struct Answer {
     pub data: Option<indexmap::IndexMap<String, Value>>,
     /// Extraction field provenance and probabilities.
     pub fields: Option<indexmap::IndexMap<String, ExtractField>>,
-    /// Future native fields.
+    /// Future native fields, including raw `think` and `meta` objects and all their nested keys.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -253,11 +254,11 @@ pub struct EvidenceSpan {
 pub struct Usage {
     /// Tokens in the option-order prompts.
     pub input_tokens: u64,
-    /// Zero: the model does not generate text.
+    /// Generated notes/stop/EOS tokens may contribute, including a skipped second prompt.
     pub output_tokens: u64,
     /// Optional question count.
     pub questions: Option<u64>,
-    /// Optional branch count.
+    /// Optional branch count; not multiplied by option orders.
     pub branches: Option<u64>,
     /// Server-side latency, in milliseconds.
     pub latency_ms: Option<f64>,
@@ -267,6 +268,12 @@ pub struct Usage {
     pub second_order_branches: Option<u64>,
     /// Inline media accounting, when present.
     pub media: Option<MediaUsage>,
+    /// Server scheduling lane, when reported.
+    pub lane: Option<String>,
+    /// Raw truncation accounting: state/head/tail/dropped tokens and head_share, retaining nested keys.
+    pub truncated: Option<Value>,
+    /// Thinking question count, absent when the server does not report thinking.
+    pub think_questions: Option<u64>,
     /// Future usage fields.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -299,6 +306,16 @@ pub struct ModelMetadata {
     pub media: Option<Vec<MediaKind>>,
     /// Calibration temperature by primitive.
     pub temperature_per_prim: Option<indexmap::IndexMap<String, f64>>,
+    /// Effective prompt layout, when reported.
+    pub layout: Option<String>,
+    /// Calibration warning, when reported.
+    pub calibration_warning: Option<String>,
+    /// Raw thinking default, available modes, limits and independent calibration identifier.
+    pub think: Option<Value>,
+    /// Available policy strings; an empty inventory is meaningful.
+    pub early_exit: Option<Vec<String>>,
+    /// Backend default policy, when heads are enabled.
+    pub early_exit_default: Option<String>,
     /// Native metadata fields, retained without interpretation.
     #[serde(flatten)]
     pub extra: Map<String, Value>,

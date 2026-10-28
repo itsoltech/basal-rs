@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### 0.7.0 (local, unpublished)
+
+- Add Think/ThinkText/EarlyExit init properties to DecisionOptions and low-level requests.
+  Preserve the positional constructor and five-value Deconstruct; omit unset options.
+- Add optional Lane/Truncated/ThinkQuestions usage and Layout/CalibrationWarning/Think/
+  EarlyExit/EarlyExitDefault discovery. Raw nested JSON and answer Extra think/meta retain
+  unknown keys. Policies are open strings; required answer validation is unchanged.
+- Existing call forms remain; convenience result records use Raw.Answers[id].Extra for
+  additions. Rebuild against the changed assembly version; no general source/binary
+  compatibility or new runtime parity is claimed. No dependencies changed.
+
 ## 0.6.0 — 2026-10-21
 
 - **Breaking:** remove API-key configuration and bearer headers from client initialization.

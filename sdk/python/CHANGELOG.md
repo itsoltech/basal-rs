@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### 0.7.0 (local, unpublished)
+
+- Add think/think_text/early_exit to raw requests and every sync/async ergonomic overload.
+  Omitted options remain absent; raw JSON can express explicit null early_exit.
+- Add optional lane/truncated/think_questions usage and layout/calibration_warning/think/
+  early_exit_default discovery. Policies are open strings; nested JSON and raw answer
+  think/meta retain unknown keys. Required answer validation is unchanged.
+- Existing call forms remain. Discovery early_exit is now annotated as a string inventory,
+  which may require type-checking fixes for callers using non-string values. No general
+  source/binary compatibility or new runtime parity is claimed; convenience dataclasses
+  use response.raw for the additions. No dependencies changed.
+
 ## 0.6.0 — 2026-10-21
 
 - **Breaking:** remove API-key configuration and bearer headers from client initialization.

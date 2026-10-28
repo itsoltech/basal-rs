@@ -9,6 +9,27 @@ This package is versioned independently. Release tag: `sdk-rust-vX.Y.Z`.
 SDK 0.7.0 removes API-key configuration. Remove `api_key`/`apiKey` from client initialization.
 Batch/Files require server 0.1.13+; all callers use its shared storage namespace.
 
+Local 0.8.0 adds `DecisionOptions::think: Option<ThinkMode>` (`Off`/`Auto`/`Force`),
+`think_text: Option<bool>` and `early_exit: Option<&str>`. Omitted options stay absent.
+`DecisionRequest.extra` retains raw request access, including explicit `early_exit: null`;
+do not repeat named low-level fields in `extra`. Wire null for `think`/`think_text` is
+invalid. Missing/null early-exit inherits the server default; explicit `off` also requires heads.
+
+Usage adds optional `lane`, raw `truncated` (state/head/tail/dropped token counts,
+`head_share`) and `think_questions`. `branches` is not multiplied by orders;
+`output_tokens` may include generated notes/stop/EOS even on a skipped second prompt.
+Discovery adds optional `layout`, `calibration_warning`, raw `think` (default,
+available, limits, calibration provenance), open-string `early_exit` and `early_exit_default`.
+No defaults are synthesized. Read answer `think`/`meta` from
+`response.raw().answers[id].extra`; each checked answer view also retains `raw`.
+`think` is skipped-context or successful tokens/ms/calibration/no_think/text data;
+its calibration identifier is independent of answer `validated`/`unvalidated`/`text`.
+Nested unknown keys and required typed answer validation remain. New public fields
+in `Usage`, `ModelMetadata` and `DecisionOptions` can break exhaustive struct literals;
+existing constructors/call forms remain, but optional fields do not ensure source compatibility.
+Rust has no stable ABI across crate versions. This local change does not publish a
+package or establish runtime parity for the new fields.
+
 ## Batch and Files API (0.5+)
 
 ### Resource helpers (0.6+)
@@ -137,8 +158,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 For choice/score, set `question.criteria` to an ordered `serde_json::Value` object/array. Question and request
 `extra` maps accept native extension fields (`evidence`, `costs`, `facts` etc.). Do not duplicate explicit fields
 in `extra`. JSON object order is retained through serde_json's `preserve_order` and indexmap. The `float_roundtrip`
-feature preserves binary64 values when parsing wire probabilities, without extra dependencies or
-`arbitrary_precision` feature unification.
+feature preserves binary64 values when parsing wire probabilities. The SDK also enables
+`arbitrary_precision` to retain numeric representations in raw JSON.
 Add `serde_json` directly (`cargo add serde_json --features preserve_order`) to construct structured JSON
 with its `json!` macro.
 

@@ -57,7 +57,21 @@ def bits(value):
 
 def usage(raw):
     u = raw["usage"]
-    return {key: u.get(key) for key in ("input_tokens", "output_tokens", "questions", "branches", "longest_prompt_tokens", "second_order_branches", "media")}
+    return {**{key: u.get(key) for key in ("input_tokens", "output_tokens", "questions", "branches", "longest_prompt_tokens", "second_order_branches", "media")},
+            **{key: u[key] for key in ("lane", "truncated", "think_questions") if key in u}}
+
+
+def answer_additions(raw):
+    # Compare raw additions independently of the convenience answer projection. Preserve
+    # nested/unknown keys and presence, but compare only the presence of measured ms.
+    result = {}
+    for name, answer in raw.get("answers", {}).items():
+        additions = {key: answer[key] for key in ("think", "meta") if key in answer}
+        if "think" in additions and isinstance(additions["think"], dict) and "ms" in additions["think"]:
+            additions["think"] = {**additions["think"], "ms": "<timing>"}
+        if additions:
+            result[name] = additions
+    return result
 
 
 def audit(directory):
@@ -76,7 +90,8 @@ def audit(directory):
     check_seen = set()
     def model_projection(models):
         if isinstance(models, dict): models = models["models"]
-        return [{key: m.get(key) for key in ("name", "prompt_format", "orders", "media", "temperature_per_prim")} for m in models]
+        return [{**{key: m.get(key) for key in ("name", "prompt_format", "orders", "media", "temperature_per_prim")},
+                 **{key: m[key] for key in ("layout", "calibration_warning", "think", "early_exit", "early_exit_default") if key in m}} for m in models]
     for record in observations:
         if "check" in record:
             identity=(record["sdk"],record["check"])
@@ -104,6 +119,8 @@ def audit(directory):
             actual = {k: project(v) for k, v in record["answers"].items()}
             if bits(expected) != bits(actual): issues.append({"sdk": key, "case": record["case"], "reason": "decoded answer differs", "expected": expected, "actual": actual})
             if bits(usage(reference)) != bits(usage(record["raw"])): issues.append({"sdk": key, "case": record["case"], "reason": "usage differs"})
+            if bits(answer_additions(reference)) != bits(answer_additions(record["raw"])):
+                issues.append({"sdk": key, "case": record["case"], "reason": "raw think/meta or presence differs"})
             if reference["model"] != record["raw"]["model"]: issues.append({"sdk": key, "case": record["case"], "reason": "model differs"})
         except (KeyError, TypeError, ValueError) as error:
             issues.append({"sdk": key, "case": record["case"], "reason": "incomplete result", "error": type(error).__name__})

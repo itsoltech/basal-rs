@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Native Basal HTTP API for basal-rs SDKs",
-    "version": "0.3.0",
+    "version": "0.4.0",
     "description": "Maintained description of canonical native requests, based on the basal-rs handlers, parser and answer builder. Additional native fields are allowed. This file is not generated from TypeSafe System One. Format-2 Basal 2.0/Omni choice/score accepts 2–255 options; older model capability limits are enforced by the server. Tool routing, multi selection objectives and inline image/audio inputs are supported. Media require an enabled Omni CUDA model; no tool execution or URL fetching is performed. Criterion order is significant. Evidence offsets count Unicode characters. The contract description version is independent of SDK package and engine versions. Upstream 2.1 experimental classify, verify, compress and extract tasks are supported. Extract may execute two decision rounds on the same model replica. Task automation is nullable and uses only task-specific thresholds; media tasks do not claim text-task certification. Source offsets and character counts are Unicode code points.",
     "license": {
       "name": "Apache-2.0"
@@ -57,7 +57,7 @@
             }
           },
           "422": {
-            "description": "Malformed JSON, invalid native request, unknown model or inference failure.",
+            "description": "Malformed JSON, validation/usage error, unknown model or unsupported capability.",
             "content": {
               "application/json": {
                 "schema": {
@@ -85,12 +85,20 @@
             }
           },
           "500": {
-            "description": "Inference worker stopped.",
+            "description": "Internal execution error or stopped inference worker.",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Error"
                 }
+              }
+            }
+          },
+          "503": {
+            "description": "Recognized out-of-memory error, detected from the full cause text. Other Internal errors use 500.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" }
               }
             }
           },
@@ -339,6 +347,19 @@
               "auto"
             ]
           },
+          "think": {
+            "type": "string",
+            "enum": ["off", "auto", "force"],
+            "description": "Omitted: auto with an enabled thinking backend, off otherwise. Null is invalid. Active modes require a thinking backend and do not support tasks."
+          },
+          "think_text": {
+            "type": "boolean",
+            "description": "Include generated notes in answer.think.text. Omitted: false. Null is invalid."
+          },
+          "early_exit": {
+            "type": ["string", "null"],
+            "description": "Missing/null inherits the backend default. Any explicit string, including off, requires a head backend and an advertised policy. Native finite numeric inputs are also normalized by the server; SDK conveniences use string/null."
+          },
           "lang": {
             "type": "string",
             "enum": [
@@ -401,13 +422,15 @@
             "type": "integer"
           },
           "output_tokens": {
-            "type": "integer"
+            "type": "integer",
+            "description": "May count generated notes, stop and EOS tokens even if the second prompt is skipped. Does not alone imply meta.think.used."
           },
           "questions": {
             "type": "integer"
           },
           "branches": {
-            "type": "integer"
+            "type": "integer",
+            "description": "Logical initial branches, not multiplied by option orders."
           },
           "latency_ms": {
             "type": "number"
@@ -419,6 +442,13 @@
           "second_order_branches": {
             "type": "integer",
             "minimum": 0
+          },
+          "lane": { "type": "string" },
+          "truncated": { "$ref": "#/components/schemas/Truncation" },
+          "think_questions": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Successful thinking second readouts; present (possibly zero) on enabled thinking servers."
           },
           "media": {
             "$ref": "#/components/schemas/MediaUsage"
@@ -447,8 +477,13 @@
           },
           "early_exit": {
             "type": "array",
-            "items": {}
+            "items": { "type": "string" },
+            "description": "Open policy inventory, empty on a plain backend."
           },
+          "early_exit_default": { "type": "string" },
+          "layout": { "type": "string" },
+          "calibration_warning": { "type": "string" },
+          "think": { "$ref": "#/components/schemas/ThinkMetadata" },
           "prompt_format": {
             "type": "integer",
             "enum": [
@@ -807,6 +842,11 @@
         "additionalProperties": true
       },
       "Answer": {
+        "type": "object",
+        "properties": {
+          "think": { "$ref": "#/components/schemas/AnswerThink" },
+          "meta": { "$ref": "#/components/schemas/AnswerMeta" }
+        },
         "oneOf": [
           {
             "$ref": "#/components/schemas/ChoiceAnswer"
@@ -842,6 +882,90 @@
         "discriminator": {
           "propertyName": "type"
         }
+      },
+      "Truncation": {
+        "type": "object",
+        "properties": {
+          "state_tokens": { "type": "integer", "minimum": 0 },
+          "head_tokens": { "type": "integer", "minimum": 0 },
+          "tail_tokens": { "type": "integer", "minimum": 0 },
+          "dropped_tokens": { "type": "integer", "minimum": 0 },
+          "head_share": { "type": "number", "minimum": 0, "maximum": 1 }
+        },
+        "required": ["state_tokens", "head_tokens", "tail_tokens", "dropped_tokens", "head_share"],
+        "additionalProperties": true
+      },
+      "ThinkMetadata": {
+        "type": "object",
+        "properties": {
+          "default": { "type": "string" },
+          "available": { "type": "array", "items": { "type": "string" } },
+          "limits": {
+            "type": "object",
+            "properties": {
+              "tokens": { "type": "integer" },
+              "max_len": { "type": "integer" }
+            },
+            "additionalProperties": true
+          },
+          "calibration": {
+            "type": "object",
+            "properties": {
+              "content_sha256": { "type": ["string", "null"] },
+              "status": { "type": "string" }
+            },
+            "required": ["content_sha256", "status"],
+            "additionalProperties": true,
+            "description": "Independent thinking calibration provenance; status is not the answer calibration enum."
+          }
+        },
+        "required": ["default", "available", "limits", "calibration"],
+        "additionalProperties": true
+      },
+      "AnswerThink": {
+        "type": "object",
+        "description": "Present only for an actual attempt. Successful fields use an independent thinking calibration identifier; ms is nondeterministic.",
+        "oneOf": [
+          {
+            "properties": { "skipped": { "const": "context" } },
+            "required": ["skipped"]
+          },
+          {
+            "properties": {
+              "tokens": { "type": "integer", "minimum": 0 },
+              "ms": { "type": "number" },
+              "calibration": { "type": "string" },
+              "no_think": {
+                "type": "object",
+                "properties": {
+                  "probabilities": { "type": "object", "additionalProperties": { "type": "number" } },
+                  "confidence": { "type": "number" }
+                },
+                "required": ["probabilities", "confidence"],
+                "additionalProperties": true
+              },
+              "text": { "type": "string" }
+            },
+            "required": ["tokens", "ms", "calibration", "no_think"]
+          }
+        ],
+        "additionalProperties": true
+      },
+      "AnswerMeta": {
+        "type": "object",
+        "properties": {
+          "think": {
+            "type": "object",
+            "properties": {
+              "used": { "type": "boolean" },
+              "tokens": { "type": "integer", "minimum": 0 }
+            },
+            "required": ["used", "tokens"],
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": true,
+        "description": "Enabled thinking emits meta.think even when off, ineligible, skipped or a task; otherwise do not synthesize it."
       },
       "DecisionResponse": {
         "type": "object",

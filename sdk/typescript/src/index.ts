@@ -65,12 +65,17 @@ export interface DecisionRequest {
   questions: Record<string, Question>;
   model?: string;
   facts?: "off" | "auto";
+  think?: "off" | "auto" | "force";
+  think_text?: boolean;
+  early_exit?: string | null;
   lang?: "pl" | "en";
   media?: readonly MediaInput[];
   detail?: "default" | "high";
 }
 export interface EvidenceSpan { text: string; start: number; end: number; probability: number }
-interface BaseAnswer<K extends string = string> { probabilities: Record<K, number>; evidence?: EvidenceSpan[]; calibration?: Calibration }
+/** Optional raw additions; nested keys are retained. Think calibration is independent of Calibration. */
+export interface AnswerAdditions { think?: Record<string, JsonValue>; meta?: Record<string, JsonValue> }
+interface BaseAnswer<K extends string = string> extends AnswerAdditions { probabilities: Record<K, number>; evidence?: EvidenceSpan[]; calibration?: Calibration }
 export interface ChoiceAnswer<K extends string = string> extends BaseAnswer<K> { type: "choice"; choice: K; confidence: number }
 export interface NoulAnswer extends BaseAnswer<"true" | "false"> { type: "noul"; noul: number; confidence: number }
 export interface ScoreAnswer extends BaseAnswer { type: "score"; score: number; legend: Record<string, string>; confidence: number }
@@ -99,9 +104,9 @@ export interface ActAnswer<K extends string = string, A extends string = string>
   deferred?: boolean;
 }
 export type Answer = ChoiceAnswer | NoulAnswer | ScoreAnswer | MultiAnswer | ActAnswer | ToolAnswer | TaskAnswer;
-export interface Usage { input_tokens: number; output_tokens: number; questions?: number; branches?: number; latency_ms?: number; longest_prompt_tokens?: number; second_order_branches?: number; media?: MediaUsage }
+export interface Usage { input_tokens: number; output_tokens: number; questions?: number; branches?: number; latency_ms?: number; longest_prompt_tokens?: number; second_order_branches?: number; media?: MediaUsage; lane?: string; truncated?: Record<string, JsonValue>; think_questions?: number }
 export interface DecisionResponse { model: string; answers: Record<string, Answer>; usage: Usage }
-export interface ModelMetadata { name: string; description?: string; release_date?: string; mode?: string; early_exit?: JsonValue[]; prompt_format?: number; orders?: JsonValue; temperature_per_prim?: Record<string,number>; media?: ("image"|"audio")[] }
+export interface ModelMetadata { name: string; description?: string; release_date?: string; mode?: string; early_exit?: string[]; early_exit_default?: string; layout?: string; calibration_warning?: string; think?: Record<string, JsonValue>; prompt_format?: number; orders?: JsonValue; temperature_per_prim?: Record<string,number>; media?: ("image"|"audio")[] }
 export interface ModelsResponse { models: ModelMetadata[] }
 
 /** Web Fetch input accepted by browsers and server runtimes. */

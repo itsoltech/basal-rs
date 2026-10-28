@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### 0.7.0 (local, unpublished)
+
+- Add think/think_text/early_exit to DecisionRequest, DecisionOptions and buildRequest,
+  retaining strict/exactOptionalPropertyTypes and omission of unset options.
+- Add optional lane/truncated/think_questions usage, layout/calibration_warning/think/
+  early_exit_default discovery and raw think/meta additions on primitive/task answers.
+  Nested data and required answer validation remain; policies are open strings.
+- Existing call forms and named inference remain. Discovery early_exit now uses string[],
+  so non-string assignments require source changes. No general cross-version type/binary
+  compatibility or new runtime parity is claimed. No dependencies changed.
+
 ## 0.6.0 — 2026-10-21
 
 - **Breaking:** remove API-key configuration and bearer headers from client initialization.

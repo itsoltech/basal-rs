@@ -9,6 +9,25 @@ This package is versioned independently. Release tag: `sdk-python-vX.Y.Z`.
 SDK 0.6.0 removes API-key configuration. Remove `api_key`/`apiKey` from client initialization.
 Batch/Files require server 0.1.13+; all callers use its shared storage namespace.
 
+Local 0.7.0 adds `think="off"|"auto"|"force"`, `think_text=bool` and
+`early_exit=str` keyword options to every sync/async dictionary/schema call.
+Omitted/None options stay absent; raw dictionaries can send explicit `early_exit: None`.
+Wire null for `think`/`think_text` is invalid. Missing/null early-exit inherits the
+server default; any explicit policy, even `off`, requires a head backend.
+
+Usage adds optional `lane`, raw `truncated` (state/head/tail/dropped token counts,
+`head_share`) and `think_questions`. `branches` is not multiplied by orders;
+`output_tokens` may include generated notes/stop/EOS even on a skipped second prompt.
+Discovery adds optional `layout`, `calibration_warning`, raw `think` (default,
+available, limits, calibration provenance), open-string `early_exit` and `early_exit_default`.
+No defaults are synthesized. Read raw answer additions from
+`response.raw["answers"][id]["think"]` / `["meta"]`; convenience dataclasses omit them.
+`think` is skipped-context or successful tokens/ms/calibration/no_think/text data;
+its calibration identifier is independent of answer `validated`/`unvalidated`/`text`.
+Nested unknown keys remain available; required typed answer validation is unchanged.
+Existing call forms remain; discovery policy annotations now describe string inventories.
+This local change does not publish a package or establish runtime parity for the new fields.
+
 ```sh
 pip install basal-client
 ```

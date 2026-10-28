@@ -30,7 +30,13 @@ foreach(var line in File.ReadLines(Path.Combine(root,"inputs/cases.jsonl"))) {
         if(encoding=="data-url")data=$"data:{TextValue(m,"mime")};base64,{data}";
         return type=="image"?Media.Image(data):Media.Audio(data);
     }).ToArray();
-    var options=new DecisionOptions(Model:Environment.GetEnvironmentVariable("BASAL_MODEL"),Lang:c["lang"]?.GetValue<string>(),Media:media,Detail:c["detail"]?.GetValue<string>());
+    var facts=c["facts"]?.GetValue<string>() switch {
+        null=> (FactsMode?)null, "off"=>FactsMode.Off, "auto"=>FactsMode.Auto,
+        _=>throw new ArgumentException("Invalid diagnostic facts")
+    };
+    var options=new DecisionOptions(Model:Environment.GetEnvironmentVariable("BASAL_MODEL"),Facts:facts,Lang:c["lang"]?.GetValue<string>(),Media:media,Detail:c["detail"]?.GetValue<string>()) {
+        Think=c["think"]?.GetValue<string>(),ThinkText=c["think_text"]?.GetValue<bool>(),EarlyExit=c["early_exit"]?.GetValue<string>()
+    };
     var response=await client.DecideAsync(c["state"]!.DeepClone(),definitions,options);
     Emit(new {sdk="csharp-map",@case=TextValue(c,"id"),answers=response.Answers.ToDictionary(p=>p.Key,p=>Project(p.Value)),raw=response.Raw});
     if(TextValue(c,"id")=="named-api") {

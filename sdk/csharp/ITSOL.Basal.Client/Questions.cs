@@ -20,7 +20,15 @@ public enum FactsMode
     Auto
 }
 /// <summary>Typed decision options; cancellation is a method argument.</summary>
-public sealed record DecisionOptions(string? Model = null, FactsMode? Facts = null, string? Lang = null, IReadOnlyList<MediaInput>? Media = null, string? Detail = null);
+public sealed record DecisionOptions(string? Model = null, FactsMode? Facts = null, string? Lang = null, IReadOnlyList<MediaInput>? Media = null, string? Detail = null)
+{
+    /// <summary>off, auto or force; omitted keeps the server's capability-dependent default.</summary>
+    public string? Think { get; init; }
+    /// <summary>Include generated notes when true; omitted keeps the server default.</summary>
+    public bool? ThinkText { get; init; }
+    /// <summary>Open policy string. Null inherits the backend default; explicit off requires heads.</summary>
+    public string? EarlyExit { get; init; }
+}
 /// <summary>Choice display/evidence options.</summary>
 public sealed record ChoiceOptions(bool Evidence = false, OptionKeys OptionKeys = OptionKeys.Show);
 /// <summary>Evidence options for noul/score.</summary>

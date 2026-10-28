@@ -9,6 +9,26 @@ This package is versioned independently. Release tag: `sdk-typescript-vX.Y.Z`.
 SDK 0.6.0 removes API-key configuration. Remove `api_key`/`apiKey` from client initialization.
 Batch/Files require server 0.1.13+; all callers use its shared storage namespace.
 
+Local 0.7.0 adds `think: "off" | "auto" | "force"`, `think_text: boolean` and
+`early_exit: string | null` to `DecisionRequest`, `DecisionOptions` and `buildRequest`.
+Unset options stay absent; ergonomic null early-exit is omitted, while raw requests
+can send explicit null. Wire null for `think`/`think_text` is invalid. Missing/null
+early-exit inherits the server default; explicit `off` also requires heads.
+
+Usage adds optional `lane`, raw `truncated` (state/head/tail/dropped token counts,
+`head_share`) and `think_questions`. `branches` is not multiplied by orders;
+`output_tokens` may include generated notes/stop/EOS even on a skipped second prompt.
+Discovery adds optional `layout`, `calibration_warning`, raw `think` (default,
+available, limits, calibration provenance), open-string `early_exit` and `early_exit_default`.
+No defaults are synthesized. All primitive/task answers expose optional raw `think`
+and `meta`; `response.raw.answers[id]` retains nested unknown keys as received.
+`think` is skipped-context or successful tokens/ms/calibration/no_think/text data;
+its calibration identifier is independent of answer `validated`/`unvalidated`/`text`.
+Required typed answer validation and named inference remain. Existing call forms remain;
+discovery policy annotations now describe string inventories. Build under strict and
+exactOptionalPropertyTypes. This local change does not publish a package or establish
+runtime parity for the new fields.
+
 ```sh
 npm i @itsoltech/basal-client
 ```

@@ -124,6 +124,17 @@ pub enum FactsMode {
     /// Let the model preprocess facts.
     Auto,
 }
+/// Native thinking request mode. Response policy strings remain open.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThinkMode {
+    /// Disable thinking.
+    Off,
+    /// Let the enabled server choose eligible questions.
+    Auto,
+    /// Request thinking for eligible questions.
+    Force,
+}
 /// Decision routing/preprocessing options.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DecisionOptions<'a> {
@@ -131,6 +142,12 @@ pub struct DecisionOptions<'a> {
     pub model: Option<&'a str>,
     /// Native facts mode.
     pub facts: Option<FactsMode>,
+    /// Native thinking mode; omitted keeps the capability-dependent server default.
+    pub think: Option<ThinkMode>,
+    /// Include generated notes when true; omitted keeps the server default.
+    pub think_text: Option<bool>,
+    /// Open policy string; omitted inherits the backend default. Explicit off requires heads.
+    pub early_exit: Option<&'a str>,
     /// Explicit prompt language.
     pub lang: Option<Language>,
     /// Inline media in request order.
@@ -663,6 +680,15 @@ impl Questions {
             );
         }
         request.lang = options.lang;
+        if let Some(think) = options.think {
+            request.extra.insert("think".into(), serde_json::to_value(think).map_err(Error::Encode)?);
+        }
+        if let Some(text) = options.think_text {
+            request.extra.insert("think_text".into(), Value::Bool(text));
+        }
+        if let Some(policy) = options.early_exit {
+            request.extra.insert("early_exit".into(), Value::String(policy.into()));
+        }
         request.detail = options.detail;
         if let Some(media) = options.media {
             if !(1..=8).contains(&media.len()) {

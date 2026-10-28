@@ -32,7 +32,7 @@ def definitions(case):
 
 
 def options(case, root):
-    result = {key: case[key] for key in ("lang", "detail") if key in case}
+    result = {key: case[key] for key in ("lang", "detail", "facts", "think", "think_text", "early_exit") if key in case}
     result["model"] = os.environ["BASAL_MODEL"]
     if "media" in case:
         result["media"] = []

@@ -40,7 +40,10 @@ for(const c of cases) {
       default:throw new Error('unsupported diagnostic case');
     }
   }
-  const options:DecisionOptions={model:process.env.BASAL_MODEL,lang:c.lang,detail:c.detail};
+  const options:DecisionOptions={
+    ...(process.env.BASAL_MODEL===undefined?{}:{model:process.env.BASAL_MODEL}),
+    ...Object.fromEntries(['lang','detail','facts','think','think_text','early_exit'].filter(k=>Object.hasOwn(c,k)).map(k=>[k,c[k]])),
+  };
   if(c.media)options.media=c.media.map((m:any)=>{
     const bytes=readFileSync(join(root,m.file));
     const data=m.encoding==='bytes'?bytes:m.encoding==='data-url'?`data:${m.mime};base64,${bytes.toString('base64')}`:bytes.toString('base64');

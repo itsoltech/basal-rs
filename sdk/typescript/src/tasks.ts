@@ -1,9 +1,9 @@
 import {QuestionSpec} from './questions.js';
-import type {DecisionResponse, JsonValue, Question, MultiObjective} from './index.js';
+import type {AnswerAdditions, DecisionResponse, JsonValue, Question, MultiObjective} from './index.js';
 
 /** Task automation is unknown (null) without a threshold certified for that task/error target. */
 export type Automation = Record<string, boolean | null>;
-export interface ClassifyAnswer<K extends string = string> {
+export interface ClassifyAnswer<K extends string = string> extends AnswerAdditions {
   type: 'classify'; experimental: true; scores: Record<K,number>;
   label?: K; top_label?: K; confidence?: number; automated?: Automation;
   labels?: K[]; set_confidence?: number;
@@ -12,10 +12,10 @@ export interface ClaimResult {
   verdict: 'supported'|'contradicted'|'not_stated'|'not_supported';
   probabilities: Record<string,number>; confidence: number; automated: Automation;
 }
-export interface VerifyAnswer {type:'verify';experimental:true;claims:Record<string,ClaimResult>;all_supported:boolean;not_supported:string[]}
+export interface VerifyAnswer extends AnswerAdditions {type:'verify';experimental:true;claims:Record<string,ClaimResult>;all_supported:boolean;not_supported:string[]}
 /** Inclusive start/exclusive end count Unicode code points, not JavaScript UTF-16 units. */
 export interface CompressionUnit {start:number;end:number;probability:number}
-export interface CompressAnswer {
+export interface CompressAnswer extends AnswerAdditions {
   type:'compress';experimental:true;compressed:string;kept:number[];units:CompressionUnit[];
   unit:'sentence'|'line'|'paragraph';original_chars:number;compressed_chars:number;ratio:number;
 }
@@ -24,7 +24,7 @@ export interface ExtractField {
   probabilities?:Record<string,number>;present_probability?:number;text?:string;start?:number;end?:number;
   line_probability?:number;span_probability?:number;error?:string;
 }
-export interface ExtractAnswer {type:'extract';experimental:true;data:Record<string,JsonValue>;fields:Record<string,ExtractField>}
+export interface ExtractAnswer extends AnswerAdditions {type:'extract';experimental:true;data:Record<string,JsonValue>;fields:Record<string,ExtractField>}
 export type TaskAnswer = ClassifyAnswer | VerifyAnswer | CompressAnswer | ExtractAnswer;
 export interface ClassifyOptions {
   multi_label?:boolean;none?:boolean;max_error?:number|readonly number[];option_keys?:'show'|'hide';

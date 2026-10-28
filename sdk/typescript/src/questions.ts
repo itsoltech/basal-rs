@@ -24,7 +24,7 @@ export interface ActOptions<K extends string = string, A extends string = string
   defer_action?: A;
   max_error?: number;
 }
-export interface DecisionOptions extends Pick<DecisionRequest,'model'|'facts'|'lang'|'media'|'detail'> { signal?: AbortSignal }
+export interface DecisionOptions extends Pick<DecisionRequest,'model'|'facts'|'think'|'think_text'|'early_exit'|'lang'|'media'|'detail'> { signal?: AbortSignal }
 
 function text(value: string, name: string): string {
   if (typeof value !== 'string' || !value.trim()) throw new TypeError(`${name} must be a nonempty string`);
@@ -214,8 +214,11 @@ export function buildRequest(state: JsonValue, questions: QuestionSet, options: 
   const entries=Object.entries(questions).map(([id,q])=>{text(id,'question ID');if(!(q instanceof QuestionSpec))throw new TypeError('expected typed question');return [id,q.toJSON()] as const;});
   if(options.model!==undefined)text(options.model,'model');
   if(options.facts!==undefined&&!['off','auto'].includes(options.facts))throw new TypeError('invalid facts');
+  if(options.think!==undefined&&!['off','auto','force'].includes(options.think))throw new TypeError('invalid think');
+  if(options.think_text!==undefined&&typeof options.think_text!=='boolean')throw new TypeError('invalid think_text');
+  if(options.early_exit!==undefined&&options.early_exit!==null&&typeof options.early_exit!=='string')throw new TypeError('invalid early_exit');
   if(options.lang!==undefined&&!['pl','en'].includes(options.lang))throw new TypeError('invalid lang');
   if(options.detail!==undefined&&!['default','high'].includes(options.detail))throw new TypeError('invalid detail');
   if(options.media!==undefined&&(!Array.isArray(options.media)||options.media.length<1||options.media.length>8||options.media.some(m=>!m||!['image','audio'].includes(m.type)||typeof m.data!=='string'||!m.data.trim())))throw new TypeError('invalid media');
-  return {state,questions:Object.fromEntries(entries),...(options.lang===undefined?{}:{lang:options.lang}),...(options.detail===undefined?{}:{detail:options.detail}),...(options.media===undefined?{}:{media:structuredClone(options.media)}),...(options.model===undefined?{}:{model:options.model}),...(options.facts===undefined?{}:{facts:options.facts})};
+  return {state,questions:Object.fromEntries(entries),...(options.lang===undefined?{}:{lang:options.lang}),...(options.detail===undefined?{}:{detail:options.detail}),...(options.media===undefined?{}:{media:structuredClone(options.media)}),...(options.model===undefined?{}:{model:options.model}),...(options.facts===undefined?{}:{facts:options.facts}),...(options.think===undefined?{}:{think:options.think}),...(options.think_text===undefined?{}:{think_text:options.think_text}),...(options.early_exit==null?{}:{early_exit:options.early_exit})};
 }

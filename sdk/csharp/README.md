@@ -8,6 +8,27 @@ This package is versioned independently. Release tag: `sdk-csharp-vX.Y.Z`.
 SDK 0.6.0 removes API-key configuration. Remove `api_key`/`apiKey` from client initialization.
 Batch/Files require server 0.1.13+; all callers use its shared storage namespace.
 
+Local 0.7.0 adds init properties `DecisionOptions.Think` (`off`/`auto`/`force`),
+`ThinkText` (nullable bool) and `EarlyExit` (open string), also on `DecisionRequest`.
+The five-parameter positional constructor and `Deconstruct` are unchanged; use
+`new DecisionOptions(Model: model) { Think = "off", ThinkText = false }`.
+Null options stay absent. Use a raw `JsonObject` for explicit wire `early_exit: null`.
+Wire null for `think`/`think_text` is invalid. Missing/null early-exit inherits the
+server default; explicit `off` also requires heads.
+
+Usage adds optional `Lane`, raw `Truncated` (state/head/tail/dropped token counts,
+`head_share`) and `ThinkQuestions`. `branches` is not multiplied by orders;
+`output_tokens` may include generated notes/stop/EOS even on a skipped second prompt.
+Discovery adds optional `Layout`, `CalibrationWarning`, raw `Think` (default,
+available, limits, calibration provenance), open-string `EarlyExit` and `EarlyExitDefault`.
+No defaults are synthesized. Read answer `think`/`meta` from
+`response.Raw.Answers[id].Extra`; convenience result records omit them.
+`think` is skipped-context or successful tokens/ms/calibration/no_think/text data;
+its calibration identifier is independent of answer `validated`/`unvalidated`/`text`.
+Nested unknown keys and required typed answer validation remain. Rebuild consumers
+against the new package; no general cross-version binary compatibility is promised.
+This local change does not publish a package or establish runtime parity for the new fields.
+
 ```sh
 dotnet add package ITSOL.Basal.Client
 ```

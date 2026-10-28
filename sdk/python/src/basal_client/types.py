@@ -66,6 +66,9 @@ class DecisionRequest(TypedDict):
     questions: dict[str, Question]
     model: NotRequired[str]
     facts: NotRequired[Literal["off", "auto"]]
+    think: NotRequired[Literal["off", "auto", "force"]]
+    think_text: NotRequired[bool]
+    early_exit: NotRequired[str | None]
     lang: NotRequired[Literal["pl", "en"]]
     media: NotRequired[list[MediaInput]]
     detail: NotRequired[Literal["default", "high"]]
@@ -123,6 +126,9 @@ class Answer(TypedDict):
     ratio: NotRequired[float]
     data: NotRequired[dict[str, JsonValue]]
     fields: NotRequired[dict[str, JsonValue]]
+    # Raw objects retain unknown nested fields; think calibration is a separate identifier.
+    think: NotRequired[dict[str, JsonValue]]
+    meta: NotRequired[dict[str, JsonValue]]
 
 
 class Usage(TypedDict):
@@ -134,6 +140,9 @@ class Usage(TypedDict):
     longest_prompt_tokens: NotRequired[int]
     second_order_branches: NotRequired[int]
     media: NotRequired[MediaUsage]
+    lane: NotRequired[str]
+    truncated: NotRequired[dict[str, JsonValue]]
+    think_questions: NotRequired[int]
 
 
 class DecisionResponse(TypedDict):
@@ -147,7 +156,11 @@ class ModelMetadata(TypedDict):
     description: NotRequired[str]
     release_date: NotRequired[str]
     mode: NotRequired[str]
-    early_exit: NotRequired[list[JsonValue]]
+    early_exit: NotRequired[list[str]]
+    early_exit_default: NotRequired[str]
+    layout: NotRequired[str]
+    calibration_warning: NotRequired[str]
+    think: NotRequired[dict[str, JsonValue]]
     prompt_format: NotRequired[int]
     orders: NotRequired[JsonValue]
     temperature_per_prim: NotRequired[dict[str, float]]

@@ -677,7 +677,7 @@ Jeden model bez pliku konfiguracji:
 | Endpoint | Opis |
 |---|---|
 | `POST /v1/systemone` | TypeSafe System One: ścisła walidacja, odpowiedzi i confidence TypeSafe, rozszerzenia basal-1.5 |
-| `POST /v1/basal` | konwencje `Server.decide` upstream v1.5.0: walidacja `to_items`, `confidence = max(p)`, błędy jako 422 `{"error"}` |
+| `POST /v1/basal` | natywny kontrakt upstream v2.4.1: `confidence = max(p)`, validation/usage/unsupported 422, Internal 500, rozpoznany OOM 503, admission 529 + `Retry-After`; body błędów `{"error"}`. [Cztery SDK](docs/SDK.md) zachowują natywną trasę i raw dodatki thinking/early-exit. |
 | `GET /v1/models` | lista modeli TypeSafe z polami upstream `mode` i `early_exit` |
 | `GET /health` | gotowość: 200 `{"status":"ok"}`; 503 `{"status":"device_lost"}` z `lost_models`, gdy backend modelu z jedną instancją (także z podziałem warstw) zgłosił trwałą utratę: Intel Vulkan po utracie urządzenia, CUDA gdy nie potwierdził końca własnej pracy GPU (dwie nieudane synchronizacje albo wiązania kontekstu); to nie test sprzętu. Grupy replik: 200 z `degraded_models`, gdy część replik jest niedostępna; 503 `{"status":"engine_stopped"}` z `unavailable_models`, gdy żadna. Wpis: `{"model", "replicas", "available", "unavailable": [{"replica", "device", "reason": "worker_closed" \| "device_lost"}]}` |
 | `GET /metrics` | opcjonalne metryki Prometheus: żądania, opóźnienia, tokeny, kolejka i partie, z podziałem na modele i ich repliki |
