@@ -6,11 +6,13 @@
 //! search of cuBLASLt configurations (`search`: algorithm, tile, stages, split-K with f32 reduction, CTA swizzle;
 //! `basal gemm-search`), or a timing of up to `CANDIDATES` heuristic algorithms on the first call of the class. A
 //! later M of the class reuses the algorithm after `cublasLtMatmulAlgoCheck` accepts it (otherwise the heuristic's first
-//! choice is used). Every configuration accumulates in f32 (split-K partial sums are reduced in f32, never in the
-//! output type); results may differ from cuBLAS in the last bits (summation order).
+//! choice is used). Every configuration accumulates in f32. The search's own split-K configurations reduce partial
+//! sums in f32; a heuristic configuration (timed on first call, or one of the heuristic's candidates that the search
+//! also times) keeps the heuristic's reduction scheme, which may store partial sums in the output type. Results may
+//! differ from cuBLAS in the last bits (summation order).
 //!
-//! [`matmul_nt_bias`] is a separate BF16-only runtime-timed path: bias is added in the epilogue before the output
-//! rounding, without a separate bias allocation or pass. Its descriptors and algorithm classes are isolated from
+//! [`matmul_nt_bias`] is a separate BF16-only runtime-timed path: bias is added in the epilogue before the final BF16
+//! store, without a separate bias allocation or pass. Its descriptors and algorithm classes are isolated from
 //! ordinary matmuls and tables. Use a dedicated `Lt` for bias projections: [`Tuned`] retains its untagged diagnostic
 //! format, so bias timings in [`Lt::tuned`] are not ordinary table entries and must not be exported/imported as such.
 
@@ -1281,7 +1283,9 @@ impl CustomOp3 for LtMatmulBias<'_> {
 }
 
 /// `x[M,K] @ w[N,K]^T + b[N]` with BF16 operands/output and F32 accumulation/scale (alpha=1, beta=0).
-/// Bias is added by the cuBLASLt epilogue before the sole BF16 output rounding; no separate bias pass or fallback.
+/// The cuBLASLt epilogue adds the bias before the final BF16 store; no separate bias pass or fallback. The split-K
+/// reduction scheme follows the timed heuristic and may round partial sums to BF16, so this promises neither a single
+/// rounding nor upstream parity.
 /// Requires nonempty contiguous operands on this `Lt`'s CUDA context. Invariant/table-only modes are errors.
 /// Allocates the output and caches host descriptors/algorithm timings, using the existing 32 MiB workspace.
 /// First-use timing may synchronize the stream. As with [`matmul_nt`], the model gate must serialize shared lanes
