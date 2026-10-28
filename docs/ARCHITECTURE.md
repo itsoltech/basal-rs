@@ -47,7 +47,13 @@ padded/FP32 buforów daje jawne UNBOUNDED_FEATURE w bounded plannerze.
 Opcjonalny `thinking.rs` przechowuje drugi backend tego samego typu z pełnymi
 wagami `think/`, własnym tokenizerem i kalibracją canonical/order1. Po pełnym P1
 `Engine::run_plans` wykonuje bounded greedy przez pełny vocabulary readout,
-retokenizuje notatki i wykonuje P2 na tym samym drugim backendzie. Oba modele
+retokenizuje notatki i wykonuje P2 na tym samym drugim backendzie.
+Llama CUDA fused generuje przez jeden prefill i dalsze kroki na nowych tokenach
+z KV każdego etapu, lokalnym dla jednego pytania. Scoped cleanup usuwa sesję
+przed niezależnym pełnym P2 oraz po błędzie/stopie; fork zaczyna z pustą sesją.
+Inne kombinacje zachowują pełne przeliczanie prefiksu. Bound generacji obejmuje
+stare i nowe KV oraz hi/lo do pełnego limitu kontekstu. To zmiana struktury
+generacji bez gwarancji parytetu numerycznego. Oba modele
 dzielą gate/work class, lecz mają osobny stan/cache; fork, stop, health i drain
 obejmują oba. Rejestr decyzji otrzymuje dopiero finalny wynik i nie zapisuje
 notatek. Capabilities, staging i device/work bounds trafiają też do offline

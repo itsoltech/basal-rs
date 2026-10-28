@@ -531,6 +531,8 @@ pub struct GpuBackend {
     /// Precomputed prefixes (prompt template up to the state, and with a state cache the shared prefix of recent
     /// single-row forwards); a row that starts with one of them skips its tokens.
     prefixes: Vec<PrefixKv>,
+    /// One causal generation only; never searched by ordinary forwards or copied to a fork.
+    generation: Option<PrefixKv>,
     /// Byte budget of non-pinned prefixes (0 = no state cache).
     pub state_cache_bytes: usize,
     clock: u64,
@@ -1433,7 +1435,7 @@ struct Ragged<'a, 'p> {
     cos_sin: &'a [f32],
     segs: &'a [Segment<'p>],
     read: &'a [u32],
-    /// Capture mode (one segment, no readout): `Some(bind)` with the `OnStage::bind` of the captured parts.
+    /// Capture mode (one segment, optional readout): `Some(bind)` with the `OnStage::bind` of the captured parts.
     capture: Option<bool>,
     dims: HeadDims,
     /// CUDA: the blocks of all rows as tree-attention units (compact offsets; prefix addresses set per layer).
@@ -1446,7 +1448,7 @@ struct Ragged<'a, 'p> {
 }
 
 /// What leaves a stage body: the boundary buffer `[2, M, H]` for the next stage, or the last stage's final normalised
-/// hidden states (None in capture mode).
+/// hidden states (None only for capture without readout).
 enum StageOut {
     Boundary(Tensor),
     Final(Option<Tensor>),
@@ -2129,6 +2131,7 @@ impl GpuBackend {
             lineage,
             transfers,
             prefixes: Vec::new(),
+            generation: None,
             state_cache_bytes: 0,
             clock: 0,
             state_cache_hits: 0,
@@ -2412,8 +2415,9 @@ impl GpuBackend {
     /// a precomputed prefix). `cos_sin` = `[2, total, hd/2]`. The stages run in order, each entered through `gates`;
     /// a split moves the activations at every boundary (`GpuBackend::transfer`, CUDA). Returns the final normalised
     /// hidden states at `read` (indices into the compact list) on the last stage's GPU, that stage entered and its
-    /// context current; or, with `capture` (`Some(bind)`: one segment, no readout), the K/V of every layer as one part
-    /// per stage. Nothing binds another stage's context after the last stage's body returned.
+    /// context current; with `capture` (`Some(bind)`: one segment), also the K/V of every layer as one part per stage.
+    /// Capture without readout skips the last layer's output as before. Nothing binds another stage's context after
+    /// the last stage's body returned.
     fn forward_ragged(
         &self,
         gates: &mut StageGates<'_>,
@@ -2574,14 +2578,14 @@ impl GpuBackend {
                 })
                 .collect::<Result<_>>()?
         };
-        // (a zero-length device buffer cannot be created on Metal; a captured prefix has no readout)
+        // A zero-length device buffer cannot be created on Metal; capture-only forwards have no readout.
         let read_t = if last_stage && !f.read.is_empty() {
             Some(Tensor::from_slice(f.read, (f.read.len(),), dev)?)
         } else {
             None
         };
         let scale = (1.0 / (hd as f64).sqrt()) as f32;
-        let mut captured = Vec::new();
+        let mut captured = Vec::with_capacity(if capture { sw.layers.len() } else { 0 });
         // CUDA: the RMSNorm of the next block (after the last block: the final norm) comes out of the residual add of
         // the previous one (one kernel); after a boundary it arrives with the residual stream
         let (mut x, mut normed) = match input {
@@ -2703,7 +2707,7 @@ impl GpuBackend {
                 }
                 if capture {
                     captured.push((ks.contiguous()?, vs.contiguous()?));
-                    if li + 1 == n_layers {
+                    if li + 1 == n_layers && f.read.is_empty() {
                         // a captured prefix needs no output of the last layer
                         return Ok((StageOut::Final(None), captured));
                     }
@@ -2920,6 +2924,66 @@ impl GpuBackend {
         let seg = Segment { off: 0, len: l, past: past.map(|i| &self.prefixes[i]), mask, units };
         let (_, parts) = self.forward_ragged(gates, &ids[np..], &cs, &[seg], &[], Some(bind))?;
         Ok(parts)
+    }
+
+    /// One generation step, with only the new causal suffix sent through the decoder. The ordinary prefix cache
+    /// is deliberately not consulted. All device readout temporaries die on the last stage before gates end.
+    fn generation_step(&self, prefix: &[u32], codes: &[u32]) -> Result<(Vec<f32>, PrefixKv)> {
+        ensure!(!self.lineage.health.is_lost(), LOST);
+        ensure!(
+            !prefix.is_empty() && prefix.len() <= self.cfg.max_positions && u32::try_from(prefix.len()).is_ok(),
+            "generation prefix is empty or exceeds model context"
+        );
+        ensure!(prefix.iter().all(|&id| (id as usize) < self.cfg.vocab), "generation token outside vocabulary");
+        ensure!(
+            !codes.is_empty() && codes.iter().all(|&id| (id as usize) < self.cfg.vocab),
+            "generation readout outside vocabulary"
+        );
+        let past = self.generation.as_ref();
+        let np = past.map_or(0, |p| p.ids.len());
+        ensure!(
+            np < prefix.len() && past.is_none_or(|p| prefix.starts_with(&p.ids)),
+            "generation must strictly extend the exact cached token prefix; close the session before a new prompt"
+        );
+        let ids = &prefix[np..];
+        let n = ids.len();
+        let half = self.cfg.head_dim / 2;
+        let mut cs = vec![0f32; 2 * n * half];
+        for t in 0..n {
+            let (cos, sin) = cs.split_at_mut(n * half);
+            self.rope_row((np + t) as f64, &mut cos[t * half..(t + 1) * half], &mut sin[t * half..(t + 1) * half]);
+        }
+        let seg = Segment {
+            off: 0,
+            len: n,
+            past,
+            mask: Vec::new(),
+            units: vec![Unit { q_off: 0, q_len: n, ranges: vec![(0, n)] }],
+        };
+        let owners = self.gate_owners();
+        let mut gates = StageGates::new(&owners);
+        let result = (|| {
+            let (hidden, parts) = self.forward_ragged(&mut gates, ids, &cs, &[seg], &[(n - 1) as u32], Some(true))?;
+            let hidden = hidden.context("generation final hidden state")?;
+            let last = self.stages.last().context("generation model has a stage")?;
+            let codes = Tensor::from_slice(codes, (codes.len(),), &last.dev)?;
+            #[cfg(feature = "cuda")]
+            let logits =
+                fused::letter_logits(&hidden.contiguous()?, &self.head()?.lm_head, &codes)?.to_vec2::<f32>()?;
+            #[cfg(not(feature = "cuda"))]
+            let logits = hidden
+                .to_dtype(DType::F32)?
+                .matmul(&self.head()?.lm_head.index_select(&codes, 0)?.to_dtype(DType::F32)?.t()?)?
+                .to_vec2::<f32>()?;
+            gates.mark_drained();
+            let mut logits = logits.into_iter().next().context("generation readout has no row")?;
+            ensure!(logits.iter().all(|x| x.is_finite()), "nonfinite generation logits");
+            if self.readout == Readout::Bf16Rounded {
+                logits.iter_mut().for_each(|v| *v = bf16_round(*v));
+            }
+            Ok((logits, PrefixKv { ids: prefix.to_vec(), parts, pinned: false, last_use: 0 }))
+        })();
+        gates.end(result)
     }
 
     /// State cache: for a single row whose template + state prefix (`Packed::state_len`) extends a known prefix by at least `MIN_STATE_TOKENS`,
@@ -3556,6 +3620,98 @@ impl GpuBackend {
 }
 
 impl Backend for GpuBackend {
+    fn generation_logits(&mut self, prefix: &[u32], codes: &[u32]) -> Result<Vec<f32>> {
+        if self.kernels != Kernels::Fused || !self.is_cuda() {
+            ensure!(!prefix.is_empty() && !codes.is_empty(), "empty generation prefix/readout");
+            let row = basal_core::pack::pack(&[prefix.to_vec()]);
+            let codes = [codes.to_vec()];
+            let mut out = self.letter_logits(&[&row], &[&codes])?;
+            ensure!(out.len() == 1 && out[0].len() == 1, "generation readout shape mismatch");
+            return Ok(out.remove(0).remove(0));
+        }
+        match self.generation_step(prefix, codes) {
+            Ok((logits, next)) => {
+                self.end_generation().context("releasing previous generation prefix")?;
+                self.generation = Some(next);
+                Ok(logits)
+            }
+            Err(error) => match self.end_generation() {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(error.context(format!("releasing failed generation prefix: {cleanup:#}"))),
+            },
+        }
+    }
+
+    fn end_generation(&mut self) -> Result<()> {
+        let Some(prefix) = self.generation.take() else { return Ok(()) };
+        let mut failure: Option<anyhow::Error> = None;
+        // Steps end with a synchronous readout and drained gate releases. Each part binds its owning context;
+        // a lost lineage retains allocations under the existing OnStage safety contract.
+        for (stage, part) in prefix.parts.into_iter().enumerate() {
+            if let Err(error) = part.release() {
+                failure = Some(match failure {
+                    Some(prior) => prior.context(format!("releasing generation stage {stage}: {error:#}")),
+                    None => error.context(format!("releasing generation stage {stage}")),
+                });
+            }
+        }
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    fn generation_work_bound(
+        &self,
+        shape: &basal_core::planner::DeviceWorkShape,
+    ) -> basal_core::planner::DeviceWorkBound {
+        use basal_core::planner::DeviceWorkBound;
+        let bound = self.device_work_bound(shape);
+        if self.kernels != Kernels::Fused || !self.is_cuda() {
+            return bound;
+        }
+        let DeviceWorkBound::Estimate(mut estimate) = bound else { return bound };
+        let c = &self.cfg;
+        let context = shape.forward_tokens.max(shape.longest_prompt);
+        let kv_width = prod(&[c.kv_heads as u64, c.head_dim as u64]);
+        let qkv_width = prod(&[c.heads as u64, c.head_dim as u64]).saturating_add(kv_width.saturating_mul(2));
+        for (s, device) in estimate.devices.iter_mut().enumerate() {
+            let layers = self.stages[s].layers.len() as u64;
+            // Old + replacement raw storage, each charged a whole f32 QKV backing allocation per layer.
+            // Prefill K/V views may alias Q too; contiguous() alone does not detach that storage. Later steps
+            // concatenate K/V into two separate allocations whose total is smaller than QKV. Count four
+            // allocations per layer for both old/new K/V. stage_work already covers current-layer scratch.
+            let mut retained =
+                Tally { bytes: prod(&[2, layers, context, qkv_width, 4]), allocations: layers.saturating_mul(4) };
+            if self.tc_attention() {
+                // Old + replacement K/V hi-lo: two f16 planes per tensor, including split_kv outputs.
+                retained.add_n(layers.saturating_mul(4), prod(&[context, kv_width, 4]));
+            }
+            device.bytes = device.bytes.saturating_add(retained.bytes);
+            device.allocations = device.allocations.saturating_add(retained.allocations);
+        }
+        estimate.basis.push_str("; generation: full-context old + replacement per-layer QKV backing and KV hi/lo, plus forward scratch; cleared before P2");
+        DeviceWorkBound::Estimate(estimate)
+    }
+
+    fn generation_host_staging(&self) -> Option<basal_core::planner::HostStaging> {
+        let mut staging = self.host_staging()?;
+        if self.kernels == Kernels::Fused && self.is_cuda() {
+            // A retained tensor has an Arc<Tensor_>, Arc<RwLock<Storage>>, shape/stride Vecs (rank <= 4),
+            // and two Arc headers (four usize counters). Count independent storage even for aliased views.
+            let tensor_metadata = (std::mem::size_of::<Tensor>()
+                + std::mem::size_of::<<Tensor as std::ops::Deref>::Target>()
+                + std::mem::size_of::<std::sync::RwLock<candle_core::Storage>>()
+                + 12 * std::mem::size_of::<usize>()) as u64;
+            // Old + replacement, raw K/V + hi/lo: eight tensors per layer; double for Vec capacity.
+            staging.fixed = staging
+                .fixed
+                .saturating_add(prod(&[16, self.cfg.num_layers as u64, tensor_metadata]))
+                .saturating_add(prod(&[4, self.stages.len() as u64, std::mem::size_of::<OnStage<StageKv>>() as u64]));
+        }
+        Some(staging)
+    }
+
     fn early_exit_caps(&self) -> Option<&basal_core::early_exit::ExitCaps> {
         self.head().ok()?.exits.as_ref().map(|h| &h.caps)
     }
@@ -3725,6 +3881,7 @@ impl Backend for GpuBackend {
             lineage: self.lineage.clone(),
             transfers: self.transfers.clone(),
             prefixes: self.prefixes.iter().filter(|p| p.pinned).cloned().collect(),
+            generation: None,
             state_cache_bytes: self.state_cache_bytes,
             clock: 0,
             state_cache_hits: 0,
@@ -3808,6 +3965,7 @@ impl Backend for GpuBackend {
         if self.profile.is_some() || self.residual_max.is_some() {
             return Err(ExecutionError::Unsupported { reason: "diagnostics are enabled on this backend".into() });
         }
+        self.end_generation().map_err(|e| ExecutionError::Device(e.into()))?;
         self.state_cache_bytes = 0;
         self.prefixes.retain(|p| p.pinned);
         Ok(())
@@ -3844,6 +4002,10 @@ impl Backend for GpuBackend {
     /// failed synchronisations or context binds); not a hardware check.
     fn device_health(&self) -> Option<DeviceHealth> {
         self.is_cuda().then(|| self.lineage.health.clone())
+    }
+
+    fn release_work(&mut self) -> std::result::Result<(), ExecutionError> {
+        self.end_generation().map_err(|e| ExecutionError::Device(e.into()))
     }
 
     fn add_prefix(&mut self, ids: &[u32]) -> Result<()> {

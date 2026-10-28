@@ -62,11 +62,18 @@ Kończy na `</think>` (także przez granicę tokenów), EOS lub limicie tokenów
 Notatki są dekodowane z `skip_special_tokens=true`; ten tekst służy do szukania
 stopu i budowy P2. Licznik nadal obejmuje surowe wygenerowane ID, także special
 tokens. Dekodowanie stanu przy skracaniu kontekstu zachowuje special tokens.
-Implementacja ponownie oblicza pełny prefiks na każdym kroku.
+Llama CUDA z kernelami fused wykonuje jeden prefill, a potem przesyła przez
+decoder tylko nowe tokeny. Każda warstwa zachowuje K/V całego dotychczasowego
+prefiksu w osobnej sesji pytania. Kolejny krok musi ściśle rozszerzać dokładną
+sekwencję ID poprzedniego kroku; zgodność samej długości nie wystarcza.
+Pozostałe kombinacje backendu i kerneli, w tym Candle, Metal i Intel,
+zachowują fallback obliczający pełny prefiks na każdym kroku.
 
 P2 ponownie koduje `head + notes.strip() + "\n</think>\n" + PREFILL`, z zakresem
 białych znaków Python `strip()` (wspólny helper promptu), sprawdza
 code IDs w tym konkretnym kontekście i czyta je na **tych samych wagach think**.
+Sesja generacji jest zamknięta przed P2. P2 otrzymuje niezależny pełny prompt
+i używa zwykłej ścieżki readoutu; nie odczytuje KV wygenerowanych notatek.
 Softmax i kalibracja readoutu są FP32; końcowy builder zachowuje formułę
 confidence właściwą dla dialektu. Act/tool odbudowują progi z kalibracji P2,
 evidence pozostaje z P1. Przed generacją obowiązuje
@@ -88,7 +95,13 @@ finalny wynik po P2; jego whitelista wyklucza notatki.
 ## Planowanie i lifecycle
 
 Fork tworzy osobny cache i stan obu backendów, zachowuje ustawienia
-i kalibrację. Gate, work class, stop, health oraz drain obejmują oba modele.
+i kalibrację; jego sesja generacji jest pusta. KV generacji nie przechodzi
+między pytaniami, żądaniami ani forkami i nie trafia do zwykłego cache prefiksów.
+Scoped cleanup zamyka sesję po sukcesie, błędzie, stopie i przy unwinding,
+zanim można rozpocząć P2. Reset/release również usuwa stan sesji. Każda część
+KV jest zwalniana z kontekstem własnego etapu; niepotwierdzony drain lub bind
+zachowuje dotychczasową regułę lost/quarantine zamiast zwalniać używaną pamięć.
+Gate, work class, stop, health oraz drain obejmują oba modele.
 Stop jest sprawdzany między tokenami i przed P2; nie przerywa kernela w toku.
 Cały request pozostaje w tym samym admission i lane aż do końcowego wyniku.
 Generacja jest sekwencyjna: także żądanie off w tym samym microbatchu czeka
@@ -106,8 +119,19 @@ Planer offline dostaje snapshot capabilities thinking. Dodatkowe host bounds
 obejmują P1, notatki, tokenizer/retokenizację, pełny słownik i staging.
 Bound notatek pochodzi z maksymalnej długości elementu zwalidowanego dekodera
 Metaspace/ByteFallback (z zapasem na zastępowanie błędnych bajtów UTF-8).
-Device bounds obejmują największy capped-prefix forward/P2 i pełny słownik;
-work cost obejmuje do `think_tokens + 1` pełnych forwardów na kwalifikujące
+Device bounds obejmują największy capped-prefix forward/P2 i pełny słownik.
+Dla inkrementalnego CUDA doliczają jednocześnie stare i nowe K/V wszystkich
+warstw danego etapu do pełnego skonfigurowanego limitu kontekstu, również
+bufory hi/lo oraz pamięć Q współdzieloną przez widoki K/V z prefillu.
+Dodatkowy konserwatywny bound na etap wynosi
+`2 * layers * context * (heads + 2 * kv_heads) * head_dim * 4` bajtów,
+a przy attention na tensor cores dodatkowo
+`4 * layers * context * kv_heads * head_dim * 4` bajtów.
+To zapas ponad dotychczasowy forward scratch, z osobnym licznikiem alokacji
+dla granulatów allocatora; nie jest zmierzonym szczytem. Host bound dolicza
+uchwyty tensorów i metadane starych/nowych KV; kopie ID mieszczą się w
+dotychczasowym składniku `context * 128`. Zwykłe/off bounds są bez zmian.
+Work cost zachowuje konserwatywny koszt do `think_tokens + 1` pełnych forwardów na kwalifikujące
 się pytanie Direct; inne pytania nie zwiększają tego kosztu.
 Pamięć rezydentna **obu** modeli i ich workspace musi być uwzględniona
 osobno w kwalifikacji i rezerwie serwera, tak jak pozostałe resident weights.
@@ -152,7 +176,8 @@ osobny plan obliczeń thinking. Nie zawierają lokalnych ścieżek tych źróde�
 ## Zakres kwalifikacji
 
 [Pomiar RTX 6000 Ada](../reports/upstream-api-241-trained-2026-10-28/README.md)
-potwierdza generację i P2 na przypiętej parze 4.5B: native FP32 zgadza się
+dotyczy wcześniejszej generacji z ponownym obliczaniem pełnych prefiksów
+i P2 na przypiętej parze 4.5B: native FP32 zgadza się
 z diagnostycznym sidecarem PyTorch FP32 w 19/19 przypadków przy progu
 0,0001, z równym tekstem i liczbą tokenów dziewięciu notatek. Adapter
 referencji i konfiguracja orders 1 / context 2048 są jawnie opisane w raporcie.
@@ -163,7 +188,12 @@ wygenerowanych odpowiedzi. Osobna kontrola native BF16 nie usuwa różnicy.
 Zachowano też FAIL bitowej równości P1 solo/batch w diagnostycznej konfiguracji
 FP32, odtworzony bez thinking. Nie potwierdza to regresji samego thinking.
 
-Full-prefix recomputation nie daje obietnicy szybkości lub parytetu z vLLM.
+Inkrementalne KV zbliża strukturę generacji do cached decode, ale nie
+gwarantuje identycznych tokenów ani wyników z vLLM. Różne harmonogramy
+prefillu i decode mogą zmieniać wyniki numeryczne. FP32 pozostaje wybieralne;
+ta zmiana nie zmienia kerneli BF16, RoPE ani SiLU. Dotychczasowe FAIL pozostają
+FAIL; bieżąca ścieżka inkrementalna wymaga osobnej kwalifikacji runtime.
+Nie ma zmierzonej obietnicy przyspieszenia.
 Ogólny parytet detokenizacji, stop/EOS i ich liczenia poza badanym korpusem,
 jakość, bounds i wydajność pozostają **GAP**. Czas `think.ms` pozostaje bez
 zaokrąglenia do dwóch miejsc stosowanego przez Python upstream. Pico/Mini

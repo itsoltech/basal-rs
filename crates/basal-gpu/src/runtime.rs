@@ -400,6 +400,38 @@ impl RuntimeBackend {
 }
 
 impl Backend for RuntimeBackend {
+    fn generation_logits(&mut self, prefix: &[u32], codes: &[u32]) -> Result<Vec<f32>> {
+        if let Self::Llama(b) = self {
+            return b.generation_logits(prefix, codes);
+        }
+        anyhow::ensure!(!prefix.is_empty() && !codes.is_empty(), "empty generation prefix/readout");
+        let row = basal_core::pack::pack(&[prefix.to_vec()]);
+        let codes = [codes.to_vec()];
+        let mut out = self.letter_logits(&[&row], &[&codes])?;
+        anyhow::ensure!(out.len() == 1 && out[0].len() == 1, "generation readout shape mismatch");
+        Ok(out.remove(0).remove(0))
+    }
+    fn end_generation(&mut self) -> Result<()> {
+        match self {
+            Self::Llama(b) => b.end_generation(),
+            _ => Ok(()),
+        }
+    }
+    fn generation_work_bound(
+        &self,
+        shape: &basal_core::planner::DeviceWorkShape,
+    ) -> basal_core::planner::DeviceWorkBound {
+        match self {
+            Self::Llama(b) => b.generation_work_bound(shape),
+            _ => self.device_work_bound(shape),
+        }
+    }
+    fn generation_host_staging(&self) -> Option<basal_core::planner::HostStaging> {
+        match self {
+            Self::Llama(b) => b.generation_host_staging(),
+            _ => self.host_staging(),
+        }
+    }
     fn early_exit_caps(&self) -> Option<&basal_core::early_exit::ExitCaps> {
         match self {
             Self::Llama(b) => b.early_exit_caps(),

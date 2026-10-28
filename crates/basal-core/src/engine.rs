@@ -29,6 +29,31 @@ pub trait Backend {
     /// `rows[r]` is one packed row, `letters[r][k]` the letter token ids of its readout `rows[r].last[k]`.
     /// Returns `[row][readout][letter]`.
     fn letter_logits(&mut self, rows: &[&Packed], letters: &[&[Vec<u32>]]) -> Result<Vec<Vec<Vec<f32>>>>;
+    /// Causal generation readout at the last token. Within a session, `prefix` must strictly extend the previous
+    /// exact token prefix. The first call prefills; implementations may retain request-local K/V until
+    /// [`Backend::end_generation`]. Forks must start without a session. Default: recompute the full prefix.
+    fn generation_logits(&mut self, prefix: &[u32], codes: &[u32]) -> Result<Vec<f32>> {
+        ensure!(!prefix.is_empty() && !codes.is_empty(), "empty generation prefix/readout");
+        let row = crate::pack::pack(&[prefix.to_vec()]);
+        let codes = [codes.to_vec()];
+        let mut out = self.letter_logits(&[&row], &[&codes])?;
+        ensure!(out.len() == 1 && out[0].len() == 1, "generation readout shape mismatch");
+        Ok(out.remove(0).remove(0))
+    }
+    /// Clear request-local generation state, including after failure/stop and before any independent P2 readout.
+    /// Idempotent; default: no retained state.
+    fn end_generation(&mut self) -> Result<()> {
+        Ok(())
+    }
+    /// Transient bound during generation, including the retained old and replacement request K/V through the
+    /// full configured context represented by `shape`. Default: the stateless full-prefix bound.
+    fn generation_work_bound(&self, shape: &crate::planner::DeviceWorkShape) -> crate::planner::DeviceWorkBound {
+        self.device_work_bound(shape)
+    }
+    /// Host staging during generation, including retained request K/V metadata. Default: stateless forward staging.
+    fn generation_host_staging(&self) -> Option<HostStaging> {
+        self.host_staging()
+    }
     /// Enabled trained-head capability only; plain backends expose none.
     fn early_exit_caps(&self) -> Option<&crate::early_exit::ExitCaps> {
         None
@@ -723,7 +748,10 @@ impl<B: Backend> Engine<B> {
                 let base = self.backend.device_work_bound(&shape);
                 if let Some(t) = &self.thinking {
                     if plans.iter().any(|p| crate::thinking::active_caps(p).is_some()) {
-                        return crate::planner::combine_sequential_bounds(base, t.backend.device_work_bound(&shape));
+                        return crate::planner::combine_sequential_bounds(
+                            base,
+                            t.backend.generation_work_bound(&shape),
+                        );
                     }
                 }
                 base

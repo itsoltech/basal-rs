@@ -1,5 +1,6 @@
 //! Opt-in native thinking: a separate full checkpoint generates notes and performs the second code readout.
-//! Prefixes are recomputed on every greedy step; no KV session or speed/token-parity claim is implied.
+//! Llama CUDA fused generation uses a scoped incremental KV session; other paths recompute full prefixes.
+//! Neither schedule implies a speed or token-parity guarantee.
 
 use std::time::Instant;
 
@@ -134,6 +135,42 @@ pub(crate) struct Thought {
     pub tokens: usize,
 }
 
+/// Own cleanup through every generation exit, including decoding errors, cooperative stops and unwinding.
+/// Explicit finish reports cleanup errors before P2; Drop is the unwind safeguard.
+struct Generation<'a, B: Backend> {
+    backend: &'a mut B,
+    active: bool,
+}
+
+impl<'a, B: Backend> Generation<'a, B> {
+    fn new(backend: &'a mut B) -> Result<Self> {
+        let session = Self { backend, active: true };
+        session.backend.end_generation().context("resetting thinking generation")?;
+        Ok(session)
+    }
+
+    fn finish(mut self, result: Result<()>) -> Result<()> {
+        let cleanup = self.backend.end_generation().context("closing thinking generation");
+        self.active = false;
+        match (result, cleanup) {
+            (Err(error), Err(cleanup)) => Err(error.context(format!("{cleanup:#}"))),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(()), cleanup) => cleanup,
+        }
+    }
+}
+
+impl<B: Backend> Drop for Generation<'_, B> {
+    fn drop(&mut self) {
+        if self.active {
+            if let Err(error) = self.backend.end_generation() {
+                use std::io::Write as _;
+                let _ = writeln!(std::io::stderr().lock(), "basal: closing thinking generation: {error:#}");
+            }
+        }
+    }
+}
+
 impl<B: Backend> Thinking<B> {
     /// Construct only after the application validates the published source identity and independent weights.
     pub fn new(
@@ -171,7 +208,7 @@ impl<B: Backend> Thinking<B> {
             media: Vec::new(),
             worst_case_rounds: false,
         };
-        let device_unavailable = match backend.device_work_bound(&shape) {
+        let device_unavailable = match backend.generation_work_bound(&shape) {
             crate::planner::DeviceWorkBound::Unknown(reason) => Some(reason),
             crate::planner::DeviceWorkBound::Estimate(_) => None,
         };
@@ -179,7 +216,7 @@ impl<B: Backend> Thinking<B> {
             settings,
             vocab,
             decoded_token_bytes: tok.llama_decoded_token_bytes()?,
-            host_staging: backend.host_staging(),
+            host_staging: backend.generation_host_staging(),
             device_unavailable,
         };
         Ok(Self { manifest, tok, backend, caps, calibration_label, sources, eos })
@@ -242,28 +279,39 @@ impl<B: Backend> Thinking<B> {
         let vocabulary: Vec<u32> = (0..u32::try_from(self.caps.vocab)?).collect();
         let mut generated = Vec::with_capacity(self.caps.settings.tokens);
         let mut notes = String::new();
-        for _ in 0..self.caps.settings.tokens {
-            check()?;
-            let logits = self.readout(&prefix, vocabulary.clone())?;
-            // Strict comparison preserves the lowest token ID on ties.
-            let mut best = 0;
-            for i in 1..logits.len() {
-                if logits[i] > logits[best] {
-                    best = i;
+        let session = Generation::new(&mut self.backend)?;
+        let generation = (|| {
+            for _ in 0..self.caps.settings.tokens {
+                check()?;
+                ensure!(!prefix.is_empty() && prefix.len() <= self.caps.settings.max_len, "thinking context exceeded");
+                let logits =
+                    session.backend.generation_logits(&prefix, &vocabulary).context("thinking generation step")?;
+                ensure!(
+                    logits.len() == vocabulary.len() && logits.iter().all(|x| x.is_finite()),
+                    "invalid thinking generation logits"
+                );
+                // Strict comparison preserves the lowest token ID on ties.
+                let mut best = 0;
+                for i in 1..logits.len() {
+                    if logits[i] > logits[best] {
+                        best = i;
+                    }
                 }
+                let id = u32::try_from(best)?;
+                generated.push(id);
+                if self.eos.contains(&id) {
+                    break;
+                }
+                notes = self.tok.decode_thinking(&generated)?;
+                if let Some(end) = notes.find("</think>") {
+                    notes.truncate(end);
+                    break;
+                }
+                prefix.push(id);
             }
-            let id = u32::try_from(best)?;
-            generated.push(id);
-            if self.eos.contains(&id) {
-                break;
-            }
-            notes = self.tok.decode_thinking(&generated)?;
-            if let Some(end) = notes.find("</think>") {
-                notes.truncate(end);
-                break;
-            }
-            prefix.push(id);
-        }
+            check()
+        })();
+        session.finish(generation)?;
         check()?;
         let second = format!("{head}{}\n</think>\n{PREFILL}", python_trim(&notes));
         let ids = self.tok.encode(&second)?;
