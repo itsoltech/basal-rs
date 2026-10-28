@@ -8,6 +8,11 @@
 //! later M of the class reuses the algorithm after `cublasLtMatmulAlgoCheck` accepts it (otherwise the heuristic's first
 //! choice is used). Every configuration accumulates in f32 (split-K partial sums are reduced in f32, never in the
 //! output type); results may differ from cuBLAS in the last bits (summation order).
+//!
+//! [`matmul_nt_bias`] is a separate BF16-only runtime-timed path: bias is added in the epilogue before the output
+//! rounding, without a separate bias allocation or pass. Its descriptors and algorithm classes are isolated from
+//! ordinary matmuls and tables. Use a dedicated `Lt` for bias projections: [`Tuned`] retains its untagged diagnostic
+//! format, so bias timings in [`Lt::tuned`] are not ordinary table entries and must not be exported/imported as such.
 
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -18,7 +23,7 @@ use candle_core::backend::BackendStorage;
 use candle_core::cuda_backend::cudarc::cublaslt::sys;
 use candle_core::cuda_backend::cudarc::driver::{CudaSlice, DevicePtr, DevicePtrMut};
 use candle_core::cuda_backend::{CudaStorageSlice as Cs, WrapErr};
-use candle_core::{CpuStorage, CudaStorage, CustomOp2, DType, Layout, Result, Shape, Tensor};
+use candle_core::{CpuStorage, CudaStorage, CustomOp2, CustomOp3, DType, Layout, Result, Shape, Tensor};
 
 const CANDIDATES: usize = 16;
 
@@ -67,16 +72,20 @@ struct Key {
     k: usize,
     m_class: usize,
     dt: DType,
+    bias: bool,
 }
 
-/// Descriptors of one exact (M, N, K, dtype); created once, never destroyed (one per distinct shape).
+/// Descriptors of one exact (M, N, K, dtype, bias); created once, never destroyed (one per distinct shape).
 #[derive(Clone, Copy)]
 struct Plan {
     desc: sys::cublasLtMatmulDesc_t,
     a: sys::cublasLtMatrixLayout_t,
     b: sys::cublasLtMatrixLayout_t,
     c: sys::cublasLtMatrixLayout_t,
+    bias: bool,
 }
+
+type PlanKey = (usize, usize, usize, DType, bool);
 
 /// Algorithms of a weight shape by M class (ascending), all with bitwise identical results.
 type ClassAlgos = Vec<(usize, sys::cublasLtMatmulAlgo_t)>;
@@ -87,9 +96,10 @@ pub struct Lt {
     ctx: std::sync::Arc<candle_core::cuda_backend::cudarc::driver::CudaContext>,
     handle: sys::cublasLtHandle_t,
     workspace: CudaSlice<u8>,
-    plans: Mutex<HashMap<(usize, usize, usize, DType), Plan>>,
+    plans: Mutex<HashMap<PlanKey, Plan>>,
     algos: Mutex<HashMap<Key, sys::cublasLtMatmulAlgo_t>>,
-    /// Classes tuned in this process (searched or timed heuristics).
+    /// Classes tuned in this process (searched or timed heuristics). Bias-only handles report bias diagnostics;
+    /// these untagged entries must not be used as ordinary tables (see the module documentation).
     pub tuned: Mutex<Vec<Tuned>>,
     /// Classes taken from a table.
     pub from_table: Mutex<usize>,
@@ -112,6 +122,8 @@ pub struct Lt {
 // thread of a model without a gate. `matmul` refuses operands of another context (no use of this handle or workspace
 // on a foreign GPU's stream). The workspace is freed only when the last owner drops, with this context bound, after
 // those drains.
+// Bias calls also hold the plans lock across descriptor mutation, algorithm selection and every enqueue. Their
+// operand guards record stream usage on success and error, keeping bias reads ordered before storage reuse/free.
 unsafe impl Send for Lt {}
 // SAFETY: shared access uses the same locks, gate serialisation and drains as owned access (above).
 unsafe impl Sync for Lt {}
@@ -192,13 +204,13 @@ impl Lt {
         Ok(())
     }
 
-    /// A table entry (batch-invariant or per class) exists for the weight shape (N, K) in `dt`.
+    /// A non-bias table entry (batch-invariant or per class) exists for the weight shape (N, K) in `dt`.
     pub fn covers(&self, n: usize, k: usize, dt: DType) -> bool {
         self.invariant.lock().unwrap().contains_key(&(n, k, dt))
-            || self.algos.lock().unwrap().keys().any(|key| key.n == n && key.k == k && key.dt == dt)
+            || self.algos.lock().unwrap().keys().any(|key| !key.bias && key.n == n && key.k == k && key.dt == dt)
     }
 
-    /// Every M class of `m` in `1..=max_m` has an algorithm for `(n, k, dt)` without run-time tuning: a batch-invariant
+    /// Every M class of `m` in `1..=max_m` has a non-bias algorithm for `(n, k, dt)` without run-time tuning: a batch-invariant
     /// entry (one algorithm for every M) or a table entry for each class.
     pub fn covers_classes(&self, n: usize, k: usize, dt: DType, max_m: usize) -> bool {
         if self.invariant.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains_key(&(n, k, dt)) {
@@ -208,7 +220,7 @@ impl Lt {
         let mut m = 1;
         while m <= max_m.max(1) {
             let class = m_class(m);
-            if !algos.contains_key(&Key { n, k, m_class: class, dt }) {
+            if !algos.contains_key(&Key { n, k, m_class: class, dt, bias: false }) {
                 return false;
             }
             m = class + 1;
@@ -222,9 +234,9 @@ impl Lt {
 
     fn plan_cached(&self, m: usize, n: usize, k: usize, dt: DType) -> Result<Plan> {
         let mut plans = self.plans.lock().unwrap();
-        Ok(*match plans.entry((m, n, k, dt)) {
+        Ok(*match plans.entry((m, n, k, dt, false)) {
             std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
-            std::collections::hash_map::Entry::Vacant(e) => e.insert(self.plan(m, n, k, dt)?),
+            std::collections::hash_map::Entry::Vacant(e) => e.insert(self.plan(m, n, k, dt, false)?),
         })
     }
 
@@ -493,11 +505,11 @@ impl Lt {
         Ok((group, row_invariant))
     }
 
-    /// Use the algorithms of a search table for their classes.
+    /// Use the non-bias algorithms of a search table for their classes. Never pass bias diagnostics from `tuned`.
     pub fn load(&self, entries: &[Tuned]) {
         let mut algos = self.algos.lock().unwrap();
         for e in entries {
-            let key = Key { n: e.n, k: e.k, m_class: e.m_class, dt: e.dtype };
+            let key = Key { n: e.n, k: e.k, m_class: e.m_class, dt: e.dtype, bias: false };
             algos.insert(key, sys::cublasLtMatmulAlgo_t { data: e.algo });
         }
         *self.from_table.lock().unwrap() += entries.len();
@@ -662,35 +674,70 @@ impl Lt {
     }
 
     /// Row-major `y[m, n] = x[m, k] @ w[n, k]^T` is column-major `y^T[n, m] = op_T(w)[n, k] x^T[k, m]`.
-    fn plan(&self, m: usize, n: usize, k: usize, dt: DType) -> Result<Plan> {
+    fn plan(&self, m: usize, n: usize, k: usize, dt: DType, bias: bool) -> Result<Plan> {
         let t = data_type(dt)?;
         let mut desc = std::ptr::null_mut();
         let (mut a, mut b, mut c) = (std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut());
-        // SAFETY: descriptor creation with valid out-pointers; attribute buffers outlive the calls.
-        unsafe {
-            st(
-                sys::cublasLtMatmulDescCreate(
-                    &mut desc,
-                    sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
-                    sys::cudaDataType::CUDA_R_32F,
-                ),
-                "desc",
-            )?;
-            let tr: i32 = 1; // CUBLAS_OP_T
-            st(
-                sys::cublasLtMatmulDescSetAttribute(
-                    desc,
-                    sys::cublasLtMatmulDescAttributes_t::CUBLASLT_MATMUL_DESC_TRANSA,
-                    &tr as *const _ as *const c_void,
-                    std::mem::size_of_val(&tr),
-                ),
-                "transa",
-            )?;
-            st(sys::cublasLtMatrixLayoutCreate(&mut a, t, k as u64, n as u64, k as i64), "layout a")?;
-            st(sys::cublasLtMatrixLayoutCreate(&mut b, t, k as u64, m as u64, k as i64), "layout b")?;
-            st(sys::cublasLtMatrixLayoutCreate(&mut c, t, n as u64, m as u64, n as i64), "layout c")?;
+        let (mut desc_created, mut layouts_created) = (false, 0);
+        let created: Result<()> = (|| {
+            // SAFETY: descriptor creation with valid out-pointers; attribute buffers outlive the synchronous calls.
+            // The caller binds this context; descriptors are published only after all attributes/layouts succeed.
+            unsafe {
+                st(
+                    sys::cublasLtMatmulDescCreate(
+                        &mut desc,
+                        sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
+                        sys::cudaDataType::CUDA_R_32F,
+                    ),
+                    "desc",
+                )?;
+                desc_created = true;
+                let tr: i32 = 1; // CUBLAS_OP_T
+                st(
+                    sys::cublasLtMatmulDescSetAttribute(
+                        desc,
+                        sys::cublasLtMatmulDescAttributes_t::CUBLASLT_MATMUL_DESC_TRANSA,
+                        &tr as *const _ as *const c_void,
+                        std::mem::size_of_val(&tr),
+                    ),
+                    "transa",
+                )?;
+                if bias {
+                    let epilogue = sys::cublasLtEpilogue_t::CUBLASLT_EPILOGUE_BIAS;
+                    st(
+                        sys::cublasLtMatmulDescSetAttribute(
+                            desc,
+                            sys::cublasLtMatmulDescAttributes_t::CUBLASLT_MATMUL_DESC_EPILOGUE,
+                            &epilogue as *const _ as *const c_void,
+                            std::mem::size_of_val(&epilogue),
+                        ),
+                        "bias epilogue",
+                    )?;
+                    // BIAS_DATA_TYPE defaults to D's dtype (CUDA 12.9 cublasLt.h); here D and bias are BF16.
+                }
+                st(sys::cublasLtMatrixLayoutCreate(&mut a, t, k as u64, n as u64, k as i64), "layout a")?;
+                layouts_created = 1;
+                st(sys::cublasLtMatrixLayoutCreate(&mut b, t, k as u64, m as u64, k as i64), "layout b")?;
+                layouts_created = 2;
+                st(sys::cublasLtMatrixLayoutCreate(&mut c, t, n as u64, m as u64, n as i64), "layout c")?;
+                layouts_created = 3;
+            }
+            Ok(())
+        })();
+        if bias && created.is_err() {
+            // SAFETY: these are this call's partially created descriptors, never cached or submitted to the GPU.
+            // Only handles whose creation returned success are destroyed, on the bound owning context.
+            unsafe {
+                for layout in [a, b, c].into_iter().take(layouts_created) {
+                    sys::cublasLtMatrixLayoutDestroy(layout);
+                }
+                if desc_created {
+                    sys::cublasLtMatmulDescDestroy(desc);
+                }
+            }
         }
-        Ok(Plan { desc, a, b, c })
+        created?;
+        Ok(Plan { desc, a, b, c, bias })
     }
 
     fn heuristics(&self, p: &Plan) -> Result<Vec<sys::cublasLtMatmulHeuristicResult_t>> {
@@ -871,6 +918,194 @@ impl Lt {
         Ok((CudaStorage { slice, device: dev }, Shape::from((m, n))))
     }
 
+    fn matmul_bias(
+        &self,
+        x: &CudaStorage,
+        xl: &Layout,
+        w: &CudaStorage,
+        wl: &Layout,
+        b: &CudaStorage,
+        bl: &Layout,
+    ) -> Result<(CudaStorage, Shape)> {
+        let (m, k) = xl.shape().dims2()?;
+        let (n, wk) = wl.shape().dims2()?;
+        let bn = bl.shape().dims1()?;
+        if m == 0 || n == 0 || k == 0 || k != wk || n != bn {
+            candle_core::bail!("cuBLASLt bias matmul: expected nonempty x[M,K], w[N,K], bias[N]");
+        }
+        let (Cs::BF16(xs), Cs::BF16(ws), Cs::BF16(bs)) = (&x.slice, &w.slice, &b.slice) else {
+            candle_core::bail!("cuBLASLt bias matmul: x, w and bias must all be BF16");
+        };
+        let elements = |a: usize, b: usize| {
+            a.checked_mul(b)
+                .filter(|&v| v <= isize::MAX as usize / DType::BF16.size_in_bytes())
+                .ok_or_else(|| candle_core::Error::Msg("cuBLASLt bias matmul: shape size overflow".into()))
+        };
+        let (mk, nk, mn) = (elements(m, k)?, elements(n, k)?, elements(m, n)?);
+        // Check offsets and backing storage before slicing, allocations, pointers or cuBLASLt calls.
+        for (layout, count, len) in [(xl, mk, xs.len()), (wl, nk, ws.len()), (bl, n, bs.len())] {
+            if !layout.is_contiguous() || layout.start_offset().checked_add(count).is_none_or(|end| end > len) {
+                candle_core::bail!("cuBLASLt bias matmul: operands must be contiguous and within their storage");
+            }
+        }
+        let dev = x.device.clone();
+        let stream = dev.cuda_stream();
+        if [stream.context(), w.device.cuda_stream().context(), b.device.cuda_stream().context()]
+            .into_iter()
+            .chain([xs.context(), ws.context(), bs.context()])
+            .any(|ctx| **ctx != *self.ctx)
+        {
+            candle_core::bail!("cuBLASLt bias matmul: all operands and the handle must share one CUDA context");
+        }
+        if self.table_only.load(std::sync::atomic::Ordering::Acquire)
+            || !self
+                .invariant
+                .lock()
+                .map_err(|_| candle_core::Error::Msg("cuBLASLt bias matmul: invariant lock poisoned".into()))?
+                .is_empty()
+            || !self
+                .chosen
+                .lock()
+                .map_err(|_| candle_core::Error::Msg("cuBLASLt bias matmul: chosen lock poisoned".into()))?
+                .is_empty()
+        {
+            candle_core::bail!("cuBLASLt bias matmul: invariant and table-only modes are unsupported");
+        }
+        self.ctx.bind_to_thread().w()?;
+        // SAFETY: all mn elements are written with beta=0 before the output can be returned; a failed call drops it.
+        let mut out = unsafe { dev.alloc::<half::bf16>(mn)? };
+        {
+            let (xv, wv, bv) = (
+                xs.slice(xl.start_offset()..xl.start_offset() + mk),
+                ws.slice(wl.start_offset()..wl.start_offset() + nk),
+                bs.slice(bl.start_offset()..bl.start_offset() + n),
+            );
+            let (xp, _gx) = xv.device_ptr(&stream);
+            let (wp, _gw) = wv.device_ptr(&stream);
+            let (bp, _gb) = bv.device_ptr(&stream);
+            let (yp, _gy) = out.device_ptr_mut(&stream);
+            // Hold the descriptor lock through selection, timing and final enqueue; the model's existing gate
+            // additionally serialises this handle/workspace across lanes until their GPU work is drained.
+            let mut plans = self
+                .plans
+                .lock()
+                .map_err(|_| candle_core::Error::Msg("cuBLASLt bias matmul: plans lock poisoned".into()))?;
+            let p = match plans.entry((m, n, k, DType::BF16, true)) {
+                std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                std::collections::hash_map::Entry::Vacant(e) => e.insert(self.plan(m, n, k, DType::BF16, true)?),
+            };
+            // Set before heuristic/check as well as before every execution; no query sees a previous call's bias.
+            self.set_bias_pointer(p, bp)?;
+            let key = Key { n, k, m_class: m_class(m), dt: DType::BF16, bias: true };
+            let known = self
+                .algos
+                .lock()
+                .map_err(|_| candle_core::Error::Msg("cuBLASLt bias matmul: algorithms lock poisoned".into()))?
+                .get(&key)
+                .copied();
+            let algo = match known {
+                Some(a) if self.check(p, &a) => a,
+                Some(_) => {
+                    self.heuristics(p)?
+                        .first()
+                        .ok_or_else(|| candle_core::Error::Msg("cuBLASLt bias matmul: no algorithm".into()))?
+                        .algo
+                }
+                None => {
+                    let cands = self.heuristics(p)?;
+                    let mut best = (
+                        f64::INFINITY,
+                        cands
+                            .first()
+                            .ok_or_else(|| candle_core::Error::Msg("cuBLASLt bias matmul: no algorithm".into()))?
+                            .algo,
+                    );
+                    let mut first = f64::NAN;
+                    for (i, c) in cands.iter().enumerate() {
+                        // SAFETY: validated BF16 buffers and their guards remain live on this context/stream;
+                        // plans is locked and the gate serialises the handle/workspace. beta=0 permits repeats.
+                        unsafe { self.run_bias(p, &c.algo, wp, xp, bp, yp, &stream)? };
+                        stream.synchronize().w()?;
+                        let t = Instant::now();
+                        for _ in 0..5 {
+                            // SAFETY: same guarded buffers, locked descriptor and gate as the warmup above.
+                            unsafe { self.run_bias(p, &c.algo, wp, xp, bp, yp, &stream)? };
+                        }
+                        stream.synchronize().w()?;
+                        let ms = t.elapsed().as_secs_f64() * 1e3 / 5.0;
+                        if i == 0 {
+                            first = ms;
+                        }
+                        if ms < best.0 {
+                            best = (ms, c.algo);
+                        }
+                    }
+                    self.tuned
+                        .lock()
+                        .map_err(|_| candle_core::Error::Msg("cuBLASLt bias matmul: timings lock poisoned".into()))?
+                        .push(Tuned {
+                            m_class: key.m_class,
+                            n,
+                            k,
+                            dtype: DType::BF16,
+                            algo: best.1.data,
+                            ms: best.0,
+                            heuristic_ms: first,
+                            tried: cands.len(),
+                        });
+                    self.algos
+                        .lock()
+                        .map_err(|_| candle_core::Error::Msg("cuBLASLt bias matmul: algorithms lock poisoned".into()))?
+                        .insert(key, best.1);
+                    best.1
+                }
+            };
+            // SAFETY: the shape-checked BF16 buffers and guards outlive this enqueue, including error returns.
+            // The locked plan and gate protect mutation/handle/workspace; guards order reuse/free after GPU reads.
+            unsafe { self.run_bias(p, &algo, wp, xp, bp, yp, &stream)? };
+        }
+        Ok((CudaStorage { slice: Cs::BF16(out), device: dev }, Shape::from((m, n))))
+    }
+
+    /// Caller holds the plans lock and a live, guarded BF16 `bias[N]` on the handle's context and execution stream.
+    fn set_bias_pointer(&self, p: &Plan, bias: u64) -> Result<()> {
+        if !p.bias {
+            candle_core::bail!("cuBLASLt bias matmul: requires a bias descriptor");
+        }
+        st(
+            // SAFETY: the descriptor is owned by this context and locked throughout mutation/consumption.
+            // cuBLASLt copies the pointer value synchronously; the caller keeps its buffer guarded until enqueue.
+            unsafe {
+                sys::cublasLtMatmulDescSetAttribute(
+                    p.desc,
+                    sys::cublasLtMatmulDescAttributes_t::CUBLASLT_MATMUL_DESC_BIAS_POINTER,
+                    &bias as *const u64 as *const c_void,
+                    std::mem::size_of_val(&bias),
+                )
+            },
+            "bias pointer",
+        )
+    }
+
+    /// # Safety
+    /// As [`Lt::run`], plus BF16 `bias[N]` live and guarded on stream. The plans lock covers this call and all
+    /// algorithm queries; the existing model gate serialises the handle/workspace, including drains on errors.
+    #[expect(clippy::too_many_arguments, reason = "Bias execution needs the plan, algorithm, four buffers and stream")]
+    unsafe fn run_bias(
+        &self,
+        p: &Plan,
+        algo: &sys::cublasLtMatmulAlgo_t,
+        w: u64,
+        x: u64,
+        bias: u64,
+        y: u64,
+        stream: &candle_core::cuda_backend::cudarc::driver::CudaStream,
+    ) -> Result<()> {
+        self.set_bias_pointer(p, bias)?;
+        // SAFETY: the caller guarantees run's buffers, context, stream and gate invariants, plus the bias lifetime.
+        unsafe { self.run(p, algo, w, x, y, stream) }
+    }
+
     #[expect(clippy::too_many_arguments, reason = "Dispatch maps one validated matmul shape and its device pointers")]
     fn dispatch(
         &self,
@@ -913,7 +1148,7 @@ impl Lt {
                 "reproducible plan: no pinned cuBLASLt algorithm for {dt:?} n={n} k={k}; no run-time timing is allowed"
             );
         }
-        let key = Key { n, k, m_class: m_class(m), dt };
+        let key = Key { n, k, m_class: m_class(m), dt, bias: false };
         if search > 0 {
             let w_bytes = (n * k * dt.size_in_bytes()) as u64;
             // SAFETY: operand pointers as for the final run below; `w` holds `search` copies of n*k elements.
@@ -1011,6 +1246,50 @@ impl CustomOp2 for LtMatmul<'_> {
 /// `x[m, k] @ w[n, k]^T` (f16 or bf16) with the measured cuBLASLt algorithm of its shape class.
 pub fn matmul_nt(lt: &Lt, x: &Tensor, w: &Tensor) -> Result<Tensor> {
     x.apply_op2_no_bwd(w, &LtMatmul(lt, Mode::Plain))
+}
+
+struct LtMatmulBias<'a>(&'a Lt);
+
+impl CustomOp3 for LtMatmulBias<'_> {
+    fn name(&self) -> &'static str {
+        "cublaslt-matmul-nt-bias"
+    }
+
+    fn cpu_fwd(
+        &self,
+        _: &CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+    ) -> Result<(CpuStorage, Shape)> {
+        candle_core::bail!("cuBLASLt bias matmul runs on CUDA only")
+    }
+
+    fn cuda_fwd(
+        &self,
+        x: &CudaStorage,
+        xl: &Layout,
+        w: &CudaStorage,
+        wl: &Layout,
+        b: &CudaStorage,
+        bl: &Layout,
+    ) -> Result<(CudaStorage, Shape)> {
+        self.0.matmul_bias(x, xl, w, wl, b, bl)
+    }
+}
+
+/// `x[M,K] @ w[N,K]^T + b[N]` with BF16 operands/output and F32 accumulation/scale (alpha=1, beta=0).
+/// Bias is added by the cuBLASLt epilogue before the sole BF16 output rounding; no separate bias pass or fallback.
+/// Requires nonempty contiguous operands on this `Lt`'s CUDA context. Invariant/table-only modes are errors.
+/// Allocates the output and caches host descriptors/algorithm timings, using the existing 32 MiB workspace.
+/// First-use timing may synchronize the stream. As with [`matmul_nt`], the model gate must serialize shared lanes
+/// through their GPU drain. Use a dedicated `Lt`; its untagged [`Tuned`] bias diagnostics are not ordinary tables.
+/// Static checks do not establish numerical parity with another backend or algorithm.
+#[expect(dead_code, reason = "Bias epilogue foundation; thinking projections adopt this API in the next slice")]
+pub fn matmul_nt_bias(lt: &Lt, x: &Tensor, w: &Tensor, b: &Tensor) -> Result<Tensor> {
+    x.apply_op3_no_bwd(w, b, &LtMatmulBias(lt))
 }
 
 /// Exhaustive configuration search for the class of `x @ w0^T` (see [`Lt::tuned`]); `w = [copies * n, k]` holds
