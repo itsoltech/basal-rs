@@ -832,44 +832,31 @@ fn planned_engine_from_manifest(
     let thinking = thinking
         .map(|mut t| {
             let think_profile = models::profile_for(&t.manifest);
-            let think_plan = if t.numerics == model_options::ThinkNumerics::UpstreamBf16Pointwise {
-                basal_gpu::ResolvedExecutionPlan::freeze(
-                    think_profile.id,
-                    basal_gpu::KernelSet::LlamaThinkBf16V1,
-                    &think_profile.dispatch,
-                    &t.manifest.config,
-                    &g.devices(),
-                    basal_gpu::PlanOptions {
-                        mode: inference_mode,
-                        precision: basal_gpu::Precision::Bf16,
-                        readout: Readout::Bf16Rounded,
-                        kernels,
-                        quantization,
-                        reproducibility: gemm.reproducibility,
-                    },
-                    None,
-                    basal_gpu::cublaslt_version().is_some(),
-                )?
+            let bf16 = t.numerics == model_options::ThinkNumerics::UpstreamBf16Pointwise;
+            let (kernel_set, precision, readout, table, tables_apply) = if bf16 {
+                let lt = basal_gpu::cublaslt_version().is_some();
+                (basal_gpu::KernelSet::LlamaThinkBf16V1, basal_gpu::Precision::Bf16, Readout::Bf16Rounded, None, lt)
             } else {
-                basal_gpu::ResolvedExecutionPlan::freeze(
-                    think_profile.id,
-                    think_profile.kernel_set,
-                    &think_profile.dispatch,
-                    &t.manifest.config,
-                    &g.devices(),
-                    basal_gpu::PlanOptions {
-                        mode: inference_mode,
-                        precision,
-                        readout: Readout::F32,
-                        kernels,
-                        quantization,
-                        reproducibility: gemm.reproducibility,
-                    },
-                    gemm.table.clone(),
-                    gemm.tables_apply,
-                )?
+                (think_profile.kernel_set, precision, Readout::F32, gemm.table.clone(), gemm.tables_apply)
             };
-            if t.numerics == model_options::ThinkNumerics::UpstreamBf16Pointwise {
+            let think_plan = basal_gpu::ResolvedExecutionPlan::freeze(
+                think_profile.id,
+                kernel_set,
+                &think_profile.dispatch,
+                &t.manifest.config,
+                &g.devices(),
+                basal_gpu::PlanOptions {
+                    mode: inference_mode,
+                    precision,
+                    readout,
+                    kernels,
+                    quantization,
+                    reproducibility: gemm.reproducibility,
+                },
+                table,
+                tables_apply,
+            )?;
+            if bf16 {
                 crate::note!("{}: thinking execution plan {}", manifest.name, plan_summary(&think_plan));
             }
             t.sources["execution_plan"] = think_plan.identity();

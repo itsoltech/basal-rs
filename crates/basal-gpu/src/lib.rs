@@ -2642,25 +2642,20 @@ impl GpuBackend {
             self.mark(dev, t, "rms_norm")?;
             let (qkv, bias) = self.project(sw, &a, &ly.wqkv, &ly.bqkv)?;
             self.mark(dev, t, "qkv_proj")?;
+            let bias = bias.map(|b| self.w(b)).transpose()?;
             // CUDA tensor-core attention: K and V come split into hi / lo planes from the same kernel
             #[cfg(feature = "cuda")]
-            let (_flat, q, k, v, hl) = {
-                let bias = bias.map(|b| self.w(b)).transpose()?;
-                if ragged_cuda && self.tc_attention() {
-                    let v_lo = self.precision != Precision::F16;
-                    let (fl, q, k, v, hl) =
-                        fused::qkv_rope_hilo(&qkv, bias.as_ref(), &cs, f.dims, v_lo, capture, self.numerics)?;
-                    (fl, q, k, v, Some(hl))
-                } else {
-                    let (fl, q, k, v) = fused::qkv_rope(&qkv, bias.as_ref(), &cs, f.dims, self.numerics)?;
-                    (fl, q, k, v, None)
-                }
+            let (_flat, q, k, v, hl) = if ragged_cuda && self.tc_attention() {
+                let v_lo = self.precision != Precision::F16;
+                let (fl, q, k, v, hl) =
+                    fused::qkv_rope_hilo(&qkv, bias.as_ref(), &cs, f.dims, v_lo, capture, self.numerics)?;
+                (fl, q, k, v, Some(hl))
+            } else {
+                let (fl, q, k, v) = fused::qkv_rope(&qkv, bias.as_ref(), &cs, f.dims, self.numerics)?;
+                (fl, q, k, v, None)
             };
             #[cfg(not(feature = "cuda"))]
-            let (_flat, q, k, v) = {
-                let bias = bias.map(|b| self.w(b)).transpose()?;
-                fused::qkv_rope(&qkv, bias.as_ref(), &cs, f.dims, self.numerics)?
-            };
+            let (_flat, q, k, v) = fused::qkv_rope(&qkv, bias.as_ref(), &cs, f.dims, self.numerics)?;
             self.mark(dev, t, "bias+rope+heads")?;
             #[cfg(feature = "cuda")]
             let ragged_o = if ragged_cuda {

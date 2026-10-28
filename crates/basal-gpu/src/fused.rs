@@ -671,6 +671,7 @@ pub struct HeadDims {
 )]
 struct QkvRope {
     d: HeadDims,
+    #[cfg_attr(not(feature = "cuda"), expect(dead_code, reason = "selects the CUDA thinking entry only"))]
     numerics: LlamaNumerics,
     /// CUDA: device address of the f16 `[K hi | K lo | V hi | V lo]` buffer (0: none) and the kernel's QR_* flags
     #[cfg_attr(not(feature = "cuda"), expect(dead_code, reason = "read by the CUDA kernel only"))]

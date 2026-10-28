@@ -66,6 +66,10 @@ Jego plan ma `table: null` i `runtime_timing`; diagnostyka GEMM etykietuje
 wyniki jako czasy epilogu bias, nie wpisy tabel. Pierwszy wybór może się różnić
 między procesami i klasami M. Deskryptory hosta są zachowywane dla dokładnych
 M i kształtów projekcji; ich liczba zależy od liczby użytych długości.
+Profil nie ma tabel GEMM, a background nie stroi GEMM w czasie działania,
+dlatego włączenie profilu wyłącza cały background executor tego silnika,
+także dla requestów z `think: off`. Ścieżka online nie wymaga background
+qualification; praca w tle wymaga `inherit` i warunków opisanych niżej.
 
 To **nie jest tryb parytetu**. Redukcje GEMM (w tym split-K), FA2, normy
 i lm_head oraz implementacje pow/sin/cos/exp/div pozostają źródłami różnic.
