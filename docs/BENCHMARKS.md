@@ -657,6 +657,12 @@ numeryki ani czasu nowej ścieżki.
 
 Opt-in [trained early-exit](EARLY_EXIT.md) zapisuje weights/heads/thresholds
 SHA-256, efektywny default, available oraz kontrakt request-isolated units/chunks.
+Diagnostyczne `Engine::run` (export, bench, profile) korzysta z defaultu backendu:
+przy aktywnej polityce każdy `Prepared` jest osobną grupą jednego pytania,
+ze wszystkimi jego orders razem, z zachowaną kolejnością wejść i wyników.
+Cały zbiór danych nie jest jednym żądaniem ani wspólnym gate. Request-level
+decide nadal waliduje override i grupuje wszystkie pytania danego żądania
+pod jedną zamrożoną polityką. Porównanie musi zachować te granice grup.
 Preflight dodaje rzeczywistą liczbę rezydentnych bajtów FP32 głowic po walidacji
 CPU. Nie ma boundu ani pomiaru nowego gridu, dense masks i transient adapterów.
 Kwalifikacja musi porównać policy/depth i każdy surowy readout z przypiętym

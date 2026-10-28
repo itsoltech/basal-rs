@@ -474,9 +474,11 @@ pub fn gpu_device(device: usize) -> Result<Device> {
             // another stream completed, or written by two streams at once. Every allocation here lives on the
             // per-thread stream of the thread that made it (candle and this crate create no streams; a handle of
             // that stream resolves to the context current on the calling thread), and the engines guarantee:
-            // (a) weights, the evidence head, cuBLASLt workspaces and pinned prefix K/V written at start-up are read
-            //     by other threads' streams only after the publication barriers that synchronise every stage (end of
-            //     `load_stages`, end of `add_prefix`), and are only read afterwards;
+            // (a) weights, the evidence head, immutable exit-head tensors, cuBLASLt workspaces and pinned prefix
+            //     K/V written at start-up are read by other threads' streams only after the publication barriers
+            //     that synchronise every stage (end of `load_stages`, exit-head `upload`, end of `add_prefix`);
+            //     exit-head upload synchronises before any fork or lane exists, and these tensors are only read
+            //     afterwards;
             // (b) a layer-split boundary copy is queued only after an `Ok` drain of its source stage and of the
             //     destination's initialisation; the destination is used and the source freed only after `Ok`
             //     synchronisations of this thread's per-thread stream in both contexts (the copy lands on one of

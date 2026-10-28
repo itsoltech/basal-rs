@@ -30,6 +30,8 @@ pub struct ExitArtifacts {
 
 impl ExitArtifacts {
     pub fn load(model: &crate::ModelManifest, heads_dir: Option<&Path>, default: &str) -> Result<Self> {
+        use sha2::{Digest, Sha256};
+
         use crate::prompt::{ChatStyle, PromptFormat};
         ensure!(
             model.name == "basal-1.0-4.5B"
@@ -44,7 +46,6 @@ impl ExitArtifacts {
             (model.dir.join("basal.json"), "d9a60ef12e0f05607e5266d9d619d7c6d5f47017068655fd7c53613b0f09bfc1"),
             (model.dir.join("model.safetensors"), WEIGHTS_SHA256),
             (dir.join("heads.pt"), HEADS_SHA256),
-            (dir.join("thresholds.json"), THRESHOLDS_SHA256),
         ] {
             ensure!(
                 file_hash(&path)? == expected,
@@ -52,7 +53,15 @@ impl ExitArtifacts {
                 path.display()
             );
         }
-        let caps = ExitCaps::from_thresholds(&std::fs::read(dir.join("thresholds.json"))?, default, cfg.num_layers)?;
+        let thresholds_path = dir.join("thresholds.json");
+        let thresholds =
+            std::fs::read(&thresholds_path).with_context(|| format!("reading {}", thresholds_path.display()))?;
+        ensure!(
+            format!("{:x}", Sha256::digest(&thresholds)) == THRESHOLDS_SHA256,
+            "trained exits: {} differs from the published artifact",
+            thresholds_path.display()
+        );
+        let caps = ExitCaps::from_thresholds(&thresholds, default, cfg.num_layers)?;
         Ok(Self { model_dir: model.dir.canonicalize()?, dir, caps })
     }
 
@@ -166,6 +175,14 @@ pub(crate) fn request_policy(
     }
     let policy = match value {
         Value::String(s) => s.clone(),
+        Value::Number(n) if dialect != Dialect::TypeSafe => {
+            n.as_f64().filter(|v| v.is_finite()).map(|v| v.to_string()).ok_or_else(|| {
+                DecideError::Validation(error(
+                    "early_exit number must be finite and representable as f64".into(),
+                    "value_error",
+                ))
+            })?
+        }
         _ if dialect != Dialect::TypeSafe => value.to_string(),
         _ => return Err(DecideError::Validation(error("early_exit must be a string or null".into(), "value_error"))),
     };

@@ -439,8 +439,16 @@ impl<B: Backend> Engine<B> {
         Ok(lens)
     }
 
+    /// Run independent items with the backend default. Active exits group each item with all its option orders.
     pub fn run(&mut self, prepared: &[Prepared], batching: Batching) -> Result<Vec<ItemResult>> {
         let policy = self.backend.early_exit_caps().map(|c| c.default_policy().to_owned());
+        if let Some(policy) = policy.as_deref().filter(|p| *p != "off") {
+            let mut results = Vec::with_capacity(prepared.len());
+            for item in prepared {
+                results.extend(self.run_exit(std::slice::from_ref(item), policy)?);
+            }
+            return Ok(results);
+        }
         self.run_with_policy(prepared, batching, policy.as_deref())
     }
 

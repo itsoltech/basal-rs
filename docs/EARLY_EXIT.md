@@ -44,8 +44,11 @@ snapshot z faktycznie załadowanego backendu.
 `early_exit` na najwyższym poziomie requestu jest niezmiennym override.
 Brak i null wybierają domyślną politykę backendu. Jawne `"off"` wymaga
 backendu z głowicami; plain backend odmawia również tej wartości. Jawna
-polityka musi być dostępna. Native API stosuje string coercion dla wartości
-nietekstowych; TypeSafe przyjmuje wyłącznie string lub null. Jawne ustawienie
+polityka musi być dostępna. Native API normalizuje liczby JSON przez skończone
+`f64` do najkrótszego zapisu: `0.990` i `9.9e-1` wybierają `0.99`. Wartości
+tekstowe pozostają dosłowne, więc `"0.990"` nie wybiera `"0.99"`. Pozostałe
+wartości nietekstowe podlegają string coercion; TypeSafe przyjmuje wyłącznie
+string lub null. Jawne ustawienie
 przy media/assets jest niedozwolone. Polityka nie zmienia globalnego defaultu.
 
 Inventory pochodzi z przypiętego JSON i obejmuje `0.98`, `0.99`, `0.995`,
@@ -67,6 +70,9 @@ permutation, uśrednieniem, kalibracją i składaniem odpowiedzi. Próg >1 wył�
 daną warstwę. Warstwy są sprawdzane rosnąco. Zachowujemy dotychczasowe
 TypeSafe formuły po readoucie i wybór bazowej kalibracji, bez plików
 CALIBRATION zależnych od polityki. Pełne `off` używa dotychczasowej arytmetyki.
+Nieskończone lub NaN logity głowicy kończą żądanie błędem wewnętrznym.
+To zamierzona różnica względem upstream, gdzie nieudany gate dla NaN
+pozwala kontynuować do głębszych warstw.
 
 Aktywne żądanie ma własną grupę wszystkich pytań, orders i label branches.
 Dokładny upstream `_pack` tworzy units; `_units` bisekuje zakres readoutów,
@@ -77,6 +83,13 @@ oraz padded budget 12288. Dummy padding nie ma readoutów. Unit ponad 3072
 packed tokens wykonuje pełny forward bez exit, z zachowanym mapowaniem.
 Limit dotyczy packed length, nie najdłuższego promptu. Auto-orders,
 grouped rounds i tasks/continuations niosą tę samą efektywną politykę.
+
+Niskopoziomowe `Engine::run` z aktywnym defaultem traktuje każdy element
+`Prepared` jako osobną grupę jednego pytania, ze wszystkimi jego orders razem.
+Zachowuje kolejność wejść i wyników; skład i kolejność pozostałych elementów
+zbioru nie wpływają na gate tego pytania. Dotyczy to również diagnostycznych
+wywołań export, bench i profile. `run_decision_plans` zachowuje grupę całego
+żądania i jego jawną, zamrożoną politykę we wszystkich rundach.
 
 Inne żądanie nie zmienia wybranej głowicy: aktywne plany rozdzielamy przed
 flatten. To odpowiednik izolacji upstream `--deterministic`; nie obiecujemy
@@ -102,7 +115,8 @@ Nie zakłada rank 256 jako dowodu zawartości binarnej. Tożsamość wiążą SH
 
 Sprawdzamy też opublikowane config.json i basal.json. Sama zgodność hidden
 dimension nie wystarcza. Pliki modelu i głowic muszą pozostawać niezmienne
-podczas ładowania. Profile batchy i benchmark zachowują hashe, default,
+podczas ładowania. Progi są odczytywane raz; SHA-256 i parser używają tego
+samego bufora bajtów. Profile batchy i benchmark zachowują hashe, default,
 inventory oraz kontrakt izolacji bez lokalnych ścieżek. `basal-planner.5`
 oddziela ten kontrakt od .4 thinking.
 
