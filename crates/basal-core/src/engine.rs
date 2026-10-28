@@ -29,6 +29,19 @@ pub trait Backend {
     /// `rows[r]` is one packed row, `letters[r][k]` the letter token ids of its readout `rows[r].last[k]`.
     /// Returns `[row][readout][letter]`.
     fn letter_logits(&mut self, rows: &[&Packed], letters: &[&[Vec<u32>]]) -> Result<Vec<Vec<Vec<f32>>>>;
+    /// Enabled trained-head capability only; plain backends expose none.
+    fn early_exit_caps(&self) -> Option<&crate::early_exit::ExitCaps> {
+        None
+    }
+    /// Explicit immutable request policy. Unsupported backends refuse even off rather than ignore it.
+    fn letter_logits_with_policy(
+        &mut self,
+        _rows: &[&Packed],
+        _letters: &[&[Vec<u32>]],
+        _policy: &str,
+    ) -> Result<Vec<Vec<Vec<f32>>>> {
+        bail!("this backend has no trained early-exit implementation")
+    }
     /// Precompute a token prefix that rows may start with (positions 0..len). Exact: a row uses it only when its
     /// token ids begin with exactly these ids. Default: not supported, ignored.
     fn add_prefix(&mut self, _ids: &[u32]) -> Result<()> {
@@ -427,6 +440,25 @@ impl<B: Backend> Engine<B> {
     }
 
     pub fn run(&mut self, prepared: &[Prepared], batching: Batching) -> Result<Vec<ItemResult>> {
+        let policy = self.backend.early_exit_caps().map(|c| c.default_policy().to_owned());
+        self.run_with_policy(prepared, batching, policy.as_deref())
+    }
+
+    fn run_with_policy(
+        &mut self,
+        prepared: &[Prepared],
+        batching: Batching,
+        policy: Option<&str>,
+    ) -> Result<Vec<ItemResult>> {
+        if let Some(policy) = policy {
+            self.backend
+                .early_exit_caps()
+                .context("explicit early_exit requires an enabled trained-head backend")?
+                .thresholds(policy)?;
+        }
+        if let Some(policy) = policy.filter(|p| *p != "off") {
+            return self.run_exit(prepared, policy);
+        }
         // forwards -> rows -> (questions of the row, packed row)
         let calls: Vec<Vec<(Vec<usize>, Packed)>> = match batching {
             // Chunks never mix prompt languages: rows of one forward then start with the same template prefix,
@@ -501,7 +533,45 @@ impl<B: Backend> Engine<B> {
         Ok(out.into_iter().map(Option::unwrap).collect())
     }
 
+    fn run_exit(&mut self, prepared: &[Prepared], policy: &str) -> Result<Vec<ItemResult>> {
+        let units = crate::early_exit::units(prepared)?;
+        let mut logits: Vec<Vec<Option<Vec<f32>>>> = prepared.iter().map(|p| vec![None; p.orders.len()]).collect();
+        for chunk in crate::early_exit::chunks(&units) {
+            self.check_stop()?;
+            let rows: Vec<_> = chunk.iter().map(|&i| &units[i].packed).collect();
+            let letters: Vec<Vec<_>> = chunk
+                .iter()
+                .map(|&i| units[i].owners.iter().map(|&(p, o)| prepared[p].orders[o].letter_ids.clone()).collect())
+                .collect();
+            let refs: Vec<_> = letters.iter().map(Vec::as_slice).collect();
+            let results = self.backend.letter_logits_with_policy(&rows, &refs, policy)?;
+            ensure!(results.len() == chunk.len(), "early-exit row mapping mismatch");
+            for (&i, row) in chunk.iter().zip(results) {
+                ensure!(row.len() == units[i].owners.len(), "early-exit readout mapping mismatch");
+                for (&(p, o), values) in units[i].owners.iter().zip(row) {
+                    ensure!(values.len() == prepared[p].orders[o].letter_ids.len(), "early-exit code mapping mismatch");
+                    logits[p][o] = Some(values);
+                }
+            }
+        }
+        prepared
+            .iter()
+            .zip(logits)
+            .map(|(p, l)| {
+                Ok(self.finish_readout(
+                    p,
+                    l.into_iter().map(|v| v.context("missing early-exit readout")).collect::<Result<_>>()?,
+                    true,
+                ))
+            })
+            .collect()
+    }
+
     fn finish(&self, p: &Prepared, letter_logits: Vec<Vec<f32>>) -> ItemResult {
+        self.finish_readout(p, letter_logits, false)
+    }
+
+    fn finish_readout(&self, p: &Prepared, letter_logits: Vec<Vec<f32>>, exit: bool) -> ItemResult {
         let perms: Vec<Vec<usize>> = p.orders.iter().map(|o| o.perm.clone()).collect();
         let temperature = if p.item.uncalibrated {
             1.0
@@ -514,8 +584,11 @@ impl<B: Backend> Engine<B> {
             let p_cal = decision::calibrate32(&p_avg, temperature);
             (probs, p_avg, p_cal)
         } else {
-            let probs: Vec<Vec<f64>> =
-                letter_logits.iter().map(|l| softmax(&l.iter().map(|v| *v as f64).collect::<Vec<_>>())).collect();
+            let probs: Vec<Vec<f64>> = if exit {
+                letter_logits.iter().map(|l| decision::softmax32(l)).collect()
+            } else {
+                letter_logits.iter().map(|l| softmax(&l.iter().map(|v| *v as f64).collect::<Vec<_>>())).collect()
+            };
             let p_avg = canonical_average(&perms, &probs);
             let p_cal = calibrate(&p_avg, temperature);
             (probs, p_avg, p_cal)
@@ -783,6 +856,9 @@ impl<B: Backend> Engine<B> {
             let raw = plan_response(&self.manifest.name, plan, &outputs[i])?;
             if let Some(mut body) = task.second_round(&raw, self.manifest.prompt_format.max_options())? {
                 body["model"] = self.manifest.name.clone().into();
+                if let Some(policy) = &plan.early_exit {
+                    body["early_exit"] = policy.clone().into();
+                }
                 if self.thinking.is_some() {
                     body["think"] = "off".into();
                 }
@@ -841,6 +917,22 @@ impl<B: Backend> Engine<B> {
 
     fn run_decision_plans(&mut self, plans: &[&RequestPlan]) -> Result<Vec<PlanOutput>> {
         self.check_stop()?;
+        // Isolate active requests before flattening. Off siblings retain their ordinary joint Tree batches.
+        if plans.len() > 1 && plans.iter().any(|p| p.early_exit.as_deref().is_some_and(|s| s != "off")) {
+            let mut out: Vec<Option<PlanOutput>> = (0..plans.len()).map(|_| None).collect();
+            let ordinary: Vec<_> =
+                plans.iter().enumerate().filter(|(_, p)| p.early_exit.as_deref().is_none_or(|s| s == "off")).collect();
+            let refs: Vec<_> = ordinary.iter().map(|(_, p)| **p).collect();
+            for ((i, _), result) in ordinary.into_iter().zip(self.run_decision_plans(&refs)?) {
+                out[i] = Some(result);
+            }
+            for (i, plan) in
+                plans.iter().enumerate().filter(|(_, p)| p.early_exit.as_deref().is_some_and(|s| s != "off"))
+            {
+                out[i] = Some(self.run_decision_plans(&[plan])?.remove(0));
+            }
+            return out.into_iter().map(|v| v.context("missing isolated request output")).collect();
+        }
         if plans.iter().any(|p| p.media.is_some()) {
             let mut results = Vec::with_capacity(plans.len());
             for plan in plans {
@@ -858,7 +950,8 @@ impl<B: Backend> Engine<B> {
             offs.push(all.len());
             all.extend(p.prepared.iter().cloned());
         }
-        let mut results = self.run(&all, self.request_batching)?;
+        let policy = plans.first().and_then(|p| p.early_exit.as_deref());
+        let mut results = self.run_with_policy(&all, self.request_batching, policy)?;
         // A dependent prompt may overflow even after the planner's heuristic probe. Refuse its whole plan,
         // including sibling grouped questions and task continuations, while keeping other requests in the batch.
         let mut context_errors = vec![Vec::new(); plans.len()];
@@ -904,14 +997,14 @@ impl<B: Backend> Engine<B> {
                 }
             }
             self.check_stop()?;
-            let rerun = self.run(&reverse, self.request_batching)?;
+            let rerun = self.run_with_policy(&reverse, self.request_batching, policy)?;
             for ((i, p2), r2) in owners.into_iter().zip(&reverse).zip(rerun) {
                 second_tokens[i] = p2.orders[0].input_ids.len();
                 let mut both = all[i].clone();
                 both.orders.extend(p2.orders.clone());
                 let mut logits = results[i].letter_logits.clone();
                 logits.extend(r2.letter_logits);
-                results[i] = self.finish(&both, logits);
+                results[i] = self.finish_readout(&both, logits, policy.is_some_and(|s| s != "off"));
             }
         }
         // grouped large choices: further rounds until each has asked its final group; the questions of all plans
@@ -983,7 +1076,7 @@ impl<B: Backend> Engine<B> {
                 break;
             }
             self.check_stop()?;
-            let res = self.run(&prep, self.request_batching)?;
+            let res = self.run_with_policy(&prep, self.request_batching, policy)?;
             for l in large.iter_mut() {
                 if l.finalists.is_none() && context_errors[l.owner].is_empty() {
                     l.last.clear();
@@ -1514,6 +1607,8 @@ pub enum QuestionPlan {
 
 #[derive(Clone, Debug)]
 pub struct RequestPlan {
+    /// Effective trained-exit policy frozen at planning, None for a plain backend.
+    pub early_exit: Option<String>,
     pub thinking: crate::thinking::ThinkRequest,
     pub(crate) thinking_caps: Option<crate::thinking::ThinkCaps>,
     pub(crate) tasks: Option<crate::tasks::TaskPlan>,

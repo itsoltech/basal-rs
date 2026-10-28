@@ -339,8 +339,14 @@ nie jest tożsamością modelu. Nowy katalog tworzy rewizję. Przyjęte batche
 pozostają przypięte do poprzedniej rewizji; utrzymuj zgodnych workerów do ich
 zakończenia lub świadomego wygaśnięcia.
 
-Wersja planera `basal-planner.4` rozróżnia również natywne thinking, jego osobne
+Wersja planera `basal-planner.5` zachowuje wprowadzony w .4 kontrakt thinking, jego osobne
 źródła/kalibrację, limity i usage, poza skracaniem kontekstu wprowadzonego w .3.
+Dodaje snapshot available/default i efektywną politykę [early-exit](EARLY_EXIT.md),
+hashe weights/heads/thresholds oraz request-isolated grouping w fingerprint.
+Aktywne trained exits odmawiają bounded planning z `UNBOUNDED_FEATURE`:
+ordinary Tree bound nie obejmuje ich gridu, dense masks i FP32 adapterów.
+Off zachowuje zwykłą ścieżkę; Candle nadal wymaga istniejących kontroli
+capability i boundów przed wykonaniem w tle.
 Snapshot możliwości zachowuje default `think`, a aktywne rekordy mają dodatkowe
 bounds notatek/retokenizacji, pełnego słownika i capped-prefix/P2 oraz koszt do
 `think_tokens + 1` pełnych forwardów na kwalifikujące się pytanie Direct.

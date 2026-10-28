@@ -164,6 +164,56 @@ pub fn pack(toks: &[Vec<u32>]) -> Packed {
     pack_tree(&[toks.to_vec()])
 }
 
+/// Exact upstream `_pack` for trained exits: separate roots by first token, no fused-attention depth cap.
+/// Iterative DFS avoids recursion proportional to nested shared prefixes. Ordinary packing stays capped at
+/// [`MAX_TREE_DEPTH`] for tree attention; this path uses Candle's dense masks only.
+pub(crate) fn pack_exit(tokens: &[&[u32]]) -> anyhow::Result<Packed> {
+    anyhow::ensure!(!tokens.is_empty() && tokens.iter().all(|t| !t.is_empty()), "empty trained-exit prompt group");
+    let mut out = Packed {
+        ids: vec![],
+        pos: vec![],
+        node: vec![],
+        parent: vec![],
+        last: vec![0; tokens.len()],
+        prefix_len: 0,
+        state_len: 0,
+    };
+    let mut roots: Vec<(u32, Vec<usize>)> = Vec::new();
+    for (i, t) in tokens.iter().enumerate() {
+        if let Some((_, members)) = roots.iter_mut().find(|(id, _)| *id == t[0]) {
+            members.push(i);
+        } else {
+            roots.push((t[0], vec![i]));
+        }
+    }
+    let mut todo: Vec<_> = roots.into_iter().rev().map(|(_, members)| (members, 0, -1)).collect();
+    while let Some((members, start, parent)) = todo.pop() {
+        let first = tokens[members[0]];
+        let mut end = start;
+        while end < first.len() && members.iter().all(|&m| tokens[m].get(end) == first.get(end)) {
+            end += 1;
+        }
+        let block = out.parent.len() as u32;
+        out.parent.push(parent);
+        out.ids.extend_from_slice(&first[start..end]);
+        out.pos.extend(start as u32..end as u32);
+        out.node.extend(std::iter::repeat_n(block, end - start));
+        let mut children: Vec<(u32, Vec<usize>)> = Vec::new();
+        for m in members {
+            if tokens[m].len() == end {
+                out.last[m] = out.ids.len() - 1;
+            } else if let Some((_, group)) = children.iter_mut().find(|(id, _)| *id == tokens[m][end]) {
+                group.push(m);
+            } else {
+                children.push((tokens[m][end], vec![m]));
+            }
+        }
+        todo.extend(children.into_iter().rev().map(|(_, members)| (members, end, block as i32)));
+    }
+    out.prefix_len = out.node.iter().take_while(|&&n| n == 0).count();
+    Ok(out)
+}
+
 fn bucket(n: usize, xs: &[usize]) -> usize {
     xs.iter().copied().find(|x| n <= *x).unwrap_or(usize::MAX)
 }

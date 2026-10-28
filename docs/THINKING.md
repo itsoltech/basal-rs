@@ -141,7 +141,10 @@ jest praktycznie restrykcyjny. Osobny rzeczywisty check `host_bound <= pool`
 nadal odmawia `HOST_BUDGET_EXCEEDED`, gdy źródłowy bound bajtów hosta nie mieści
 się w puli. Żaden z tych wzorów nie jest zmierzonym kosztem ani szczytem pamięci.
 
-`basal-planner.4` rozróżnia nowy kontrakt. Profile batchy i ustawienia benchmarku
+`basal-planner.5` zachowuje kontrakt thinking wprowadzony w .4 i dodaje
+[trained early-exit](EARLY_EXIT.md). Głowice exit pochodzą z innego modelu
+1.0; loader odmawia łączenia obu opt-in i nie używa ich w think/ 2.0.
+Profile batchy i ustawienia benchmarku
 zawierają efektywne limity, osobną kalibrację (hash/off/missing), przypiętą
 tożsamość i hashe plików obu checkpointów, tokenizerów i konfiguracji oraz
 osobny plan obliczeń thinking. Nie zawierają lokalnych ścieżek tych źródeł.

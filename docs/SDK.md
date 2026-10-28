@@ -12,6 +12,11 @@ aktualizuje. Do czasu tej synchronizacji nie należy zakładać, że typed SDK
 udostępnia te opcje lub zachowuje nowe pola; można użyć bezpośredniego JSON HTTP
 albo dostarczanych narzędzi MCP.
 
+Serwer obsługuje też [trained early-exit](EARLY_EXIT.md): `early_exit`
+missing/null wybiera default, jawny string wymaga head-capable backendu
+(również `off`). Discovery dodaje rzeczywiste available i `early_exit_default`.
+Typed SDK i OpenAPI wymagają osobnej synchronizacji także dla tych pól.
+
 Hosty agentów mogą też użyć narzędzi `decide`/`decide_many` przez opcjonalne
 HTTP `/mcp` lub `basal mcp` (most stdio do `/v1/basal`). Transporty i schematy
 MCP dostarcza CLI z oficjalnym `rmcp 3.8.0`; cztery SDK HTTP zachowują własne

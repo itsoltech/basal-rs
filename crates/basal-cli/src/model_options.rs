@@ -15,6 +15,14 @@ use serde_json::{json, Value};
 
 #[derive(Args, Clone, Default, Deserialize)]
 pub(crate) struct ModelOptions {
+    /// Opt in to trained exits: off (head-capable full depth) or a policy from thresholds.json
+    #[arg(long)]
+    #[serde(default)]
+    pub early_exit: Option<String>,
+    /// Local directory with published heads.pt and thresholds.json (alone defaults to off)
+    #[arg(long)]
+    #[serde(default)]
+    pub exit_heads: Option<PathBuf>,
     /// Native second-checkpoint reasoning: off (default) or auto; only the published 2.0 4.5B pair
     #[arg(long, value_parser = ["off", "auto"])]
     #[serde(default)]
@@ -67,7 +75,9 @@ pub(crate) struct ModelOptions {
 
 impl ModelOptions {
     pub(crate) fn is_set(&self) -> bool {
-        self.think.is_some()
+        self.early_exit.is_some()
+            || self.exit_heads.is_some()
+            || self.think.is_some()
             || self.think_tokens.is_some()
             || self.think_max_len.is_some()
             || self.think_calibration.is_some()
@@ -82,6 +92,12 @@ impl ModelOptions {
     }
     /// Explicit shared CLI values override per-model YAML; one calibration source replaces the other.
     pub(crate) fn apply_cli(&mut self, cli: &Self) {
+        if cli.early_exit.is_some() {
+            self.early_exit.clone_from(&cli.early_exit);
+        }
+        if cli.exit_heads.is_some() {
+            self.exit_heads.clone_from(&cli.exit_heads);
+        }
         if cli.think.is_some() {
             self.think.clone_from(&cli.think);
         }
@@ -135,6 +151,10 @@ impl ModelOptions {
     }
 
     pub(crate) fn validate(&self) -> Result<()> {
+        ensure!(
+            !self.exits_enabled() || !self.thinking_enabled()?,
+            "trained exits cannot be combined with the distinct thinking checkpoint"
+        );
         self.thinking_enabled()?;
         self.think_settings()?;
         ensure!(!(self.no_calibration && self.calibration.is_some()), "calibration conflicts with no_calibration");
@@ -152,6 +172,21 @@ impl ModelOptions {
             "auto" => Ok(true),
             other => anyhow::bail!("unknown think {other:?} (off, auto)"),
         }
+    }
+
+    pub(crate) fn exits_enabled(&self) -> bool {
+        self.early_exit.is_some() || self.exit_heads.is_some()
+    }
+
+    pub(crate) fn load_exits(&self, manifest: &ModelManifest) -> Result<Option<basal_core::early_exit::ExitArtifacts>> {
+        if !self.exits_enabled() {
+            return Ok(None);
+        }
+        Ok(Some(basal_core::early_exit::ExitArtifacts::load(
+            manifest,
+            self.exit_heads.as_deref(),
+            self.early_exit.as_deref().unwrap_or("off"),
+        )?))
     }
 
     fn think_settings(&self) -> Result<basal_core::thinking::ThinkSettings> {

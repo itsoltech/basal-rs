@@ -289,7 +289,11 @@ pub(crate) fn run(model: &ModelArgs, gpu_options: &GpuArgs, options: &Options) -
 fn model_files(model: &ModelArgs, g: &GpuArgs, report: &mut Value) -> Result<(PathBuf, u64, ModelManifest)> {
     let mut configured = crate::config::model_ref(&model.model)?;
     configured.model_options = g.model_options.clone();
-    let dir = if g.model_options.thinking_enabled()? { crate::config::model_dir(&configured)? } else { model.dir()? };
+    let dir = if g.model_options.thinking_enabled()? || g.model_options.exits_enabled() {
+        crate::config::model_dir(&configured)?
+    } else {
+        model.dir()?
+    };
     let checkpoint_bytes = basal_core::checkpoint::bytes(&dir).context("checkpoint size")?;
     report["model"]["checkpoint_bytes"] = json!(checkpoint_bytes);
     let source = crate::config::model_ref(&model.model)?.source_name();
@@ -310,17 +314,37 @@ fn execute(
     let host = host_memory()?;
     // A layer split's coverage needs the model's config.json and is refused before any device context (each probe
     // below creates one), as in serve: its model files come next; one GPU keeps its device check before them.
-    let split_files = g
-        .layer_split
-        .as_ref()
-        .map(|split| {
-            let files = model_files(model, g, report)?;
-            // Refuse unsupported architecture-specific split options before the preflight.
-            crate::config::check_architecture(&files.2, quantization, true)?;
-            crate::config::check_split_coverage(&files.2.name, split, files.2.config.num_layers())?;
-            anyhow::Ok(files)
-        })
-        .transpose()?;
+    let split_files = if g.model_options.exits_enabled() {
+        let files = model_files(model, g, report)?;
+        let readout = match g.readout.as_str() {
+            "f32" => basal_gpu::Readout::F32,
+            "bf16" => basal_gpu::Readout::Bf16Rounded,
+            value => anyhow::bail!("unknown readout {value:?}"),
+        };
+        GpuBackend::check_early_exit(
+            basal_gpu::Kernels::parse(&g.kernels)?,
+            quantization,
+            readout,
+            g.layer_split.is_some(),
+            g.media,
+            &files.2.config,
+        )?;
+        let artifacts = g.model_options.load_exits(&files.2)?.context("trained exit artifacts")?;
+        report["model"]["exit_head_resident_bytes"] =
+            GpuBackend::early_exit_resident_bytes(&artifacts, &files.2.config)?.into();
+        Some(files)
+    } else {
+        g.layer_split
+            .as_ref()
+            .map(|split| {
+                let files = model_files(model, g, report)?;
+                // Refuse unsupported architecture-specific split options before the preflight.
+                crate::config::check_architecture(&files.2, quantization, true)?;
+                crate::config::check_split_coverage(&files.2.name, split, files.2.config.num_layers())?;
+                anyhow::Ok(files)
+            })
+            .transpose()?
+    };
     // one GPU, or the stages of a layer split in order: the first one is the device the top-level fields describe,
     // `layer_split` reports every stage's device (only with a split)
     let devices = g.devices();
@@ -377,7 +401,10 @@ fn execute(
         },
         "estimate from format arithmetic (checkpoint size; q8_0 / q4_k: projection matrices at Q8_0 / Q4_K block size with padding), not a measurement");
     // The supported pair has identical tensor shapes, file sizes and load precision, with independent weights.
-    let weight_bytes = weight_bytes.checked_mul(resident_models).context("dual-model weight estimate overflow")?;
+    let weight_bytes = weight_bytes
+        .checked_mul(resident_models)
+        .and_then(|n| n.checked_add(report["model"]["exit_head_resident_bytes"].as_u64().unwrap_or(0)))
+        .context("resident model/head weight estimate overflow")?;
     report["model"]["estimated_weight_bytes"] =
         json!({"bytes": weight_bytes, "quantization": quantization.as_str(), "method": method});
     report["model"]["estimated_resident_weight_bytes"] = json!(weight_bytes);
@@ -508,6 +535,8 @@ fn execute(
         engine.context_overflow(),
     );
     report["settings"]["thinking"] = engine.thinking_profile();
+    report["settings"]["early_exit"] =
+        engine.backend.early_exit_caps().map(basal_core::early_exit::profile).unwrap_or(Value::Null);
     let probes = engine.backend.memory_probes();
     let host = host_memory()?;
     let gpu = engine.backend.memory()?;

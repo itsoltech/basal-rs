@@ -48,6 +48,7 @@ pub struct PlanOptions {
 /// loaded backend ([`PlanCaps::from_backend`]); media are planned through the backend's shared media processor.
 #[derive(Clone)]
 pub struct PlanCaps {
+    pub early_exit: Option<crate::early_exit::ExitCaps>,
     pub thinking: Option<crate::thinking::ThinkCaps>,
     pub has_evidence: bool,
     pub media_kinds: Vec<crate::media::Kind>,
@@ -73,17 +74,32 @@ impl PlanCaps {
         let processor = backend.media_processor();
         let media_unavailable = (!kinds.is_empty() && processor.is_none())
             .then(|| "this backend takes media but exposes no shared media processor for offline planning".into());
-        Self { thinking: None, has_evidence: backend.has_evidence(), media_kinds: kinds, processor, media_unavailable }
+        Self {
+            early_exit: backend.early_exit_caps().cloned(),
+            thinking: None,
+            has_evidence: backend.has_evidence(),
+            media_kinds: kinds,
+            processor,
+            media_unavailable,
+        }
     }
 
     /// Text-only capabilities (no media, no evidence head).
     pub fn text_only() -> Self {
-        Self { thinking: None, has_evidence: false, media_kinds: Vec::new(), processor: None, media_unavailable: None }
+        Self {
+            early_exit: None,
+            thinking: None,
+            has_evidence: false,
+            media_kinds: Vec::new(),
+            processor: None,
+            media_unavailable: None,
+        }
     }
 }
 
 /// Capabilities a [`PlanContext`] asks for lazily (the online path queries its backend only where it did before).
 pub(crate) trait PlanCapabilities {
+    fn early_exit(&self) -> Option<&crate::early_exit::ExitCaps>;
     fn thinking(&self) -> Option<&crate::thinking::ThinkCaps>;
     fn has_evidence(&self) -> bool;
     fn media_kinds(&self) -> Vec<crate::media::Kind>;
@@ -101,6 +117,9 @@ pub(crate) trait PlanCapabilities {
 pub(crate) struct BackendCaps<'b, B: ?Sized>(pub(crate) &'b B, pub(crate) Option<&'b crate::thinking::ThinkCaps>);
 
 impl<B: crate::Backend + ?Sized> PlanCapabilities for BackendCaps<'_, B> {
+    fn early_exit(&self) -> Option<&crate::early_exit::ExitCaps> {
+        self.0.early_exit_caps()
+    }
     fn thinking(&self) -> Option<&crate::thinking::ThinkCaps> {
         self.1
     }
@@ -125,6 +144,9 @@ impl<B: crate::Backend + ?Sized> PlanCapabilities for BackendCaps<'_, B> {
 }
 
 impl PlanCapabilities for PlanCaps {
+    fn early_exit(&self) -> Option<&crate::early_exit::ExitCaps> {
+        self.early_exit.as_ref()
+    }
     fn thinking(&self) -> Option<&crate::thinking::ThinkCaps> {
         self.thinking.as_ref()
     }
@@ -593,6 +615,7 @@ impl<'a> PlanContext<'a> {
         self.check_stop()?;
         // Before task expansion: enabled defaults and explicit active modes refuse tasks without a forward.
         crate::thinking::ThinkRequest::parse(body, self.caps.thinking())?;
+        crate::early_exit::request_policy(body, self.caps.early_exit(), dialect)?;
         // Parsing and task expansion clone state, options and JSON before token preparation. Include the retained
         // task text/character indexes and transient expansion copies, not only the final rendered prompts.
         let items_bound = if self.budget.is_bounded() && self.truncates() {
@@ -651,6 +674,10 @@ impl<'a> PlanContext<'a> {
         dialect: crate::request::Dialect,
     ) -> Result<RequestPlan, PlanError> {
         let thinking = crate::thinking::ThinkRequest::parse(body, self.caps.thinking())?;
+        let early_exit = crate::early_exit::request_policy(body, self.caps.early_exit(), dialect)?;
+        if self.budget.is_bounded() && early_exit.as_deref().is_some_and(|s| s != "off") {
+            return Err(UnboundedFeature("trained early-exit Candle units/grid, dense masks and FP32 adapters have no source-derived execution bound".into()).into());
+        }
         if self.manifest.layout != PromptLayout::Canonical {
             if let Some(field) =
                 ["media", "assets"].into_iter().find(|field| body.get(*field).is_some_and(|v| !v.is_null()))
@@ -663,7 +690,7 @@ impl<'a> PlanContext<'a> {
                 .into());
             }
         }
-        for field in ["early_exit", "thinking"] {
+        for field in ["thinking"] {
             if body.get(field).is_some_and(|v| !v.is_null()) {
                 return Err(DecideError::Unsupported(vec![crate::request::FieldError::new(
                     vec!["body".into(), field.into()],
@@ -819,6 +846,7 @@ impl<'a> PlanContext<'a> {
         plan.evidence_limit = req.facts_limit;
         plan.dialect = dialect;
         plan.thinking = thinking;
+        plan.early_exit = early_exit;
         plan.thinking_caps = self.caps.thinking().cloned();
         if let Some(caps) = crate::thinking::active_caps(&plan).filter(|_| self.budget.is_bounded()) {
             if caps.host_staging.is_none() {
@@ -1065,6 +1093,7 @@ impl<'a> PlanContext<'a> {
         media: Option<Arc<crate::media::ProcessedMedia>>,
     ) -> Result<RequestPlan, PlanError> {
         let mut plan = RequestPlan {
+            early_exit: self.caps.early_exit().map(|c| c.default_policy().to_owned()),
             thinking: crate::thinking::ThinkRequest::default(),
             thinking_caps: None,
             tasks: None,
@@ -1547,6 +1576,9 @@ pub struct DeviceWorkShape {
 impl DeviceWorkShape {
     /// Bounds of running `plans` together (one micro-batch) under `limits`.
     pub fn from_plans(plans: &[&RequestPlan], limits: &ShapeLimits) -> Result<Self, UnmodelledShape> {
+        if plans.iter().any(|p| p.early_exit.as_deref().is_some_and(|s| s != "off")) {
+            return Err(UnmodelledShape("trained exit units/grid and FP32 adapters have no device work bound".into()));
+        }
         let as_u64 = |n: usize| n as u64;
         let mut total = 0u64;
         let mut largest_question = 0u64;
@@ -1816,6 +1848,9 @@ pub fn exec_bound(
     result_bound: u64,
     staging: Option<&HostStaging>,
 ) -> Option<u64> {
+    if plan.early_exit.as_deref().is_some_and(|s| s != "off") {
+        return None;
+    }
     let staging = staging?;
     let thinking = match crate::thinking::active_caps(plan) {
         Some(c) => c.host_bound(plan)?,

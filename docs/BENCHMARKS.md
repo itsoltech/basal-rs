@@ -654,3 +654,12 @@ obejmują oba modele. Porównanie generation/P2 wymaga tych samych pełnych wag,
 precision, promptów i rzeczywistej wersji vLLM odniesienia. Pico/Mini kwalifikują
 wyłącznie off i odmowy; statyczne kontrole nie potwierdzają parytetu tokenów,
 numeryki ani czasu nowej ścieżki.
+
+Opt-in [trained early-exit](EARLY_EXIT.md) zapisuje weights/heads/thresholds
+SHA-256, efektywny default, available oraz kontrakt request-isolated units/chunks.
+Preflight dodaje rzeczywistą liczbę rezydentnych bajtów FP32 głowic po walidacji
+CPU. Nie ma boundu ani pomiaru nowego gridu, dense masks i transient adapterów.
+Kwalifikacja musi porównać policy/depth i każdy surowy readout z przypiętym
+upstream FP32 oraz potwierdzić skip-tail, fallback >3072 i izolację klientów.
+Pico/Mini nie mają trained heads i nie są dodatnią kwalifikacją; wszystkie
+takie wyniki, w tym wydajność i bitowa zgodność off z bazą, pozostają GAP.

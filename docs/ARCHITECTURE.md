@@ -34,6 +34,16 @@ snapshotu HF dostarcza repo i rozwiązany commit.
 `serve` buduje metadane z silnika, a planer batchy z jego sklonowanego manifestu.
 API pokazuje ostrzeżenie kalibracji bez lokalnych ścieżek i tożsamości.
 
+Opt-in [early_exit](EARLY_EXIT.md) ładuje przypięte wytrenowane głowice
+basal-1.0-4.5B tylko dla CUDA Llama/Candle bez split. PlanCaps przechowuje
+available/default, RequestPlan efektywną niezmienną politykę. Aktywne plany
+rozdzielamy przed zwykłym Tree flatten; osobne dokładne units/chunks zachowują
+mapowanie readoutów we wszystkich rundach. Callback po pełnym residual update
+wylicza trained FP32 RMSNorm/adapter/LM readout i może zakończyć pętlę warstw.
+Fused/ragged nie wykonuje głowic i odmawia ich aktywacji. Aktywny forward
+omija cache; off zachowuje dotychczasowy path. Brak boundów dla nowych
+padded/FP32 buforów daje jawne UNBOUNDED_FEATURE w bounded plannerze.
+
 Opcjonalny `thinking.rs` przechowuje drugi backend tego samego typu z pełnymi
 wagami `think/`, własnym tokenizerem i kalibracją canonical/order1. Po pełnym P1
 `Engine::run_plans` wykonuje bounded greedy przez pełny vocabulary readout,

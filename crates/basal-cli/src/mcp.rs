@@ -227,6 +227,8 @@ fn tool(many: bool) -> Tool {
         json!({"type":"boolean",
         "description":"Include generated reasoning text when a thought succeeds (default false)."}),
     );
+    properties.insert("early_exit".into(), json!({"type":["string","null"],
+        "description":"Trained exit policy from model metadata, or null for its default. Requires an enabled trained-head backend, even for explicit off."}));
     let schema = json!({"type": "object", "properties": properties, "required": required});
     Tool::new(name, description, schema.as_object().expect("object schema").clone())
         .with_annotations(ToolAnnotations::new().read_only(true).destructive(false).idempotent(true).open_world(false))
@@ -239,7 +241,7 @@ fn native_body(name: &str, mut args: Map<String, Value>) -> Result<Value> {
     anyhow::ensure!(state.is_string() || state.is_object(), "state must be a string or object");
     let mut body = Map::new();
     body.insert("state".into(), state);
-    for field in ["think", "think_text"] {
+    for field in ["think", "think_text", "early_exit"] {
         if let Some(value) = args.remove(field) {
             body.insert(field.into(), value);
         }

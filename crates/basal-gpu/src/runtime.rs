@@ -36,6 +36,56 @@ pub enum RuntimeBackend {
 }
 
 impl RuntimeBackend {
+    /// Validate the actual pickle tensor inventory on CPU; exact FP32 resident head bytes, before device work.
+    pub fn early_exit_resident_bytes(
+        artifacts: &basal_core::early_exit::ExitArtifacts,
+        cfg: &Architecture,
+    ) -> Result<usize> {
+        let cfg = cfg.llama()?;
+        Ok(crate::early_exit::ExitHeads::load(artifacts, cfg.hidden, cfg.num_layers)?.resident_bytes)
+    }
+
+    /// Refuse unsupported combinations before any device discovery, GEMM tuning or weight upload.
+    pub fn check_early_exit(
+        kernels: Kernels,
+        quantization: Quantization,
+        readout: Readout,
+        split: bool,
+        media: bool,
+        cfg: &Architecture,
+    ) -> Result<()> {
+        anyhow::ensure!(cfg!(feature = "cuda") && !cfg!(target_os = "macos")
+            && matches!(cfg, Architecture::Llama(_)) && kernels == Kernels::Candle
+            && quantization == Quantization::None && readout == Readout::F32 && !split && !media,
+            "trained early_exit supports only single-device CUDA Llama with explicit Candle kernels, quantization none, FP32 readout and text input; fused, split, Metal, Intel, Gemma and Qwen are unsupported");
+        Ok(())
+    }
+
+    /// Published trained-head opt-in. Ordinary constructors/loaders remain plain and never read heads.
+    pub fn load_planned_with_exits(
+        dir: &Path,
+        cfg: &Architecture,
+        plan: &ResolvedExecutionPlan,
+        placement: PlannedPlacement<'_>,
+        media: bool,
+        artifacts: &basal_core::early_exit::ExitArtifacts,
+    ) -> Result<(Self, Option<usize>)> {
+        Self::check_early_exit(
+            plan.kernels(),
+            plan.quantization(),
+            plan.readout(),
+            matches!(placement, PlannedPlacement::Split(_)),
+            media,
+            cfg,
+        )?;
+        artifacts.check_model_dir(dir)?;
+        let (mut backend, classes) = Self::load_planned(dir, cfg, plan, placement, media)?;
+        match &mut backend {
+            Self::Llama(b) => b.enable_early_exit(artifacts)?,
+            _ => anyhow::bail!("trained exits require the CUDA Llama backend"),
+        }
+        Ok((backend, classes))
+    }
     /// Refuse Gemma configurations whose cross-layer state is not placed by the layer-split implementation.
     pub fn check_gemma_split(cfg: &basal_core::architecture::GemmaConfig) -> Result<()> {
         crate::gemma::GemmaBackend::check_split_config(cfg)
@@ -350,6 +400,23 @@ impl RuntimeBackend {
 }
 
 impl Backend for RuntimeBackend {
+    fn early_exit_caps(&self) -> Option<&basal_core::early_exit::ExitCaps> {
+        match self {
+            Self::Llama(b) => b.early_exit_caps(),
+            _ => None,
+        }
+    }
+    fn letter_logits_with_policy(
+        &mut self,
+        rows: &[&Packed],
+        letters: &[&[Vec<u32>]],
+        policy: &str,
+    ) -> Result<Vec<Vec<Vec<f32>>>> {
+        match self {
+            Self::Llama(b) => b.letter_logits_with_policy(rows, letters, policy),
+            _ => anyhow::bail!("this architecture/backend has no trained early-exit implementation"),
+        }
+    }
     fn media_kinds(&self) -> Vec<basal_core::media::Kind> {
         match self {
             Self::Gemma(b) => b.media_kinds(),

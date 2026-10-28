@@ -36,9 +36,16 @@ P2 zachowuje formuły confidence dialektu. Każda odpowiedź enabled serwera ma
 `meta.think`; sukces dodatkowo `think` z liczbą tokenów, czasem, etykietą
 osobnej kalibracji i rozkładem P1, a tekst tylko na jawne żądanie.
 
+Opcjonalne [wytrenowane early-exit](EARLY_EXIT.md) przyjmuje top-level
+`early_exit`: brak/null wybiera default backendu; jawny string musi być
+dostępny. Plain backend odmawia również `"off"`. TypeSafe wymaga string/null,
+native stosuje string coercion. Media odmawiają jawnego override. Aktywne
+plany mają izolowane units/chunks, także w kolejnych rundach i tasks.
+
 `GET /v1/models` zwraca listę TypeSafe `ModelMetadataList` (`name`,
 `description`, `release_date`) z polami upstream `mode` i `early_exit`
-(pusta lista: runtime nie stosuje wczesnego wyjścia). `release_date` ustawia
+(pusta lista: plain backend). Po opt-in `early_exit` zawiera inventory
+polityk i `off`, a `early_exit_default` pokazuje default. `release_date` ustawia
 `basal serve --release-date`.
 
 Metadane zawierają również `prompt_format`, efektywne `orders`,

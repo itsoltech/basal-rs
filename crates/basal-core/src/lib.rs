@@ -6,6 +6,7 @@ mod budget;
 pub mod calibration;
 pub mod checkpoint;
 pub mod decision;
+pub mod early_exit;
 pub mod engine;
 pub mod evidence;
 pub mod execution;

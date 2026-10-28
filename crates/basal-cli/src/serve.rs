@@ -1137,6 +1137,10 @@ fn metadata_for_model<B: Backend>(engine: &Engine<B>) -> Value {
         metadata["layout"] = manifest.layout.as_str().into();
     }
     let thinking = engine.thinking_profile();
+    if let Some(caps) = engine.backend.early_exit_caps() {
+        metadata["early_exit"] = json!(caps.available());
+        metadata["early_exit_default"] = caps.default_policy().into();
+    }
     if thinking["mode"] == "auto" {
         metadata["think"] = json!({"default":"auto","available":["off","auto","force"],
             "limits":thinking["limits"], "calibration":thinking["calibration"]});

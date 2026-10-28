@@ -668,6 +668,14 @@ pub fn cached_model_dir(repo: &str, revision: Option<&str>) -> Option<PathBuf> {
 pub fn model_dir(m: &ModelConfig) -> Result<PathBuf> {
     m.model_options.validate()?;
     let thinking = m.model_options.thinking_enabled()?;
+    let exits = m.model_options.exits_enabled();
+    if exits && m.repo.is_some() {
+        ensure!(
+            m.repo.as_deref() == Some(basal_core::early_exit::EXIT_REPO)
+                && m.revision.as_deref() == Some(basal_core::early_exit::EXIT_REVISION),
+            "trained exits acquisition requires the published repository and immutable revision"
+        );
+    }
     if thinking && m.repo.is_some() {
         ensure!(
             m.repo.as_deref() == Some(basal_core::thinking::THINK_REPO)
@@ -680,13 +688,15 @@ pub fn model_dir(m: &ModelConfig) -> Result<PathBuf> {
             ensure!(m.revision.is_none(), "model {}: revision needs repo", crate::term::P(&p));
             Ok(p.clone())
         }
-        (None, Some(repo)) => download(repo, m.revision.as_deref(), thinking),
+        (None, Some(repo)) => {
+            download(repo, m.revision.as_deref(), thinking, exits && m.model_options.exit_heads.is_none())
+        }
         (Some(_), Some(_)) => bail!("model entry: give either path or repo, not both"),
         (None, None) => bail!("model entry: needs path or repo"),
     }
 }
 
-fn download(repo: &str, revision: Option<&str>, thinking: bool) -> Result<PathBuf> {
+fn download(repo: &str, revision: Option<&str>, thinking: bool, exits: bool) -> Result<PathBuf> {
     let (owner, name) = repo.split_once('/').with_context(|| format!("repo {repo:?}: expected owner/name"))?;
     let client = hf_hub::HFClientSync::new().context("Hugging Face client")?;
     let r = client.model(owner, name);
@@ -696,6 +706,9 @@ fn download(repo: &str, revision: Option<&str>, thinking: bool) -> Result<PathBu
     let mut files: Vec<String> = MODEL_FILES.iter().map(|f| f.to_string()).collect();
     if thinking {
         files.extend(["think/*.json", "think/*.safetensors", "think/chat_template.jinja"].map(str::to_string));
+    }
+    if exits {
+        files.extend(["exit_heads/heads.pt", "exit_heads/thresholds.json"].map(str::to_string));
     }
     crate::progress!("{repo}@{at}: fetching the model files (Hugging Face cache)");
     let t = std::time::Instant::now();

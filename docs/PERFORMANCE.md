@@ -7,6 +7,13 @@ wynik w różnych konfiguracjach. Każda liczba pochodzi z raportu w
 karcie. W ścieżkach serwowanych upstream liczy w BF16, a basal-rs w f16; na
 Apple Silicon porównanie obejmuje także upstream w f16.
 
+[Wytrenowane early-exit](EARLY_EXIT.md) izoluje aktywne żądania przed
+grupowaniem readoutów; zwykłe off zachowuje obecny batching. Sąsiedni klient
+nie może zmienić wybranej głowicy. To odpowiada upstream `--deterministic`,
+bez obietnicy zgodności z jego cross-request groupingiem. Brak pomiarów
+nowej ścieżki 4.5B: nie deklarujemy przyspieszenia, bitowej powtarzalności
+nowego kernela ani utrzymania jakości na podstawie etykiet polityk.
+
 ## basal-2.0 — bieżąca kampania NVIDIA
 
 [Raport 2026-10-14](../reports/perf-basal2-fivegpu-2026-10-14/README.md)

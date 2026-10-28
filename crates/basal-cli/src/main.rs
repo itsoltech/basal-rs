@@ -663,6 +663,10 @@ fn planning_engine(
     orders: Option<&str>,
     options: &model_options::ModelOptions,
 ) -> Result<Engine<NoBackend>> {
+    anyhow::ensure!(
+        !options.exits_enabled(),
+        "this prepare-only command has no trained-head backend; use the loaded engine for early_exit planning"
+    );
     let mut model = config::model_ref(&m.model)?;
     model.model_options = options.clone();
     let manifest = options.load_manifest(&config::model_dir(&model)?, orders, &model.source_name())?;
@@ -737,8 +741,23 @@ fn planned_engine_from_manifest(
         r => bail!("unknown readout {r:?} (f32, bf16)"),
     };
     let profile = models::profile_for(&manifest);
-    let precision = config::model_precision(&g.dtype, &manifest, g.devices()[0])?;
     let kernels = Kernels::parse(&g.kernels)?;
+    // Before precision/device/GEMM work below, heads are validated from the exact published model.
+    if g.model_options.exits_enabled() {
+        GpuBackend::check_early_exit(
+            kernels,
+            quantization,
+            readout,
+            g.layer_split.is_some(),
+            g.media,
+            &manifest.config,
+        )?;
+    }
+    let exits = g.model_options.load_exits(&manifest)?;
+    if let Some(artifacts) = &exits {
+        GpuBackend::early_exit_resident_bytes(artifacts, &manifest.config)?;
+    }
+    let precision = config::model_precision(&g.dtype, &manifest, g.devices()[0])?;
     if let Some(split) = &g.layer_split {
         // the stages must cover the model's layers exactly: checked before any weight is read
         config::check_split_coverage(&manifest.name, split, manifest.config.num_layers())?;
@@ -809,11 +828,14 @@ fn planned_engine_from_manifest(
             basal_core::thinking::Thinking::new(t.manifest, backend, t.settings, t.eos, t.calibration_label, t.sources)
         })
         .transpose()?;
-    let (mut backend, gemm_classes) = GpuBackend::load_planned(dir, &manifest.config, &plan, placement, g.media)
-        .with_context(|| match &g.layer_split {
-            None => format!("loading {}", manifest.name),
-            Some(split) => format!("loading {} with layer split {split}", manifest.name),
-        })?;
+    let loaded = match &exits {
+        Some(exits) => GpuBackend::load_planned_with_exits(dir, &manifest.config, &plan, placement, g.media, exits),
+        None => GpuBackend::load_planned(dir, &manifest.config, &plan, placement, g.media),
+    };
+    let (mut backend, gemm_classes) = loaded.with_context(|| match &g.layer_split {
+        None => format!("loading {}", manifest.name),
+        Some(split) => format!("loading {} with layer split {split}", manifest.name),
+    })?;
     match &g.layer_split {
         None => crate::done!("{} loaded on GPU {} in {:.1}s", manifest.name, g.device(), backend.load_s()),
         Some(split) => {
@@ -1312,6 +1334,24 @@ fn run() -> Result<()> {
                 let quantization: Quantization =
                     mc.quantization.parse().with_context(|| format!("model {}", manifest.name))?;
                 config::check_architecture(manifest, quantization, placement.split().is_some())?;
+                if mc.model_options.exits_enabled() {
+                    let readout = match g.readout.as_str() {
+                        "f32" => Readout::F32,
+                        "bf16" => Readout::Bf16Rounded,
+                        value => bail!("unknown readout {value:?}"),
+                    };
+                    GpuBackend::check_early_exit(
+                        Kernels::parse(&g.kernels)?,
+                        quantization,
+                        readout,
+                        placement.split().is_some(),
+                        mc.media,
+                        &manifest.config,
+                    )?;
+                    if let Some(artifacts) = mc.model_options.load_exits(manifest)? {
+                        GpuBackend::early_exit_resident_bytes(&artifacts, &manifest.config)?;
+                    }
+                }
                 if let Some(split) = placement.split() {
                     config::check_split_coverage(&manifest.name, split, manifest.config.num_layers())?;
                 }

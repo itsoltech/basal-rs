@@ -35,6 +35,11 @@ Przy aktywacji model może wygenerować ograniczone notatki i wykonać drugi
 readout. `decide` zachowuje pola `think`/`meta.think` pojedynczej odpowiedzi;
 `decide_many` także usage. Szczegóły: [THINKING.md](THINKING.md).
 
+Oba narzędzia przekazują też opcjonalne `early_exit` string/null do tego
+samego dispatchera. Missing/null wybiera default; jawny string, w tym `off`,
+wymaga head-capable backendu i dostępnej polityki. Units/chunks pozostają
+izolowane per request; obsługiwany model, opt-in i GAP: [EARLY_EXIT.md](EARLY_EXIT.md).
+
 Oba narzędzia deklarują `readOnlyHint=true`, `destructiveHint=false`,
 `idempotentHint=true`, `openWorldHint=false`. SDK zwraca obiekt
 `structuredContent` oraz tekstowy JSON dla starszych klientów. Błędy

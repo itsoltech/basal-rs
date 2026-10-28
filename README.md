@@ -335,6 +335,11 @@ tokenizer; niezgodność z obsługiwanym kontraktem promptu kończy się błęde
 
 ## Serwer
 
+Opcjonalne [wytrenowane early-exit](docs/EARLY_EXIT.md) obsługuje opublikowany
+basal-1.0-4.5B na pojedynczym CUDA z jawnym `--kernels candle --early-exit off`.
+Pominięcie `early_exit` i `exit_heads` pozostawia plain backend bez głowic.
+Polityka requestu jest izolowana; dodatnia kwalifikacja 4.5B pozostaje GAP.
+
 Opcjonalne [natywne thinking](docs/THINKING.md) uruchamia generowanie i drugi
 readout na osobnym pełnym checkpoincie opublikowanego modelu 2.0 4.5B.
 `--think off` jest domyślne i nie ładuje drugiego modelu. Włączenie wymaga

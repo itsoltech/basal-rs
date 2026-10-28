@@ -22,7 +22,7 @@ use super::store::{Fingerprint, PlannerVersion, WorkerTarget};
 
 /// Contract version of offline planning: bump it whenever prompts, planning or result serialization change, so
 /// queued batches are never executed by a different planner.
-pub(crate) const PLANNER_VERSION: &str = "basal-planner.4";
+pub(crate) const PLANNER_VERSION: &str = "basal-planner.5";
 
 /// Files of a model directory that change its results (in this order); missing optional files are recorded as
 /// absent. Safetensors shards come from `model.safetensors.index.json` when present.
@@ -104,6 +104,8 @@ impl ModelProfile {
             engine.context_overflow(),
         );
         numeric["thinking"] = engine.thinking_profile();
+        numeric["early_exit"] =
+            engine.backend.early_exit_caps().map(basal_core::early_exit::profile).unwrap_or(Value::Null);
         mask_device_ordinals(&mut numeric["thinking"]);
         Ok(Self {
             name,

@@ -36,6 +36,7 @@ use serde_json::{json, Value};
 
 #[cfg(feature = "cuda")]
 mod cublaslt;
+mod early_exit;
 mod fused;
 mod gemma;
 mod gemma_encoders;
@@ -602,6 +603,8 @@ struct StageWeights {
 /// Readout weights of the last stage.
 #[derive(Clone)]
 struct Head {
+    /// Immutable trained exits on this head's device, protected by the stage's bind/loss ownership rules.
+    exits: Option<Arc<early_exit::ExitHeads>>,
     norm: Tensor,
     /// bf16 (checkpoint dtype); only the letter rows are gathered and converted to f32 per call.
     lm_head: Tensor,
@@ -1637,6 +1640,28 @@ fn check(st: &MmapedSafetensors, name: &str, shape: &[usize]) -> Result<()> {
 }
 
 impl GpuBackend {
+    /// Only called by the validated planned loader, before prefixes, gates or execution lanes exist.
+    fn enable_early_exit(&mut self, artifacts: &basal_core::early_exit::ExitArtifacts) -> Result<()> {
+        ensure!(
+            self.is_cuda()
+                && self.stages.len() == 1
+                && self.kernels == Kernels::Candle
+                && self.quantization == Quantization::None
+                && self.readout == Readout::F32,
+            "trained exits require single CUDA Llama, Candle kernels, no quantization"
+        );
+        ensure!(self.prefixes.is_empty(), "enable trained exits before prefix warmup");
+        let heads = early_exit::ExitHeads::load(artifacts, self.cfg.hidden, self.cfg.num_layers)?;
+        let stage = &mut self.stages[0];
+        let head = stage.w.get_mut().head.as_mut().context("single stage holds the LM head")?;
+        head.exits = Some(Arc::new(heads));
+        // No fork exists at this load boundary; the stage already owns every partially uploaded tensor.
+        Arc::get_mut(head.exits.as_mut().context("exit heads just installed")?)
+            .context("exit heads cannot be shared before upload")?
+            .upload(&stage.dev)?;
+        Ok(())
+    }
+
     /// Load a model onto GPU `device`. `quantization` sets the format of the projection weights; a quantized format is
     /// checked against `precision`, `kernels` and this build's backend before anything is opened.
     ///
@@ -1988,7 +2013,7 @@ impl GpuBackend {
                                 reader.read("lm_head.weight", &mut bytes)?;
                                 Tensor::from_raw_buffer(&bytes, DType::BF16, v.shape(), dev)?
                             };
-                            w.head = Some(Head { norm, lm_head, evidence: None });
+                            w.head = Some(Head { norm, lm_head, evidence: None, exits: None });
                         }
                         // q8_0: load Candle's QUANTIZED module and its dequantization kernel now (a first use may
                         // compile the module's PTX), by dequantizing the smallest projection matrix of the stage's first
@@ -2279,6 +2304,26 @@ impl GpuBackend {
         l: usize,
         read: &[u32],
     ) -> Result<Tensor> {
+        match self.forward_padded_exit(ids, cos_sin, mask, b, l, read, None)? {
+            early_exit::PaddedOutput::Hidden(hidden) => Ok(hidden),
+            early_exit::PaddedOutput::Exit(_) => bail!("unexpected trained exit on ordinary forward"),
+        }
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "existing padded input shape plus an optional request-local exit callback"
+    )]
+    fn forward_padded_exit(
+        &self,
+        ids: &[u32],
+        cos_sin: &[f32],
+        mask: &[f32],
+        b: usize,
+        l: usize,
+        read: &[u32],
+        mut exit: Option<&mut early_exit::ExitCheck<'_>>,
+    ) -> Result<early_exit::PaddedOutput> {
         ensure!(self.stages.len() == 1, "the candle kernel set runs a model on one GPU only");
         let c = &self.cfg;
         let (h, nh, nkv, hd) = (c.hidden, c.heads, c.kv_heads, c.head_dim);
@@ -2305,7 +2350,7 @@ impl GpuBackend {
                 let cos = cs.narrow(0, 0, half)?.reshape((b, l, hd / 2))?;
                 let sin = cs.narrow(0, half, half)?.reshape((b, l, hd / 2))?;
                 let inter = c.intermediate;
-                for ly in &sw.layers {
+                for (layer, ly) in sw.layers.iter().enumerate() {
                     let a = rms_norm(&x, &self.w(&ly.ln1)?, eps)?;
                     self.mark(dev, &mut t, "rms_norm")?;
                     let qkv = self.linear(&a, ly.wqkv.dense()?, &ly.bqkv)?;
@@ -2347,10 +2392,15 @@ impl GpuBackend {
                     self.mark(dev, &mut t, "bias+silu*up")?;
                     x = (x + self.linear(&act, ly.wdown.dense()?, &ly.bdown)?)?;
                     self.mark(dev, &mut t, "down_proj+bias+residual")?;
+                    if let Some(check) = exit.as_mut() {
+                        if let Some(logits) = check(layer + 1, &x.index_select(&read_t, 0)?)? {
+                            return Ok(early_exit::PaddedOutput::Exit(logits));
+                        }
+                    }
                 }
                 let out = rms_norm(&x.index_select(&read_t, 0)?, &self.w(&head.norm)?, eps)?;
                 self.mark(dev, &mut t, "final_norm")?;
-                Ok(out)
+                Ok(early_exit::PaddedOutput::Hidden(out))
             }
         }
     }
@@ -3504,6 +3554,79 @@ impl GpuBackend {
 }
 
 impl Backend for GpuBackend {
+    fn early_exit_caps(&self) -> Option<&basal_core::early_exit::ExitCaps> {
+        self.head().ok()?.exits.as_ref().map(|h| &h.caps)
+    }
+
+    fn letter_logits_with_policy(
+        &mut self,
+        rows: &[&Packed],
+        letters: &[&[Vec<u32>]],
+        policy: &str,
+    ) -> Result<Vec<Vec<Vec<f32>>>> {
+        let heads = self.head()?.exits.as_ref().context("trained exits were not enabled at startup")?;
+        heads.caps.thresholds(policy)?;
+        if policy == "off" {
+            return self.letter_logits(rows, letters);
+        }
+        ensure!(!self.lineage.health.is_lost(), LOST);
+        ensure!(!rows.is_empty() && rows.len() == letters.len(), "invalid exit batch");
+        for (row, codes) in rows.iter().zip(letters) {
+            ensure!(!row.ids.is_empty() && row.last.len() == codes.len(), "invalid exit readout shape");
+            ensure!(
+                row.pos.iter().all(|&p| (p as usize) < self.cfg.max_positions),
+                "exit prompt exceeds context length"
+            );
+            ensure!(codes.iter().flatten().all(|&id| (id as usize) < self.cfg.vocab), "exit code outside vocabulary");
+        }
+        let longest = rows.iter().map(|r| r.ids.len()).max().unwrap_or(0);
+        let short = longest <= 3072;
+        let (b, l) = if short {
+            let l = basal_core::early_exit::length_bucket(longest).context("exit length bucket")?;
+            let b = basal_core::early_exit::batch_bucket(rows.len()).context("exit batch bucket")?;
+            ensure!(b * l <= basal_core::pack::TOKEN_BUDGET, "exit chunk exceeds padded token budget");
+            (b, l)
+        } else {
+            ensure!(rows.len() == 1, "oversize exit units must run individually at full depth");
+            (1, longest)
+        };
+        let owners = self.gate_owners();
+        let mut gates = StageGates::new(&owners);
+        let result = (|| {
+            gates.switch_to(0)?;
+            // Dummy rows create only padding, never readouts or gates. Actual rows retain their mapping.
+            let empty = Packed {
+                ids: vec![],
+                pos: vec![],
+                node: vec![],
+                parent: vec![],
+                last: vec![],
+                prefix_len: 0,
+                state_len: 0,
+            };
+            let mut padded = rows.to_vec();
+            padded.resize(b, &empty);
+            let (ids, cs, mask, read) = self.padded_inputs(&padded, l);
+            let lm = &self.head()?.lm_head;
+            let mut check = |layer, raw: &Tensor| {
+                gates.checkpoint()?;
+                if short {
+                    heads.readout(layer, raw, self.cfg.rms_eps, lm, letters, policy)
+                } else {
+                    Ok(None)
+                }
+            };
+            let output = self.forward_padded_exit(&ids, &cs, &mask, b, l, &read, Some(&mut check))?;
+            let logits = match output {
+                early_exit::PaddedOutput::Exit(logits) => logits,
+                early_exit::PaddedOutput::Hidden(hidden) => early_exit::project(&hidden, lm, letters)?,
+            };
+            gates.mark_drained();
+            Ok(logits)
+        })();
+        gates.end(result)
+    }
+
     /// Per stage, the larger of the letter forward and (with an evidence head) the evidence forward, from
     /// `GpuBackend::stage_work`. Unknown for the paths without a source-derived bound: the candle reference
     /// kernels (padded rows with dense masks), the dense-mask SDPA attention (`BASAL_ATT=sdpa`), the state cache
@@ -3781,6 +3904,13 @@ impl Backend for GpuBackend {
             },
         });
         // `none` keeps the description above unchanged
+        if let Some(heads) = self.head().ok().and_then(|h| h.exits.as_ref()) {
+            d["early_exit"] = basal_core::early_exit::profile(&heads.caps);
+            d["early_exit"]["resident_head_bytes"] = heads.resident_bytes.into();
+            d["early_exit"]["readout"] =
+                "FP32 trained RMSNorm + residual adapter + frozen LM code rows; FP32 code softmax".into();
+            d["early_exit"]["execution_bounds"] = "UNBOUNDED_FEATURE: active Candle grid/dense masks/FP32 buffers; bounded/background execution unavailable".into();
+        }
         #[cfg(feature = "cuda")]
         if let Some(stats) = &self.quant_stats {
             d["weights"] = match stats {

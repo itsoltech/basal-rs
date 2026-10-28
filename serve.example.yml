@@ -57,6 +57,11 @@ models:
     strict_calibration: false      # explicit file identity mismatch: false warns/retains, true refuses startup
     auto_tau: 0.6                  # finite [0,1]; adaptive orders only
     # Native thinking: ONLY basal-2.0-4.5B at e5ba9149760d99b73b1963d8e0ccf948b58afacb with full think/ weights.
+    # Trained exits: ONLY Remek/basal-1.0-4.5B@b95288041cb1975bb930c6f0410819273fd2f54f.
+    # Run that model with global CLI --kernels candle --readout f32 (single CUDA, no quantization/media/thinking).
+    # early_exit: "off"            # explicit opt-in to head-capable full-depth default; omitted both = plain backend
+    # exit_heads: ./exit_heads     # optional local published heads.pt + thresholds.json; alone defaults to off
+    # A request's early_exit overrides this default immutably. Details and qualification GAP: docs/EARLY_EXIT.md.
     # think: off                   # off (default, no second download/load) or auto
     # think_tokens: 256            # positive, +16 below think_max_len
     # think_max_len: 8192          # additionally capped by the actual think checkpoint context
