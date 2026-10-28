@@ -465,6 +465,9 @@ impl GemmaBackend {
             return Err(crate::InferenceConfigError::CacheInitialized);
         }
         crate::inference::check_plan(plan)?;
+        if plan.kernel_set() != crate::KernelSet::V1 {
+            return Err(crate::InferenceConfigError::PlanMismatch("Gemma kernel set"));
+        }
         if plan.precision() != self.precision || plan.readout() != self.readout {
             return Err(crate::InferenceConfigError::PlanMismatch("precision or readout"));
         }

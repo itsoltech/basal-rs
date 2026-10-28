@@ -520,6 +520,14 @@ pub fn gpu_device(device: usize) -> Result<Device> {
     bail!("no GPU backend in this build for device {device} (macOS: Metal; Linux: build with --features cuda)")
 }
 
+/// Fixed pointwise arithmetic, selected before any cache or lane exists.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum LlamaNumerics {
+    #[default]
+    Ordinary,
+    ThinkBf16,
+}
+
 pub struct GpuBackend {
     /// Consecutive layer ranges in layer order, each on its own GPU; one stage holds the whole model on one GPU (the
     /// path without a layer split). Never empty.
@@ -543,6 +551,7 @@ pub struct GpuBackend {
     precision: Precision,
     readout: Readout,
     kernels: Kernels,
+    numerics: LlamaNumerics,
     /// Fixed before prefix warmup and copied to every execution lane.
     attention_override: Option<&'static str>,
     /// CUDA: the attention kernel the device rule fixed for the GPU of each stage (by stage): set by the public
@@ -2142,6 +2151,7 @@ impl GpuBackend {
             kernels,
             attention_override: None,
             attention_defaults: Vec::new(),
+            numerics: LlamaNumerics::Ordinary,
             inv_freq,
             rope: rope.into(),
             load_s,
@@ -2249,6 +2259,29 @@ impl GpuBackend {
             }
         }
         Ok(x.matmul(&w.t()?)?)
+    }
+
+    /// Ordinary leaves the bias for the fused consumer. Thinking uses the stage's existing, bias-only Lt;
+    /// the bias epilogue precedes the final BF16 store (heuristic split-K reduction remains deferred).
+    fn project<'b>(
+        &self,
+        sw: &StageWeights,
+        x: &Tensor,
+        w: &ProjWeight,
+        b: &'b Tensor,
+    ) -> Result<(Tensor, Option<&'b Tensor>)> {
+        if self.numerics == LlamaNumerics::Ordinary {
+            return Ok((self.matmul_t(sw, x, w)?, Some(b)));
+        }
+        #[cfg(feature = "cuda")]
+        {
+            ensure!(x.is_contiguous(), "thinking projection requires contiguous input");
+            let ProjWeight::Dense(w) = w else { bail!("thinking projection requires dense weights") };
+            let lt = sw.lt.as_ref().context("thinking projection requires the stage's cuBLASLt handle")?;
+            Ok((cublaslt::matmul_nt_bias(lt, x, w, b)?, None))
+        }
+        #[cfg(not(feature = "cuda"))]
+        bail!("thinking BF16 projections require CUDA")
     }
 
     /// f16 values of resident Q8_0 or Q4_K blocks, on the blocks' own candle device (their stage's, checked at load).
@@ -2607,20 +2640,27 @@ impl GpuBackend {
                 None => rms_norm(&x, &self.w(&ly.ln1)?, eps)?,
             };
             self.mark(dev, t, "rms_norm")?;
-            let qkv = self.matmul_t(sw, &a, &ly.wqkv)?;
+            let (qkv, bias) = self.project(sw, &a, &ly.wqkv, &ly.bqkv)?;
             self.mark(dev, t, "qkv_proj")?;
             // CUDA tensor-core attention: K and V come split into hi / lo planes from the same kernel
             #[cfg(feature = "cuda")]
-            let (_flat, q, k, v, hl) = if ragged_cuda && self.tc_attention() {
-                let v_lo = self.precision != Precision::F16;
-                let (fl, q, k, v, hl) = fused::qkv_rope_hilo(&qkv, &self.w(&ly.bqkv)?, &cs, f.dims, v_lo, capture)?;
-                (fl, q, k, v, Some(hl))
-            } else {
-                let (fl, q, k, v) = fused::qkv_rope(&qkv, &self.w(&ly.bqkv)?, &cs, f.dims)?;
-                (fl, q, k, v, None)
+            let (_flat, q, k, v, hl) = {
+                let bias = bias.map(|b| self.w(b)).transpose()?;
+                if ragged_cuda && self.tc_attention() {
+                    let v_lo = self.precision != Precision::F16;
+                    let (fl, q, k, v, hl) =
+                        fused::qkv_rope_hilo(&qkv, bias.as_ref(), &cs, f.dims, v_lo, capture, self.numerics)?;
+                    (fl, q, k, v, Some(hl))
+                } else {
+                    let (fl, q, k, v) = fused::qkv_rope(&qkv, bias.as_ref(), &cs, f.dims, self.numerics)?;
+                    (fl, q, k, v, None)
+                }
             };
             #[cfg(not(feature = "cuda"))]
-            let (_flat, q, k, v) = fused::qkv_rope(&qkv, &self.w(&ly.bqkv)?, &cs, f.dims)?;
+            let (_flat, q, k, v) = {
+                let bias = bias.map(|b| self.w(b)).transpose()?;
+                fused::qkv_rope(&qkv, bias.as_ref(), &cs, f.dims, self.numerics)?
+            };
             self.mark(dev, t, "bias+rope+heads")?;
             #[cfg(feature = "cuda")]
             let ragged_o = if ragged_cuda {
@@ -2729,15 +2769,27 @@ impl GpuBackend {
                 o = o.index_select(rt, 0)?;
                 x = x.index_select(rt, 0)?;
             }
-            let y = self.matmul_t(sw, &o, &ly.wo)?;
+            let (y, bias) = self.project(sw, &o, &ly.wo, &ly.bo)?;
             let a;
-            (x, a) = self.residual_norm(dev, &x, &y, &ly.bo, &ly.ln2, eps)?;
+            #[cfg(feature = "cuda")]
+            if self.numerics == LlamaNumerics::ThinkBf16 {
+                (x, a) = fused::residual_rmsnorm_mid(&x, &y, &self.w(&ly.ln2)?, eps)?;
+            } else {
+                (x, a) = self.residual_norm(dev, &x, &y, bias, &ly.ln2, eps)?;
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                (x, a) = self.residual_norm(dev, &x, &y, bias, &ly.ln2, eps)?;
+            }
             self.mark(dev, t, "o_proj+bias+residual+rms_norm")?;
-            let gu = self.matmul_t(sw, &a, &ly.wgu)?;
+            let (gu, bias) = self.project(sw, &a, &ly.wgu, &ly.bgu)?;
             self.mark(dev, t, "gate_up_proj")?;
-            let act = fused::bias_silu_mul(&gu, &self.w(&ly.bgu)?)?;
+            let act = {
+                let bias = bias.map(|b| self.w(b)).transpose()?;
+                fused::bias_silu_mul(&gu, bias.as_ref(), self.numerics)?
+            };
             self.mark(dev, t, "bias+silu*up")?;
-            let y = self.matmul_t(sw, &act, &ly.wdown)?;
+            let (y, bias) = self.project(sw, &act, &ly.wdown, &ly.bdown)?;
             if dev.is_cuda() {
                 // the next block's RMSNorm (at a boundary: of the next stage's first block, through its copy
                 // `next_ln1`, the same values), after the last block the final norm
@@ -2750,16 +2802,17 @@ impl GpuBackend {
                 };
                 if i + 1 == sw.layers.len() && !last_stage {
                     // the residual stream and its normalised copy as the one buffer the next stage receives
-                    let buf = self.boundary_norm(&x, &y, &ly.bdown, ln, eps)?;
+                    let buf = self.boundary_norm(&x, &y, bias.context("ordinary boundary bias")?, ln, eps)?;
                     x = buf.get(0)?;
                     boundary = Some(buf);
                 } else {
                     let a;
-                    (x, a) = self.residual_norm(dev, &x, &y, &ly.bdown, ln, eps)?;
+                    (x, a) = self.residual_norm(dev, &x, &y, bias, ln, eps)?;
                     normed = Some(a);
                 }
             } else {
-                x = fused::bias_residual(&x, &y, &self.w(&ly.bdown)?)?;
+                ensure!(self.numerics == LlamaNumerics::Ordinary, "thinking residual requires CUDA");
+                x = fused::bias_residual(&x, &y, &self.w(bias.context("ordinary residual bias")?)?)?;
             }
             self.mark(dev, t, "down_proj+bias+residual")?;
             if let Some(rm) = &self.residual_max {
@@ -2819,17 +2872,19 @@ impl GpuBackend {
         dev: &Device,
         x: &Tensor,
         y: &Tensor,
-        b: &Tensor,
+        b: Option<&Tensor>,
         ln: &Tensor,
         eps: f32,
     ) -> Result<(Tensor, Tensor)> {
         #[cfg(feature = "cuda")]
         if dev.is_cuda() {
-            return Ok(fused::residual_rmsnorm(x, y, &self.w(b)?, &self.w(ln)?, eps)?);
+            let b = b.map(|b| self.w(b)).transpose()?;
+            return Ok(fused::residual_rmsnorm(x, y, b.as_ref(), &self.w(ln)?, eps, self.numerics)?);
         }
         #[cfg(not(feature = "cuda"))]
         let _ = dev;
-        let x = fused::bias_residual(x, y, &self.w(b)?)?;
+        ensure!(self.numerics == LlamaNumerics::Ordinary, "thinking residual requires CUDA");
+        let x = fused::bias_residual(x, y, &self.w(b.context("ordinary residual bias")?)?)?;
         let a = rms_norm(&x, &self.w(ln)?, eps)?;
         Ok((x, a))
     }
@@ -2837,6 +2892,7 @@ impl GpuBackend {
     /// [`GpuBackend::residual_norm`] of a stage's last layer before a boundary (CUDA): the same kernel and values, as
     /// its one `[2, M, H]` buffer.
     fn boundary_norm(&self, x: &Tensor, y: &Tensor, b: &Tensor, ln: &Tensor, eps: f32) -> Result<Tensor> {
+        ensure!(self.numerics == LlamaNumerics::Ordinary, "thinking numerics do not support stage boundaries");
         #[cfg(feature = "cuda")]
         return Ok(fused::residual_rmsnorm_buf(x, y, &self.w(b)?, &self.w(ln)?, eps)?);
         #[cfg(not(feature = "cuda"))]
@@ -2853,6 +2909,9 @@ impl GpuBackend {
                 let (c, s) = row.split_at(d / 2);
                 cos.copy_from_slice(c);
                 sin.copy_from_slice(s);
+            }
+            None if self.numerics == LlamaNumerics::ThinkBf16 => {
+                think_rope_angles(self.cfg.rope_theta, pos as f32, cos, sin)
             }
             None => rope_angles(&self.inv_freq, pos, cos, sin),
         }
@@ -3125,6 +3184,9 @@ impl GpuBackend {
     }
 
     fn gemm_desc(&self) -> &'static str {
+        if self.numerics == LlamaNumerics::ThinkBf16 {
+            return "cuBLASLt bias epilogues, f32 accumulation, heuristic RuntimeTiming; split-K may round partial sums to BF16";
+        }
         #[cfg(feature = "cuda")]
         if let Some(lt) = &self.stages[0].w.get().lt {
             // every stage loads the same table in the same mode (load_gemm_table)
@@ -3143,7 +3205,11 @@ impl GpuBackend {
         {
             let tuning = |lt: &cublaslt::Lt| {
                 let t = lt.tuned.lock().unwrap();
-                json!({"from_table": *lt.from_table.lock().unwrap(), "tuned_at_run_time": t.iter().map(|e| json!({"m_class": e.m_class, "n": e.n, "k": e.k, "ms": e.ms, "heuristic_first_ms": e.heuristic_ms})).collect::<Vec<_>>()})
+                let mut v = json!({"from_table": *lt.from_table.lock().unwrap(), "tuned_at_run_time": t.iter().map(|e| json!({"m_class": e.m_class, "n": e.n, "k": e.k, "ms": e.ms, "heuristic_first_ms": e.heuristic_ms})).collect::<Vec<_>>()});
+                if self.numerics == LlamaNumerics::ThinkBf16 {
+                    v["kind"] = "bias_epilogue_timings_not_table_entries".into();
+                }
+                v
             };
             if !self.split() {
                 return self.stages[0].w.get().lt.as_deref().map_or(Value::Null, tuning);
@@ -3172,6 +3238,7 @@ impl GpuBackend {
     /// same mode. `name` names the table in messages. With `table_only` (a reproducible plan) only a
     /// batch-invariant table of the forward's dtype is accepted and a GEMM without its algorithm is an error.
     pub fn load_gemm_table(&mut self, v: &Value, name: &str, table_only: bool) -> Result<usize> {
+        ensure!(self.numerics == LlamaNumerics::Ordinary, "thinking bias-only cuBLASLt does not accept GEMM tables");
         #[cfg(feature = "cuda")]
         if self.stages.iter().all(|s| s.w.get().lt.is_some()) {
             ensure!(
@@ -3294,6 +3361,17 @@ fn rope_angles(inv_freq: &[f64], pos: f64, cos: &mut [f32], sin: &mut [f32]) {
         let a = pos * f;
         cos[j] = a.cos() as f32;
         sin[j] = a.sin() as f32;
+    }
+}
+
+/// C1: f32 inverse-frequency/power and angle; host f64 trig rounded through f32 to BF16. Device-libm ulps are deferred.
+fn think_rope_angles(base: f64, pos: f32, cos: &mut [f32], sin: &mut [f32]) {
+    let d = 2 * cos.len();
+    for j in 0..cos.len() {
+        let inv = 1.0f32 / (base as f32).powf((2 * j) as f32 / d as f32);
+        let angle = pos * inv;
+        cos[j] = bf16_round((angle as f64).cos() as f32);
+        sin[j] = bf16_round((angle as f64).sin() as f32);
     }
 }
 
@@ -3568,6 +3646,10 @@ impl GpuBackend {
         // o projection, residual + norm, gate/up, SiLU*up, down projection
         t.add(prod(&[m, h, e]));
         t.add_n(2, prod(&[m, h, e]));
+        if self.numerics == LlamaNumerics::ThinkBf16 {
+            // C3': unrounded s0 through the MLP; add counts bytes and one allocation slot.
+            t.add(prod(&[m, h, 4]));
+        }
         t.add(prod(&[m, 2, i, e]));
         t.add(prod(&[m, i, e]));
         t.add(prod(&[m, h, e]));
@@ -3892,6 +3974,7 @@ impl Backend for GpuBackend {
             kernels: self.kernels,
             attention_override: self.attention_override,
             attention_defaults: self.attention_defaults.clone(),
+            numerics: self.numerics,
             inv_freq: self.inv_freq.clone(),
             rope: self.rope.clone(),
             load_s: 0.0,
@@ -4067,6 +4150,14 @@ impl Backend for GpuBackend {
                 Kernels::Candle => "full",
             },
         });
+        if self.numerics == LlamaNumerics::ThinkBf16 {
+            d["think_numerics"] = "upstream-bf16-pointwise".into();
+            d["activations"] = "BF16 layer boundaries and norm/MLP outputs; f32 interior residual through MLP".into();
+            d["attention"] =
+                "BF16-valued q/k/v in f32 backing, BF16 RoPE table from host f32 recipe; existing attention kernels"
+                    .into();
+            d["kernels"] = "basal-llama-think-bf16-pointwise.1: bias epilogue before final BF16 store, BF16 q/k stores, f32 SiLU through up multiply, unrounded interior residual; no parity guarantee".into();
+        }
         // `none` keeps the description above unchanged
         if let Some(heads) = self.head().ok().and_then(|h| h.exits.as_ref()) {
             d["early_exit"] = basal_core::early_exit::profile(&heads.caps);

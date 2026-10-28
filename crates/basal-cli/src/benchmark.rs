@@ -376,6 +376,7 @@ fn execute(
         Some(files) => files,
         None => model_files(model, g, report)?,
     };
+    crate::check_thinking_gpu_options(g)?;
     let thinking = g.model_options.load_thinking(&manifest)?;
     let resident_models = if thinking.is_some() { 2 } else { 1 };
     if thinking.is_some() {

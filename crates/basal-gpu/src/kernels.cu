@@ -1945,3 +1945,110 @@ extern "C" __global__ void qwen35_masked_softmax_##S(const float *scores, const 
 }
 QWEN35_SOFTMAX(__half, f16)
 QWEN35_SOFTMAX(__nv_bfloat16, bf16)
+
+// Thinking-only BF16 entries are isolated so adding the profile cannot alter old template instantiations.
+// The projection epilogue already applied the bias. Retain the unused pointer in the qkv/SiLU ABI only.
+extern "C" __global__ void silu_mul_tb_bf16(const __nv_bfloat16 *gu, const __nv_bfloat16 *, __nv_bfloat16 *out,
+                                            unsigned I, unsigned total) {
+    unsigned id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (id >= total) return;
+    unsigned m = id / I, i = id % I;
+    float g = to_f(gu[(size_t)m * 2 * I + i]);
+    float u = to_f(gu[(size_t)m * 2 * I + I + i]);
+    out[id] = from_f<__nv_bfloat16>((g / (1.0f + expf(-g))) * u);
+}
+
+extern "C" __global__ void silu_mul8_tb_bf16(const __nv_bfloat16 *gu, const __nv_bfloat16 *, __nv_bfloat16 *out,
+                                             unsigned I, unsigned total8) {
+    unsigned id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (id >= total8) return;
+    unsigned m = id / (I / 8), i = (id % (I / 8)) * 8;
+    uint4 gv = *reinterpret_cast<const uint4 *>(gu + (size_t)m * 2 * I + i);
+    uint4 uv = *reinterpret_cast<const uint4 *>(gu + (size_t)m * 2 * I + I + i);
+    const __nv_bfloat16 *g8 = reinterpret_cast<const __nv_bfloat16 *>(&gv);
+    const __nv_bfloat16 *u8 = reinterpret_cast<const __nv_bfloat16 *>(&uv);
+    uint4 ov;
+    __nv_bfloat16 *o8 = reinterpret_cast<__nv_bfloat16 *>(&ov);
+#pragma unroll
+    for (int e = 0; e < 8; e++) {
+        float g = to_f(g8[e]), u = to_f(u8[e]);
+        o8[e] = from_f<__nv_bfloat16>((g / (1.0f + expf(-g))) * u);
+    }
+    *reinterpret_cast<uint4 *>(out + (size_t)m * I + i) = ov;
+}
+
+// C3': mid writes s0 as f32; end writes the residual as BF16. Both normalize the unrounded f32 sum.
+template <typename RI, typename RO>
+__device__ void think_residual_rmsnorm(const RI *x, const __nv_bfloat16 *y, const __nv_bfloat16 *alpha,
+                                      RO *xo, __nv_bfloat16 *no, unsigned H, float eps) {
+    const int row = blockIdx.x, tid = threadIdx.x, bs = blockDim.x;
+    float tmp = 0.0f;
+    for (int col = tid; col < H; col += bs) {
+        size_t i = (size_t)row * H + col;
+        float v = to_f(x[i]) + to_f(y[i]);
+        xo[i] = from_f<RO>(v);
+        tmp += v * v;
+    }
+    tmp = warp_sum_xor(tmp);
+    if (bs > 32) {
+        __shared__ float s_sum[32];
+        int warp_id = tid / 32, lane_id = tid % 32;
+        if (lane_id == 0) s_sum[warp_id] = tmp;
+        __syncthreads();
+        tmp = warp_sum_xor(s_sum[lane_id]);
+    }
+    const float scale = rsqrtf(tmp / H + eps);
+    for (int col = tid; col < H; col += bs) {
+        size_t i = (size_t)row * H + col;
+        float v = to_f(x[i]) + to_f(y[i]);
+        no[i] = from_f<__nv_bfloat16>(scale * v * to_f(alpha[col]));
+    }
+}
+
+extern "C" __global__ void residual_rmsnorm_tb_mid_bf16(const __nv_bfloat16 *r, const __nv_bfloat16 *o,
+    const __nv_bfloat16 *alpha, float *s0, __nv_bfloat16 *normed, unsigned H, unsigned M, float eps) {
+    think_residual_rmsnorm(r, o, alpha, s0, normed, H, eps);
+}
+
+extern "C" __global__ void residual_rmsnorm_tb_end_bf16(const float *s0, const __nv_bfloat16 *d,
+    const __nv_bfloat16 *alpha, __nv_bfloat16 *out, unsigned H, unsigned M, float eps) {
+    think_residual_rmsnorm(s0, d, alpha, out, out + (size_t)M * H, H, eps);
+}
+
+extern "C" __global__ void qkv_rope_tb_bf16(const __nv_bfloat16 *qkv, const __nv_bfloat16 *, const float *cs,
+    float *out, unsigned B, unsigned L, unsigned NH, unsigned NKV, unsigned HD, __half *hl, unsigned flags) {
+    unsigned id = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned hd2 = HD / 2, heads = NH + 2 * NKV;
+    if (id >= B * L * heads * hd2) return;
+    unsigned d = id % hd2, t = id / hd2, j = t % heads;
+    t /= heads;
+    unsigned l = t % L, b = t / L;
+    size_t row = (size_t)(b * L + l) * heads * HD;
+    unsigned col = j * HD;
+    float x1 = to_f(qkv[row + col + d]), x2 = to_f(qkv[row + col + d + hd2]);
+    float y1 = x1, y2 = x2;
+    if (j < NH + NKV) {
+        unsigned ci = (b * L + l) * hd2 + d;
+        float c = cs[ci], s = cs[B * L * hd2 + ci];
+        y1 = rt<__nv_bfloat16>(x1 * c - x2 * s);
+        y2 = rt<__nv_bfloat16>(x2 * c + x1 * s);
+    }
+    size_t base;
+    unsigned hh, nh;
+    if (j < NH) { base = 0; hh = j; nh = NH; }
+    else if (j < NH + NKV) { base = (size_t)B * NH * L * HD; hh = j - NH; nh = NKV; }
+    else { base = (size_t)B * (NH + NKV) * L * HD; hh = j - NH - NKV; nh = NKV; }
+    size_t o = base + ((size_t)(b * nh + hh) * L + l) * HD + d;
+    if (j < NH || !(flags & QR_NO_KV32)) { out[o] = y1; out[o + hd2] = y2; }
+    if (j >= NH && (flags & QR_HILO)) {
+        const size_t nk = (size_t)B * NKV * L * HD, i = o - (size_t)B * NH * L * HD;
+        const bool isv = i >= nk;
+        __half *hi = hl + (isv ? nk + i : i);
+        __half h1 = __float2half_rn(y1), h2 = __float2half_rn(y2);
+        hi[0] = h1; hi[hd2] = h2;
+        if (!isv || (flags & QR_VLO)) {
+            hi[nk] = __float2half_rn(y1 - __half2float(h1));
+            hi[nk + hd2] = __float2half_rn(y2 - __half2float(h2));
+        }
+    }
+}

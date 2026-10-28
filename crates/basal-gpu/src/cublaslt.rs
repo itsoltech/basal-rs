@@ -518,7 +518,8 @@ impl Lt {
     }
 
     /// Exhaustive search of cuBLASLt configurations for one shape on the given operands (f32 accumulation; split-K
-    /// only with f32 reduction). Returns the fastest valid algorithm, its time, the heuristic's first choice time and
+    /// in the search's own configurations uses f32 reduction; heuristic candidates retain their reduction scheme).
+    /// Returns the fastest valid algorithm, its time, the heuristic's first choice time and
     /// the number of valid configurations timed.
     ///
     /// # Safety
@@ -1291,7 +1292,6 @@ impl CustomOp3 for LtMatmulBias<'_> {
 /// First-use timing may synchronize the stream. As with [`matmul_nt`], the model gate must serialize shared lanes
 /// through their GPU drain. Use a dedicated `Lt`; its untagged [`Tuned`] bias diagnostics are not ordinary tables.
 /// Static checks do not establish numerical parity with another backend or algorithm.
-#[expect(dead_code, reason = "Bias epilogue foundation; thinking projections adopt this API in the next slice")]
 pub fn matmul_nt_bias(lt: &Lt, x: &Tensor, w: &Tensor, b: &Tensor) -> Result<Tensor> {
     x.apply_op3_no_bwd(w, b, &LtMatmulBias(lt))
 }

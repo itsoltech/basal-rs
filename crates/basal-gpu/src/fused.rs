@@ -1,7 +1,8 @@
-//! Fused kernels as candle custom ops: Metal (kernels.metal) and CUDA (kernels.cu, same arithmetic and rounding
-//! points). Each replaces several candle element-wise kernels and the strided copies between them; the GEMMs, RMSNorm
-//! and attention stay candle/MLX/cuBLAS kernels.
+//! Fused kernels as candle custom ops: Metal (kernels.metal) and CUDA (kernels.cu). Ordinary entries share arithmetic
+//! and rounding points; CUDA thinking selects separate BF16 entries. Each replaces several candle element-wise
+//! kernels and strided copies; projections and attention use the existing candle/MLX/cuBLAS paths.
 
+use crate::LlamaNumerics;
 #[cfg(any(target_os = "macos", feature = "cuda"))]
 use candle_core::backend::BackendStorage;
 #[cfg(target_os = "macos")]
@@ -254,7 +255,19 @@ pub(crate) use qwen35::{
     qwen35_recurrent, qwen35_recurrent_packed, qwen35_swiglu,
 };
 
-struct BiasSiluMul;
+/// Thinking inputs already include the GEMM bias; ordinary consumers require it here.
+fn check_numerics(numerics: LlamaNumerics, x: &Tensor, bias: Option<&Tensor>) -> Result<()> {
+    if (numerics == LlamaNumerics::ThinkBf16) != bias.is_none() {
+        candle_core::bail!("fused numerics: ThinkBf16 requires no bias, Ordinary requires a bias");
+    }
+    if numerics == LlamaNumerics::ThinkBf16 && (x.dtype() != DType::BF16 || !x.device().is_cuda()) {
+        candle_core::bail!("ThinkBf16 requires CUDA BF16 activations");
+    }
+    Ok(())
+}
+
+#[cfg_attr(not(feature = "cuda"), expect(dead_code, reason = "numerics selects CUDA entry points only"))]
+struct BiasSiluMul(LlamaNumerics);
 
 impl CustomOp2 for BiasSiluMul {
     fn name(&self) -> &'static str {
@@ -277,7 +290,17 @@ impl CustomOp2 for BiasSiluMul {
             let out = unsafe { dev.alloc::<T>(total)? };
             // 8 outputs per thread with 16-byte accesses when the layout allows it (same arithmetic per element)
             let vec8 = S != "f32" && i % 8 == 0 && go % 8 == 0 && bo % 8 == 0;
-            let name = if vec8 { format!("bias_silu_mul8_{S}") } else { format!("bias_silu_mul_{S}") };
+            let name = if self.0 == LlamaNumerics::ThinkBf16 {
+                if vec8 {
+                    "silu_mul8_tb_bf16".into()
+                } else {
+                    "silu_mul_tb_bf16".into()
+                }
+            } else if vec8 {
+                format!("bias_silu_mul8_{S}")
+            } else {
+                format!("bias_silu_mul_{S}")
+            };
             let f = cu::func(&dev, &name, "basal_fused", cu::ptx)?;
             let mut a = f.builder();
             let threads = if vec8 { total / 8 } else { total };
@@ -333,17 +356,46 @@ impl CustomOp2 for BiasSiluMul {
     }
 }
 
-/// `silu(gate + b_gate) * (up + b_up)` for `gu = [M, 2I]` (gate | up) and `bias = [2I]`.
-pub fn bias_silu_mul(gu: &Tensor, bias: &Tensor) -> Result<Tensor> {
-    gu.apply_op2_no_bwd(bias, &BiasSiluMul)
+/// Ordinary: `silu(gate + b_gate) * (up + b_up)` for `gu = [M, 2I]`, `bias = [2I]`.
+/// ThinkBf16: bias-free BF16 gu, f32 SiLU through the multiply and one final BF16 store.
+pub(crate) fn bias_silu_mul(gu: &Tensor, bias: Option<&Tensor>, numerics: LlamaNumerics) -> Result<Tensor> {
+    check_numerics(numerics, gu, bias)?;
+    // The thinking entry never reads the bias pointer. Borrow gu as the unused CustomOp operand.
+    gu.apply_op2_no_bwd(bias.unwrap_or(gu), &BiasSiluMul(numerics))
 }
 
-/// `(T(x + T(y + b)), RMSNorm(that) * alpha)` in one CUDA kernel: the residual add of a linear output and the RMSNorm
+/// Ordinary: `(T(x + T(y + b)), RMSNorm(that) * alpha)` in one CUDA kernel: the residual add and the RMSNorm
 /// of the next block, bitwise as [`bias_residual`] followed by candle's `rms_norm` (same arithmetic and summation
 /// order), with one read of the residual stream instead of two. Returns (x, normed) as views of one [2, M, H] buffer.
+/// ThinkBf16 end: f32 x plus BF16 y, no bias, variance/norm from the unrounded sum, both outputs BF16.
 #[cfg(feature = "cuda")]
-pub fn residual_rmsnorm(x: &Tensor, y: &Tensor, b: &Tensor, alpha: &Tensor, eps: f32) -> Result<(Tensor, Tensor)> {
-    let out = residual_rmsnorm_buf(x, y, b, alpha, eps)?;
+pub(crate) fn residual_rmsnorm(
+    x: &Tensor,
+    y: &Tensor,
+    b: Option<&Tensor>,
+    alpha: &Tensor,
+    eps: f32,
+    numerics: LlamaNumerics,
+) -> Result<(Tensor, Tensor)> {
+    check_numerics(numerics, y, b)?;
+    let out = if numerics == LlamaNumerics::ThinkBf16 {
+        if x.dtype() != DType::F32 {
+            candle_core::bail!("ThinkBf16 end residual requires f32 s0");
+        }
+        check_think_residual(x, y, alpha)?;
+        x.apply_op2_no_bwd(y, &ThinkResidualNorm { alpha: alpha.clone(), eps, normed: None })?
+    } else {
+        if x.dtype() != y.dtype() {
+            candle_core::bail!("Ordinary residual dtypes must match");
+        }
+        residual_rmsnorm_buf(
+            x,
+            y,
+            b.ok_or_else(|| candle_core::Error::Msg("ordinary residual bias".into()))?,
+            alpha,
+            eps,
+        )?
+    };
     Ok((out.get(0)?, out.get(1)?))
 }
 
@@ -428,6 +480,107 @@ impl CustomOp3 for ResidualRmsNorm {
             <T as candle_core::cuda_backend::CudaDType>::wrap_cuda_slice(out, dev.clone())
         });
         Ok((st, Shape::from((2, m, h))))
+    }
+}
+
+#[cfg(feature = "cuda")]
+fn check_think_residual(x: &Tensor, y: &Tensor, alpha: &Tensor) -> Result<()> {
+    let (m, h) = x.dims2()?;
+    if m == 0
+        || h == 0
+        || y.dims() != [m, h]
+        || alpha.dims() != [h]
+        || y.dtype() != DType::BF16
+        || alpha.dtype() != DType::BF16
+        || !x.device().is_cuda()
+        || x.device().location() != y.device().location()
+        || x.device().location() != alpha.device().location()
+        || !x.is_contiguous()
+        || !y.is_contiguous()
+        || !alpha.is_contiguous()
+    {
+        candle_core::bail!("thinking residual requires contiguous CUDA [M,H] operands and BF16 alpha[H] on one device");
+    }
+    Ok(())
+}
+
+/// C3' mid: keep f32(o + r) through the MLP, with a separate BF16 normalized output.
+#[cfg(feature = "cuda")]
+pub(crate) fn residual_rmsnorm_mid(r: &Tensor, o: &Tensor, alpha: &Tensor, eps: f32) -> Result<(Tensor, Tensor)> {
+    check_think_residual(r, o, alpha)?;
+    if r.dtype() != DType::BF16 {
+        candle_core::bail!("thinking mid residual requires BF16 r");
+    }
+    // SAFETY: the mid kernel writes every element of this local output on the same per-thread stream. The local
+    // and the op's clone retain its storage through enqueue; it is returned alongside s0 and never read early.
+    let normed = unsafe { Tensor::empty(r.shape(), DType::BF16, r.device())? };
+    let s0 = r.apply_op2_no_bwd(o, &ThinkResidualNorm { alpha: alpha.clone(), eps, normed: Some(normed.clone()) })?;
+    Ok((s0, normed))
+}
+
+#[cfg(feature = "cuda")]
+struct ThinkResidualNorm {
+    alpha: Tensor,
+    eps: f32,
+    /// Some: mid kernel, with this separate BF16 output. None: end kernel, one `[2,M,H]` BF16 buffer.
+    normed: Option<Tensor>,
+}
+
+#[cfg(feature = "cuda")]
+impl CustomOp2 for ThinkResidualNorm {
+    fn name(&self) -> &'static str {
+        "thinking-residual-rmsnorm"
+    }
+    fn cpu_fwd(&self, _: &CpuStorage, _: &Layout, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> {
+        no_cpu()
+    }
+    fn cuda_fwd(&self, x: &CudaStorage, xl: &Layout, y: &CudaStorage, yl: &Layout) -> Result<(CudaStorage, Shape)> {
+        use candle_core::cuda_backend::{
+            cudarc::driver::{LaunchConfig, PushKernelArg},
+            WrapErr,
+        };
+        let (m, h) = xl.shape().dims2()?;
+        let dev = x.device.clone();
+        let (ast, al) = self.alpha.storage_and_layout();
+        let candle_core::Storage::Cuda(alpha) = &*ast else {
+            candle_core::bail!("thinking alpha must be CUDA");
+        };
+        let av = view!(alpha, half::bf16, contiguous(al, "alpha")?);
+        let yv = view!(y, half::bf16, contiguous(yl, "y")?);
+        let (h_, m_, eps) = (h as u32, m as u32, self.eps);
+        let cfg = LaunchConfig {
+            grid_dim: (m_, 1, 1),
+            block_dim: (if h < 1024 { 32 } else { 1024 }, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        if let Some(normed) = &self.normed {
+            let (nst, nl) = normed.storage_and_layout();
+            let candle_core::Storage::Cuda(ns) = &*nst else {
+                candle_core::bail!("thinking norm output must be CUDA");
+            };
+            let nv = view!(ns, half::bf16, contiguous(nl, "normed")?);
+            let xv = view!(x, half::bf16, contiguous(xl, "r")?);
+            // SAFETY: the mid kernel initializes all m*h f32 values before either output is consumed.
+            let out = unsafe { dev.alloc::<f32>(m * h)? };
+            let f = cu::func(&dev, "residual_rmsnorm_tb_mid_bf16", "basal_fused", cu::ptx)?;
+            let mut a = f.builder();
+            a.arg(&xv).arg(&yv).arg(&av).arg(&out).arg(&nv).arg(&h_).arg(&m_).arg(&eps);
+            // SAFETY: wrappers validate contiguous shapes/dtypes/device. One block writes each row of s0 and
+            // normed, on the same PTDS. Both output owners and all input/alpha storage borrows outlive launch.
+            unsafe { a.launch(cfg) }.w()?;
+            Ok((CudaStorage { slice: Cs::F32(out), device: dev }, Shape::from((m, h))))
+        } else {
+            let xv = view!(x, f32, contiguous(xl, "s0")?);
+            // SAFETY: the end kernel writes all elements of both halves of this output.
+            let out = unsafe { dev.alloc::<half::bf16>(2 * m * h)? };
+            let f = cu::func(&dev, "residual_rmsnorm_tb_end_bf16", "basal_fused", cu::ptx)?;
+            let mut a = f.builder();
+            a.arg(&xv).arg(&yv).arg(&av).arg(&out).arg(&h_).arg(&m_).arg(&eps);
+            // SAFETY: f32 s0, BF16 y/alpha and [2,M,H] BF16 out match the signature and validated layouts.
+            // One block per row initializes both halves; all owners live through launch on the owning PTDS.
+            unsafe { a.launch(cfg) }.w()?;
+            Ok((CudaStorage { slice: Cs::BF16(out), device: dev }, Shape::from((2, m, h))))
+        }
     }
 }
 
@@ -518,6 +671,7 @@ pub struct HeadDims {
 )]
 struct QkvRope {
     d: HeadDims,
+    numerics: LlamaNumerics,
     /// CUDA: device address of the f16 `[K hi | K lo | V hi | V lo]` buffer (0: none) and the kernel's QR_* flags
     #[cfg_attr(not(feature = "cuda"), expect(dead_code, reason = "read by the CUDA kernel only"))]
     hl: u64,
@@ -560,7 +714,12 @@ impl CustomOp3 for QkvRope {
         let out = unsafe { dev.alloc::<f32>(n)? };
         by_dtype!(qkv.dtype(), |T, S| {
             let (qv, bv) = (view!(qkv, T, qo), view!(b, T, bo));
-            let f = cu::func(&dev, &format!("qkv_rope_{S}"), "basal_fused", cu::ptx)?;
+            let name = if self.numerics == LlamaNumerics::ThinkBf16 {
+                "qkv_rope_tb_bf16".into()
+            } else {
+                format!("qkv_rope_{S}")
+            };
+            let f = cu::func(&dev, &name, "basal_fused", cu::ptx)?;
             let mut a = f.builder();
             let c = [d.b as u32, d.l as u32, d.nh as u32, d.nkv as u32, d.hd as u32];
             a.arg(&qv).arg(&bv).arg(&csv).arg(&out).arg(&c[0]).arg(&c[1]).arg(&c[2]).arg(&c[3]).arg(&c[4]);
@@ -595,15 +754,18 @@ impl CustomOp3 for QkvRope {
     }
 }
 
-/// Bias + RoPE + head split: returns the flat f32 buffer `[q | k | v]` and its views `q [B, NH, L, HD]`,
+/// Ordinary bias + RoPE + head split; ThinkBf16 skips bias and rounds q/k at store. Returns f32 `[q | k | v]`
+/// and its views `q [B, NH, L, HD]`,
 /// `k, v [B, NKV, L, HD]`.
-pub fn qkv_rope(
+pub(crate) fn qkv_rope(
     qkv: &Tensor,
-    bias: &Tensor,
+    bias: Option<&Tensor>,
     cos_sin: &Tensor,
     d: HeadDims,
+    numerics: LlamaNumerics,
 ) -> Result<(Tensor, Tensor, Tensor, Tensor)> {
-    let flat = qkv.apply_op3_no_bwd(bias, cos_sin, &QkvRope { d, hl: 0, flags: 0 })?;
+    check_numerics(numerics, qkv, bias)?;
+    let flat = qkv.apply_op3_no_bwd(bias.unwrap_or(qkv), cos_sin, &QkvRope { d, numerics, hl: 0, flags: 0 })?;
     let (nq, nk) = (d.b * d.nh * d.l * d.hd, d.b * d.nkv * d.l * d.hd);
     let q = flat.narrow(0, 0, nq)?.reshape((d.b, d.nh, d.l, d.hd))?;
     let k = flat.narrow(0, nq, nk)?.reshape((d.b, d.nkv, d.l, d.hd))?;
@@ -616,19 +778,22 @@ pub fn qkv_rope(
 /// the V lo plane (not read by the attention when V is exact f16); `kv_f32`: also write K and V into the flat f32
 /// buffer (a prefix capture needs them; otherwise only its Q part is read).
 #[cfg(feature = "cuda")]
-pub fn qkv_rope_hilo(
+pub(crate) fn qkv_rope_hilo(
     qkv: &Tensor,
-    bias: &Tensor,
+    bias: Option<&Tensor>,
     cos_sin: &Tensor,
     d: HeadDims,
     v_lo: bool,
     kv_f32: bool,
+    numerics: LlamaNumerics,
 ) -> Result<(Tensor, Tensor, Tensor, Tensor, Tensor)> {
+    check_numerics(numerics, qkv, bias)?;
     let nk = d.b * d.nkv * d.l * d.hd;
     // SAFETY: qkv_rope writes the K hi, K lo and V hi planes, and the V lo plane when it is read (`v_lo`).
     let hl = unsafe { Tensor::empty((4 * nk,), DType::F16, qkv.device())? };
     let flags = 1 | if v_lo { 2 } else { 0 } | if kv_f32 { 0 } else { 4 };
-    let flat = qkv.apply_op3_no_bwd(bias, cos_sin, &QkvRope { d, hl: device_addr_f16(&hl)?, flags })?;
+    let flat =
+        qkv.apply_op3_no_bwd(bias.unwrap_or(qkv), cos_sin, &QkvRope { d, numerics, hl: device_addr_f16(&hl)?, flags })?;
     let nq = d.b * d.nh * d.l * d.hd;
     let q = flat.narrow(0, 0, nq)?.reshape((d.b, d.nh, d.l, d.hd))?;
     let k = flat.narrow(0, nq, nk)?.reshape((d.b, d.nkv, d.l, d.hd))?;

@@ -27,6 +27,10 @@ pub(crate) struct ModelOptions {
     #[arg(long, value_parser = ["off", "auto"])]
     #[serde(default)]
     pub think: Option<String>,
+    /// Thinking arithmetic: inherit (default) or opt-in CUDA BF16 pointwise profile; no parity guarantee
+    #[arg(long, value_parser = ["inherit", "upstream-bf16-pointwise"])]
+    #[serde(default)]
+    pub think_numerics: Option<String>,
     /// Most generated thinking tokens (default 256)
     #[arg(long)]
     #[serde(default)]
@@ -78,6 +82,7 @@ impl ModelOptions {
         self.early_exit.is_some()
             || self.exit_heads.is_some()
             || self.think.is_some()
+            || self.think_numerics.is_some()
             || self.think_tokens.is_some()
             || self.think_max_len.is_some()
             || self.think_calibration.is_some()
@@ -100,6 +105,9 @@ impl ModelOptions {
         }
         if cli.think.is_some() {
             self.think.clone_from(&cli.think);
+        }
+        if cli.think_numerics.is_some() {
+            self.think_numerics.clone_from(&cli.think_numerics);
         }
         if cli.think_tokens.is_some() {
             self.think_tokens = cli.think_tokens;
@@ -156,6 +164,7 @@ impl ModelOptions {
             "trained exits cannot be combined with the distinct thinking checkpoint"
         );
         self.thinking_enabled()?;
+        self.think_numerics()?;
         self.think_settings()?;
         ensure!(!(self.no_calibration && self.calibration.is_some()), "calibration conflicts with no_calibration");
         if let Some(layout) = &self.layout {
@@ -178,6 +187,48 @@ impl ModelOptions {
         self.early_exit.is_some() || self.exit_heads.is_some()
     }
 
+    pub(crate) fn think_numerics(&self) -> Result<ThinkNumerics> {
+        use basal_gpu::PlanError;
+        if self.think_numerics.is_some() && !self.thinking_enabled()? {
+            return Err(PlanError::Option("think_numerics requires think: auto (also for inherit)".into()).into());
+        }
+        match self.think_numerics.as_deref().unwrap_or("inherit") {
+            "inherit" => Ok(ThinkNumerics::Inherit),
+            "upstream-bf16-pointwise" => Ok(ThinkNumerics::UpstreamBf16Pointwise),
+            other => {
+                Err(PlanError::Option(format!("unknown think_numerics {other:?} (inherit, upstream-bf16-pointwise)"))
+                    .into())
+            }
+        }
+    }
+
+    /// Refuse unsupported execution settings before reading checkpoint weights (including their digests).
+    pub(crate) fn check_think_execution(
+        &self,
+        kernels: basal_gpu::Kernels,
+        quantization: basal_gpu::Quantization,
+        mode: basal_gpu::InferenceMode,
+        split: bool,
+        reproducibility: basal_gpu::Reproducibility,
+    ) -> Result<()> {
+        if self.think_numerics()? == ThinkNumerics::Inherit {
+            return Ok(());
+        }
+        use basal_gpu::{DiagnosticOverrides, InferenceMode, Kernels, PlanError, Quantization, Reproducibility};
+        if basal_gpu::plan::BackendKind::llama() != basal_gpu::plan::BackendKind::Cuda
+            || kernels != Kernels::Fused
+            || quantization != Quantization::None
+            || mode == InferenceMode::Balanced
+            || split
+            || reproducibility == Reproducibility::Pinned
+            || DiagnosticOverrides::process().norm() == Some("register")
+            || DiagnosticOverrides::process().gemm() == Some("cublas")
+        {
+            return Err(PlanError::Option("upstream-bf16-pointwise requires single-device CUDA Llama, fused dense kernels, adaptive GEMM, no balanced mode, BASAL_NORM=register or BASAL_GEMM=cublas".into()).into());
+        }
+        Ok(())
+    }
+
     pub(crate) fn load_exits(&self, manifest: &ModelManifest) -> Result<Option<basal_core::early_exit::ExitArtifacts>> {
         if !self.exits_enabled() {
             return Ok(None);
@@ -196,6 +247,7 @@ impl ModelOptions {
     /// Validate the separately published checkpoint, tokenizer, calibration and content identities before GPU or
     /// GEMM activity. No fallback to base weights, adapters or an untrained smaller model.
     pub(crate) fn load_thinking(&self, base: &ModelManifest) -> Result<Option<LoadedThinking>> {
+        let numerics = self.think_numerics()?;
         if !self.thinking_enabled()? {
             return Ok(None);
         }
@@ -327,7 +379,7 @@ impl ModelOptions {
             let key = if checkpoint == base.dir { "base/model.safetensors" } else { "think/model.safetensors" };
             sources["files"][key] = hash.into();
         }
-        Ok(Some(LoadedThinking { manifest, settings, eos, calibration_label, sources }))
+        Ok(Some(LoadedThinking { manifest, settings, eos, calibration_label, sources, numerics }))
     }
 
     /// Identity follows upstream: HF snapshot repo/commit, otherwise the actual configured source and no revision.
@@ -383,6 +435,13 @@ pub(crate) struct LoadedThinking {
     pub eos: Vec<u32>,
     pub calibration_label: String,
     pub sources: Value,
+    pub numerics: ThinkNumerics,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ThinkNumerics {
+    Inherit,
+    UpstreamBf16Pointwise,
 }
 
 fn content_hash(bytes: &[u8]) -> String {

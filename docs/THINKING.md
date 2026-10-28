@@ -15,7 +15,7 @@ basal serve --model 2.0-4.5B --think auto --think-tokens 256 --think-max-len 819
 ```
 
 W YAML te same opcje modelu mają nazwy `think`, `think_tokens`, `think_max_len`,
-`think_calibration`. Jawne flagi CLI zastępują wartości danego modelu w YAML.
+`think_calibration`, `think_numerics`. Jawne flagi CLI zastępują wartości danego modelu w YAML.
 Limity muszą być dodatnie, mieścić się w u32, a `think_tokens + 16` musi być
 mniejsze od limitu kontekstu; rzeczywisty limit checkpointu dodatkowo ogranicza
 `think_max_len`. Walidacja i wybór osobnej kalibracji następują przed GEMM
@@ -30,6 +30,48 @@ orders/layout, strict identity ani `--no-calibration` readoutu bazowego.
 Temperatury per primitive/bucket i certyfikaty P2 pochodzą wyłącznie z tego
 pliku. Opublikowany plik zawiera temperatury, lecz jego certyfikaty per-type
 1%/5% są null: to nie potwierdzenie certyfikowanej jakości P2.
+
+## Opcjonalna numeryka BF16
+
+`--think-numerics inherit` (YAML `think_numerics: inherit`) jest domyślne:
+zachowuje numerykę po J1, precyzję modelu bazowego i readout FP32. Diagnostyczne
+thinking FP32 pozostaje dostępne przez `--dtype f32`. Pominięcie opcji i jawne
+`inherit` wybierają ten sam plan; jawna opcja wymaga `think: auto`.
+
+`--think-numerics upstream-bf16-pointwise` wybiera wyłącznie dla osobnego
+backendu think zestaw `basal-llama-think-bf16-pointwise.1`, BF16 obliczeń
+i istniejący readout FP32 zaokrąglany na hoście do BF16, także w sesji generacji.
+Nie zmienia modelu bazowego ani domyślnego wyboru. Profil deklaruje:
+
+1. Tabelę RoPE z odwrotnością częstotliwości i kątem w FP32, hostowym sin/cos
+   zaokrąglanym przez FP32 do BF16; te wartości są przechowywane jako FP32.
+2. Bias czterech projekcji w epilogu cuBLASLt przed końcowym zapisem BF16;
+   konsumenci fused nie dodają go ponownie. Heurystyczny split-K może wcześniej
+   zaokrąglać sumy częściowe do BF16. Algorytm/redukcja GEMM pozostają odroczone.
+3. Q/K zaokrąglone do BF16 przy zapisie RoPE, bez pośredniego zaokrąglania
+   iloczynów. V pochodzi z projekcji BF16; backing KV pozostaje FP32 z hi/lo
+   zależnie od faktycznego attention.
+4. SiLU w FP32 aż do mnożenia przez up, z jednym końcowym zapisem BF16.
+5. Wewnętrzny residual `s0 = f32(o + R)` aż przez MLP. Koniec warstwy liczy
+   `s1 = f32(s0 + down)`, normę z niezaokrąglonego `s1` i dopiero zapisuje
+   residual oraz wynik normy jako BF16. Pierwsza norma pozostaje bez zmian.
+
+Przed ładowaniem wag odmawiane są: opcja przy `think: off` (także `inherit`),
+inny model niż wspierana para Llama, backend bez CUDA (Metal/Intel), split,
+kwantyzacja, kernele Candle, balanced, pinned, `BASAL_NORM=register`
+i `BASAL_GEMM=cublas`. Nie ma cichego fallbacku po błędzie epilogu bias.
+Profil używa istniejącego Lt każdego etapu osobnego backendu think wyłącznie
+do biasu: bez drugiego handle/workspace, tabel, invariant search ani pinned.
+Jego plan ma `table: null` i `runtime_timing`; diagnostyka GEMM etykietuje
+wyniki jako czasy epilogu bias, nie wpisy tabel. Pierwszy wybór może się różnić
+między procesami i klasami M. Deskryptory hosta są zachowywane dla dokładnych
+M i kształtów projekcji; ich liczba zależy od liczby użytych długości.
+
+To **nie jest tryb parytetu**. Redukcje GEMM (w tym split-K), FA2, normy
+i lm_head oraz implementacje pow/sin/cos/exp/div pozostają źródłami różnic.
+Zgodność nowych kerneli z deklaracją, wyniki wobec upstream BF16 i FP32,
+deterministyczność po restarcie, pamięć i latency wymagają osobnych pomiarów.
+Historyczny FAIL pozostaje FAIL; kompilacja nie dowodzi jakości ani parytetu.
 
 ## Żądanie i odpowiedź
 
@@ -138,6 +180,13 @@ Work cost zachowuje konserwatywny koszt do `think_tokens + 1` pełnych forwardó
 się pytanie Direct; inne pytania nie zwiększają tego kosztu.
 Pamięć rezydentna **obu** modeli i ich workspace musi być uwzględniona
 osobno w kwalifikacji i rezerwie serwera, tak jak pozostałe resident weights.
+Profil BF16 dolicza w `stage_work` konserwatywne `4 * M * hidden` bajtów
+na f32 `s0` i jeden slot alokacji. Nie zmienia konserwatywnego boundu J1
+dla starego/nowego KV z backingiem FP32 i hi/lo według attention. Istniejący
+workspace Lt to 32 MiB na etap, współdzielone przez lanes tego modelu pod
+tym samym gate/drain. Transient `stage_work` go nie dolicza: to pamięć
+rezydentna, wymagająca osobnej rezerwy. Pokrycie rzeczywistych szczytów
+allocatora i całej rezerwy rezydentnej pozostaje GAP.
 
 Na włączonym silniku `background_support` backendu think musi pokrywać pełne
 `think_max_len`, także gdy konkretny request wybiera off. Brak tego wsparcia
@@ -194,7 +243,8 @@ FP32, odtworzony bez thinking. Nie potwierdza to regresji samego thinking.
 Inkrementalne KV zbliża strukturę generacji do cached decode, ale nie
 gwarantuje identycznych tokenów ani wyników z vLLM. Różne harmonogramy
 prefillu i decode mogą zmieniać wyniki numeryczne. FP32 pozostaje wybieralne;
-ta zmiana nie zmienia kerneli BF16, RoPE ani SiLU. Dotychczasowe FAIL pozostają
+ścieżka `inherit` zachowuje dotychczasowe kernele BF16, RoPE i SiLU.
+Opcjonalny profil powyżej ma własne kernele i wymaga pomiarów. Dotychczasowe FAIL pozostają
 FAIL; bieżąca ścieżka inkrementalna wymaga osobnej kwalifikacji runtime.
 Nie ma zmierzonej obietnicy przyspieszenia.
 Ogólny parytet detokenizacji, stop/EOS i ich liczenia poza badanym korpusem,

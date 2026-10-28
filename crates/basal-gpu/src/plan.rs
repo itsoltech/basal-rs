@@ -42,16 +42,27 @@ pub enum KernelSet {
     /// The kernels of kernels.cu, kernels.metal, gemma_ops and the cuBLASLt GEMM path of this crate as measured
     /// before the execution plans were introduced (attention hi/lo, QK1, WGMMA, fused Gemma FP16 operations).
     V1,
+    /// Opt-in CUDA Llama BF16 thinking: BF16 RoPE table and q/k stores (C1/C2), an f32 interior residual with
+    /// layer-end rounding (C3'), BF16 readout (C4), f32 SiLU through multiply (K3), and GEMM bias epilogues (K4-E).
+    /// Not a parity mode: GEMM/FA2/norm/readout reductions, transcendentals and other backends remain deferred.
+    LlamaThinkBf16V1,
 }
 
 impl KernelSet {
     /// The sets this build implements.
-    pub const SUPPORTED: &'static [KernelSet] =
-        &[KernelSet::V1, KernelSet::Qwen35V1, KernelSet::Qwen35V2, KernelSet::Qwen35V3, KernelSet::Qwen35V4];
+    pub const SUPPORTED: &'static [KernelSet] = &[
+        KernelSet::V1,
+        KernelSet::Qwen35V1,
+        KernelSet::Qwen35V2,
+        KernelSet::Qwen35V3,
+        KernelSet::Qwen35V4,
+        KernelSet::LlamaThinkBf16V1,
+    ];
 
     pub fn id(self) -> &'static str {
         match self {
             Self::V1 => "basal-kernels.1",
+            Self::LlamaThinkBf16V1 => "basal-llama-think-bf16-pointwise.1",
             Self::Qwen35V1 => "basal-qwen35-reference.1",
             Self::Qwen35V2 => "basal-qwen35.2",
             Self::Qwen35V3 => "basal-qwen35.3",
@@ -767,6 +778,30 @@ impl ResolvedExecutionPlan {
     ) -> Result<Self, PlanError> {
         if !KernelSet::SUPPORTED.contains(&kernel_set) {
             return Err(PlanError::KernelSet(kernel_set.id()));
+        }
+        if kernel_set == KernelSet::LlamaThinkBf16V1 {
+            if !matches!((arch, rule), (Architecture::Llama(_), DispatchRule::LlamaV1 { .. }))
+                || BackendKind::llama() != BackendKind::Cuda
+                || devices.len() != 1
+                || options.precision != Precision::Bf16
+                || options.readout != Readout::Bf16Rounded
+                || options.kernels != Kernels::Fused
+                || options.quantization != Quantization::None
+                || options.mode == InferenceMode::Balanced
+                || options.reproducibility == Reproducibility::Pinned
+                || !tables_apply
+                || table.is_some()
+            {
+                return Err(PlanError::Option("upstream-bf16-pointwise requires single-device CUDA Llama, BF16, BF16-rounded readout, fused dense kernels and adaptive RuntimeTiming without a GEMM table".into()));
+            }
+            if DiagnosticOverrides::process().norm() == Some("register") {
+                return Err(PlanError::Option("upstream-bf16-pointwise does not support BASAL_NORM=register".into()));
+            }
+            if DiagnosticOverrides::process().gemm() == Some("cublas") {
+                return Err(PlanError::Option(
+                    "upstream-bf16-pointwise requires cuBLASLt bias epilogues; BASAL_GEMM=cublas is unsupported".into(),
+                ));
+            }
         }
         rule.check_family(arch)?;
         if matches!(arch, Architecture::Qwen35(_))

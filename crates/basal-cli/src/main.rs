@@ -723,10 +723,32 @@ fn gpu_engine_at(dir: &Path, g: &GpuArgs, source: &str) -> Result<Engine<GpuBack
     Ok(planned_engine_at(dir, g, source)?.engine)
 }
 
+/// Reject unsupported opt-in thinking settings before checkpoint digests or GPU weight loading.
+fn check_thinking_gpu_options(g: &GpuArgs) -> Result<()> {
+    if g.model_options.think_numerics()? == model_options::ThinkNumerics::Inherit {
+        return Ok(());
+    }
+    let reproducibility = match &g.resolved_gemm {
+        Some(gemm) => gemm.reproducibility,
+        None => gemm_artifact::TableRequest::parse(
+            &g.gemm_table.as_ref().map(|p| p.to_string_lossy()).unwrap_or("none".into()),
+        )?
+        .reproducibility(),
+    };
+    g.model_options.check_think_execution(
+        Kernels::parse(&g.kernels)?,
+        g.quantization.as_deref().unwrap_or("none").parse()?,
+        parse_inference_mode(&g.inference_mode)?,
+        g.layer_split.is_some(),
+        reproducibility,
+    )
+}
+
 /// Load the model of `dir` with `g`: resolve its profile, freeze the execution plan (precision, kernels, attention,
-/// GEMM table and fallbacks for the instance's GPUs) before any weight is read, load the backend from the plan,
+/// GEMM table and fallbacks for the instance's GPUs) before any weight is loaded, load the backend from the plan,
 /// then precompute the template prefixes.
 fn planned_engine_at(dir: &Path, g: &GpuArgs, source: &str) -> Result<PlannedEngine> {
+    check_thinking_gpu_options(g)?;
     let manifest = g.model_options.load_manifest(dir, g.orders.as_deref(), source)?;
     let thinking = g.model_options.load_thinking(&manifest)?;
     planned_engine_from_manifest(manifest, thinking, g)
@@ -737,6 +759,7 @@ fn planned_engine_from_manifest(
     thinking: Option<model_options::LoadedThinking>,
     g: &GpuArgs,
 ) -> Result<PlannedEngine> {
+    check_thinking_gpu_options(g)?;
     let dir = manifest.dir.as_path();
     let inference_mode = parse_inference_mode(&g.inference_mode)?;
     #[cfg(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos")))]
@@ -809,23 +832,46 @@ fn planned_engine_from_manifest(
     let thinking = thinking
         .map(|mut t| {
             let think_profile = models::profile_for(&t.manifest);
-            let think_plan = basal_gpu::ResolvedExecutionPlan::freeze(
-                think_profile.id,
-                think_profile.kernel_set,
-                &think_profile.dispatch,
-                &t.manifest.config,
-                &g.devices(),
-                basal_gpu::PlanOptions {
-                    mode: inference_mode,
-                    precision,
-                    readout: Readout::F32,
-                    kernels,
-                    quantization,
-                    reproducibility: gemm.reproducibility,
-                },
-                gemm.table.clone(),
-                gemm.tables_apply,
-            )?;
+            let think_plan = if t.numerics == model_options::ThinkNumerics::UpstreamBf16Pointwise {
+                basal_gpu::ResolvedExecutionPlan::freeze(
+                    think_profile.id,
+                    basal_gpu::KernelSet::LlamaThinkBf16V1,
+                    &think_profile.dispatch,
+                    &t.manifest.config,
+                    &g.devices(),
+                    basal_gpu::PlanOptions {
+                        mode: inference_mode,
+                        precision: basal_gpu::Precision::Bf16,
+                        readout: Readout::Bf16Rounded,
+                        kernels,
+                        quantization,
+                        reproducibility: gemm.reproducibility,
+                    },
+                    None,
+                    basal_gpu::cublaslt_version().is_some(),
+                )?
+            } else {
+                basal_gpu::ResolvedExecutionPlan::freeze(
+                    think_profile.id,
+                    think_profile.kernel_set,
+                    &think_profile.dispatch,
+                    &t.manifest.config,
+                    &g.devices(),
+                    basal_gpu::PlanOptions {
+                        mode: inference_mode,
+                        precision,
+                        readout: Readout::F32,
+                        kernels,
+                        quantization,
+                        reproducibility: gemm.reproducibility,
+                    },
+                    gemm.table.clone(),
+                    gemm.tables_apply,
+                )?
+            };
+            if t.numerics == model_options::ThinkNumerics::UpstreamBf16Pointwise {
+                crate::note!("{}: thinking execution plan {}", manifest.name, plan_summary(&think_plan));
+            }
             t.sources["execution_plan"] = think_plan.identity();
             let (backend, _) =
                 GpuBackend::load_planned(&t.manifest.dir, &t.manifest.config, &think_plan, placement, false)
@@ -1324,7 +1370,17 @@ fn run() -> Result<()> {
                 .models
                 .iter()
                 .zip(&manifests)
-                .map(|(mc, manifest)| mc.model_options.load_thinking(manifest))
+                .zip(&placements)
+                .map(|((mc, manifest), placement)| {
+                    mc.model_options.check_think_execution(
+                        Kernels::parse(&g.kernels)?,
+                        mc.quantization.parse()?,
+                        parse_inference_mode(&mc.inference_mode)?,
+                        placement.split().is_some(),
+                        gemm_artifact::TableRequest::parse(&mc.gemm_table)?.reproducibility(),
+                    )?;
+                    mc.model_options.load_thinking(manifest)
+                })
                 .collect::<Result<_>>()?;
             // one engine per model name (the `model` field of requests) before any GEMM search or load
             for (i, m) in manifests.iter().enumerate() {

@@ -2,7 +2,7 @@
 //! lanes exist.
 
 use crate::plan::{ExecutionPolicy, KernelSet, ResolvedExecutionPlan};
-use crate::GpuBackend;
+use crate::{GpuBackend, LlamaNumerics};
 
 /// Attention arithmetic selected before any template or state K/V is computed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,6 +73,25 @@ impl GpuBackend {
         if self.is_cuda() && default_kernels.len() != self.stages.len() {
             return Err(InferenceConfigError::PlanMismatch("stage count"));
         }
+        let numerics = match plan.kernel_set() {
+            KernelSet::V1 => LlamaNumerics::Ordinary,
+            KernelSet::LlamaThinkBf16V1 if self.is_cuda() && self.stages.len() == 1 => LlamaNumerics::ThinkBf16,
+            _ => return Err(InferenceConfigError::PlanMismatch("Llama kernel set or placement")),
+        };
+        #[cfg(feature = "cuda")]
+        if numerics == LlamaNumerics::ThinkBf16 && self.stages.iter().any(|s| s.w.get().lt.is_none()) {
+            return Err(InferenceConfigError::PlanMismatch("thinking requires cuBLASLt"));
+        }
+        if numerics == LlamaNumerics::ThinkBf16 {
+            let d = self.cfg.head_dim;
+            let mut rope = vec![0f32; self.cfg.max_positions * d];
+            for (pos, row) in rope.chunks_exact_mut(d).enumerate() {
+                let (cos, sin) = row.split_at_mut(d / 2);
+                crate::think_rope_angles(self.cfg.rope_theta, pos as f32, cos, sin);
+            }
+            self.rope = rope.into();
+        }
+        self.numerics = numerics;
         self.attention_override = attention.kernel_override();
         self.attention_defaults.clone_from(default_kernels);
         Ok(())

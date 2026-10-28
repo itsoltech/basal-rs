@@ -142,6 +142,9 @@ impl RuntimeBackend {
             #[cfg(all(feature = "intel", not(target_os = "macos")))]
             Self::Intel(_) => {
                 crate::inference::check_plan(plan)?;
+                if plan.kernel_set() != crate::KernelSet::V1 {
+                    return Err(InferenceConfigError::PlanMismatch("Intel kernel set"));
+                }
                 match plan.policy() {
                     crate::plan::ExecutionPolicy::Llama { .. } => Ok(()),
                     crate::plan::ExecutionPolicy::Gemma { .. } | crate::plan::ExecutionPolicy::Qwen35 { .. } => {

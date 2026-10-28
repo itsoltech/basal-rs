@@ -483,6 +483,13 @@ fn load_local(args: &ClientArgs, name: &str) -> Result<basal_core::Engine<crate:
     }
     let dir = crate::config::model_dir(&model)?;
     let manifest = args.model_options.load_manifest(&dir, model.orders.as_deref(), &model.source_name())?;
+    args.model_options.check_think_execution(
+        basal_gpu::Kernels::Fused,
+        basal_gpu::Quantization::None,
+        crate::parse_inference_mode(&args.inference_mode)?,
+        false,
+        crate::gemm_artifact::TableRequest::parse(&model.gemm_table)?.reproducibility(),
+    )?;
     let thinking = args.model_options.load_thinking(&manifest)?;
     let precision = crate::config::model_precision(&model.dtype, &manifest, args.device)?;
     let table = crate::gemm_artifact::resolve(

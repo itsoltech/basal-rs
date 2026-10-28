@@ -344,7 +344,10 @@ Opcjonalne [natywne thinking](docs/THINKING.md) uruchamia generowanie i drugi
 readout na osobnym pełnym checkpoincie opublikowanego modelu 2.0 4.5B.
 `--think off` jest domyślne i nie ładuje drugiego modelu. Włączenie wymaga
 obu przypiętych checkpointów i odpowiedniej pamięci; pozytywna kwalifikacja
-runtime tej ścieżki pozostaje otwarta.
+runtime tej ścieżki pozostaje otwarta. `--think-numerics inherit` zachowuje
+dotychczasową numerykę (domyślnie); opt-in `upstream-bf16-pointwise` wybiera
+osobny profil BF16 tylko dla CUDA Llama think, bez gwarancji parytetu.
+Odmowy konfiguracji i deklarację obliczeń opisuje [THINKING.md](docs/THINKING.md).
 
 Jeden proces obsługuje jeden lub kilka modeli. Konfiguracja w YAML
 ([serve.example.yml](serve.example.yml)):
@@ -728,7 +731,7 @@ oraz `client --local`. Przykład:
 basal serve --model 2.0-mini --layout qfirst --no-calibration --orders auto --auto-tau 0.6 --auto-band 0.2 0.8
 ```
 
-Jawne `--think`, `--think-tokens`, `--think-max-len`, `--think-calibration`,
+Jawne `--think`, `--think-numerics`, `--think-tokens`, `--think-max-len`, `--think-calibration`,
 `--layout`, `--calibration` / `--no-calibration`, `--strict-calibration`,
 `--auto-tau`, `--auto-band`, `--context-overflow` i `--truncate-head` nadpisują odpowiednie ustawienia **każdego** modelu
 z YAML, również przy `--config`. CLI wybiera jedno źródło kalibracji zamiast

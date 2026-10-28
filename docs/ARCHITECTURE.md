@@ -52,13 +52,22 @@ Llama CUDA fused generuje przez jeden prefill i dalsze kroki na nowych tokenach
 z KV każdego etapu, lokalnym dla jednego pytania. Scoped cleanup usuwa sesję
 przed niezależnym pełnym P2 oraz po błędzie/stopie; fork zaczyna z pustą sesją.
 Inne kombinacje zachowują pełne przeliczanie prefiksu. Bound generacji obejmuje
-stare i nowe KV oraz hi/lo do pełnego limitu kontekstu. To zmiana struktury
+stare i nowe KV oraz hi/lo do efektywnego `think_max_len`. To zmiana struktury
 generacji bez gwarancji parytetu numerycznego. Oba modele
 dzielą gate/work class, lecz mają osobny stan/cache; fork, stop, health i drain
 obejmują oba. Rejestr decyzji otrzymuje dopiero finalny wynik i nie zapisuje
 notatek. Capabilities, staging i device/work bounds trafiają też do offline
 planera; resident weights obu modeli wymagają osobnej rezerwy. Domyślne off
 nie tworzy drugiego backendu. Kontrakt i ograniczenia: [THINKING.md](THINKING.md).
+
+`think_numerics: inherit` zachowuje plan i obliczenia po J1. Opt-in
+`upstream-bf16-pointwise` zamraża osobny kernel set CUDA Llama z BF16 readoutem,
+tabelą RoPE BF16, f32 SiLU do mnożenia i f32 residualem pomiędzy attention
+a końcem MLP. Wykorzystuje istniejący Lt osobnego backendu think wyłącznie
+do projekcji z biasem przed końcowym zapisem BF16, z własnym RuntimeTiming
+bez tabel. `s0` jest lokalną aktywacją warstwy, nie stanem sesji; bound
+dolicza `4*M*hidden` i slot alokacji. To deklaracja punktów zaokrągleń,
+bez gwarancji zgodności redukcji ani wyników z upstream.
 
 `planner.rs` realizuje odmowę albo maksymalnie dwie próby skracania tekstu na
 CPU, przed forwardem. Sprawdza retokenizowane prompty obu potencjalnych
