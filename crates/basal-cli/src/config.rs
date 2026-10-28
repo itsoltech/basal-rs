@@ -666,25 +666,37 @@ pub fn cached_model_dir(repo: &str, revision: Option<&str>) -> Option<PathBuf> {
 /// Directory of a configured model: `path`, or the Hugging Face snapshot of `repo` at `revision` (downloaded when
 /// missing; a cached snapshot is used when the Hub cannot be reached).
 pub fn model_dir(m: &ModelConfig) -> Result<PathBuf> {
+    m.model_options.validate()?;
+    let thinking = m.model_options.thinking_enabled()?;
+    if thinking && m.repo.is_some() {
+        ensure!(
+            m.repo.as_deref() == Some(basal_core::thinking::THINK_REPO)
+                && m.revision.as_deref() == Some(basal_core::thinking::THINK_REVISION),
+            "thinking acquisition requires the published repository and immutable revision"
+        );
+    }
     match (&m.path, &m.repo) {
         (Some(p), None) => {
             ensure!(m.revision.is_none(), "model {}: revision needs repo", crate::term::P(&p));
             Ok(p.clone())
         }
-        (None, Some(repo)) => download(repo, m.revision.as_deref()),
+        (None, Some(repo)) => download(repo, m.revision.as_deref(), thinking),
         (Some(_), Some(_)) => bail!("model entry: give either path or repo, not both"),
         (None, None) => bail!("model entry: needs path or repo"),
     }
 }
 
-fn download(repo: &str, revision: Option<&str>) -> Result<PathBuf> {
+fn download(repo: &str, revision: Option<&str>, thinking: bool) -> Result<PathBuf> {
     let (owner, name) = repo.split_once('/').with_context(|| format!("repo {repo:?}: expected owner/name"))?;
     let client = hf_hub::HFClientSync::new().context("Hugging Face client")?;
     let r = client.model(owner, name);
     let at = revision.unwrap_or("main");
     // a commit as its first 8 characters in the messages
     let at = if at.len() == 40 && at.bytes().all(|b| b.is_ascii_hexdigit()) { &at[..8] } else { at };
-    let files: Vec<String> = MODEL_FILES.iter().map(|f| f.to_string()).collect();
+    let mut files: Vec<String> = MODEL_FILES.iter().map(|f| f.to_string()).collect();
+    if thinking {
+        files.extend(["think/*.json", "think/*.safetensors", "think/chat_template.jinja"].map(str::to_string));
+    }
     crate::progress!("{repo}@{at}: fetching the model files (Hugging Face cache)");
     let t = std::time::Instant::now();
     let progress = std::sync::Arc::new(DownloadLog::new(repo));

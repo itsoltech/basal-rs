@@ -652,7 +652,8 @@ fn gpu_engine(m: &ModelArgs, g: &GpuArgs) -> Result<Engine<GpuBackend>> {
     // an unsupported weight format or layer split fails before the model is downloaded
     g.quantization(&m.model)?;
     g.check_layer_split(&m.model)?;
-    let model = config::model_ref(&m.model)?;
+    let mut model = config::model_ref(&m.model)?;
+    model.model_options = g.model_options.clone();
     gpu_engine_at(&config::model_dir(&model)?, g, &model.source_name())
 }
 
@@ -662,9 +663,21 @@ fn planning_engine(
     orders: Option<&str>,
     options: &model_options::ModelOptions,
 ) -> Result<Engine<NoBackend>> {
-    let model = config::model_ref(&m.model)?;
+    let mut model = config::model_ref(&m.model)?;
+    model.model_options = options.clone();
     let manifest = options.load_manifest(&config::model_dir(&model)?, orders, &model.source_name())?;
+    let thinking = options.load_thinking(&manifest)?;
     let mut engine = Engine::new(manifest, NoBackend)?;
+    if let Some(t) = thinking {
+        engine.set_thinking(basal_core::thinking::Thinking::new(
+            t.manifest,
+            NoBackend,
+            t.settings,
+            t.eos,
+            t.calibration_label,
+            t.sources,
+        )?);
+    }
     engine.set_auto_orders(options.auto_orders()?);
     engine.set_context_overflow(options.overflow()?);
     Ok(engine)
@@ -701,10 +714,20 @@ fn gpu_engine_at(dir: &Path, g: &GpuArgs, source: &str) -> Result<Engine<GpuBack
 /// GEMM table and fallbacks for the instance's GPUs) before any weight is read, load the backend from the plan,
 /// then precompute the template prefixes.
 fn planned_engine_at(dir: &Path, g: &GpuArgs, source: &str) -> Result<PlannedEngine> {
+    let manifest = g.model_options.load_manifest(dir, g.orders.as_deref(), source)?;
+    let thinking = g.model_options.load_thinking(&manifest)?;
+    planned_engine_from_manifest(manifest, thinking, g)
+}
+
+fn planned_engine_from_manifest(
+    manifest: ModelManifest,
+    thinking: Option<model_options::LoadedThinking>,
+    g: &GpuArgs,
+) -> Result<PlannedEngine> {
+    let dir = manifest.dir.as_path();
     let inference_mode = parse_inference_mode(&g.inference_mode)?;
     #[cfg(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos")))]
     anyhow::ensure!(g.state_cache_mb == 0, "Intel state cache is not implemented; use --state-cache-mb 0");
-    let manifest = g.model_options.load_manifest(dir, g.orders.as_deref(), source)?;
     let quantization = g.quantization(&manifest.name)?;
     // Validate architecture-specific quantization and split constraints before any weight is read.
     config::check_architecture(&manifest, quantization, g.layer_split.is_some())?;
@@ -759,6 +782,33 @@ fn planned_engine_at(dir: &Path, g: &GpuArgs, source: &str) -> Result<PlannedEng
         None => basal_gpu::PlannedPlacement::Single(g.device()),
         Some(split) => basal_gpu::PlannedPlacement::Split(split),
     };
+    let thinking = thinking
+        .map(|mut t| {
+            let think_profile = models::profile_for(&t.manifest);
+            let think_plan = basal_gpu::ResolvedExecutionPlan::freeze(
+                think_profile.id,
+                think_profile.kernel_set,
+                &think_profile.dispatch,
+                &t.manifest.config,
+                &g.devices(),
+                basal_gpu::PlanOptions {
+                    mode: inference_mode,
+                    precision,
+                    readout: Readout::F32,
+                    kernels,
+                    quantization,
+                    reproducibility: gemm.reproducibility,
+                },
+                gemm.table.clone(),
+                gemm.tables_apply,
+            )?;
+            t.sources["execution_plan"] = think_plan.identity();
+            let (backend, _) =
+                GpuBackend::load_planned(&t.manifest.dir, &t.manifest.config, &think_plan, placement, false)
+                    .context("loading separate think checkpoint for generation and P2")?;
+            basal_core::thinking::Thinking::new(t.manifest, backend, t.settings, t.eos, t.calibration_label, t.sources)
+        })
+        .transpose()?;
     let (mut backend, gemm_classes) = GpuBackend::load_planned(dir, &manifest.config, &plan, placement, g.media)
         .with_context(|| match &g.layer_split {
             None => format!("loading {}", manifest.name),
@@ -816,6 +866,9 @@ fn planned_engine_at(dir: &Path, g: &GpuArgs, source: &str) -> Result<PlannedEng
     }
     backend.set_state_cache_bytes(g.state_cache_mb.checked_mul(1 << 20).context("state cache budget overflow")?)?;
     let mut engine = Engine::new(manifest, backend)?;
+    if let Some(t) = thinking {
+        engine.set_thinking(t);
+    }
     engine.set_auto_orders(g.model_options.auto_orders()?);
     engine.set_context_overflow(g.model_options.overflow()?);
     engine.mark_state = g.state_cache_mb > 0;
@@ -1239,6 +1292,13 @@ fn run() -> Result<()> {
                 .zip(&c.models)
                 .map(|(d, m)| m.model_options.load_manifest(d, m.orders.as_deref(), &m.source_name()))
                 .collect::<Result<_>>()?;
+            // Validate every second checkpoint and calibration before any model's GEMM search or GPU load.
+            let thinking: Vec<_> = c
+                .models
+                .iter()
+                .zip(&manifests)
+                .map(|(mc, manifest)| mc.model_options.load_thinking(manifest))
+                .collect::<Result<_>>()?;
             // one engine per model name (the `model` field of requests) before any GEMM search or load
             for (i, m) in manifests.iter().enumerate() {
                 anyhow::ensure!(
@@ -1275,8 +1335,8 @@ fn run() -> Result<()> {
                 tables.push(table);
             }
             let mut served = Vec::new();
-            for ((((mc, table), dir), placement), batch_qualification) in
-                c.models.iter().zip(tables).zip(dirs).zip(placements).zip(batch_qualifications)
+            for (((((mc, table), manifest), thinking), placement), batch_qualification) in
+                c.models.iter().zip(tables).zip(manifests).zip(thinking).zip(placements).zip(batch_qualifications)
             {
                 let instances = placement.instances();
                 let mut replicas = Vec::with_capacity(instances.len());
@@ -1298,7 +1358,7 @@ fn run() -> Result<()> {
                         device: placement.split().is_none().then(|| devices[0]),
                         layer_split: placement.split().cloned(),
                     };
-                    let planned = planned_engine_at(&dir, &mg, &mc.source_name())?;
+                    let planned = planned_engine_from_manifest(manifest.clone(), thinking.clone(), &mg)?;
                     let scheduling = planned.scheduling();
                     let mut engine = planned.engine;
                     engine.forward_max_tokens = mc.max_batch_tokens;

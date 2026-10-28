@@ -27,6 +27,14 @@ claude mcp add --transport http basal http://127.0.0.1:8000/mcp
   polami. `facts` to `off`, `auto` lub null. Wynik to pełne natywne
   `model`, `answers`, `usage`.
 
+Oba narzędzia przyjmują opcjonalne `think: off|auto|force` oraz boolean
+`think_text`, przekazywane do wspólnego dispatchera bez zmiany znaczenia.
+Brak `think` wybiera ustawienie serwera; null jest błędem. Aktywne thinking
+wymaga załadowanej pary base + think i nie obsługuje tasks (dla nich `off`).
+Przy aktywacji model może wygenerować ograniczone notatki i wykonać drugi
+readout. `decide` zachowuje pola `think`/`meta.think` pojedynczej odpowiedzi;
+`decide_many` także usage. Szczegóły: [THINKING.md](THINKING.md).
+
 Oba narzędzia deklarują `readOnlyHint=true`, `destructiveHint=false`,
 `idempotentHint=true`, `openWorldHint=false`. SDK zwraca obiekt
 `structuredContent` oraz tekstowy JSON dla starszych klientów. Błędy

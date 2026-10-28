@@ -231,7 +231,8 @@ fn worker<B: Backend>(mut engine: Engine<B>, mut rx: mpsc::Receiver<Command>, co
             };
             execute(&mut engine, &items, stop, &mut phase)
         }));
-        let mut lost = engine.backend.work_health().is_none_or(|health| health.is_lost());
+        let health = engine.work_health();
+        let mut lost = health.is_empty() || health.iter().any(|h| h.is_lost());
         let cleanup_unconfirmed = phase == WorkPhase::Cleaning;
         let outcome = match result {
             Ok(outcome) if !lost => outcome,
@@ -241,7 +242,7 @@ fn worker<B: Backend>(mut engine: Engine<B>, mut rx: mpsc::Receiver<Command>, co
             },
             _ => {
                 lost = true;
-                if let Some(health) = engine.backend.work_health() {
+                for health in engine.work_health() {
                     health.mark_lost();
                 }
                 Outcome::DeviceLost

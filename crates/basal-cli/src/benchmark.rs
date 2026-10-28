@@ -287,7 +287,9 @@ pub(crate) fn run(model: &ModelArgs, gpu_options: &GpuArgs, options: &Options) -
 
 /// The model directory (downloaded when missing), its checkpoint size (also reported) and manifest.
 fn model_files(model: &ModelArgs, g: &GpuArgs, report: &mut Value) -> Result<(PathBuf, u64, ModelManifest)> {
-    let dir = model.dir()?;
+    let mut configured = crate::config::model_ref(&model.model)?;
+    configured.model_options = g.model_options.clone();
+    let dir = if g.model_options.thinking_enabled()? { crate::config::model_dir(&configured)? } else { model.dir()? };
     let checkpoint_bytes = basal_core::checkpoint::bytes(&dir).context("checkpoint size")?;
     report["model"]["checkpoint_bytes"] = json!(checkpoint_bytes);
     let source = crate::config::model_ref(&model.model)?.source_name();
@@ -354,6 +356,12 @@ fn execute(
         Some(files) => files,
         None => model_files(model, g, report)?,
     };
+    let thinking = g.model_options.load_thinking(&manifest)?;
+    let resident_models = if thinking.is_some() { 2 } else { 1 };
+    if thinking.is_some() {
+        report["model"]["thinking_checkpoint_bytes"] =
+            basal_core::checkpoint::bytes(&manifest.dir.join("think"))?.into();
+    }
     // quantization exists for Llama only: an Omni (Gemma) model is refused before the preflight
     crate::config::check_architecture(&manifest, quantization, g.layer_split.is_some())?;
     // none: the checkpoint size, as before; q8_0 / q4_k: the same with the projections at the format's block size;
@@ -368,6 +376,8 @@ fn execute(
             basal_core::architecture::Architecture::Gemma4(_) | basal_core::architecture::Architecture::Qwen35(_) => checkpoint_bytes,
         },
         "estimate from format arithmetic (checkpoint size; q8_0 / q4_k: projection matrices at Q8_0 / Q4_K block size with padding), not a measurement");
+    // The supported pair has identical tensor shapes, file sizes and load precision, with independent weights.
+    let weight_bytes = weight_bytes.checked_mul(resident_models).context("dual-model weight estimate overflow")?;
     report["model"]["estimated_weight_bytes"] =
         json!({"bytes": weight_bytes, "quantization": quantization.as_str(), "method": method});
     report["model"]["estimated_resident_weight_bytes"] = json!(weight_bytes);
@@ -406,6 +416,7 @@ fn execute(
                         g.media,
                     )?,
                 };
+                let bytes = bytes.checked_mul(resident_models).context("dual-model stage estimate overflow")?;
                 let stage_guard = if i == 0 { &mut guard } else { &mut others[i - 1].2 };
                 let checked = stage_guard
                     .check(&host_memory()?, &basal_gpu::gpu_memory(stage.device)?, bytes)
@@ -454,7 +465,7 @@ fn execute(
     for pool in &mut pools {
         pool.reset("reset before load");
     }
-    let planned = crate::planned_engine_at(&dir, &gpu_settings, &config.source_name())?;
+    let planned = crate::planned_engine_from_manifest(manifest.clone(), thinking, &gpu_settings)?;
     let scheduling = planned.scheduling();
     report["execution_plan"] = planned.plan.identity();
     let engine = planned.engine;
@@ -496,6 +507,7 @@ fn execute(
         engine.auto_orders(),
         engine.context_overflow(),
     );
+    report["settings"]["thinking"] = engine.thinking_profile();
     let probes = engine.backend.memory_probes();
     let host = host_memory()?;
     let gpu = engine.backend.memory()?;

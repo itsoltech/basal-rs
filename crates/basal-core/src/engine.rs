@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::{bail, ensure, Result};
+use anyhow::{bail, ensure, Context, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -282,6 +282,7 @@ pub struct Engine<B: Backend> {
     pub trace_large_choice: bool,
     auto_orders: AutoOrderSettings,
     overflow: crate::overflow::OverflowSettings,
+    thinking: Option<crate::thinking::Thinking<B>>,
     /// Stop token of background work, checked between rounds ([`Engine::set_stop_token`]); `None` online.
     stop: Option<StopToken>,
 }
@@ -305,6 +306,7 @@ impl<B: Backend> Engine<B> {
             trace_large_choice: false,
             auto_orders: AutoOrderSettings::default(),
             overflow: crate::overflow::OverflowSettings::default(),
+            thinking: None,
             stop: None,
         })
     }
@@ -321,7 +323,58 @@ impl<B: Backend> Engine<B> {
         e.trace_large_choice = self.trace_large_choice;
         e.auto_orders = self.auto_orders;
         e.overflow = self.overflow;
+        e.thinking = self.thinking.as_ref().map(crate::thinking::Thinking::fork).transpose()?;
         Ok(e)
+    }
+
+    /// Enable a separately loaded full thinking checkpoint; ordinary constructors remain off.
+    pub fn set_thinking(&mut self, thinking: crate::thinking::Thinking<B>) {
+        self.thinking = Some(thinking);
+    }
+
+    /// Effective thinking sources/settings for reproducible profiles, without local paths.
+    pub fn thinking_profile(&self) -> Value {
+        self.thinking.as_ref().map_or_else(
+            || json!({"mode":"off"}),
+            |t| {
+                json!({
+                    "mode":"auto", "limits":t.caps.settings, "sources":t.sources,
+                    "calibration":{"content_sha256":t.manifest.calibration_provenance.content_sha256,
+                        "status":t.calibration_label}, "vocab":t.caps.vocab,
+                })
+            },
+        )
+    }
+
+    /// Apply gate ownership to both independently cached models.
+    pub fn set_device_gate(&mut self, device: usize, gate: Arc<crate::gate::Gate>, urgent: bool) -> Result<()> {
+        self.backend.set_device_gate(device, gate.clone(), urgent)?;
+        if let Some(t) = &mut self.thinking {
+            t.backend.set_device_gate(device, gate, urgent)?;
+        }
+        Ok(())
+    }
+
+    pub fn set_device_work_class(
+        &mut self,
+        device: usize,
+        gate: Arc<crate::gate::Gate>,
+        class: WorkClass,
+    ) -> std::result::Result<(), ExecutionError> {
+        self.backend.set_device_work_class(device, gate.clone(), class)?;
+        if let Some(t) = &mut self.thinking {
+            t.backend.set_device_work_class(device, gate, class)?;
+        }
+        Ok(())
+    }
+
+    /// Every backend's work health must be observed when deciding whether a replica is usable.
+    pub fn work_health(&self) -> Vec<DeviceHealth> {
+        self.backend
+            .work_health()
+            .into_iter()
+            .chain(self.thinking.as_ref().and_then(|t| t.backend.work_health()))
+            .collect()
     }
 
     pub fn set_auto_orders(&mut self, settings: AutoOrderSettings) {
@@ -482,7 +535,9 @@ impl<B: Backend> Engine<B> {
 
     /// Capability snapshot of this engine's backend for offline planning.
     pub fn plan_caps(&self) -> PlanCaps {
-        PlanCaps::from_backend(&self.backend)
+        let mut caps = PlanCaps::from_backend(&self.backend);
+        caps.thinking = self.thinking.as_ref().map(|t| t.caps.clone());
+        caps
     }
 
     /// An offline planner of this engine's model with its own tokenizer (loaded again), options and capabilities.
@@ -493,7 +548,7 @@ impl<B: Backend> Engine<B> {
     /// This engine's tokenizer, backend and stop token; host memory is accounted by its caller during execution.
     fn with_planner<R>(&self, f: impl FnOnce(&PlanContext<'_>) -> R) -> R {
         let budget = PlanBudget::unbounded();
-        let caps = BackendCaps(&self.backend);
+        let caps = BackendCaps(&self.backend, self.thinking.as_ref().map(|t| &t.caps));
         let ctx =
             PlanContext::with_caps(&self.manifest, &self.tok, self.plan_options(), &caps, &budget, self.stop.as_ref());
         f(&ctx)
@@ -549,6 +604,12 @@ impl<B: Backend> Engine<B> {
     /// Whether this engine can run background work (its backend's support for forwards of up to
     /// `forward_max_tokens`).
     pub fn background_support(&self) -> BackgroundSupport {
+        if let Some(t) = &self.thinking {
+            let support = t.backend.background_support(t.caps.settings.max_len);
+            if !support.is_supported() {
+                return support;
+            }
+        }
         self.backend.background_support(self.forward_max_tokens)
     }
 
@@ -577,7 +638,15 @@ impl<B: Backend> Engine<B> {
     /// Transient device memory of running `plans` together on this engine's backend, or `Unknown` with the reason.
     pub fn device_work_bound(&self, plans: &[&RequestPlan]) -> crate::planner::DeviceWorkBound {
         match self.device_work_shape(plans) {
-            Ok(shape) => self.backend.device_work_bound(&shape),
+            Ok(shape) => {
+                let base = self.backend.device_work_bound(&shape);
+                if let Some(t) = &self.thinking {
+                    if plans.iter().any(|p| crate::thinking::active_caps(p).is_some()) {
+                        return crate::planner::combine_sequential_bounds(base, t.backend.device_work_bound(&shape));
+                    }
+                }
+                base
+            }
             Err(e) => crate::planner::DeviceWorkBound::Unknown(e.to_string()),
         }
     }
@@ -591,6 +660,9 @@ impl<B: Backend> Engine<B> {
             }
         }
         self.backend.set_stop_token(stop.clone())?;
+        if let Some(t) = &mut self.thinking {
+            t.backend.set_stop_token(stop.clone())?;
+        }
         self.stop = stop;
         Ok(())
     }
@@ -603,7 +675,14 @@ impl<B: Backend> Engine<B> {
                 reason: "this backend reports no health of its GPU work, needed after a failed background call".into(),
             });
         }
-        self.backend.configure_background()
+        self.backend.configure_background()?;
+        if let Some(t) = &mut self.thinking {
+            if t.backend.work_health().is_none() {
+                return Err(ExecutionError::Unsupported { reason: "thinking backend reports no work health".into() });
+            }
+            t.backend.configure_background()?;
+        }
+        Ok(())
     }
 
     /// Reset execution state before the next background micro-batch, also after an error or interruption: end any
@@ -619,8 +698,17 @@ impl<B: Backend> Engine<B> {
     pub fn reset_execution(&mut self) -> std::result::Result<(), ExecutionError> {
         self.backend.end_media();
         self.stop = None;
-        self.backend.set_stop_token(None)?;
-        self.backend.release_work()
+        // Always drain both models, including when clearing or releasing one fails.
+        let base_stop = self.backend.set_stop_token(None);
+        let base_release = self.backend.release_work();
+        let think = if let Some(t) = &mut self.thinking {
+            let clear = t.backend.set_stop_token(None);
+            let release = t.backend.release_work();
+            clear.and(release)
+        } else {
+            Ok(())
+        };
+        base_stop.and(base_release).and(think)
     }
 
     /// `Err(Interrupted)` once the background stop token is stopped; always `Ok` online.
@@ -681,6 +769,7 @@ impl<B: Backend> Engine<B> {
     pub fn run_plans(&mut self, plans: &[&RequestPlan]) -> Result<Vec<PlanOutput>> {
         self.check_stop()?;
         let mut outputs = self.run_decision_plans(plans)?;
+        self.apply_thinking(plans, &mut outputs)?;
         if !plans.iter().any(|p| p.tasks.is_some()) {
             return Ok(outputs);
         }
@@ -694,6 +783,9 @@ impl<B: Backend> Engine<B> {
             let raw = plan_response(&self.manifest.name, plan, &outputs[i])?;
             if let Some(mut body) = task.second_round(&raw, self.manifest.prompt_format.max_options())? {
                 body["model"] = self.manifest.name.clone().into();
+                if self.thinking.is_some() {
+                    body["think"] = "off".into();
+                }
                 match self.plan_decision_request_as(&body, plan.dialect) {
                     Ok(next) => {
                         continuations.push(next);
@@ -994,6 +1086,7 @@ impl<B: Backend> Engine<B> {
                 first_round,
                 evidence,
                 second_order_branches,
+                ..Default::default()
             });
         }
         Ok(outs)
@@ -1100,10 +1193,57 @@ impl<B: Backend> Engine<B> {
                 first_round: vec![None; n],
                 evidence: vec![None; n],
                 second_order_branches: (self.manifest.orders == OptionOrders::Auto).then_some(second),
+                ..Default::default()
             })
         })();
         self.backend.end_media();
         result
+    }
+
+    fn apply_thinking(&mut self, plans: &[&RequestPlan], outputs: &mut [PlanOutput]) -> Result<()> {
+        use crate::thinking::{eligible, recalibrate_item, ThinkMode};
+        let Some(thinking) = &mut self.thinking else { return Ok(()) };
+        for (plan, out) in plans.iter().zip(outputs) {
+            out.thoughts = vec![None; out.finals.len()];
+            if plan.thinking.mode == ThinkMode::Off || plan.truncated.is_some() || !out.context_errors.is_empty() {
+                continue;
+            }
+            // Complete p1 answer validation too (e.g. act without a required defer action) before any generation.
+            if plan_response(&self.manifest.name, plan, out).is_err() {
+                // Keep p1 untouched: final serialization reports its original per-request error, without failing
+                // unrelated requests that shared the base forwards.
+                continue;
+            }
+            for (i, (item, probabilities)) in out.finals.iter_mut().enumerate() {
+                if !matches!(plan.questions[i], QuestionPlan::Direct(_)) || !eligible(item) {
+                    continue;
+                }
+                let confidence = probabilities.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                let threshold = self.manifest.certified("0.05", item.temp_kind());
+                if plan.thinking.mode == ThinkMode::Auto && threshold.is_some_and(|t| confidence >= t) {
+                    continue;
+                }
+                let mut thought = thinking.think(item, self.stop.as_ref())?;
+                out.think_tokens =
+                    out.think_tokens.checked_add(thought.tokens).context("thinking output count overflow")?;
+                let Some(p2) = thought.probabilities else {
+                    out.thoughts[i] = Some(thought.details);
+                    continue;
+                };
+                thought.details["no_think"] = json!({
+                    "probabilities": item.keys.iter().cloned().zip(probabilities.iter().map(|p| json!(p))).collect::<serde_json::Map<String, Value>>(),
+                    "confidence": confidence,
+                });
+                if !plan.thinking.text {
+                    thought.details.as_object_mut().map(|m| m.remove("text"));
+                }
+                out.think_questions += 1;
+                *probabilities = p2;
+                recalibrate_item(item, &thinking.manifest);
+                out.thoughts[i] = Some(thought.details);
+            }
+        }
+        Ok(())
     }
 
     /// Prompts of the final rounds are not known before the first round; `usage.input_tokens` counts the first round.
@@ -1319,6 +1459,9 @@ struct Large {
 /// first of grouped large choices (counted in `usage.input_tokens`).
 #[derive(Default)]
 pub struct PlanOutput {
+    thoughts: Vec<Option<Value>>,
+    think_tokens: usize,
+    think_questions: usize,
     /// Context refusal of this plan only; no partial answers or further task rounds are served.
     context_errors: Vec<crate::request::FieldError>,
     task_response: Option<Value>,
@@ -1354,6 +1497,8 @@ pub enum QuestionPlan {
 
 #[derive(Clone, Debug)]
 pub struct RequestPlan {
+    pub thinking: crate::thinking::ThinkRequest,
+    pub(crate) thinking_caps: Option<crate::thinking::ThinkCaps>,
     pub(crate) tasks: Option<crate::tasks::TaskPlan>,
     pub prepared: Vec<Prepared>,
     pub questions: Vec<QuestionPlan>,
@@ -1380,10 +1525,20 @@ pub fn plan_response(model: &str, plan: &RequestPlan, out: &PlanOutput) -> Resul
         return Err(crate::tasks::invalid(error));
     }
     if let Some(response) = &out.task_response {
-        return Ok(response.clone());
+        let mut response = response.clone();
+        if plan.thinking.enabled {
+            response["usage"]["think_questions"] = 0.into();
+            for answer in response["answers"].as_object_mut().into_iter().flat_map(|m| m.values_mut()) {
+                if !answer["meta"].is_object() {
+                    answer["meta"] = json!({});
+                }
+                answer["meta"]["think"] = json!({"used":false,"tokens":0});
+            }
+        }
+        return Ok(response);
     }
     let mut answers = serde_json::Map::new();
-    for ((it, p), ev) in out.finals.iter().zip(&out.evidence) {
+    for (i, ((it, p), ev)) in out.finals.iter().zip(&out.evidence).enumerate() {
         let a = crate::decision::answer_checked(it, p, plan.dialect).map_err(|msg| {
             DecideError::Validation(vec![crate::request::FieldError::new(
                 vec!["body".into(), "questions".into(), it.name.clone().into()],
@@ -1395,8 +1550,19 @@ pub fn plan_response(model: &str, plan: &RequestPlan, out: &PlanOutput) -> Resul
         if let (Some(ev), Some(obj)) = (ev, a.as_object_mut()) {
             obj.insert("evidence".into(), ev.clone());
         }
-        if plan.calibration_unvalidated {
+        let thought = out.thoughts.get(i).and_then(Option::as_ref);
+        let thought_tokens = thought.and_then(|t| t["tokens"].as_u64());
+        if plan.calibration_unvalidated && thought_tokens.is_none() {
             a["calibration"] = "unvalidated".into();
+        }
+        if let Some(thought) = thought {
+            a["think"] = thought.clone();
+        }
+        if plan.thinking.enabled {
+            if !a["meta"].is_object() {
+                a["meta"] = json!({});
+            }
+            a["meta"]["think"] = json!({"used":thought_tokens.is_some(),"tokens":thought_tokens.unwrap_or(0)});
         }
         answers.insert(it.name.clone(), a);
     }
@@ -1414,6 +1580,10 @@ pub fn plan_response(model: &str, plan: &RequestPlan, out: &PlanOutput) -> Resul
     let mut response = json!({"model": model, "answers": answers, "usage": {"input_tokens": input_tokens, "output_tokens": 0,
                                                              "questions": plan.questions.len(), "branches": branches}});
     response["usage"]["longest_prompt_tokens"] = out.longest_prompt_tokens.into();
+    if plan.thinking.enabled {
+        response["usage"]["think_questions"] = out.think_questions.into();
+        response["usage"]["output_tokens"] = out.think_tokens.into();
+    }
     if let Some(truncated) = plan.truncated {
         response["usage"]["truncated"] = json!(truncated);
     }

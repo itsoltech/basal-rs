@@ -56,6 +56,12 @@ models:
     no_calibration: false          # true: no file read; conflicts with calibration
     strict_calibration: false      # explicit file identity mismatch: false warns/retains, true refuses startup
     auto_tau: 0.6                  # finite [0,1]; adaptive orders only
+    # Native thinking: ONLY basal-2.0-4.5B at e5ba9149760d99b73b1963d8e0ccf948b58afacb with full think/ weights.
+    # think: off                   # off (default, no second download/load) or auto
+    # think_tokens: 256            # positive, +16 below think_max_len
+    # think_max_len: 8192          # additionally capped by the actual think checkpoint context
+    # think_calibration: off       # PATH or off; omitted: root CALIBRATION.think.json, missing => T=1
+    # Both full checkpoints remain resident. See docs/THINKING.md for memory, request modes and qualification gaps.
     auto_band: [0.2, 0.8]           # exactly two finite values in [0,1], LO <= HI; inclusive noul band
     context_overflow: refuse       # our default (upstream defaults to truncate); text only, media always refuse
     truncate_head: 0.3333333333333333 # finite [0,1]; keep this share at the start, the rest at the end

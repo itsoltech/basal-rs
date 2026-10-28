@@ -472,6 +472,7 @@ fn run_local(
 
 fn load_local(args: &ClientArgs, name: &str) -> Result<basal_core::Engine<crate::GpuBackend>> {
     let mut model = crate::config::model_ref(name)?;
+    model.model_options = args.model_options.clone();
     model.dtype = args.dtype.clone();
     model.media = args.media;
     if args.orders.is_some() {
@@ -482,6 +483,7 @@ fn load_local(args: &ClientArgs, name: &str) -> Result<basal_core::Engine<crate:
     }
     let dir = crate::config::model_dir(&model)?;
     let manifest = args.model_options.load_manifest(&dir, model.orders.as_deref(), &model.source_name())?;
+    let thinking = args.model_options.load_thinking(&manifest)?;
     let precision = crate::config::model_precision(&model.dtype, &manifest, args.device)?;
     let table = crate::gemm_artifact::resolve(
         &crate::gemm_artifact::TableRequest::parse(&model.gemm_table)?,
@@ -510,7 +512,7 @@ fn load_local(args: &ClientArgs, name: &str) -> Result<basal_core::Engine<crate:
         // `basal client --local` runs a model on one GPU
         layer_split: None,
     };
-    let engine = crate::gpu_engine_at(&dir, &gpu, &model.source_name())?;
+    let engine = crate::planned_engine_from_manifest(manifest, thinking, &gpu)?.engine;
     if let Some(table) = gpu.resolved_gemm.as_ref().and_then(|r| r.table.as_ref()) {
         crate::config::check_gemm_coverage(&engine.manifest.name, &engine.backend.gemm_table_missing(), table)?;
     }

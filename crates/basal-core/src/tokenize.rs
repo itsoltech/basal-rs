@@ -103,6 +103,13 @@ impl BasalTokenizer {
         self.inner.get_vocab_size(true)
     }
 
+    pub(crate) fn has_dense_vocabulary(&self) -> bool {
+        let vocab = self.inner.get_vocab(true);
+        let mut ids: Vec<u32> = vocab.values().copied().collect();
+        ids.sort_unstable();
+        ids.iter().enumerate().all(|(i, id)| usize::try_from(*id) == Ok(i))
+    }
+
     /// Token id of each of the first `k` letters at the answer position; `None` when a letter is not a single new
     /// token there or two letters share an id. Cached per `k` like upstream `Server.jobs_for`: the answer position
     /// always follows the same prefill, so the first prompt with `k` options decides for all.
@@ -116,6 +123,20 @@ impl BasalTokenizer {
         if let Some(hit) = self.letters.lock().map_err(|_| anyhow!("tokenizer code cache poisoned"))?.get(&(fmt, k)) {
             return Ok(hit.clone());
         }
+        let res = self.context_code_ids(fmt, prompt, base, k)?;
+        self.letters.lock().map_err(|_| anyhow!("tokenizer code cache poisoned"))?.insert((fmt, k), res.clone());
+        Ok(res)
+    }
+
+    /// Validate codes in this exact answer context, bypassing the ordinary format/count cache (thinking P2).
+    pub fn context_code_ids(
+        &self,
+        fmt: PromptFormat,
+        prompt: &str,
+        base: &[u32],
+        k: usize,
+    ) -> Result<Option<Vec<u32>>> {
+        ensure!((2..=fmt.max_options()).contains(&k), "unsupported option count {k}");
         let mut ids = Vec::with_capacity(k);
         let mut ok = true;
         for l in fmt.codes().iter().take(k) {
@@ -129,8 +150,19 @@ impl BasalTokenizer {
         let mut uniq = ids.clone();
         uniq.sort_unstable();
         uniq.dedup();
-        let res = (ok && uniq.len() == k).then_some(ids);
-        self.letters.lock().map_err(|_| anyhow!("tokenizer code cache poisoned"))?.insert((fmt, k), res.clone());
-        Ok(res)
+        Ok((ok && uniq.len() == k).then_some(ids))
+    }
+
+    /// Conservative decoded-byte bound for the validated Llama Metaspace/ByteFallback decoder: replacing an
+    /// invalid byte can emit three UTF-8 bytes. Include a space per piece, even when the decoder removes it.
+    pub(crate) fn llama_decoded_token_bytes(&self) -> Result<usize> {
+        let decoder = serde_json::json!({"type":"Sequence","decoders":[
+            {"type":"Replace","pattern":{"String":"▁"},"content":" "},
+            {"type":"ByteFallback"},{"type":"Fuse"},{"type":"Strip","content":" ","start":1,"stop":0}]});
+        ensure!(
+            serde_json::to_value(self.inner.get_decoder())? == decoder,
+            "thinking decoded-byte bound requires the published Llama decoder"
+        );
+        Ok(self.inner.get_vocab(true).keys().map(|s| s.len().saturating_mul(3).saturating_add(1)).max().unwrap_or(0))
     }
 }

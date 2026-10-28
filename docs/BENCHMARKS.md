@@ -645,3 +645,12 @@ basal-1.5) wystarczają do sprawdzenia zgodności z upstream, ale nie do oceny
 jakości na danych konkretnej aplikacji.
 
 Nowe dane wynikowe zapisujemy poza Gitem i archiwizujemy według [MEASUREMENT_ARTIFACTS.md](MEASUREMENT_ARTIFACTS.md). W `reports/` pozostają precyzyjne podsumowania Markdown.
+
+Opcjonalne [thinking](THINKING.md) zapisuje w ustawieniach benchmarku efektywne
+limity, osobny hash/status kalibracji, hashe i przypięte tożsamości źródeł
+base/think oraz plan wykonania drugiego modelu. Preflight pamięci uwzględnia
+rezydentną parę o identycznych kształtach i rozmiarach, a pomiary po załadowaniu
+obejmują oba modele. Porównanie generation/P2 wymaga tych samych pełnych wag,
+precision, promptów i rzeczywistej wersji vLLM odniesienia. Pico/Mini kwalifikują
+wyłącznie off i odmowy; statyczne kontrole nie potwierdzają parytetu tokenów,
+numeryki ani czasu nowej ścieżki.

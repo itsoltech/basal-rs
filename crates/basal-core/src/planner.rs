@@ -48,6 +48,7 @@ pub struct PlanOptions {
 /// loaded backend ([`PlanCaps::from_backend`]); media are planned through the backend's shared media processor.
 #[derive(Clone)]
 pub struct PlanCaps {
+    pub thinking: Option<crate::thinking::ThinkCaps>,
     pub has_evidence: bool,
     pub media_kinds: Vec<crate::media::Kind>,
     pub processor: Option<Arc<crate::media::Processor>>,
@@ -72,17 +73,18 @@ impl PlanCaps {
         let processor = backend.media_processor();
         let media_unavailable = (!kinds.is_empty() && processor.is_none())
             .then(|| "this backend takes media but exposes no shared media processor for offline planning".into());
-        Self { has_evidence: backend.has_evidence(), media_kinds: kinds, processor, media_unavailable }
+        Self { thinking: None, has_evidence: backend.has_evidence(), media_kinds: kinds, processor, media_unavailable }
     }
 
     /// Text-only capabilities (no media, no evidence head).
     pub fn text_only() -> Self {
-        Self { has_evidence: false, media_kinds: Vec::new(), processor: None, media_unavailable: None }
+        Self { thinking: None, has_evidence: false, media_kinds: Vec::new(), processor: None, media_unavailable: None }
     }
 }
 
 /// Capabilities a [`PlanContext`] asks for lazily (the online path queries its backend only where it did before).
 pub(crate) trait PlanCapabilities {
+    fn thinking(&self) -> Option<&crate::thinking::ThinkCaps>;
     fn has_evidence(&self) -> bool;
     fn media_kinds(&self) -> Vec<crate::media::Kind>;
     fn prepare_media(
@@ -96,9 +98,12 @@ pub(crate) trait PlanCapabilities {
 
 /// The online path: the backend's own media preparation, unchanged. It has no host-budget accounting, so it refuses
 /// a bounded budget instead of ignoring it.
-pub(crate) struct BackendCaps<'b, B: ?Sized>(pub(crate) &'b B);
+pub(crate) struct BackendCaps<'b, B: ?Sized>(pub(crate) &'b B, pub(crate) Option<&'b crate::thinking::ThinkCaps>);
 
 impl<B: crate::Backend + ?Sized> PlanCapabilities for BackendCaps<'_, B> {
+    fn thinking(&self) -> Option<&crate::thinking::ThinkCaps> {
+        self.1
+    }
     fn has_evidence(&self) -> bool {
         self.0.has_evidence()
     }
@@ -120,6 +125,9 @@ impl<B: crate::Backend + ?Sized> PlanCapabilities for BackendCaps<'_, B> {
 }
 
 impl PlanCapabilities for PlanCaps {
+    fn thinking(&self) -> Option<&crate::thinking::ThinkCaps> {
+        self.thinking.as_ref()
+    }
     fn has_evidence(&self) -> bool {
         self.has_evidence
     }
@@ -583,6 +591,8 @@ impl<'a> PlanContext<'a> {
     /// [`PlanContext::plan_request`] for an endpoint dialect (upstream: no model check, 2..10 options only).
     pub fn plan_request_as(&self, body: &Value, dialect: crate::request::Dialect) -> Result<RequestPlan, PlanError> {
         self.check_stop()?;
+        // Before task expansion: enabled defaults and explicit active modes refuse tasks without a forward.
+        crate::thinking::ThinkRequest::parse(body, self.caps.thinking())?;
         // Parsing and task expansion clone state, options and JSON before token preparation. Include the retained
         // task text/character indexes and transient expansion copies, not only the final rendered prompts.
         let items_bound = if self.budget.is_bounded() && self.truncates() {
@@ -640,6 +650,7 @@ impl<'a> PlanContext<'a> {
         body: &Value,
         dialect: crate::request::Dialect,
     ) -> Result<RequestPlan, PlanError> {
+        let thinking = crate::thinking::ThinkRequest::parse(body, self.caps.thinking())?;
         if self.manifest.layout != PromptLayout::Canonical {
             if let Some(field) =
                 ["media", "assets"].into_iter().find(|field| body.get(*field).is_some_and(|v| !v.is_null()))
@@ -807,6 +818,16 @@ impl<'a> PlanContext<'a> {
         }
         plan.evidence_limit = req.facts_limit;
         plan.dialect = dialect;
+        plan.thinking = thinking;
+        plan.thinking_caps = self.caps.thinking().cloned();
+        if self.budget.is_bounded() && crate::thinking::active_caps(&plan).is_some_and(|c| c.host_staging.is_none()) {
+            return Err(UnboundedFeature("thinking backend has no source-derived host staging bound".into()).into());
+        }
+        if self.budget.is_bounded() {
+            if let Some(reason) = crate::thinking::active_caps(&plan).and_then(|c| c.device_unavailable.as_ref()) {
+                return Err(UnboundedFeature(format!("thinking executor: {reason}")).into());
+            }
+        }
         Ok(plan)
     }
 
@@ -1044,6 +1065,8 @@ impl<'a> PlanContext<'a> {
         media: Option<Arc<crate::media::ProcessedMedia>>,
     ) -> Result<RequestPlan, PlanError> {
         let mut plan = RequestPlan {
+            thinking: crate::thinking::ThinkRequest::default(),
+            thinking_caps: None,
             tasks: None,
             prepared: Vec::new(),
             questions: Vec::new(),
@@ -1268,6 +1291,14 @@ pub fn result_bound(model: &str, plan: &RequestPlan) -> u64 {
         return MAX_RESULT_BYTES;
     }
     let mut bytes = 512u64.saturating_add(escaped(model));
+    if let Some(caps) = crate::thinking::active_caps(plan) {
+        // p1 distribution/confidence, metadata and optional JSON-escaped decoded notes, retained beside p2.
+        bytes = bytes.saturating_add(
+            (plan.questions.len() as u64).saturating_mul(caps.note_bytes().saturating_mul(6).saturating_add(65536)),
+        );
+    } else if plan.thinking.enabled {
+        bytes = bytes.saturating_add((plan.questions.len() as u64).saturating_mul(128));
+    }
     if plan.media.is_some() {
         bytes = bytes.saturating_add(256);
     }
@@ -1284,6 +1315,9 @@ pub fn result_bound(model: &str, plan: &RequestPlan) -> u64 {
             return MAX_RESULT_BYTES;
         }
         let keys: u64 = item.keys.iter().map(|k| escaped(k).saturating_add(NUMBER + 2)).sum();
+        if crate::thinking::active_caps(plan).is_some() {
+            bytes = bytes.saturating_add(keys); // retained no_think probability map, with original key lengths
+        }
         // legend of a score: the levels (TypeSafe) or the option texts (upstream)
         let legend: u64 = item
             .keys
@@ -1628,6 +1662,14 @@ impl DeviceWorkShape {
                 evidence = Some(EvidenceShape { tokens: positions, readouts: positions });
             }
         }
+        for caps in plans.iter().filter_map(|p| crate::thinking::active_caps(p)) {
+            // One capped-prefix forward at a time, plus p1. P2 is re-encoded and guarded by this same cap.
+            forward_tokens = forward_tokens.max(caps.settings.max_len as u64);
+            longest_prompt = longest_prompt.max(caps.settings.max_len as u64);
+            forward_readouts = forward_readouts.max(1);
+            forward_letters = forward_letters.max(caps.vocab as u64);
+            prompt_letters = prompt_letters.max(caps.vocab as u64);
+        }
         Ok(Self {
             forward_tokens,
             forward_readouts,
@@ -1685,9 +1727,33 @@ pub enum DeviceWorkBound {
     Unknown(String),
 }
 
+/// Sequential models share resident memory but never private forward tensors. Both bounds must be known.
+pub(crate) fn combine_sequential_bounds(a: DeviceWorkBound, b: DeviceWorkBound) -> DeviceWorkBound {
+    match (a, b) {
+        (DeviceWorkBound::Estimate(mut a), DeviceWorkBound::Estimate(b)) => {
+            for next in b.devices {
+                if let Some(d) = a.devices.iter_mut().find(|d| d.device == next.device) {
+                    d.bytes = d.bytes.max(next.bytes);
+                    d.allocations = d.allocations.max(next.allocations);
+                } else {
+                    a.devices.push(next);
+                }
+            }
+            a.basis = format!(
+                "sequential base + thinking: {}; {}. Resident weights of BOTH models excluded",
+                a.basis, b.basis
+            );
+            DeviceWorkBound::Estimate(a)
+        }
+        (DeviceWorkBound::Unknown(s), _) | (_, DeviceWorkBound::Unknown(s)) => DeviceWorkBound::Unknown(s),
+    }
+}
+
 /// Neutral cost figures of a plan for admission and scheduling (no backend needed).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PlanCost {
+    /// Additional conservative full-prefix token work: up to token_cap generation forwards + P2 per question.
+    pub thinking_tokens: u64,
     /// Packed tokens of the plan's prompts in one shared-prefix row (the server's admission size).
     pub packed_tokens: usize,
     /// Sum of the prompt tokens of every option order (`usage.input_tokens` of the first round).
@@ -1712,6 +1778,11 @@ pub fn plan_cost(plan: &RequestPlan) -> PlanCost {
     );
     let orders = plan.prepared.iter().flat_map(|p| &p.orders);
     PlanCost {
+        thinking_tokens: crate::thinking::active_caps(plan).map_or(0, |c| {
+            (plan.questions.len() as u64)
+                .saturating_mul(c.settings.tokens as u64 + 1)
+                .saturating_mul(c.settings.max_len as u64)
+        }),
         packed_tokens: size.tokens,
         prompt_tokens: orders.clone().map(|o| o.input_ids.len()).sum(),
         longest_prompt: orders.clone().map(|o| o.input_ids.len()).max().unwrap_or(0),
@@ -1745,6 +1816,10 @@ pub fn exec_bound(
     staging: Option<&HostStaging>,
 ) -> Option<u64> {
     let staging = staging?;
+    let thinking = match crate::thinking::active_caps(plan) {
+        Some(c) => c.host_bound(plan)?,
+        None => 0,
+    };
     let cost = plan_cost(plan);
     let prepared: u64 = plan.prepared.iter().map(prepared_bytes).sum();
     // run_decision_plans clones every prepared question; Tree batching clones them again for tree rows and packs
@@ -1790,6 +1865,7 @@ pub fn exec_bound(
     };
     Some(
         clones
+            .saturating_add(thinking)
             .saturating_add(rows)
             .saturating_add(letters)
             .saturating_add(results)

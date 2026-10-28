@@ -339,7 +339,15 @@ nie jest tożsamością modelu. Nowy katalog tworzy rewizję. Przyjęte batche
 pozostają przypięte do poprzedniej rewizji; utrzymuj zgodnych workerów do ich
 zakończenia lub świadomego wygaśnięcia.
 
-Wersja planera `basal-planner.3` rozróżnia również skracanie kontekstu i jego usage.
+Wersja planera `basal-planner.4` rozróżnia również natywne thinking, jego osobne
+źródła/kalibrację, limity i usage, poza skracaniem kontekstu wprowadzonego w .3.
+Snapshot możliwości zachowuje default `think`, a aktywne rekordy mają dodatkowe
+bounds notatek/retokenizacji, pełnego słownika i capped-prefix/P2 oraz koszt do
+`think_tokens + 1` pełnych forwardów na pytanie. Nie wyłącza się generacji
+w background fork. Niewymodelowane konfiguracje drugiego backendu odmawiają
+`UNBOUNDED_FEATURE`; skończone limity admission nadal obowiązują.
+Kwalifikacja pamięci musi uwzględniać rezydentne wagi obu modeli i ich workspace.
+Szczegóły i ograniczenia: [THINKING.md](THINKING.md).
 Fingerprint obejmuje efektywne `orders`, layout (także override), SHA-256
 wybranej kalibracji lub stan off/brak, strict, auto tau/band oraz
 `context_overflow` i `truncate_head` (także przy polityce refuse).

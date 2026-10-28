@@ -1136,6 +1136,11 @@ fn metadata_for_model<B: Backend>(engine: &Engine<B>) -> Value {
     if manifest.layout != basal_core::prompt::PromptLayout::Canonical {
         metadata["layout"] = manifest.layout.as_str().into();
     }
+    let thinking = engine.thinking_profile();
+    if thinking["mode"] == "auto" {
+        metadata["think"] = json!({"default":"auto","available":["off","auto","force"],
+            "limits":thinking["limits"], "calibration":thinking["calibration"]});
+    }
     if let Some(warning) = crate::model_options::calibration_warning(manifest) {
         metadata["calibration_warning"] = warning.into();
     }
@@ -1296,7 +1301,7 @@ fn serve_inner<B: Backend + Send + 'static>(
                 let label = if group { format!("{name}-r{index}") } else { name.clone() };
                 let device_gates: Vec<(usize, &Arc<Gate>)> =
                     devices.iter().filter_map(|&d| gates.get(&d).map(|g| (d, g))).collect();
-                let mut health: Vec<DeviceHealth> = engine.backend.work_health().into_iter().collect();
+                let mut health: Vec<DeviceHealth> = engine.work_health();
                 let (tx, rx) = mpsc::unbounded_channel();
                 let lane =
                     |kind| Lane::new(schedule, max_batch_tokens, metrics.as_ref().map(|m| m.lane(&name, kind, index)));
@@ -1310,7 +1315,7 @@ fn serve_inner<B: Backend + Send + 'static>(
                             .with_context(|| format!("{label}: background configuration"))?;
                         anyhow::ensure!(device_gates.len() == devices.len(), "background needs every device gate");
                         for &(device, gate) in &device_gates {
-                            background.backend.set_device_work_class(
+                            background.set_device_work_class(
                                 device,
                                 gate.clone(),
                                 basal_core::WorkClass::Background,
@@ -1336,11 +1341,9 @@ fn serve_inner<B: Backend + Send + 'static>(
                         "{label}: the long lane needs the gate of every GPU it uses"
                     );
                     for &(d, gate) in &device_gates {
-                        le.backend
-                            .set_device_gate(d, gate.clone(), false)
-                            .with_context(|| format!("{label}: long lane"))?;
+                        le.set_device_gate(d, gate.clone(), false).with_context(|| format!("{label}: long lane"))?;
                     }
-                    health.extend(le.backend.work_health());
+                    health.extend(le.work_health());
                     let (ltx, lrx) = std::sync::mpsc::channel();
                     let mut l = lane("long");
                     l.usage_lane = Some("long");
@@ -1355,7 +1358,7 @@ fn serve_inner<B: Backend + Send + 'static>(
                     None
                 };
                 for &(d, gate) in &device_gates {
-                    engine.backend.set_device_gate(d, gate.clone(), true).with_context(|| label.clone())?;
+                    engine.set_device_gate(d, gate.clone(), true).with_context(|| label.clone())?;
                 }
                 let mut main_lane = lane("main");
                 main_lane.usage_lane = long.as_ref().map(|_| "main");

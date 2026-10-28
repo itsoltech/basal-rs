@@ -28,6 +28,14 @@ natywnego kontraktu oraz tego samego domyślnego modelu, niezależnie od
 `systemone_dialect`. Nie wymagają przełączenia TypeSafe. Narzędzia,
 mapowanie body/wyników, limity i dostęp: [MCP.md](MCP.md).
 
+Opcjonalne [natywne thinking](THINKING.md) przyjmuje `think: off|auto|force`
+i boolean `think_text` w obu dialektach. Brak wybiera default serwera,
+`null` jest błędem. Aktywny tryb wymaga osobnego opublikowanego checkpointu;
+nieobsługiwane kombinacje, w tym tasks, odmawiają przed forwardem.
+P2 zachowuje formuły confidence dialektu. Każda odpowiedź enabled serwera ma
+`meta.think`; sukces dodatkowo `think` z liczbą tokenów, czasem, etykietą
+osobnej kalibracji i rozkładem P1, a tekst tylko na jawne żądanie.
+
 `GET /v1/models` zwraca listę TypeSafe `ModelMetadataList` (`name`,
 `description`, `release_date`) z polami upstream `mode` i `early_exit`
 (pusta lista: runtime nie stosuje wczesnego wyjścia). `release_date` ustawia
@@ -215,7 +223,7 @@ wykonane prompty po skróceniu. Brak skrócenia oznacza brak tego pola.
 | koperta | `model`, `answers` po ID pytań, `usage` |
 
 `legend` zachowuje oryginalne wartości JSON kryteriów. `usage` zawiera
-`input_tokens` (tokeny promptów obu porządków), `output_tokens` = 0,
+`input_tokens` (tokeny promptów obu porządków), `output_tokens` (0 bez thinking),
 `questions`, `branches` i `latency_ms` (czas żądania w serwerze).
 `longest_prompt_tokens` podaje najdłuższy prompt w obu formatach modelu,
 łącznie z drugim porządkiem `orders: auto` i kolejnymi rundami grupowego `choice`.
@@ -225,6 +233,10 @@ liczy dodatkowy drugi porządek. Kontynuacje zadań zachowują własne doliczani
 tokenów i gałęzi oraz maksimum długości. Przy aktywnym torze długich żądań
 `usage.lane` to `main` lub `long` według toru, który faktycznie wykonał żądanie,
 także po fallbacku do głównego toru i na replikach. Pola czasu pozostają dostępne.
+Przy enabled thinking `think_questions` liczy udane P2, a `output_tokens`
+faktycznie wygenerowane tokeny. Pozostałe liczniki zachowują powyższe znaczenie
+przebiegu bazowego. Model metadata dodaje `think` tylko po aktywacji, z default,
+available, limits i etykietą/hashem kalibracji bez lokalnych ścieżek.
 
 Confidence według TypeSafe, liczone z końcowego rozkładu po kalibracji:
 

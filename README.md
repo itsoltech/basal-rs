@@ -335,6 +335,12 @@ tokenizer; niezgodność z obsługiwanym kontraktem promptu kończy się błęde
 
 ## Serwer
 
+Opcjonalne [natywne thinking](docs/THINKING.md) uruchamia generowanie i drugi
+readout na osobnym pełnym checkpoincie opublikowanego modelu 2.0 4.5B.
+`--think off` jest domyślne i nie ładuje drugiego modelu. Włączenie wymaga
+obu przypiętych checkpointów i odpowiedniej pamięci; pozytywna kwalifikacja
+runtime tej ścieżki pozostaje otwarta.
+
 Jeden proces obsługuje jeden lub kilka modeli. Konfiguracja w YAML
 ([serve.example.yml](serve.example.yml)):
 
@@ -717,7 +723,8 @@ oraz `client --local`. Przykład:
 basal serve --model 2.0-mini --layout qfirst --no-calibration --orders auto --auto-tau 0.6 --auto-band 0.2 0.8
 ```
 
-Jawne `--layout`, `--calibration` / `--no-calibration`, `--strict-calibration`,
+Jawne `--think`, `--think-tokens`, `--think-max-len`, `--think-calibration`,
+`--layout`, `--calibration` / `--no-calibration`, `--strict-calibration`,
 `--auto-tau`, `--auto-band`, `--context-overflow` i `--truncate-head` nadpisują odpowiednie ustawienia **każdego** modelu
 z YAML, również przy `--config`. CLI wybiera jedno źródło kalibracji zamiast
 źródła z YAML; `--calibration` i `--no-calibration` wykluczają się. Brak tych

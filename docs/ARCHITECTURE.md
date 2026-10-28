@@ -34,6 +34,16 @@ snapshotu HF dostarcza repo i rozwiązany commit.
 `serve` buduje metadane z silnika, a planer batchy z jego sklonowanego manifestu.
 API pokazuje ostrzeżenie kalibracji bez lokalnych ścieżek i tożsamości.
 
+Opcjonalny `thinking.rs` przechowuje drugi backend tego samego typu z pełnymi
+wagami `think/`, własnym tokenizerem i kalibracją canonical/order1. Po pełnym P1
+`Engine::run_plans` wykonuje bounded greedy przez pełny vocabulary readout,
+retokenizuje notatki i wykonuje P2 na tym samym drugim backendzie. Oba modele
+dzielą gate/work class, lecz mają osobny stan/cache; fork, stop, health i drain
+obejmują oba. Rejestr decyzji otrzymuje dopiero finalny wynik i nie zapisuje
+notatek. Capabilities, staging i device/work bounds trafiają też do offline
+planera; resident weights obu modeli wymagają osobnej rezerwy. Domyślne off
+nie tworzy drugiego backendu. Kontrakt i ograniczenia: [THINKING.md](THINKING.md).
+
 `planner.rs` realizuje odmowę albo maksymalnie dwie próby skracania tekstu na
 CPU, przed forwardem. Sprawdza retokenizowane prompty obu potencjalnych
 porządków auto i kopie stanu layoutu; usuwa wyłącznie środek oryginalnego stanu.

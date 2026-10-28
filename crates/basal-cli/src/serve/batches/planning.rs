@@ -288,7 +288,7 @@ fn plan_line(job: &PlanJob, limits: &PlanLimits) -> Result<PlannedRecord, PlanFa
         ));
     }
     // DRR cost in ns of device-gate time: packed tokens × the profile's coefficient.
-    let packed = (cost.packed_tokens as u64).max(1);
+    let packed = (cost.packed_tokens as u64).saturating_add(cost.thinking_tokens).max(1);
     let cost_units = packed.checked_mul(profile.cost_ns_per_token).filter(|&c| c <= profile.max_record_cost);
     let Some(cost_units) = cost_units else {
         return Err(PlanFailure::data(

@@ -23,6 +23,7 @@ pub mod request;
 pub mod sets;
 pub mod systemone;
 pub mod tasks;
+pub mod thinking;
 pub mod tokenize;
 pub mod tools;
 

@@ -4,6 +4,14 @@ Cztery klienty HTTP obsługują **`POST /v1/basal`** oraz **Batch/Files API**.
 Nie korzystają z kontraktu TypeSafe System One. Nie wymagają GPU ani wag
 modelu po stronie aplikacji. Serwer uruchamiasz osobno przez `basal serve`.
 
+Serwer obsługuje opt-in [natywne thinking](THINKING.md): wire `think`
+off/auto/force i boolean `think_text`, odpowiedź `think`/`meta.think`, usage
+`think_questions` i faktyczne `output_tokens`. Typy czterech SDK i opis
+OpenAPI wymagają osobnej synchronizacji; ta implementacja silnika ich nie
+aktualizuje. Do czasu tej synchronizacji nie należy zakładać, że typed SDK
+udostępnia te opcje lub zachowuje nowe pola; można użyć bezpośredniego JSON HTTP
+albo dostarczanych narzędzi MCP.
+
 Hosty agentów mogą też użyć narzędzi `decide`/`decide_many` przez opcjonalne
 HTTP `/mcp` lub `basal mcp` (most stdio do `/v1/basal`). Transporty i schematy
 MCP dostarcza CLI z oficjalnym `rmcp 3.8.0`; cztery SDK HTTP zachowują własne

@@ -73,8 +73,10 @@ impl ServerHandler for Tools {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("basal", env!("CARGO_PKG_VERSION")))
             .with_instructions(format!(
-                "basal ({}) answers typed questions about a state without generating text, returning calibrated \
-                 probabilities. Use it for routing, yes/no checks, scores and label sets. Put every fact and rule \
+                "basal ({}) answers typed questions about a state, returning calibrated \
+                 probabilities. With native thinking enabled it may generate bounded reasoning before a second \
+                 decision readout; thinking is off by default. Use it for routing, yes/no checks, scores and label sets. \
+                 Put every fact and rule \
                  needed in state: the model decides only from what it reads. Ask one condition per yes/no question; \
                  use multi for several labels. Describe what each option means; offer a cannot-be-determined \
                  option when information may be missing. Ask in the state's language (Polish or English). Compute \
@@ -215,6 +217,16 @@ fn tool(many: bool) -> Tool {
             "description": "Prompt language; default Polish if state/question has Polish diacritics, otherwise English."
         }),
     );
+    properties.insert(
+        "think".into(),
+        json!({"enum":["off","auto","force"],
+        "description":"Optional native thinking override; requires an enabled supported server. Tasks require off."}),
+    );
+    properties.insert(
+        "think_text".into(),
+        json!({"type":"boolean",
+        "description":"Include generated reasoning text when a thought succeeds (default false)."}),
+    );
     let schema = json!({"type": "object", "properties": properties, "required": required});
     Tool::new(name, description, schema.as_object().expect("object schema").clone())
         .with_annotations(ToolAnnotations::new().read_only(true).destructive(false).idempotent(true).open_world(false))
@@ -227,6 +239,11 @@ fn native_body(name: &str, mut args: Map<String, Value>) -> Result<Value> {
     anyhow::ensure!(state.is_string() || state.is_object(), "state must be a string or object");
     let mut body = Map::new();
     body.insert("state".into(), state);
+    for field in ["think", "think_text"] {
+        if let Some(value) = args.remove(field) {
+            body.insert(field.into(), value);
+        }
+    }
     if let Some(lang) = args.remove("lang").filter(|v| !v.is_null()) {
         anyhow::ensure!(matches!(lang.as_str(), Some("pl" | "en")), "lang must be pl, en or null");
         body.insert("lang".into(), lang);
