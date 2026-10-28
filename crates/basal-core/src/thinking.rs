@@ -293,14 +293,20 @@ impl<B: Backend> Thinking<B> {
 
 /// Caps needed only when this plan can execute a thought. Off/truncated/ineligible plans keep the old budgets.
 pub(crate) fn active_caps(plan: &crate::engine::RequestPlan) -> Option<&ThinkCaps> {
-    (plan.thinking.mode != ThinkMode::Off
-        && plan.truncated.is_none()
-        && plan
-            .questions
-            .iter()
-            .any(|q| matches!(q, crate::engine::QuestionPlan::Direct(i) if eligible(&plan.prepared[*i].item))))
-    .then_some(plan.thinking_caps.as_ref())
-    .flatten()
+    plan.thinking_caps.as_ref().filter(|_| {
+        plan.thinking.mode != ThinkMode::Off && plan.truncated.is_none() && eligible_direct(plan).next().is_some()
+    })
+}
+
+/// Eligible Direct questions: the one plan-level predicate behind active caps and thinking work cost.
+pub(crate) fn eligible_direct(plan: &crate::engine::RequestPlan) -> impl Iterator<Item = &Item> + '_ {
+    plan.questions
+        .iter()
+        .filter_map(|q| match q {
+            crate::engine::QuestionPlan::Direct(i) => Some(&plan.prepared[*i].item),
+            _ => None,
+        })
+        .filter(|item| eligible(item))
 }
 
 impl ThinkCaps {

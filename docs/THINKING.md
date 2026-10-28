@@ -94,10 +94,13 @@ Cały request pozostaje w tym samym admission i lane aż do końcowego wyniku.
 Generacja jest sekwencyjna: także żądanie off w tym samym microbatchu czeka
 na zakończenie myślenia pozostałych żądań przed wysłaniem odpowiedzi. To źródło
 opóźnienia head-of-line, bez zmierzonej wartości latency. Błąd thinking jednego
-żądania kończy jego dalsze thoughts i daje `INTERNAL` z pełnym opisem przyczyn
-(natywne rozpoznanie OOM nadal daje 503); poprawne żądania współdzielące batch
-mogą otrzymać odpowiedź. Typowane przerwanie i utrata urządzenia nadal kończą
-wywołanie, z dotychczasowym drain i quarantine.
+żądania kończy jego dalsze thoughts i daje błąd wewnętrzny z pełnym opisem
+przyczyn. Dialekt upstream odpowiada 500, a 503 tylko wtedy, gdy ten opis
+zawiera rozpoznany natywny OOM; TypeSafe zawsze odpowiada 500. W trwałym
+batchu rekord jest ponawiany, a po `batches.execution.max_attempts` próbach
+dostaje wynik błędu `execution_failed`. Poprawne żądania współdzielące
+microbatch mogą otrzymać odpowiedź. Typowane przerwanie i utrata urządzenia
+nadal kończą wywołanie, z dotychczasowym drain i quarantine.
 
 Planer offline dostaje snapshot capabilities thinking. Dodatkowe host bounds
 obejmują P1, notatki, tokenizer/retokenizację, pełny słownik i staging.

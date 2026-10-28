@@ -820,11 +820,11 @@ impl<'a> PlanContext<'a> {
         plan.dialect = dialect;
         plan.thinking = thinking;
         plan.thinking_caps = self.caps.thinking().cloned();
-        if self.budget.is_bounded() && crate::thinking::active_caps(&plan).is_some_and(|c| c.host_staging.is_none()) {
-            return Err(UnboundedFeature("thinking backend has no source-derived host staging bound".into()).into());
-        }
-        if self.budget.is_bounded() {
-            if let Some(reason) = crate::thinking::active_caps(&plan).and_then(|c| c.device_unavailable.as_ref()) {
+        if let Some(caps) = crate::thinking::active_caps(&plan).filter(|_| self.budget.is_bounded()) {
+            if caps.host_staging.is_none() {
+                return Err(UnboundedFeature("thinking backend has no source-derived host staging bound".into()).into());
+            }
+            if let Some(reason) = &caps.device_unavailable {
                 return Err(UnboundedFeature(format!("thinking executor: {reason}")).into());
             }
         }
@@ -1780,11 +1780,7 @@ pub fn plan_cost(plan: &RequestPlan) -> PlanCost {
     let orders = plan.prepared.iter().flat_map(|p| &p.orders);
     PlanCost {
         thinking_tokens: crate::thinking::active_caps(plan).map_or(0, |c| {
-            (plan
-                .questions
-                .iter()
-                .filter(|q| matches!(q, QuestionPlan::Direct(i) if crate::thinking::eligible(&plan.prepared[*i].item)))
-                .count() as u64)
+            (crate::thinking::eligible_direct(plan).count() as u64)
                 .saturating_mul(c.settings.tokens as u64 + 1)
                 .saturating_mul(c.settings.max_len as u64)
         }),

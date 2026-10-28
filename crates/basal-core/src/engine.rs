@@ -1534,6 +1534,15 @@ pub struct RequestPlan {
     pub(crate) auto_reverse: Option<crate::planner::ReverseTokens>,
 }
 
+/// `meta.think` of an enabled server's answer: `tokens` of a successful thought, otherwise unused (off, ineligible,
+/// skipped or a task answer).
+fn set_think_meta(answer: &mut Value, tokens: Option<u64>) {
+    if !answer["meta"].is_object() {
+        answer["meta"] = json!({});
+    }
+    answer["meta"]["think"] = json!({"used": tokens.is_some(), "tokens": tokens.unwrap_or(0)});
+}
+
 pub fn plan_response(model: &str, plan: &RequestPlan, out: &PlanOutput) -> Result<Value, DecideError> {
     if !out.context_errors.is_empty() {
         return Err(DecideError::Unsupported(out.context_errors.clone()));
@@ -1550,10 +1559,7 @@ pub fn plan_response(model: &str, plan: &RequestPlan, out: &PlanOutput) -> Resul
         if plan.thinking.enabled {
             response["usage"]["think_questions"] = 0.into();
             for answer in response["answers"].as_object_mut().into_iter().flat_map(|m| m.values_mut()) {
-                if !answer["meta"].is_object() {
-                    answer["meta"] = json!({});
-                }
-                answer["meta"]["think"] = json!({"used":false,"tokens":0});
+                set_think_meta(answer, None);
             }
         }
         return Ok(response);
@@ -1580,10 +1586,7 @@ pub fn plan_response(model: &str, plan: &RequestPlan, out: &PlanOutput) -> Resul
             a["think"] = thought.clone();
         }
         if plan.thinking.enabled {
-            if !a["meta"].is_object() {
-                a["meta"] = json!({});
-            }
-            a["meta"]["think"] = json!({"used":thought_tokens.is_some(),"tokens":thought_tokens.unwrap_or(0)});
+            set_think_meta(&mut a, thought_tokens);
         }
         answers.insert(it.name.clone(), a);
     }
