@@ -11,7 +11,7 @@
 //! execution (slot `R`, native planner, the same budgets, numbers and semantics as online) and appended in bounded
 //! chunks: byte range, line hash, cost, `result_bound` and `host_bound`. The seal follows only after every record.
 //! The local profile also claims its profiles without a host staging bound (no other host could) and fails their
-//! batches with `unbounded_feature` before reading the input.
+//! batches with `unbounded_feature` without validating or planning any record (discovery read only the first line).
 //! Data errors (up to the issue limit, with line numbers) fail the batch; a lost lease or an unavailable store
 //! stops the attempt without failing it, so another lease continues. Records are never fetched from URLs.
 
