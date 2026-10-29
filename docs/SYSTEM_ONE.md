@@ -309,6 +309,12 @@ legenda score z tekstami opcji. Błędy żądania, także niepoprawny JSON, to 4
 Admission zachowuje 529 i `Retry-After`. Dla modelu basal-1.0 obowiązują reguły v1.5.0 (`type:
 "multi"` to multi).
 
+W dialekcie upstream jawne `state: null` daje tekst `"null"`; brak `state`
+pozostaje błędem. `facts` dopuszcza brak pola, `"off"` lub `"auto"`, a jawne
+`facts: null` zwraca 422. Dotyczy to także `/v1/systemone` po wybraniu dialektu
+upstream. Dialekt TypeSafe nadal traktuje `state: null` jak brak pola,
+a `facts: null` jak wyłączone fakty.
+
 Na 34 żądaniach referencji basal-1.5 błędy występują w tych samych miejscach
 co w upstream, a 55/55 pytań ma te same pola i decyzje (maks. różnica
 liczbowa 0,0016, FP16 wobec FP32 upstream). `basal export` zapisuje odpowiedź

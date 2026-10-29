@@ -398,7 +398,7 @@ pub fn parse_request_for_format(
         }
     };
     let state = match obj.get("state") {
-        Some(v) if is_description(v, false) || (dialect == Dialect::Upstream && !v.is_null()) => Some(text(v)),
+        Some(v) if is_description(v, false) || dialect == Dialect::Upstream => Some(text(v)),
         // a null state is a missing one for the TypeSafe API
         None | Some(Value::Null) => {
             errs.push(missing(loc(&["state"]), body));
@@ -438,7 +438,8 @@ pub fn parse_request_for_format(
     let mut state = state;
     let mut facts_limit = None;
     match obj.get("facts") {
-        None | Some(Value::Null) => {}
+        None => {}
+        Some(Value::Null) if dialect == Dialect::TypeSafe => {}
         Some(Value::String(f)) if f == "off" => {}
         Some(Value::String(f)) if f == "auto" => {
             if let Some(s) = &state {
