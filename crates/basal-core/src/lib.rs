@@ -27,6 +27,7 @@ pub mod tasks;
 pub mod thinking;
 pub mod tokenize;
 pub mod tools;
+pub mod weights;
 
 pub use engine::{Backend, Batching, DeviceHealth, Engine, ItemResult, Prepared};
 pub use execution::{BackgroundSupport, ExecutionError, Interrupted, StopReason, StopToken, WorkClass};
