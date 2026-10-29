@@ -82,15 +82,14 @@ pub fn run(file: Option<PathBuf>, model_refs: &[String], as_json: bool) -> Resul
     let mut invalid_ple = false;
     if let Some(c) = &config {
         for model in &c.models {
-            if model.ple_placement == basal_gpu::PleMode::Host {
-                if let Err(e) = config::check_ple_source(model.ple_placement, model.layer_split.is_some(), model) {
-                    config_report.fail(
-                        "models",
-                        format!("{}: {e:#}", config::describe(model)),
-                        "host PLE needs a CUDA build and non-unified Gemma with PLE, without layer split",
-                    );
-                    invalid_ple = true;
-                }
+            // Device returns Ok before any check.
+            if let Err(e) = config::check_ple_source(model.ple_placement, model.layer_split.is_some(), model) {
+                config_report.fail(
+                    "models",
+                    format!("{}: {e:#}", config::describe(model)),
+                    "host PLE needs a CUDA build and non-unified Gemma with PLE, without layer split",
+                );
+                invalid_ple = true;
             }
         }
     }
@@ -649,10 +648,8 @@ fn models(r: &mut Report, c: &ServeConfig, gpus: Option<&[Gpu]>) {
                     bytes = memory.estimated_device_weight_bytes;
                     for devices in placement.instances() {
                         for device in devices {
-                            ple_load_scratch
-                                .entry(device)
-                                .and_modify(|b| *b = (*b).max(memory.estimated_device_load_scratch_bytes))
-                                .or_insert(memory.estimated_device_load_scratch_bytes);
+                            let scratch = ple_load_scratch.entry(device).or_default();
+                            *scratch = (*scratch).max(memory.estimated_device_load_scratch_bytes);
                         }
                     }
                     match ple_host_load.checked_add(host) {
