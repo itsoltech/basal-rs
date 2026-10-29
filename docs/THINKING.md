@@ -103,6 +103,12 @@ profil BF16 dał też różne prawdopodobieństwa w dwóch procesach z tą samą
 tożsamością planu. Wcześniejsza powtarzalność dotyczy zatem wyłącznie
 zmierzonej serii HTTP; profil nie gwarantuje powtarzalności po restarcie.
 
+[Diagnostyka GEMM J4](../reports/upstream-api-241-gemm-diagnostic-2026-10-29/README.md)
+potwierdziła powtarzalność jawnego trybu `BASAL_THINK_GEMM=heuristic` w dwóch
+procesach na badanym korpusie. Pełne HTTP dało 13/19 odpowiedzi w progu 1e-4,
+4/9 zgodnych notatek i 7/9 argmax względem rzeczywistego upstream. To nadal
+FAIL parytetu; tryb pozostaje diagnostyczny, bez zmiany ustawień domyślnych.
+
 ## Żądanie i odpowiedź
 
 Oba dialekty HTTP oraz narzędzia MCP przyjmują requestowe `think`:
