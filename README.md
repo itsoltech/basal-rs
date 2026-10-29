@@ -835,8 +835,31 @@ writer lub błąd zapisu daje 500. Zawartość i lifecycle:
 | `wait_ms` | brak | skończone nieujemne milisekundy stałego okna zbierania głównego toru |
 | `batch_window_ms` | brak | skończone nieujemne milisekundy okna adaptacyjnego głównego toru; `0` wyłącza adaptacyjne czekanie |
 | `schedule` | `hrrn` | kolejność przyjmowania żądań: `hrrn` (krótkie przed długimi, bez zagłodzenia) albo `fifo` |
-| `long_tokens` | 4096 | żądania powyżej tej liczby tokenów idą do toru długich żądań; oddawanie GPU między warstwami podlega głównej polityce `long_share`; `0` wyłącza tor |
+| `long_tokens` | 4096 | ścisły próg `>` w wybranej podstawie; oddawanie GPU między warstwami podlega głównej polityce `long_share`; `0` wyłącza tor w trybie legacy |
+| `long_lane` | `legacy` | `legacy`: tor aktywny przy dodatnim `long_tokens`; `off`: wyłączony niezależnie od progu; `on`: wymaga dodatniego progu |
+| `long_token_basis` | `packed` | `packed`: dotychczasowy koszt admission całego planu; `prompt`: najdłuższy rzeczywisty prompt po truncation lub konserwatywna granica późniejszej pracy |
 | `state_cache_mb` | 0 | cache K/V stanu między żądaniami |
+
+`--long-lane legacy|on|off` i `--long-token-basis packed|prompt` nadpisują
+odpowiednie pola każdego modelu tylko przy jawnym podaniu, również z `--config`,
+`BASAL_CONFIG` i automatycznie znalezionym YAML. Bez opcji pozostają wartości
+YAML, a bez obu źródeł — legacy/packed. Nieznane wartości i `on` z progiem 0
+odmawiają startu przed pracą modelu/urządzenia. `off` usuwa dodatkowy silnik,
+wątek i naliczenie pamięci PLE, zachowując bramki wspólnego GPU i batchy w tle.
+Log startu rozróżnia żądane kontrole oraz efektywny tor, próg i podstawę.
+
+`prompt` liczy maksimum `orders[].input_ids.len()` po renderowaniu, tokenizacji
+i ewentualnym skróceniu kontekstu, także znanych odwrotnych porządków. Wiele
+krótkich pytań bez dłuższej pracy zależnej może pozostać w głównym torze,
+mimo przekroczenia progu packed. Nieznane jeszcze finały grouped choice,
+kontynuacje tasks i aktywne thinking otrzymują konserwatywną granicę kontekstu,
+więc mogą trafić do long mimo krótkich pierwszych promptów. Evidence bez
+dowiedzionej zgodności z zaplanowanym promptem również trafia do long.
+Szczegóły i granice dowodu: [architektura](docs/ARCHITECTURE.md).
+Całe żądanie wybiera tor raz; cache-hit nie skraca klasyfikacji. Koszt HRRN,
+budżet tokenowy i limity/rezerwacje żądań pozostają niezależne od tej podstawy.
+Natywne FIFO/HRRN zachowują swoje reguły; nie jest to scheduler upstream ani
+short-first backlog. Główne `long_share` nadal dotyczy wspólnego urządzenia.
 
 `--soam on|off` nadpisuje per-model YAML `soam` tylko przy jawnym podaniu.
 Brak opcji i `on` zachowują dotychczasowy Tree, wybór backendu, plan numeryczny
@@ -845,9 +868,10 @@ orders jednej gałęzi `Prepared`, także ich wspólny prefiks. Nie współdziel
 wiersza drzewa pomiędzy gałęziami ani żądaniami. Niezależne `state_cache_mb`
 i cache stałych prefiksów szablonu zachowują swoje ustawienia.
 
-W `off` koszt HRRN, próg `long_tokens`, admission obu torów i podgląd kolekcji
-sumują rzeczywiste `Prepared.packed.ids.len()` bez deduplikacji. Próg długiego
-toru dotyczy całego początkowego planu. W głównym torze zwykłego tekstu wpisem
+W `soam: off` koszt HRRN, admission obu torów, podgląd kolekcji i routing
+`long_token_basis: packed` sumują rzeczywiste `Prepared.packed.ids.len()` bez
+deduplikacji. Próg długiego toru w tej podstawie dotyczy całego początkowego
+planu. W głównym torze zwykłego tekstu wpisem
 jest gotowa gałąź `Prepared` ze wszystkimi jej porządkami opcji; `max_batch`
 i historia okna adaptacyjnego liczą takie wpisy. FIFO używa czasu przyjścia
 żądania, HRRN czasu oczekiwania i kosztu danej gotowej gałęzi. Podgląd i admission

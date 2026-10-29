@@ -81,7 +81,7 @@ pub(super) fn scheduler<B: Backend>(
     mut engine: Engine<B>,
     mut rx: mpsc::UnboundedReceiver<Job>,
     mut lane: Lane,
-    long: Option<(std::sync::mpsc::Sender<Waiting>, usize)>,
+    long: Option<(std::sync::mpsc::Sender<Waiting>, super::routing::RoutingPolicy)>,
     scheduling: SchedulingPolicy,
     policy: CollectionPolicy,
     runtime: CollectionRuntime,

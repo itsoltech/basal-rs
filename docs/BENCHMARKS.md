@@ -503,6 +503,21 @@ tabela GEMM tylko nazwą pliku, bez ścieżki katalogu użytkownika.
 Opcje `--max-batch-tokens`, `--max-inflight`, `--max-large-inflight`, `--schedule`, `--long-tokens`
 i `--long-slice-ms` mają takie same domyślne wartości jak `serve`.
 Benchmark nie czyta ambientowej konfiguracji `basal-serve.yml`.
+Opcjonalne `--long-lane legacy|on|off` i `--long-token-basis packed|prompt`
+działają tak samo jak w serve: brak oznacza legacy/packed, on wymaga dodatniego
+`--long-tokens`, off nie tworzy ani nie nalicza drugiego workera. Walidacja
+poprzedza zasoby/model. Jawna dowolna z tych opcji dodaje `routing` do raportu
+przed ładowaniem (także przy błędzie), a po ładowaniu do `settings.routing`:
+requested oraz efektywny tor, próg i podstawa. Pominięcie obu nie dodaje tych
+kluczy do dotychczasowego JSON. Przy porównaniu konfiguracji zachowaj te same
+wejścia i pozostałe ustawienia, a wybrane kontrole podaj jawnie, np.
+`--long-lane on --long-token-basis prompt --long-tokens 4096`.
+Prompt oznacza rzeczywiste maksimum po truncation oraz konserwatywne granice
+późniejszych rund, nie koszt packed ani długość samego pierwszego promptu.
+[Architektura](ARCHITECTURE.md) opisuje evidence/thinking/tasks/media i bezpieczny
+wybór long przy braku dowiedzionej granicy. FIFO/HRRN oraz budżet packed nie
+zmieniają reguł; brak short-first scheduler'a i skrótu cache-hit. To okablowanie
+porównywalnych pomiarów, bez nowej deklaracji zgodności lub wydajności.
 `settings` zawiera efektywne `context_overflow` i `truncate_head`, tak jak
 profil batchy. Domyślne `refuse` zachowuje pomiar limitu kontekstu; przy
 jawnym `--context-overflow truncate` wynik może opisywać skrócone wejście,

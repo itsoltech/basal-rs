@@ -631,7 +631,7 @@ między gałęziami/żądaniami. Cache stanu oraz stałe prefiksy szablonu pozos
 niezależne. Prywatny `AdmissionCost` zachowuje dotychczasową ścieżkę `TrieSize`
 dla Tree. Dla Budget sumuje długości `Prepared.packed.ids` przez `checked_add`,
 bez alokacji list promptów i deduplikacji. Ten sam helper służy `plan_job`
-(HRRN i long routing), faktycznemu admission oraz podglądowi kolekcji.
+(HRRN i long routing w podstawie packed), faktycznemu admission oraz podglądowi kolekcji.
 Przepełnienie blokuje kolejnego kandydata; koszt pierwszego żądania może nasycić
 się do `usize::MAX` i wejść zgodnie z regułą oversized-first. Minimalny koszt 1
 dla HRRN pozostaje tylko zabezpieczeniem dzielenia przy żądaniu bez promptów.
@@ -737,7 +737,68 @@ pełnej zgodności harmonogramów. Kontrole kolekcji nie zmieniają planu
 numerycznego ani odcisku trwałych batchy. Zmieniony skład partii wymaga jednak
 osobnego replayu zgodności, również dla F32 zależnego od kształtu obliczeń.
 
-Żądania powyżej `--long-tokens` liczy drugi tor: drugi silnik na tym samym
+Typowane opcjonalne `long_lane: legacy|on|off` i `long_token_basis: packed|prompt`
+należą do modelu. Jawne `--long-lane` / `--long-token-basis` nadpisują YAML dla
+każdego modelu, także przez `--config`, `BASAL_CONFIG` i autodetekcję; pominięcie
+zachowuje YAML, a brak obu źródeł oznacza legacy/packed. Progi i ich dotychczasowe
+źródła pozostają bez zmian: domyślnie 4096, ścisłe `>`. Legacy włącza tor tylko
+przy dodatnim progu; off wyłącza go niezależnie od progu; on z zerowym progiem
+jest błędem przed pobraniem modelu/odkrywaniem urządzeń. Nieznane wartości enum
+odrzuca parser. Próg nie dostaje domyślnej wartości specjalnej dla on.
+
+Prywatny `serve/routing.rs::RoutingPolicy` rozwiązuje i waliduje żądane kontrole.
+Ten sam snapshot steruje routingiem, etykietami usage main/long, tworzeniem
+bramek i diagnostyką active-long, forkiem silnika, wątkiem oraz liczbą workerów
+PLE w szacowaniu ładowania hosta i staging/headroom. Wyłączenie toru nie usuwa
+bramek wymaganych przez współdzielone urządzenia lub background. Main pozostaje
+klasą main także na takich bramkach. Logi startu pokazują requested/effective;
+konfiguracja zachowuje żądane wartości. Routing nie zmienia planu numerycznego,
+fingerprintu kwalifikacji batchy ani backendu.
+
+Podstawa packed korzysta z dokładnie dotychczasowego `AdmissionCost` dla Tree
+lub Rows. Prompt korzysta z wąskiego odczytu `RequestPlan::prompt_token_bound`:
+maksimum rzeczywistych `Prepared.orders[].input_ids.len()` po kontekstowym
+skróceniu stanu oraz `auto_reverse.longest` z już wykonanej tokenizacji pełnych
+odwrotnych porządków. Nie sumuje pytań/opcji ani wierszy trie i nie szacuje
+tekstu przed renderowaniem. Wiele krótkich, niezależnych promptów może więc
+pozostać main przy koszcie packed ponad progiem. HRRN, `max_batch_tokens`,
+limity wpisów i historia kolekcji nadal używają dotychczasowych kosztów.
+
+Żądanie wybiera tor tylko raz. Późniejsze zależności pozostają w tym samym
+właścicielu, bez transferu częściowego `RequestExecution` pomiędzy wątkami.
+Konserwatywne przypadki mają następujące uzasadnienie źródłowe:
+
+- Finały i kolejne grupy large choice zależą od wyników. Każdy nowy Prepared
+  jest sprawdzany przez `prepared_context_error` przed forwardem (`engine/rounds.rs`);
+  granica całego żądania to co najmniej zwalidowane `ShapeLimits.max_positions`.
+- Kontynuacje tasks są ponownie planowane przez `plan_decision_request_as`,
+  z kontrolą kontekstu i ewentualnym truncation przed wykonaniem. Ich przyszłe
+  pytania, multi i grupy również otrzymują granicę max_positions.
+- Aktywne, kwalifikujące się thinking może tworzyć nowe prompty i P2. Używamy
+  co najmniej max_positions oraz własnego `ThinkCaps.settings.max_len`, jeśli
+  jest większy. Ten drugi limit jest ograniczony kontekstem checkpointu thinking;
+  generation/P2 sprawdzają go także po ponownej tokenizacji. Off, truncation
+  lub brak kwalifikujących pytań nie dodają tej granicy.
+- Evidence przy canonical Llama renderuje ten sam prompt co pierwszy porządek.
+  Inny layout/chat style tokenizuje go dopiero w `evidence_for`, bez osobnego
+  sprawdzenia max_positions. Nie przypisujemy mu fałszywej granicy: brak dowodu
+  (`None`) kieruje całe żądanie do long niezależnie od progu, również gdy task
+  może dopiero wprowadzić takie evidence.
+- Media mają już tokeny placeholderów w rzeczywistych input_ids i nie podlegają
+  truncation. Ich reverse orders również przechodzą kontrolę kontekstu; encoder
+  patch/frame count nie jest długością promptu. Dynamiczny task z mediami nadal
+  otrzymuje granicę kontynuacji. Brak reverse lengths przy adaptive orders albo
+  brak dodatniej granicy kontekstu również oznacza bezpieczny wybór long.
+
+Te granice nie są obserwowaną długością przyszłych promptów. Mogą skierować
+krótkie żądanie do long; nawet próg równy max_positions nie pozwala ominąć
+przypadku bez dowiedzionej granicy. Cache-hit nie zmienia klasyfikacji.
+Long zachowuje atomowe wykonanie, fallback do main po zamknięciu kanału,
+jedną odpowiedź i rezerwację oraz synchroniczny drain. Native FIFO/HRRN nie
+dostaje short-first backlog ani aliasu upstream; zgodność harmonogramów i
+wyników, jakość FP32, zużycie pamięci i wydajność wymagają osobnych pomiarów.
+
+Żądania sklasyfikowane jako long liczy drugi tor: drugi silnik na tym samym
 GPU, ze wspólnymi wagami, tabelą GEMM i prefiksami szablonu. Oba tory
 korzystają z GPU na zmianę (`basal_core::gate`): tor długich żądań po każdej
 warstwie czeka na zakończenie swoich kerneli i oddaje GPU, gdy główny tor ma

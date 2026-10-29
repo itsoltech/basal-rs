@@ -102,11 +102,11 @@ models:
     device: 0
     # soam: off                   # absent/on: legacy Tree; off: one packed row per primitive branch (Budget)
     # All option orders within one branch still share their prefix; state/template caches remain independent.
-    # Queue/max_batch/long lane still use whole requests; upstream SOAM-off primitive-branch scheduling is not supported.
+    # Main ordinary text admits ready primitives; long/media/active-exit work remains whole-request atomic.
     # Explicit CLI --soam on|off overrides YAML. Off refuses batch_profile.background: true (Tree evidence is not Budget).
     max_batch_tokens: 8192         # Tree: trie tokens; SOAM-off: sum of actual Prepared packed row lengths
     # Optional controls, absent by default; explicit CLI --max-batch/--wait-ms/--batch-window-ms override YAML.
-    # max_batch: 64               # positive whole requests per batch, independently in main and long lanes
+    # max_batch: 64               # positive entries per batch: main SOAM-off primitives, otherwise whole requests
     # wait_ms: 0                  # finite nonnegative milliseconds; fixed main-lane collection wait
     # batch_window_ms: 3          # adaptive main-lane window, toward the previous admitted batch size (>1)
     # Either timing key replaces profile timing; its absent companion is 0. Explicit 0/0 adds no delay but still
@@ -115,7 +115,14 @@ models:
     # token-budget rejection stops collection. Exact equality still permits zero-cost work (Tree: shared prompts).
     # The native long lane shares max_batch, with no added collection delay; upstream has separate long bounds.
     schedule: hrrn                 # hrrn (default) or fifo
-    long_tokens: 4096              # requests above this run in the model's long lane (0: none)
+    long_tokens: 4096              # strict > threshold in the selected basis; 0 disables legacy lane
+    # long_lane: legacy           # absent/legacy: enabled iff long_tokens > 0; on: requires > 0; off: disabled
+    # long_token_basis: packed    # absent/packed: old admission cost; prompt: longest actual post-truncation order
+    # Explicit --long-lane / --long-token-basis override these per-model keys, including with --config.
+    # Prompt includes known reverse orders; later grouped finals/tasks/thinking use conservative context bounds.
+    # Evidence without a proven matching prompt bound chooses long. See docs/ARCHITECTURE.md for each case.
+    # Whole requests choose a lane once; no cache-hit shortcut or short-first scheduler. HRRN/admission costs
+    # remain packed. Off removes the fork/thread/PLE worker charge, retaining shared-device/background gates.
     state_cache_mb: 0              # cross-request state cache (0: off)
 
   - path: .models/basal-1.5-4.5B   # or a local model directory

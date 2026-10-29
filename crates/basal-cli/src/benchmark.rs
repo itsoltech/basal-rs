@@ -64,9 +64,15 @@ pub(crate) struct Options {
     /// Server queue admission order
     #[arg(long, value_enum, default_value_t = Schedule::Hrrn)]
     schedule: Schedule,
-    /// Packed-token threshold of the server's long-request lane (0 disables it)
+    /// Strict long-lane token threshold in the selected basis (0 disables the legacy lane)
     #[arg(long, default_value_t = 4096)]
     long_tokens: usize,
+    /// Long lane: legacy follows the threshold, on requires a positive threshold, off disables
+    #[arg(long, value_enum)]
+    long_lane: Option<crate::serve::routing::LongLane>,
+    /// Long routing by packed admission cost or safe longest-prompt bound
+    #[arg(long, value_enum)]
+    long_token_basis: Option<crate::serve::routing::LongTokenBasis>,
     /// Minimum long-lane slice before handing the GPU to short requests
     #[arg(long, default_value_t = 100)]
     long_slice_ms: u64,
@@ -82,7 +88,13 @@ pub(crate) struct Options {
 }
 
 impl Options {
+    fn routing_policy(&self) -> Result<crate::serve::routing::RoutingPolicy> {
+        crate::serve::routing::RoutingPolicy::new(self.long_tokens, self.long_lane, self.long_token_basis)
+            .context("benchmark long-lane routing")
+    }
+
     fn validate(&self) -> Result<()> {
+        self.routing_policy()?;
         crate::serve::check_long_share(self.long_share)?;
         ensure!(
             !self.concurrency.is_empty() && self.concurrency.iter().all(|c| (1..=256).contains(c)),
@@ -154,7 +166,7 @@ impl Server {
             max_batch_tokens: options.max_batch_tokens,
             collection: Default::default(),
             schedule: options.schedule,
-            long_tokens: options.long_tokens,
+            routing: options.routing_policy()?,
             batch_profile: None,
             batch_qualification: crate::serve::batches::config::BackgroundQualification::not_configured(),
         };
@@ -280,6 +292,10 @@ pub(crate) fn run(model: &ModelArgs, gpu_options: &GpuArgs, options: &Options) -
     if let Some(share) = options.long_share {
         report["long_share"] = json!(share);
     }
+    if options.long_lane.is_some() || options.long_token_basis.is_some() {
+        // Record before execute so resource/model/startup failures retain the comparable policy identity.
+        report["routing"] = options.routing_policy()?.identity();
+    }
     let result = execute(model, gpu_options, quantization, options, raw, &mut report);
     if let Err(e) = &result {
         report["reason"] = json!(format!("{e:#}"));
@@ -402,7 +418,7 @@ fn execute(
     crate::config::check_architecture(&manifest, quantization, g.layer_split.is_some())?;
     let ple_memory = if g.ple_placement == Some(basal_gpu::PleMode::Host) {
         let memory = GpuBackend::host_ple_memory(&dir, &manifest.config)?;
-        let workers = 1 + u64::from(options.long_tokens > 0);
+        let workers = options.routing_policy()?.workers(false);
         let host_bytes = memory.host_load_bytes(workers)?;
         let reserve = (options.ram_reserve_gib * 1073741824.0) as u64;
         crate::config::check_host_ple_headroom(
@@ -566,6 +582,9 @@ fn execute(
         "long_tokens": options.long_tokens, "long_slice_ms": options.long_slice_ms});
     if let Some(share) = options.long_share {
         report["settings"]["long_share"] = json!(share);
+    }
+    if options.long_lane.is_some() || options.long_token_basis.is_some() {
+        report["settings"]["routing"] = options.routing_policy()?.identity();
     }
     if let Some(split) = &g.layer_split {
         report["settings"]["layer_split"] = json!(split.stages());

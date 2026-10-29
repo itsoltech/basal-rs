@@ -11,7 +11,8 @@
 //! whose client disconnected while waiting are dropped. More than `max_inflight` waiting or running requests are
 //! refused with 529 and `Retry-After: 1` (the TypeSafe API's status when it is overloaded).
 //!
-//! Long requests (`--long-tokens`, default 4096 packed tokens) go to a second lane: a second engine on the same GPU
+//! Long requests (`--long-tokens`, default 4096 packed tokens; optional lane/basis controls) go to a second lane:
+//! a second engine on the same GPU
 //! sharing the weights, admitted the same way. The two lanes take turns on the GPU (`basal_core::gate`): when the
 //! main lane has a batch, the long lane pauses after its current layer (once it has worked `--long-slice-ms`), the
 //! main batch runs, and the long forward continues. Results do not depend on the lane or the pauses.
@@ -64,6 +65,7 @@ pub(crate) mod collection;
 mod decisions;
 mod http;
 mod metrics;
+pub(crate) mod routing;
 mod systemone;
 use metrics::{LaneMetrics, Metrics, ReplicaMetrics, RequestModel};
 
@@ -127,8 +129,8 @@ pub struct ServedModel<B: Backend> {
     pub max_batch_tokens: usize,
     pub(crate) collection: collection::CollectionPolicy,
     pub schedule: Schedule,
-    /// Requests above this many packed tokens run in a second lane that yields the GPU between layers (0 = one lane).
-    pub long_tokens: usize,
+    /// Validated requested/effective lane policy, shared by routing and resource accounting.
+    pub(crate) routing: routing::RoutingPolicy,
     /// Captured before moving the online engine; hashing and CPU planning are independent of GPU execution.
     pub(crate) batch_profile: Option<batches::ModelProfile>,
     pub(crate) batch_qualification: batches::config::BackgroundQualification,
@@ -726,12 +728,12 @@ fn served_response(name: &str, plan: &RequestPlan, out: &PlanOutput) -> std::res
 }
 
 /// GPU thread of the main lane: plan arriving requests (validation errors are answered at once), pass requests above
-/// `long_tokens` packed tokens to the long lane (when there is one), admit, run, answer.
+/// the effective routing threshold to the long lane (when there is one), admit, run, answer.
 fn scheduler<B: Backend>(
     mut engine: Engine<B>,
     mut rx: mpsc::UnboundedReceiver<Job>,
     mut lane: Lane,
-    long: Option<(std::sync::mpsc::Sender<Waiting>, usize)>,
+    long: Option<(std::sync::mpsc::Sender<Waiting>, routing::RoutingPolicy)>,
     scheduling: crate::models::SchedulingPolicy,
 ) {
     // `CoalesceReturning` (a profile policy, resolved with the engine's plan): a model idle for at least `idle` still
@@ -789,7 +791,7 @@ fn plan_job<B: Backend>(
     engine: &Engine<B>,
     mut job: Job,
     lane: &mut Lane,
-    long: &Option<(std::sync::mpsc::Sender<Waiting>, usize)>,
+    long: &Option<(std::sync::mpsc::Sender<Waiting>, routing::RoutingPolicy)>,
 ) -> bool {
     if job.reply.is_closed() {
         return false;
@@ -816,7 +818,7 @@ fn plan_job<B: Backend>(
             let mut size = AdmissionCost::new(lane.batching);
             size.try_add(&plan, true, lane.max_batch_tokens);
             let tokens = size.tokens().max(1);
-            let long_route = long.as_ref().filter(|(_, limit)| tokens > *limit);
+            let long_route = long.as_ref().filter(|(_, policy)| policy.routes_long(engine, &plan, tokens));
             let split = long_route.is_none()
                 && lane.batching == basal_core::Batching::Budget
                 && !plan.prepared.is_empty()
@@ -1528,6 +1530,7 @@ fn serve_inner<B: Backend + Send + 'static>(
     check_admission_limits(opts.max_inflight, opts.max_large_inflight)?;
     let mut layout: Vec<(String, Vec<Vec<usize>>)> = Vec::with_capacity(models.len());
     for m in &models {
+        crate::note!("routing {}: {}", m.name, m.routing.identity());
         let first = m.replicas.first().context("a served model needs at least one engine")?;
         let name = &m.name;
         let mut devices: Vec<Vec<usize>> = Vec::with_capacity(m.replicas.len());
@@ -1563,8 +1566,10 @@ fn serve_inner<B: Backend + Send + 'static>(
     // of its GPUs) or a long lane on it, every engine on that GPU takes turns through its gate (long requests yield
     // between layers according to the root policy). GPUs do not wait for each other; a layer-split instance
     // holds one of its gates at a time.
-    let instances: Vec<(&[usize], usize)> =
-        models.iter().flat_map(|m| m.replicas.iter().map(move |r| (r.devices.as_slice(), m.long_tokens))).collect();
+    let instances: Vec<(&[usize], bool)> = models
+        .iter()
+        .flat_map(|m| m.replicas.iter().map(move |r| (r.devices.as_slice(), m.routing.enabled())))
+        .collect();
     let background_devices: std::collections::BTreeSet<usize> = models
         .iter()
         .filter(|model| {
@@ -1574,10 +1579,10 @@ fn serve_inner<B: Backend + Send + 'static>(
         .flat_map(|model| model.replicas.iter().flat_map(|replica| replica.devices.iter().copied()))
         .collect();
     let mut gates: HashMap<usize, Arc<Gate>> = HashMap::new();
-    for &(devices, long_tokens) in &instances {
+    for &(devices, long_enabled) in &instances {
         for &device in devices {
             let on_device = instances.iter().filter(|(ds, _)| ds.contains(&device)).count();
-            if on_device > 1 || long_tokens > 0 || background_devices.contains(&device) {
+            if on_device > 1 || long_enabled || background_devices.contains(&device) {
                 if let std::collections::hash_map::Entry::Vacant(entry) = gates.entry(device) {
                     let slice = std::time::Duration::from_millis(opts.long_slice_ms);
                     let gate = match opts.long_share {
@@ -1586,7 +1591,7 @@ fn serve_inner<B: Backend + Send + 'static>(
                             .with_context(|| format!("device {device}: long_share gate"))?,
                     };
                     entry.insert(Arc::new(gate));
-                    let active_long = instances.iter().any(|(ds, tokens)| ds.contains(&device) && *tokens > 0);
+                    let active_long = instances.iter().any(|(ds, enabled)| ds.contains(&device) && *enabled);
                     crate::note!(
                         "device {device}: one shared gate across models/replicas, active long lane={active_long}"
                     );
@@ -1608,7 +1613,7 @@ fn serve_inner<B: Backend + Send + 'static>(
     for model in &models {
         let background = batches_enabled
             && matches!(model.batch_qualification, batches::config::BackgroundQualification::Qualified { .. });
-        let workers = 1 + u64::from(model.long_tokens > 0) + u64::from(background);
+        let workers = model.routing.workers(background);
         for replica in &model.replicas {
             if let Some(bytes) = replica.engine.backend.describe()["ple"]["max_staging_bytes_per_call"].as_u64() {
                 ple_staging = ple_staging
@@ -1637,7 +1642,7 @@ fn serve_inner<B: Backend + Send + 'static>(
                 max_batch_tokens,
                 collection,
                 schedule,
-                long_tokens,
+                routing,
                 batch_profile,
                 batch_qualification,
             } = m;
@@ -1696,7 +1701,7 @@ fn serve_inner<B: Backend + Send + 'static>(
                         });
                     }
                 }
-                let long = if long_tokens > 0 {
+                let long = if routing.enabled() {
                     let mut le = engine.fork().with_context(|| format!("{label}: second engine for the long lane"))?;
                     anyhow::ensure!(
                         device_gates.len() == devices.len(),
@@ -1715,7 +1720,7 @@ fn serve_inner<B: Backend + Send + 'static>(
                             .spawn(move || long_lane(le, lrx, l))
                             .context("starting a long-lane thread")?,
                     );
-                    Some((ltx, long_tokens))
+                    Some((ltx, routing))
                 } else {
                     None
                 };
@@ -1761,9 +1766,9 @@ fn serve_inner<B: Backend + Send + 'static>(
                     ),
                 };
                 crate::note!(
-                    "serving {name}{} on {on} (batch {max_batch_tokens} tokens, {schedule:?}{})",
+                    "serving {name}{} on {on} (batch {max_batch_tokens} tokens, {schedule:?}); routing {}",
                     if group { format!(" replica {index}") } else { String::new() },
-                    if long_tokens > 0 { format!(", long lane above {long_tokens} tokens") } else { String::new() }
+                    routing.identity()
                 );
                 // a group routes by its reservations; a single instance counts them only for its metrics
                 let load = (group || metrics.is_some()).then(|| {

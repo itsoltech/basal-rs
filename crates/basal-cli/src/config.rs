@@ -169,9 +169,15 @@ pub struct ModelConfig {
     pub batch_window_ms: Option<f64>,
     #[serde(default = "default_schedule")]
     pub schedule: Schedule,
-    /// Requests above this many packed tokens run in this model's long lane (0 = none).
+    /// Strict long-lane threshold in the selected basis (legacy default: packed; 0 disables legacy).
     #[serde(default = "default_long_tokens")]
     pub long_tokens: usize,
+    /// Absent/legacy follows `long_tokens > 0`; off disables the lane; on requires a positive threshold.
+    #[serde(default)]
+    pub(crate) long_lane: Option<crate::serve::routing::LongLane>,
+    /// Absent/packed preserves admission-cost routing; prompt uses a safe longest-prompt bound.
+    #[serde(default)]
+    pub(crate) long_token_basis: Option<crate::serve::routing::LongTokenBasis>,
     /// Budget (MiB) of the cross-request state cache (0 = off).
     #[serde(default)]
     pub state_cache_mb: usize,
@@ -234,6 +240,11 @@ fn default_tree_max_tokens() -> usize {
 }
 
 impl ModelConfig {
+    pub(crate) fn routing_policy(&self) -> Result<crate::serve::routing::RoutingPolicy> {
+        crate::serve::routing::RoutingPolicy::new(self.long_tokens, self.long_lane, self.long_token_basis)
+            .with_context(|| format!("model {}: long-lane routing", describe(self)))
+    }
+
     pub(crate) fn batch_qualification(&self) -> Result<crate::serve::batches::config::BackgroundQualification> {
         self.batch_profile
             .validate(&describe(self), self.ple_placement, self.model_options.request_batching())

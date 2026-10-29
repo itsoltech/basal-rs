@@ -634,7 +634,7 @@ fn models(r: &mut Report, c: &ServeConfig, gpus: Option<&[Gpu]>) {
                         qualification,
                         crate::serve::batches::config::BackgroundQualification::Qualified { .. }
                     );
-                let workers = 1 + u64::from(m.long_tokens > 0) + u64::from(background);
+                let workers = m.routing_policy()?.workers(background);
                 let memory = basal_gpu::RuntimeBackend::host_ple_memory(dir, &arch)?;
                 let replicas = u64::try_from(placement.instances().len())?;
                 let host = memory

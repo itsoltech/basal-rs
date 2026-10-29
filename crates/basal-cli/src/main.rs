@@ -570,10 +570,15 @@ enum Cmd {
         /// Admission order of waiting requests
         #[arg(long, value_enum, default_value_t = serve::Schedule::Hrrn)]
         schedule: serve::Schedule,
-        /// Requests above this many packed tokens run in a second lane that yields the GPU between layers to
-        /// shorter requests (0 = one lane)
+        /// Strict long-lane token threshold in the selected basis (0 disables the legacy lane)
         #[arg(long, default_value_t = 4096)]
         long_tokens: usize,
+        /// Long lane: legacy follows the threshold, on requires a positive threshold, off disables (overrides YAML)
+        #[arg(long, value_enum)]
+        long_lane: Option<serve::routing::LongLane>,
+        /// Long routing by packed admission cost or safe longest-prompt bound (overrides YAML)
+        #[arg(long, value_enum)]
+        long_token_basis: Option<serve::routing::LongTokenBasis>,
         /// Least time the long lane works between two hand-overs to the main lane
         #[arg(long, default_value_t = 100)]
         long_slice_ms: u64,
@@ -1290,6 +1295,8 @@ fn run() -> Result<()> {
             max_large_inflight,
             schedule,
             long_tokens,
+            long_lane,
+            long_token_basis,
             long_slice_ms,
             long_share,
             access_log,
@@ -1302,16 +1309,6 @@ fn run() -> Result<()> {
             let (source, mut c) = config::select(config, &models)?;
             c.long_share = long_share.or(c.long_share);
             serve::check_long_share(c.long_share)?;
-            // once a day: is there a newer release (BASAL_NO_UPDATE_CHECK=1 turns it off)
-            std::thread::spawn(|| {
-                if let Some(v) = update::notice() {
-                    crate::warn!(
-                        "version {v} is available ({} installed): {}",
-                        env!("CARGO_PKG_VERSION"),
-                        update::how()
-                    );
-                }
-            });
             if let Some(name) = name {
                 anyhow::ensure!(
                     !matches!(source, config::Source::File(_)),
@@ -1332,6 +1329,8 @@ fn run() -> Result<()> {
                 model.max_batch = max_batch.or(model.max_batch);
                 model.wait_ms = wait_ms.or(model.wait_ms);
                 model.batch_window_ms = batch_window_ms.or(model.batch_window_ms);
+                model.long_lane = long_lane.or(model.long_lane);
+                model.long_token_basis = long_token_basis.or(model.long_token_basis);
                 model.collection_policy()?;
                 let origin = |cli: bool, supplied: bool| {
                     if cli {
@@ -1414,7 +1413,21 @@ fn run() -> Result<()> {
                 c.long_slice_ms = long_slice_ms;
                 c.release_date = release_date;
             }
+            for model in &c.models {
+                let routing = model.routing_policy()?;
+                crate::note!("routing {}: {}", config::describe(model), routing.identity());
+            }
             serve::check_admission_limits(c.max_inflight, c.max_large_inflight)?;
+            // once a day: is there a newer release (BASAL_NO_UPDATE_CHECK=1 turns it off)
+            std::thread::spawn(|| {
+                if let Some(v) = update::notice() {
+                    crate::warn!(
+                        "version {v} is available ({} installed): {}",
+                        env!("CARGO_PKG_VERSION"),
+                        update::how()
+                    );
+                }
+            });
             // Validate database and Batch settings before downloading weights or loading a GPU.
             let addr = match (addr, std::env::var("BASAL_ADDR")) {
                 (Some(a), _) => a,
@@ -1521,7 +1534,7 @@ fn run() -> Result<()> {
                     let memory = GpuBackend::host_ple_memory(&manifest.dir, &manifest.config)?;
                     let background = batch_settings.is_some()
                         && matches!(qualification, serve::batches::config::BackgroundQualification::Qualified { .. });
-                    let workers = 1 + u64::from(mc.long_tokens > 0) + u64::from(background);
+                    let workers = mc.routing_policy()?.workers(background);
                     let replicas = u64::try_from(placement.instances().len())?;
                     let bytes = memory
                         .host_load_bytes(workers)?
@@ -1621,7 +1634,7 @@ fn run() -> Result<()> {
                     max_batch_tokens: mc.max_batch_tokens,
                     collection: mc.collection_policy()?,
                     schedule: mc.schedule,
-                    long_tokens: mc.long_tokens,
+                    routing: mc.routing_policy()?,
                     batch_profile,
                     batch_qualification,
                 });

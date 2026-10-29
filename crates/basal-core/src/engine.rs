@@ -1388,6 +1388,41 @@ pub struct RequestPlan {
     pub(crate) auto_reverse: Option<crate::planner::ReverseTokens>,
 }
 
+impl RequestPlan {
+    /// Longest tokenized prompt, or a conservative bound for dependent work, for this engine's `limits`.
+    /// Use limits from the engine that planned this request. This reads post-truncation orders, including the
+    /// context check's actual adaptive reverse lengths; it does not count packed rows or sum questions.
+    ///
+    /// Grouped finalists and task continuations are not known until execution. Their decision orders are checked
+    /// against `max_positions` before forwarding. Active thinking additionally has its own validated `max_len`
+    /// guard for generation and re-encoded P2. These are bounds, not observed prompt lengths.
+    /// Media placeholders already occupy positions in `input_ids`; media reverse orders use the same context check.
+    ///
+    /// Canonical Llama evidence reuses the as-written prompt. Other evidence layouts are tokenized only during
+    /// execution without a matching prompt-length proof; tasks may introduce such evidence later. `None` means
+    /// no finite bound is established here: a whole-request router must choose long or refuse before execution.
+    pub fn prompt_token_bound(&self, limits: &crate::planner::ShapeLimits) -> Option<usize> {
+        if limits.max_positions == 0
+            || (limits.adaptive_orders && self.auto_reverse.is_none() && !self.prepared.is_empty())
+            || (!limits.evidence_matches_prompt
+                && (self.tasks.is_some() || self.prepared.iter().any(|p| p.item.evidence)))
+        {
+            return None;
+        }
+        let mut longest = self.prepared.iter().flat_map(|p| &p.orders).map(|o| o.input_ids.len()).max().unwrap_or(0);
+        if let Some(reverse) = self.auto_reverse {
+            longest = longest.max(reverse.longest);
+        }
+        if self.tasks.is_some() || self.questions.iter().any(|q| matches!(q, QuestionPlan::Groups { .. })) {
+            longest = longest.max(limits.max_positions);
+        }
+        if let Some(caps) = crate::thinking::active_caps(self) {
+            longest = longest.max(limits.max_positions).max(caps.settings.max_len);
+        }
+        Some(longest)
+    }
+}
+
 /// `meta.think` of an enabled server's answer: `tokens` of a successful thought, otherwise unused (off, ineligible,
 /// skipped or a task answer).
 fn set_think_meta(answer: &mut Value, tokens: Option<u64>) {
