@@ -108,16 +108,12 @@ impl Scanner<'_> {
     }
 
     fn document(mut self) -> Result<(), JsonEnvelopeError> {
-        let mut root_seen = false;
+        self.whitespace()?;
+        self.value()?;
         loop {
             self.whitespace()?;
             if self.depth == 0 {
-                if root_seen {
-                    return if self.peek().is_none() { Ok(()) } else { Err(self.malformed("trailing input")) };
-                }
-                root_seen = true;
-                self.value()?;
-                continue;
+                return if self.peek().is_none() { Ok(()) } else { Err(self.malformed("trailing input")) };
             }
             // depth is positive here and only push grows it, after a capacity check.
             let top = self.depth - 1;
@@ -181,7 +177,7 @@ impl Scanner<'_> {
             return Err(JsonEnvelopeError::Resource {
                 resource: JsonEnvelopeResource::Depth,
                 offset: self.offset,
-                limit: 64,
+                limit: MAX_DEPTH as u64,
             });
         }
         // Check above proves this index and depth+1 <= 64 before either write.
@@ -233,10 +229,7 @@ impl Scanner<'_> {
                             let code = self.hex_quad(&mut length)?;
                             if (0xd800..=0xdbff).contains(&code) {
                                 // The second escape is part of the same raw string body.
-                                if self.string_byte(&mut length)? != b'\\' {
-                                    return Err(self.malformed("expected low surrogate escape"));
-                                }
-                                if self.string_byte(&mut length)? != b'u' {
+                                if self.string_byte(&mut length)? != b'\\' || self.string_byte(&mut length)? != b'u' {
                                     return Err(self.malformed("expected low surrogate escape"));
                                 }
                                 let low = self.hex_quad(&mut length)?;
