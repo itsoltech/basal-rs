@@ -6,6 +6,7 @@ use super::{GgmlDType, QTensor};
 use crate::{Context, Device, Result};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::collections::HashMap;
+use std::io::{Read, Seek};
 
 pub const DEFAULT_ALIGNMENT: u64 = 32;
 
@@ -17,6 +18,212 @@ const GGUF_MAX_STRING_LENGTH: u64 = 1 << 30;
 const GGUF_MAX_ARRAY_ELEMENTS: u64 = 1 << 30;
 const GGUF_MAX_TENSOR_DIMS: u32 = 4;
 const GGUF_MAX_VALUE_DEPTH: usize = 64;
+
+/// Explicit quotas for [`Content::read_with_limits`]. Every field is finite;
+/// zero grants no allowance for that dimension. The legacy reader ignores them.
+/// Existing format caps still apply when a caller supplies larger limits.
+///
+/// The allocation ledger counts planned requested storage cumulatively, without
+/// refunds: raw strings, up to three output bytes per raw value-string byte,
+/// array slots, dimension vectors and map tables. Each nonempty buffer/table
+/// adds 64 bytes. Maps charge `4 * entries + 16` buckets, each containing the
+/// key/value tuple plus one control byte (assuming the current std hash-table
+/// layout, with conservative capacity/control/alignment slack).
+/// Stack values, error diagnostics and allocations inside the supplied reader
+/// are outside the ledger. Allocator metadata, rounding, overcommit and unrelated
+/// process memory are not bounded: this is not a physical-memory/OOM guarantee.
+#[derive(Debug, Clone, Copy)]
+pub struct ReadLimits {
+    /// Raw bytes consumed from the initial reader position, excluding padding/payload.
+    pub max_header_bytes: u64,
+    /// Number of metadata entries.
+    pub max_metadata_entries: u64,
+    /// Number of tensor inventory entries.
+    pub max_tensors: u64,
+    /// Raw byte length of any key, name or value string.
+    pub max_string_bytes: u64,
+    /// Sum of raw byte lengths of all keys, names and value strings.
+    pub max_total_string_bytes: u64,
+    /// All metadata Value nodes, including array containers and every element.
+    pub max_total_values: u64,
+    /// Number of enclosing array levels; zero permits only scalar/string values.
+    pub max_nesting: usize,
+    /// Number of dimensions per tensor; zero permits only rank-zero inventory entries.
+    pub max_rank: u32,
+    /// Cumulative allocation-ledger bytes, using the accounting above.
+    pub max_allocation_bytes: u64,
+}
+
+impl Default for ReadLimits {
+    /// Conservative G1 header defaults, not measured machine capacity or model admission.
+    fn default() -> Self {
+        Self {
+            max_header_bytes: 64 << 20,
+            max_metadata_entries: 4096,
+            max_tensors: 8195,
+            max_string_bytes: 1 << 20,
+            max_total_string_bytes: 32 << 20,
+            max_total_values: 1 << 20,
+            max_nesting: 2,
+            max_rank: 4,
+            max_allocation_bytes: 256 << 20,
+        }
+    }
+}
+
+struct ReadBudget<'a> {
+    limits: &'a ReadLimits,
+    strings: u64,
+    values: u64,
+    allocations: u64,
+}
+
+impl ReadBudget<'_> {
+    fn charge(total: &mut u64, amount: u64, limit: u64, what: &str) -> Result<()> {
+        let next = total
+            .checked_add(amount)
+            .with_context(|| format!("gguf: {what} accounting overflows u64"))?;
+        if next > limit {
+            crate::bail!("gguf: {what} {next} exceeds limit {limit}")
+        }
+        *total = next;
+        Ok(())
+    }
+
+    fn charge_values(&mut self, count: u64) -> Result<()> {
+        Self::charge(
+            &mut self.values,
+            count,
+            self.limits.max_total_values,
+            "cumulative value nodes",
+        )
+    }
+
+    fn charge_storage(&mut self, count: u64, item_size: usize) -> Result<()> {
+        if count == 0 {
+            return Ok(());
+        }
+        let item_size = u64::try_from(item_size).context("gguf: item size does not fit u64")?;
+        let bytes = count
+            .checked_mul(item_size)
+            .and_then(|n| n.checked_add(64))
+            .context("gguf: allocation accounting overflows u64")?;
+        Self::charge(
+            &mut self.allocations,
+            bytes,
+            self.limits.max_allocation_bytes,
+            "cumulative allocation ledger",
+        )
+    }
+
+    fn reserve_map<K, V>(&mut self, map: &mut HashMap<K, V>, count: u64) -> Result<()>
+    where
+        K: Eq + std::hash::Hash,
+    {
+        if count == 0 {
+            return Ok(());
+        }
+        let buckets = count
+            .checked_mul(4)
+            .and_then(|n| n.checked_add(16))
+            .context("gguf: map bucket accounting overflows u64")?;
+        let bucket_size = std::mem::size_of::<(K, V)>()
+            .checked_add(1)
+            .context("gguf: map bucket size overflows usize")?;
+        self.charge_storage(buckets, bucket_size)?;
+        let count = usize::try_from(count).context("gguf: map count does not fit usize")?;
+        map.try_reserve(count)
+            .context("gguf: cannot allocate header map")?;
+        Ok(())
+    }
+}
+
+// Only header reads pass through this wrapper. Sizing/position seeks do not
+// consume the relative byte budget, and no payload is read here.
+struct HeaderReader<'a, R> {
+    inner: &'a mut R,
+    budget: Option<ReadBudget<'a>>,
+    consumed: u64,
+    position: u64,
+    file_size: u64,
+}
+
+impl<R> HeaderReader<'_, R> {
+    fn check_available(&self, bytes: u64) -> std::io::Result<()> {
+        if let Some(budget) = &self.budget {
+            let total = self.consumed.checked_add(bytes).ok_or_else(|| {
+                std::io::Error::other("gguf: header byte accounting overflows u64")
+            })?;
+            if total > budget.limits.max_header_bytes {
+                return Err(std::io::Error::other(
+                    "gguf: raw header byte limit exceeded",
+                ));
+            }
+            let remaining = self
+                .file_size
+                .checked_sub(self.position)
+                .ok_or_else(|| std::io::Error::other("gguf: reader position exceeds file size"))?;
+            if bytes > remaining {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "gguf: truncated header exceeds remaining file bytes",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn record_read(&mut self, bytes: u64) -> std::io::Result<()> {
+        if self.budget.is_some() {
+            // check_available has already admitted the complete request before
+            // the read; retain checked arithmetic for both accounting units.
+            self.consumed = self.consumed.checked_add(bytes).ok_or_else(|| {
+                std::io::Error::other("gguf: header byte accounting overflows u64")
+            })?;
+            self.position = self
+                .position
+                .checked_add(bytes)
+                .ok_or_else(|| std::io::Error::other("gguf: header position overflows u64"))?;
+        }
+        Ok(())
+    }
+}
+
+impl<R: std::io::Read> std::io::Read for HeaderReader<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let bytes = u64::try_from(buf.len())
+            .map_err(|_| std::io::Error::other("gguf: read length does not fit u64"))?;
+        self.check_available(bytes)?;
+        let n = self.inner.read(buf)?;
+        let bytes = u64::try_from(n)
+            .map_err(|_| std::io::Error::other("gguf: read length does not fit u64"))?;
+        self.record_read(bytes)?;
+        Ok(n)
+    }
+
+    fn read_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
+        let bytes = u64::try_from(buf.len())
+            .map_err(|_| std::io::Error::other("gguf: read length does not fit u64"))?;
+        self.check_available(bytes)?;
+        self.inner.read_exact(buf)?;
+        self.record_read(bytes)?;
+        Ok(())
+    }
+}
+
+impl<R: std::io::Seek> std::io::Seek for HeaderReader<'_, R> {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        let position = self.inner.seek(pos)?;
+        self.position = position;
+        Ok(position)
+    }
+
+    fn stream_position(&mut self) -> std::io::Result<u64> {
+        let position = self.inner.stream_position()?;
+        self.position = position;
+        Ok(position)
+    }
+}
 
 // `file_size` is the byte length captured once up front, so this avoids
 // seeking to the end and back on every length-prefixed read.
@@ -164,9 +371,10 @@ pub struct Content {
 }
 
 fn read_string<R: std::io::Read + std::io::Seek>(
-    reader: &mut R,
+    reader: &mut HeaderReader<'_, R>,
     magic: &VersionedMagic,
     file_size: u64,
+    strict_name: bool,
 ) -> Result<String> {
     let len = read_length(reader, magic)?;
     if len > GGUF_MAX_STRING_LENGTH {
@@ -175,6 +383,10 @@ fn read_string<R: std::io::Read + std::io::Seek>(
     let remaining = remaining_bytes(reader, file_size)?;
     if len > remaining {
         crate::bail!("gguf: string length {len} exceeds remaining file bytes {remaining}")
+    }
+    if reader.budget.is_some() {
+        reader.check_available(len)?;
+        return read_bounded_string(reader, len, strict_name);
     }
     let len = usize::try_from(len).context("gguf: string length does not fit usize")?;
     let mut v = Vec::new();
@@ -188,6 +400,65 @@ fn read_string<R: std::io::Read + std::io::Seek>(
     }
     // GGUF strings are utf8 encoded but there are cases that don't seem to be valid.
     Ok(String::from_utf8_lossy(&v).into_owned())
+}
+
+fn read_bounded_string<R: std::io::Read>(
+    reader: &mut HeaderReader<'_, R>,
+    len: u64,
+    strict_name: bool,
+) -> Result<String> {
+    // Called only with a budget; raw and output storage are charged before either
+    // reservation/read. No infallibly allocating lossy-decoding helper is used.
+    let output_bytes = if strict_name {
+        0
+    } else {
+        len.checked_mul(3)
+            .context("gguf: lossy string size overflows u64")?
+    };
+    if let Some(budget) = &mut reader.budget {
+        if len > budget.limits.max_string_bytes {
+            crate::bail!(
+                "gguf: string length {len} exceeds limit {}",
+                budget.limits.max_string_bytes
+            )
+        }
+        ReadBudget::charge(
+            &mut budget.strings,
+            len,
+            budget.limits.max_total_string_bytes,
+            "cumulative raw string bytes",
+        )?;
+        budget.charge_storage(len, 1)?;
+        budget.charge_storage(output_bytes, 1)?;
+    }
+    let len = usize::try_from(len).context("gguf: string length does not fit usize")?;
+    let output_bytes =
+        usize::try_from(output_bytes).context("gguf: decoded string size does not fit usize")?;
+    let mut raw = Vec::new();
+    raw.try_reserve_exact(len)
+        .context("gguf: cannot allocate string read buffer")?;
+    raw.resize(len, 0u8);
+    reader.read_exact(&mut raw)?;
+    if strict_name {
+        if raw.contains(&0) {
+            crate::bail!("gguf: metadata key or tensor name contains NUL")
+        }
+        return String::from_utf8(raw).context("gguf: metadata key or tensor name is not UTF-8");
+    }
+    while let Some(0) = raw.last() {
+        raw.pop();
+    }
+    let mut decoded = String::new();
+    decoded
+        .try_reserve_exact(output_bytes)
+        .context("gguf: cannot allocate decoded value string")?;
+    for chunk in raw.utf8_chunks() {
+        decoded.push_str(chunk.valid());
+        if !chunk.invalid().is_empty() {
+            decoded.push('\u{fffd}');
+        }
+    }
+    Ok(decoded)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -357,7 +628,7 @@ impl Value {
     }
 
     fn read<R: std::io::Read + std::io::Seek>(
-        reader: &mut R,
+        reader: &mut HeaderReader<'_, R>,
         value_type: ValueType,
         magic: &VersionedMagic,
         depth: usize,
@@ -382,8 +653,16 @@ impl Value {
                 1 => Self::Bool(true),
                 b => crate::bail!("unexpected bool value {b}"),
             },
-            ValueType::String => Self::String(read_string(reader, magic, file_size)?),
+            ValueType::String => Self::String(read_string(reader, magic, file_size, false)?),
             ValueType::Array => {
+                if let Some(budget) = &reader.budget {
+                    if depth >= budget.limits.max_nesting {
+                        crate::bail!(
+                            "gguf: array nesting exceeds limit {}",
+                            budget.limits.max_nesting
+                        )
+                    }
+                }
                 let value_type = reader.read_u32::<LittleEndian>()?;
                 let value_type = ValueType::from_u32(value_type)?;
                 let len = read_length(reader, magic)?;
@@ -399,6 +678,17 @@ impl Value {
                     )
                 }
                 let mut vs = Vec::new();
+                if let Some(budget) = &mut reader.budget {
+                    // Parent/root slots have already been charged. Charge every
+                    // child once, including children that are themselves arrays.
+                    budget.charge_values(len)?;
+                    budget.charge_storage(len, std::mem::size_of::<Value>())?;
+                    reader.check_available(needed)?;
+                    let len =
+                        usize::try_from(len).context("gguf: array length does not fit usize")?;
+                    vs.try_reserve_exact(len)
+                        .context("gguf: cannot allocate value array")?;
+                }
                 for _ in 0..len {
                     vs.push(Value::read(
                         reader,
@@ -508,12 +798,50 @@ impl ValueType {
 
 impl Content {
     pub fn read<R: std::io::Seek + std::io::Read>(reader: &mut R) -> Result<Self> {
+        Self::read_impl(reader, None)
+    }
+
+    /// Read only the GGUF header/inventory under explicit cumulative quotas.
+    ///
+    /// Checks precede input reads and planned collection/buffer reservations.
+    /// Keys and tensor names must be UTF-8 without NUL; duplicates are rejected.
+    /// Value strings retain the legacy trailing-NUL removal and lossy UTF-8
+    /// decoding. The byte allowance starts at the current reader position;
+    /// file-sizing seeks, final alignment padding and payload are not consumed.
+    ///
+    /// This retains generic v1/v2/v3 format compatibility and existing span and
+    /// alignment checks. It does not enforce a model's inventory, canonical
+    /// alignment, immutable source, payload quality or materialization budget.
+    /// See [`ReadLimits`] for ledger assumptions and physical-memory exclusions.
+    pub fn read_with_limits<R: std::io::Seek + std::io::Read>(
+        reader: &mut R,
+        limits: &ReadLimits,
+    ) -> Result<Self> {
+        Self::read_impl(reader, Some(limits))
+    }
+
+    fn read_impl<R: std::io::Seek + std::io::Read>(
+        reader: &mut R,
+        limits: Option<&ReadLimits>,
+    ) -> Result<Self> {
         // Capture the file size once so the bounds checks below don't have to
         // seek to the end and back on every length-prefixed read.
         let start = reader.stream_position()?;
         let file_size = reader.seek(std::io::SeekFrom::End(0))?;
         reader.seek(std::io::SeekFrom::Start(start))?;
 
+        let reader = &mut HeaderReader {
+            inner: reader,
+            budget: limits.map(|limits| ReadBudget {
+                limits,
+                strings: 0,
+                values: 0,
+                allocations: 0,
+            }),
+            consumed: 0,
+            position: start,
+            file_size,
+        };
         let magic = VersionedMagic::read(reader)?;
         let tensor_count = read_length(reader, &magic)?;
         let metadata_kv_count = read_length(reader, &magic)?;
@@ -525,6 +853,20 @@ impl Content {
             crate::bail!(
                 "gguf: metadata_kv_count {metadata_kv_count} exceeds max {GGUF_MAX_ARRAY_ELEMENTS}"
             )
+        }
+        if let Some(budget) = &reader.budget {
+            if tensor_count > budget.limits.max_tensors {
+                crate::bail!(
+                    "gguf: tensor count {tensor_count} exceeds limit {}",
+                    budget.limits.max_tensors
+                )
+            }
+            if metadata_kv_count > budget.limits.max_metadata_entries {
+                crate::bail!(
+                    "gguf: metadata count {metadata_kv_count} exceeds limit {}",
+                    budget.limits.max_metadata_entries
+                )
+            }
         }
 
         // Reject header-declared counts that can't fit in the file at minimum size.
@@ -544,10 +886,15 @@ impl Content {
         }
 
         let mut metadata = HashMap::new();
+        reader.check_available(needed)?;
+        if let Some(budget) = &mut reader.budget {
+            budget.charge_values(metadata_kv_count)?;
+            budget.reserve_map(&mut metadata, metadata_kv_count)?;
+        }
         for _idx in 0..metadata_kv_count {
-            let key = read_string(reader, &magic, file_size)?;
-            // Compare decoded names, preserving read_string's trailing-NUL
-            // removal and lossy UTF-8 handling for existing files.
+            let key = read_string(reader, &magic, file_size, true)?;
+            // Legacy names retain trailing-NUL removal and lossy UTF-8 decoding;
+            // explicitly bounded names reach this check without normalization.
             if metadata.contains_key(&key) {
                 crate::bail!("gguf: duplicate metadata key '{key}'")
             }
@@ -557,8 +904,15 @@ impl Content {
             metadata.insert(key, value);
         }
         let mut tensor_infos = HashMap::new();
+        let tensor_header_bytes = tensor_count
+            .checked_mul(min_per_tensor)
+            .context("gguf: tensor header size overflows u64")?;
+        reader.check_available(tensor_header_bytes)?;
+        if let Some(budget) = &mut reader.budget {
+            budget.reserve_map(&mut tensor_infos, tensor_count)?;
+        }
         for _idx in 0..tensor_count {
-            let tensor_name = read_string(reader, &magic, file_size)?;
+            let tensor_name = read_string(reader, &magic, file_size, true)?;
             if tensor_infos.contains_key(&tensor_name) {
                 crate::bail!("gguf: duplicate tensor name '{tensor_name}'")
             }
@@ -569,7 +923,28 @@ impl Content {
                 )
             }
 
-            let mut dimensions = Vec::with_capacity(n_dimensions as usize);
+            let mut dimensions = if let Some(budget) = &mut reader.budget {
+                if n_dimensions > budget.limits.max_rank {
+                    crate::bail!(
+                        "gguf: tensor '{tensor_name}' rank {n_dimensions} exceeds limit {}",
+                        budget.limits.max_rank
+                    )
+                }
+                budget.charge_storage(u64::from(n_dimensions), std::mem::size_of::<usize>())?;
+                let dimension_bytes = u64::from(n_dimensions)
+                    .checked_mul(prefix)
+                    .context("gguf: dimension byte count overflows u64")?;
+                reader.check_available(dimension_bytes)?;
+                let n_dimensions = usize::try_from(n_dimensions)
+                    .context("gguf: tensor rank does not fit usize")?;
+                let mut dimensions = Vec::new();
+                dimensions
+                    .try_reserve_exact(n_dimensions)
+                    .context("gguf: cannot allocate tensor dimensions")?;
+                dimensions
+            } else {
+                Vec::with_capacity(n_dimensions as usize)
+            };
             for _ in 0..n_dimensions {
                 let dim = read_length(reader, &magic)?;
                 dimensions.push(usize::try_from(dim).with_context(|| {

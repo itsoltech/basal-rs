@@ -103,7 +103,8 @@ inventory needs no tensor span, so an aligned data offset past EOF alone is not
 an error. The existing writer is unchanged, including its empty-inventory
 padding.
 
-Alignment rounding and both span additions are checked. Existing file-size,
+Alignment rounding and both span additions are checked. The legacy `Content::read`
+keeps its compatibility/error ordering and decoded-name behavior. Existing file-size,
 string/count/dimension/depth caps remain. Tensor and string read buffers use
 fallible reservation. This does not impose a product memory budget or guarantee
 OOM immunity for arbitrary large files: metadata collections, decoded strings,
@@ -125,6 +126,60 @@ upstream documentation diagnostics: broken links in `error.rs`, `ggml_file.rs`,
 `tensor.rs` and `indexer.rs`, and the bare specification URL in `gguf_file.rs`.
 These are not suppressed. Static checks do not establish parser runtime
 behavior, model equivalence, GPU behavior or complete input safety.
+
+## Explicitly bounded GGUF header reading
+
+`Content::read_with_limits(reader, &ReadLimits)` adds an opt-in header policy
+without changing legacy `Content::read` callers or tensor materialization.
+Defaults are 64 MiB of raw header reads, 4096 metadata entries, 8195 tensors,
+1 MiB per raw string, 32 MiB of cumulative raw string payload, 1,048,576
+metadata `Value` nodes, two enclosing array levels, rank four and a 256 MiB
+cumulative allocation ledger. Callers can tighten every allowance; zero means
+no allowance, and checked arithmetic rejects accounting overflow. The existing
+generic format caps still apply to larger caller limits. Root values and array
+containers count as nodes, as does every element of every nested array.
+
+Byte checks cover scalar/length fields as well as strings, arrays and tensor
+inventory, before their reads. The budget is relative to the initial reader
+position. File-sizing and position seeks do not count file payload as header;
+alignment padding and tensor payload are not read. Physical remaining-file
+checks still apply. Counts, minimum encoded sizes and storage charges precede
+fallible reservations for maps, array slots, strings and dimensions. Maps are
+reserved once for their full declared counts, and arrays for all their elements,
+so parsing those collections requires no uncharged capacity growth.
+
+Bounded keys and tensor names require valid UTF-8 and reject every NUL byte;
+duplicate checks run before insertion without name normalization. Metadata
+value strings retain trailing-NUL removal and lossy UTF-8 decoding, including
+tokenizer byte-token content. Strict names transfer their raw buffer into the
+final string. Value strings precharge both the raw buffer and a separate
+fallibly reserved output buffer of three bytes per raw byte, covering lossy
+expansion and simultaneous temporary/output storage.
+
+Ledger units are planned requested bytes, accumulated without refunds. Nonempty
+buffers add 64 bytes of allowance beyond requested element storage. Nonempty
+maps charge `4 * entries + 16` buckets, each with `size_of::<(String, Value)>()`
+or `size_of::<(String, TensorInfo)>()` plus a control byte, and 64 extra bytes.
+This conservative table allowance assumes the current standard-library hash
+table layout, including capacity, control and alignment slack. It is not a
+physical memory bound: allocator metadata/rounding, overcommit, stack values,
+error diagnostics, reader-internal allocations and unrelated process memory
+are outside this ledger. Fallible reservation cannot guarantee OOM immunity.
+
+The shared parser retains generic v1/v2/v3, alignment and checked shape/span
+validation. This API does not implement native model loading, exact model
+inventory admission, canonical G1 alignment/version rules, immutable-source
+leasing, payload quality or device/staging budgets. G0/G0b materialization and
+CUDA source lifetime containment are unchanged. REQ-009 remains partial.
+
+G1a uses fresh Rust 1.95.0 offline/locked static checks with a private target:
+vendor/workspace formatting, direct uncapped Candle Clippy, workspace release
+Clippy and private workspace Rustdoc pass for default and CUDA builds. Direct
+Candle Rustdoc retains the same ten upstream diagnostics described above,
+without new public-API diagnostics or suppressions. All 69 vendor checksums and
+combined-patch reproduction pass; dependency-policy evidence is inherited with
+unchanged inputs. No malformed-file replay, model/bitwise comparison, physical
+memory measurement or GPU runtime check was performed. Metal was not checked.
 
 ## GGML typed materialization prerequisite
 
