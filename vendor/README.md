@@ -1,4 +1,4 @@
-# Candle archive dependency and GGUF reader patches
+# Candle archive dependency and GGUF/GGML reader patches
 
 `candle-core/` is the library from the official crates.io `candle-core 0.11.0`
 release. The workspace patches that package locally because both the published
@@ -14,11 +14,13 @@ All three advisories are fixed in `zip >=9.0.0`.
 - Original crate SHA-256:
   `5ecb245093b0f791b89d3420c3df9c6d49c60ab63ba54db896bf8a3baf486706`.
 - The 65 files under `src/`, `LICENSE` and the upstream `README.md` originate
-  from that verified archive. Of the source files, 62 remain byte for byte
+  from that verified archive. Of the source files, 61 remain byte for byte
   identical. `src/npy.rs` and `src/pickle.rs` adapt archive names to zip 9's
   fallible API: propagate name-decoding errors instead of treating names as
   infallible. `src/quantized/gguf_file.rs` adds the read validation described
-  below. No numeric decode, tensor operations, kernels or model code change.
+  below. `src/quantized/ggml_file.rs` adds checked materialization and aligned
+  typed copies as described below. No dequantization arithmetic, tensor
+  operations, block layouts, kernels or model code change.
 - The normalized release manifest changes only the runtime dependency
   `zip = "8.6.0"` to `zip = "9.0.0"`, retaining `default-features = false`.
   Upstream example, test and benchmark targets and their dev dependencies are
@@ -28,10 +30,12 @@ All three advisories are fixed in `zip >=9.0.0`.
 - `candle-core/zip-9.patch` records the prior archive compatibility delta from
   the official manifest and source; it is unchanged by the GGUF reader patch.
   Apply `candle-core/gguf-read-validation.patch` afterwards, from the crate
-  root, to reproduce the additional GGUF source delta. Its preimage is the
+  root, to reproduce the additional GGUF and GGML source deltas. Its GGUF preimage is the
   archive's unchanged GGUF source (SHA-256
   `303d0bc548677b41a572b4c878a79905108775eba840037daf778b051d281822`).
-  `candle-core/SHA256SUMS` records the resulting library files and GGUF patch.
+  The unchanged archive GGML preimage has SHA-256
+  `dfc48f822e4393bc836efcf782f4a6bb36168ac9d641324a054f13ee862aadac`.
+  `candle-core/SHA256SUMS` records the resulting library files and combined patch.
 
 Verify the copied files with:
 
@@ -44,7 +48,7 @@ The original license remains in `candle-core/LICENSE`. These are temporary
 vendored patches. Remove the
 workspace `[patch.crates-io]` entry, its workspace exclusion and this directory
 when an official compatible Candle release uses the fixed `zip` and provides
-equivalent GGUF read validation. Review the release diff and repeat the
+equivalent GGUF read validation and GGML materialization safety. Review the release diff and repeat the
 dependency and build checks before removal.
 
 The patch is included in both Docker build paths, the cloud build source sync
@@ -92,8 +96,9 @@ spans run both for the parsed inventory and for independently constructed public
 The last dimension must also satisfy the existing QTensor block constraint.
 Scalar inventory entries keep the empty-product element count of one; reading
 a scalar still fails because QTensor does not support scalars. Zero-element
-shapes remain accepted where their ordered intermediate products, block shape
-and zero-byte span are valid. Padding and tensor bytes are unchanged. An empty
+shapes remain accepted in the inventory where their ordered intermediate products,
+block shape and zero-byte span are valid; reading them now returns an error before
+allocation or decoding. Padding and tensor bytes are unchanged. An empty
 inventory needs no tensor span, so an aligned data offset past EOF alone is not
 an error. The existing writer is unchanged, including its empty-inventory
 padding.
@@ -120,3 +125,34 @@ upstream documentation diagnostics: broken links in `error.rs`, `ggml_file.rs`,
 `tensor.rs` and `indexer.rs`, and the bare specification URL in `gguf_file.rs`.
 These are not suppressed. Static checks do not establish parser runtime
 behavior, model equivalence, GPU behavior or complete input safety.
+
+## GGML typed materialization prerequisite
+
+The same patch also hardens the public `qtensor_from_ggml` entry point, independent
+of GGUF callers. Scalars and zero-element shapes return crate errors. For nonzero
+dimensions, a checked total bounds both forward element and reverse contiguous
+stride products. The last dimension must be divisible by the dtype's block size;
+the block byte count is checked and the input must contain that many bytes.
+Trailing bytes remain ignored. Native endian interpretation is preserved; this
+does not add cross-endian decoding or any dtype previously unsupported here.
+The legacy GGML tensor reader reuses the size checks before its fallible raw
+buffer reservation. This is not comprehensive legacy GGML metadata hardening.
+
+Only the existing concrete float and quantized block types are copied with
+unaligned reads into an owned, correctly aligned `Vec<T>`. Their fields are
+integers, half floats and floats with valid arbitrary bit patterns; the block
+size assertions establish no padding. The public safe `GgmlType` trait alone
+does not authorize byte reinterpretation. CPU storage takes ownership of this
+vector. GPU upload helpers borrow it until they return, retaining their existing
+copy/lifetime contract. No borrowed typed slice is created from the input bytes.
+
+G0b uses Rust 1.95.0 offline static checks: direct uncapped Candle Clippy via
+`clippy-driver`/`cargo check`, workspace Clippy and formatting pass. Workspace
+private Rustdoc passes; direct Candle Rustdoc retains the ten inherited
+diagnostics listed above. The combined patch reproduces both sources from their
+pinned preimages and all vendor checksums pass. Dependency-policy results are
+inherited for the unchanged manifests and lockfile. CUDA compilation is blocked
+locally by the missing CUDA toolkit (`nvcc`); Metal compilation is
+not available on this Linux host. Neither GPU runtime behavior nor model bitwise
+equivalence, performance or general OOM safety was measured. REQ-009 remains
+partial; model mapping and resource policy remain open.

@@ -87,8 +87,7 @@ pub struct TensorInfo {
 }
 
 impl TensorInfo {
-    // Validate before allocating or calling the GGML decoder, which computes
-    // these products again without checked arithmetic. Keep the same dimension
+    // Validate inventory and public reads before allocating. Keep the same dimension
     // order, including intermediate products for shapes containing zero.
     fn size_in_bytes(&self) -> Result<usize> {
         let tensor_elems = self.shape.dims().iter().try_fold(1usize, |n, &dim| {
@@ -136,6 +135,9 @@ impl TensorInfo {
         // QTensor does not support scalars, even for unquantized GGML dtypes.
         if self.shape.dims().is_empty() {
             crate::bail!("gguf: scalar tensor cannot be quantized")
+        }
+        if size_in_bytes == 0 {
+            crate::bail!("gguf: empty tensor cannot be materialized")
         }
         let mut raw_data = Vec::new();
         raw_data

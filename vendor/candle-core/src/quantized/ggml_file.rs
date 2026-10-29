@@ -1,7 +1,7 @@
 //! Support for the GGML file format.
 
 use super::{k_quants, GgmlDType, QStorage};
-use crate::{Device, Result};
+use crate::{Context, Device, Result};
 use byteorder::{LittleEndian, ReadBytesExt};
 use std::collections::HashMap;
 
@@ -117,73 +117,95 @@ impl Vocab {
     }
 }
 
-fn from_raw_data<T: super::GgmlType + Send + Sync + 'static>(
-    raw_data: &[u8],
-    size_in_bytes: usize,
+fn from_data<T: super::GgmlType + Send + Sync + 'static>(
+    data: Vec<T>,
     dims: Vec<usize>,
     device: &Device,
 ) -> Result<super::QTensor> {
-    let raw_data_ptr = raw_data.as_ptr();
-    let n_blocks = size_in_bytes / std::mem::size_of::<T>();
-    let data = unsafe { std::slice::from_raw_parts(raw_data_ptr as *const T, n_blocks) };
     let data: QStorage = match device {
-        Device::Cpu => QStorage::Cpu(Box::new(data.to_vec())),
-        Device::Metal(metal) => super::metal::load_quantized(metal, data)?,
-        Device::Cuda(cuda) => super::cuda::load_quantized(cuda, data)?,
+        Device::Cpu => QStorage::Cpu(Box::new(data)),
+        Device::Metal(metal) => super::metal::load_quantized(metal, &data)?,
+        Device::Cuda(cuda) => super::cuda::load_quantized(cuda, &data)?,
     };
     super::QTensor::new(data, dims)
 }
 
+fn tensor_size_in_bytes(ggml_dtype: GgmlDType, dims: &[usize]) -> Result<usize> {
+    let Some(&last_dim) = dims.last() else {
+        crate::bail!("ggml: scalar tensor cannot be quantized")
+    };
+    // Nonzero dimensions also ensure every reverse contiguous-stride product
+    // is bounded by the checked total, without a zero masking overflow.
+    if dims.contains(&0) {
+        crate::bail!("ggml: empty tensor cannot be materialized")
+    }
+    let tensor_elems = dims.iter().try_fold(1usize, |n, &dim| {
+        n.checked_mul(dim)
+            .context("ggml: tensor element count overflows usize")
+    })?;
+    let block_size = ggml_dtype.block_size();
+    if !last_dim.is_multiple_of(block_size) {
+        crate::bail!(
+            "ggml: tensor last dimension {last_dim} is not divisible by block size {block_size}"
+        )
+    }
+    (tensor_elems / block_size)
+        .checked_mul(ggml_dtype.type_size())
+        .context("ggml: tensor byte length overflows usize")
+}
+
 /// Creates a [Tensor] from a raw GGML tensor.
+///
+/// Scalars and zero-element shapes are rejected. Only the required byte prefix
+/// is consumed; trailing bytes are ignored. Values retain the existing native
+/// endian interpretation of the GGML block layouts.
 pub fn qtensor_from_ggml(
     ggml_dtype: GgmlDType,
     raw_data: &[u8],
     dims: Vec<usize>,
     device: &Device,
 ) -> Result<super::QTensor> {
-    let tensor_elems = dims.iter().product::<usize>();
-    let block_size = ggml_dtype.block_size();
-    if tensor_elems % block_size != 0 {
-        crate::bail!(
-            "the number of elements {tensor_elems} is not divisible by the block size {block_size}"
-        )
+    let size_in_bytes = tensor_size_in_bytes(ggml_dtype, &dims)?;
+    let raw_data = raw_data
+        .get(..size_in_bytes)
+        .context("ggml: raw tensor buffer is shorter than its shape requires")?;
+
+    // Keep the bit-validity proof local to this concrete dispatch, rather than
+    // trusting arbitrary implementations of the public, safe GgmlType trait.
+    macro_rules! decode {
+        ($ty:ty) => {{
+            let mut data = Vec::<$ty>::new();
+            data.try_reserve_exact(raw_data.len() / std::mem::size_of::<$ty>())
+                .context("ggml: cannot allocate typed tensor buffer")?;
+            for block in raw_data.chunks_exact(std::mem::size_of::<$ty>()) {
+                // SAFETY: Each chunk contains exactly size_of::<$ty>() readable
+                // bytes, alive and immutable during the read. read_unaligned
+                // requires no source alignment. The concrete types below are
+                // f32, transparent u16 half floats, or repr(C) blocks containing
+                // only those floats and integer arrays, with no padding (see
+                // k_quants' size assertions). All bit patterns are valid, with
+                // no references, ownership or Drop state to duplicate. The Vec
+                // owns the resulting values in properly aligned storage.
+                data.push(unsafe { block.as_ptr().cast::<$ty>().read_unaligned() });
+            }
+            from_data(data, dims, device)
+        }};
     }
-    let size_in_bytes = tensor_elems / block_size * ggml_dtype.type_size();
 
     match ggml_dtype {
-        GgmlDType::F32 => from_raw_data::<f32>(raw_data, size_in_bytes, dims, device),
-        GgmlDType::F16 => from_raw_data::<half::f16>(raw_data, size_in_bytes, dims, device),
-        GgmlDType::BF16 => from_raw_data::<half::bf16>(raw_data, size_in_bytes, dims, device),
-        GgmlDType::Q4_0 => {
-            from_raw_data::<k_quants::BlockQ4_0>(raw_data, size_in_bytes, dims, device)
-        }
-        GgmlDType::Q4_1 => {
-            from_raw_data::<k_quants::BlockQ4_1>(raw_data, size_in_bytes, dims, device)
-        }
-        GgmlDType::Q5_0 => {
-            from_raw_data::<k_quants::BlockQ5_0>(raw_data, size_in_bytes, dims, device)
-        }
-        GgmlDType::Q5_1 => {
-            from_raw_data::<k_quants::BlockQ5_1>(raw_data, size_in_bytes, dims, device)
-        }
-        GgmlDType::Q8_0 => {
-            from_raw_data::<k_quants::BlockQ8_0>(raw_data, size_in_bytes, dims, device)
-        }
-        GgmlDType::Q2K => {
-            from_raw_data::<k_quants::BlockQ2K>(raw_data, size_in_bytes, dims, device)
-        }
-        GgmlDType::Q3K => {
-            from_raw_data::<k_quants::BlockQ3K>(raw_data, size_in_bytes, dims, device)
-        }
-        GgmlDType::Q4K => {
-            from_raw_data::<k_quants::BlockQ4K>(raw_data, size_in_bytes, dims, device)
-        }
-        GgmlDType::Q5K => {
-            from_raw_data::<k_quants::BlockQ5K>(raw_data, size_in_bytes, dims, device)
-        }
-        GgmlDType::Q6K => {
-            from_raw_data::<k_quants::BlockQ6K>(raw_data, size_in_bytes, dims, device)
-        }
+        GgmlDType::F32 => decode!(f32),
+        GgmlDType::F16 => decode!(half::f16),
+        GgmlDType::BF16 => decode!(half::bf16),
+        GgmlDType::Q4_0 => decode!(k_quants::BlockQ4_0),
+        GgmlDType::Q4_1 => decode!(k_quants::BlockQ4_1),
+        GgmlDType::Q5_0 => decode!(k_quants::BlockQ5_0),
+        GgmlDType::Q5_1 => decode!(k_quants::BlockQ5_1),
+        GgmlDType::Q8_0 => decode!(k_quants::BlockQ8_0),
+        GgmlDType::Q2K => decode!(k_quants::BlockQ2K),
+        GgmlDType::Q3K => decode!(k_quants::BlockQ3K),
+        GgmlDType::Q4K => decode!(k_quants::BlockQ4K),
+        GgmlDType::Q5K => decode!(k_quants::BlockQ5K),
+        GgmlDType::Q6K => decode!(k_quants::BlockQ6K),
         _ => crate::bail!("quantized type {ggml_dtype:?} is not supported yet"),
     }
 }
@@ -211,10 +233,13 @@ fn read_one_tensor<R: std::io::Seek + std::io::Read>(
         reader.seek(std::io::SeekFrom::Current(((32 - pos % 32) % 32) as i64))?;
     }
     let dims = dims.iter().map(|&u| u as usize).collect::<Vec<_>>();
-    let tensor_elems = dims.iter().product::<usize>();
-    let size_in_bytes = tensor_elems * ggml_dtype.type_size() / ggml_dtype.block_size();
+    let size_in_bytes = tensor_size_in_bytes(ggml_dtype, &dims)?;
     // TODO: Mmap version to avoid copying the data around?
-    let mut raw_data = vec![0u8; size_in_bytes];
+    let mut raw_data = Vec::new();
+    raw_data
+        .try_reserve_exact(size_in_bytes)
+        .context("ggml: cannot allocate tensor read buffer")?;
+    raw_data.resize(size_in_bytes, 0u8);
     reader.read_exact(&mut raw_data)?;
     match qtensor_from_ggml(ggml_dtype, &raw_data, dims, device) {
         Ok(tensor) => Ok((name, tensor)),
