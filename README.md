@@ -824,10 +824,8 @@ i cache stałych prefiksów szablonu zachowują swoje ustawienia.
 W `off` koszt HRRN, próg `long_tokens`, admission obu torów i podgląd kolekcji
 sumują rzeczywiste `Prepared.packed.ids.len()` bez deduplikacji. Przepełnienie
 nie może zawinąć kosztu do małej liczby ani wpuścić kolejnego żądania. Kolejka,
-`max_batch` i długi tor nadal obejmują całe żądania. To etap S2a obejmujący
-packing i rachunek kosztu: **REQ-003 pozostaje częściowe** do S2b, które wydzieli
-wpisy gałęzi prymitywnych i postęp rund, oraz kwalifikacji runtime. Nie jest to
-jeszcze dosłowny harmonogram upstream SOAM-off ani zamknięcie interakcji REQ-004.
+`max_batch` i długi tor nadal obejmują całe żądania. Gałęzie nie są osobnymi
+wpisami kolejki, więc harmonogram nie jest dosłownie zgodny z upstream SOAM-off.
 
 Opcja działa we wspólnym konstruktorze CLI, `serve`, `client --local` i plannerze.
 `bench-requests --batching` steruje tymi samymi forwardami; sprzeczne jawne

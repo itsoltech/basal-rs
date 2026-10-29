@@ -636,11 +636,11 @@ Przepełnienie blokuje kolejnego kandydata; koszt pierwszego żądania może nas
 się do `usize::MAX` i wejść zgodnie z regułą oversized-first. Minimalny koszt 1
 dla HRRN pozostaje tylko zabezpieczeniem dzielenia przy żądaniu bez promptów.
 
-S2a obejmuje wyłącznie packing i ten rachunek: kolejka, `max_batch`, long lane,
+Opcja zmienia packing i ten rachunek: kolejka, `max_batch`, long lane,
 permit, completion, anulowanie, queued/running i odpowiedź nadal należą do całego
-żądania. Nie zmieniono algorytmu decyzji ani stanu rund. REQ-003 pozostaje
-częściowe do S2b (primitive-branch entries i wspólny postęp rund) i kwalifikacji;
-interakcja REQ-004 także nie jest zamknięta. Aktywne early-exit nadal izoluje
+żądania. Gałęzie nie są osobnymi wpisami kolejki, więc harmonogram nie jest
+dosłownie zgodny z upstream SOAM-off. Algorytm decyzji i stan rund pozostają
+dotychczasowe. Aktywne early-exit nadal izoluje
 żądanie i buduje własne exit units; media zachowują osobne readouty/session,
 thinking i generowanie swoje dotychczasowe sesje. Te ścieżki nie stają się
 Budget wskutek samej opcji; tekstowe ordinary/off-exit ścieżki używają Budget.

@@ -96,7 +96,7 @@ models:
     device: 0
     # soam: off                   # absent/on: legacy Tree; off: one packed row per primitive branch (Budget)
     # All option orders within one branch still share their prefix; state/template caches remain independent.
-    # S2a packing/accounting only: queue/max_batch/long lane still use whole requests. REQ-003 needs S2b+qualification.
+    # Queue/max_batch/long lane still use whole requests; upstream SOAM-off primitive-branch scheduling is not supported.
     # Explicit CLI --soam on|off overrides YAML. Off refuses batch_profile.background: true (Tree evidence is not Budget).
     max_batch_tokens: 8192         # Tree: trie tokens; SOAM-off: sum of actual Prepared packed row lengths
     # Optional controls, absent by default; explicit CLI --max-batch/--wait-ms/--batch-window-ms override YAML.
