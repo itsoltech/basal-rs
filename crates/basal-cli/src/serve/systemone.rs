@@ -200,13 +200,13 @@ fn validate(body: Value, headers: &HeaderMap) -> Result<Value, Error> {
         return Err(bad("Image assets require TypeSafe-Danger-Zone-Images: true"));
     }
     if let Some(state) = body.get("state") {
-        valid_json_value(state, 0)?;
+        valid_json_value(state, 0).map_err(bad)?;
     }
     if let Some(questions) = body.get("questions").and_then(Value::as_object) {
         for q in questions.values() {
             for field in ["instructions", "criteria"] {
                 if let Some(v) = q.get(field) {
-                    valid_json_value(v, 0)?;
+                    valid_json_value(v, 0).map_err(bad)?;
                 }
             }
         }
@@ -214,11 +214,12 @@ fn validate(body: Value, headers: &HeaderMap) -> Result<Value, Error> {
     Ok(body)
 }
 
-fn valid_json_value(value: &Value, depth: usize) -> Result<(), Error> {
+/// At most 64 levels of arrays/objects and only finite numbers.
+pub(super) fn valid_json_value(value: &Value, depth: usize) -> Result<(), &'static str> {
     match value {
         Value::Array(values) => {
             if depth >= 64 {
-                return Err(bad("JSON nesting exceeds 64 levels"));
+                return Err("JSON nesting exceeds 64 levels");
             }
             for v in values {
                 valid_json_value(v, depth + 1)?;
@@ -226,15 +227,13 @@ fn valid_json_value(value: &Value, depth: usize) -> Result<(), Error> {
         }
         Value::Object(values) => {
             if depth >= 64 {
-                return Err(bad("JSON nesting exceeds 64 levels"));
+                return Err("JSON nesting exceeds 64 levels");
             }
             for v in values.values() {
                 valid_json_value(v, depth + 1)?;
             }
         }
-        Value::Number(n) if n.as_f64().is_none_or(|v| !v.is_finite()) => {
-            return Err(bad("JSON numbers must be finite"))
-        }
+        Value::Number(n) if n.as_f64().is_none_or(|v| !v.is_finite()) => return Err("JSON numbers must be finite"),
         _ => {}
     }
     Ok(())

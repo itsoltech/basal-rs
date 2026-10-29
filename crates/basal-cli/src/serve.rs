@@ -1,5 +1,6 @@
 //! `basal serve`: HTTP server: POST /v1/systemone (TypeSafe System One), POST /v1/basal (upstream basal conventions),
-//! GET /v1/models, GET /health, opt-in GET /metrics (Prometheus).
+//! POST /v1/decisions (OpenAI Decisions API over the TypeSafe path), GET /v1/models, GET /health, opt-in GET /metrics
+//! (Prometheus).
 //!
 //! One thread owns the GPU engine; HTTP handlers (tokio) send jobs to it over a channel. The scheduler plans arriving
 //! requests (validation errors are answered at once), orders the waiting ones (`--schedule`: highest response ratio
@@ -60,6 +61,7 @@ pub(crate) mod batches;
 mod decisions;
 mod http;
 mod metrics;
+mod openai;
 mod systemone;
 use metrics::{LaneMetrics, Metrics, ReplicaMetrics, RequestModel};
 
@@ -735,20 +737,70 @@ async fn decide(
     large: Option<LargeBodyPermit>,
 ) -> Response {
     match dispatch(app, body, dialect, arrived, label, large).await {
-        Ok((value, timing)) => {
-            let mut headers = HeaderMap::new();
-            if let Some(t) = timing {
-                for (k, v) in [
-                    ("x-basal-queue-ms", format!("{:.3}", t.queue_ms)),
-                    ("x-basal-compute-ms", format!("{:.3}", t.compute_ms)),
-                    ("x-basal-batch-requests", t.batch.to_string()),
-                ] {
-                    headers.insert(k, HeaderValue::from_str(&v).expect("numeric timing header"));
-                }
-            }
-            (StatusCode::OK, headers, Json(value)).into_response()
-        }
+        Ok((value, timing)) => (StatusCode::OK, timing_headers(timing), Json(value)).into_response(),
         Err(error) => error.response(dialect),
+    }
+}
+
+fn timing_headers(timing: Option<Timing>) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    if let Some(t) = timing {
+        for (k, v) in [
+            ("x-basal-queue-ms", format!("{:.3}", t.queue_ms)),
+            ("x-basal-compute-ms", format!("{:.3}", t.compute_ms)),
+            ("x-basal-batch-requests", t.batch.to_string()),
+        ] {
+            headers.insert(k, HeaderValue::from_str(&v).expect("numeric timing header"));
+        }
+    }
+    headers
+}
+
+/// OpenAI Decisions API endpoint: the request is translated to a TypeSafe System One body and answered by the same
+/// dispatch; errors use the OpenAI envelope. Bodies over 2 MiB are parsed and translated on the blocking pool.
+async fn openai_decisions(
+    State(app): State<Arc<App>>,
+    label: Option<Extension<RequestModel>>,
+    large: Option<Extension<LargeBodyPermit>>,
+    Extension(SystemOneDecodePermit(decoding)): Extension<SystemOneDecodePermit>,
+    body: std::result::Result<axum::body::Bytes, axum::extract::rejection::BytesRejection>,
+) -> Response {
+    let arrived = Instant::now();
+    let large = large.map(|Extension(permit)| permit);
+    let body = match body {
+        Ok(body) => body,
+        Err(e) => return openai::Error::body(e.status(), e.body_text()).into_response(),
+    };
+    let permits = (large.clone(), decoding);
+    let blocking = body.len() > 2 * 1024 * 1024;
+    let translate = move || {
+        // A blocking decoder continues after handler cancellation; retain its allocation permits until it exits.
+        let _permits = permits;
+        let body = serde_json::from_slice(&body).map_err(|e| openai::Error::json(&e))?;
+        openai::translate(body)
+    };
+    let translated = if blocking {
+        tokio::task::spawn_blocking(translate)
+            .await
+            .unwrap_or_else(|e| Err(openai::Error::internal(format!("JSON decode worker failed: {e}"))))
+    } else {
+        translate()
+    };
+    let openai::Translated { body, model, answers } = match translated {
+        Ok(t) => t,
+        Err(error) => return error.into_response(),
+    };
+    if !app.routes.contains_key(&model) {
+        return openai::Error::unknown_model(&model).into_response();
+    }
+    match dispatch(app, body, Dialect::TypeSafe, arrived, label.map(|Extension(l)| l), large).await {
+        Ok((value, timing)) => match answers.decision(&value, model) {
+            Ok(decision) => (StatusCode::OK, timing_headers(timing), Json(decision)).into_response(),
+            Err(error) => error.into_response(),
+        },
+        Err(DispatchError::Api(e)) => openai::Error::decide(e).into_response(),
+        Err(DispatchError::Overloaded { typesafe, .. }) => openai::Error::overloaded(typesafe).into_response(),
+        Err(DispatchError::Stopped) => openai::Error::internal("engine stopped").into_response(),
     }
 }
 
@@ -973,11 +1025,16 @@ async fn models_list(State(app): State<Arc<App>>) -> Json<Value> {
 /// Admit large or chunked inference bodies before reading/allocating them.
 async fn large_body_admission(State(app): State<Arc<App>>, mut request: Request, next: Next) -> Response {
     let mcp = request.uri().path() == "/mcp";
+    let openai = request.uri().path() == "/v1/decisions";
     let typesafe =
         request.uri().path() == "/v1/systemone" && matches!(app.systemone_dialect, SystemOneDialect::TypeSafe);
-    if typesafe || mcp {
+    if typesafe || mcp || openai {
         let permit = match app.systemone_decoders.clone().try_acquire_owned() {
             Ok(permit) => permit,
+            Err(_) if openai => {
+                return openai::Error::overloaded("Too many requests decoding. Retry after a short delay.")
+                    .into_response()
+            }
             Err(_) => {
                 return overloaded(
                     if typesafe { Dialect::TypeSafe } else { Dialect::Upstream },
@@ -998,6 +1055,10 @@ async fn large_body_admission(State(app): State<Arc<App>>, mut request: Request,
     let _permit = if large {
         match app.large_bodies.clone().try_acquire_owned() {
             Ok(permit) => Some(Arc::new(permit)),
+            Err(_) if openai => {
+                return openai::Error::overloaded("Too many large requests in flight. Retry after a short delay.")
+                    .into_response()
+            }
             Err(_) => {
                 let dialect = if typesafe { Dialect::TypeSafe } else { Dialect::Upstream };
                 return overloaded(
@@ -1432,7 +1493,11 @@ fn serve_inner<B: Backend + Send + 'static>(
             SystemOneDialect::TypeSafe => typesafe,
             SystemOneDialect::Upstream => basal.clone(),
         };
-        let router = Router::new().route("/v1/systemone", systemone).route("/v1/basal", basal);
+        let decisions = post(openai_decisions)
+            .layer(axum::extract::DefaultBodyLimit::max(basal_core::systemone::MAX_BODY_BYTES))
+            .layer(axum::middleware::from_fn_with_state(app.clone(), large_body_admission));
+        let router =
+            Router::new().route("/v1/systemone", systemone).route("/v1/basal", basal).route("/v1/decisions", decisions);
         let router = if opts.metrics {
             router
                 .route_layer(axum::middleware::from_fn_with_state(app.clone(), metrics::observe))

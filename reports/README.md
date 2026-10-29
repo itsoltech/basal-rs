@@ -1,5 +1,9 @@
 # Raporty
 
+[OpenAI Decisions API: `POST /v1/decisions`](openai-decisions-2026-10-29/README.md)
+— oficjalne SDK OpenAI na RTX 4060; odpowiedzi bitowo równe `/v1/systemone`,
+koperty błędów OpenAI.
+
 [API względem upstream basal-serve v2.4.1](upstream-api-audit-2026-10-27/README.md)
 — przegląd kontraktów HTTP, klientów, layoutów, MCP i opcji serwera;
 ustalenia na podstawie źródeł, bez uruchamiania inferencji.
