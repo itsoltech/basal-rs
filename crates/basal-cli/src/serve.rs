@@ -1341,6 +1341,28 @@ fn serve_inner<B: Backend + Send + 'static>(
     let collection_stopping = Arc::new(AtomicBool::new(false));
     let batches_enabled = opts.batches.is_some();
     let (device_budget, online_reserves) = background_limits(&models, batches_enabled)?;
+    // Weights/tables are now resident. Gates do not serialize host allocations: every main,
+    // long and qualified background worker gets its own maximum PLE staging allowance.
+    let mut ple_staging = 0u64;
+    for model in &models {
+        let background = batches_enabled
+            && matches!(model.batch_qualification, batches::config::BackgroundQualification::Qualified { .. });
+        let workers = 1 + u64::from(model.long_tokens > 0) + u64::from(background);
+        for replica in &model.replicas {
+            if let Some(bytes) = replica.engine.backend.describe()["ple"]["max_staging_bytes_per_call"].as_u64() {
+                ple_staging = ple_staging
+                    .checked_add(bytes.checked_mul(workers).context("host PLE worker estimate overflow")?)
+                    .context("host PLE server staging overflow")?;
+            }
+        }
+    }
+    if ple_staging > 0 {
+        let pool = opts.batches.as_ref().map_or(0, |b| b.host.exec_pool_bytes);
+        crate::config::check_host_ple_headroom(
+            ple_staging.checked_add(pool).context("host PLE and Batch pool overflow")?,
+        )?;
+        crate::note!("host PLE: {ple_staging} bytes for simultaneous worker staging, plus {pool} Batch pool bytes; source bounds, not allocator reservations or total process peaks");
+    }
     // Synchronous startup, before any readiness message or HTTP runtime. Every subsequent exit joins it below.
     let decisions = opts.log_decisions.as_deref().map(decisions::DecisionWriter::open).transpose()?;
     let result = (|| -> Result<()> {

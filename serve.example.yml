@@ -83,6 +83,10 @@ models:
     # (reports/w4a16-s3-2026-10-12). Request speed of mini, max and other GPUs was not measured.
     # Both change the numerics of the model.
     quantization: none
+    # Gemma with PLE only (e.g. omni-mini), single CUDA device per replica:
+    # ple_placement: host          # omitted/device keeps the existing device table; Llama/Qwen/Unified/split refuse host
+    # Host background qualification additionally needs batch_profile.ple_placement: host and its own measurements.
+    # See docs/OMNI.md for table/worker/load accounting and unverified runtime behavior.
     # GPU of the model (default 0): CUDA device ordinal visible to the process. CUDA first orders all GPUs (by
     # default fastest first, which may differ from nvidia-smi; CUDA_DEVICE_ORDER=PCI_BUS_ID: PCI order, as
     # nvidia-smi), then CUDA_VISIBLE_DEVICES selects, reorders and renumbers them from 0. `basal doctor`, run with

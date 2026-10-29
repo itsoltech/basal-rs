@@ -35,7 +35,7 @@ pub(super) struct HostPle {
 }
 
 // Short buckets have <=8192 padded tokens; non-unified long/media chunks have <=2048.
-const MAX_ROWS: usize = 8192;
+pub(super) const MAX_ROWS: usize = 8192;
 // One gathered Vec plus one conservative pageable transfer copy. Candle's ordinary from_slice
 // CUDA path borrows the Vec without copying it; no CPU Tensor or index tensor is constructed.
 const ROW_COPIES: u64 = 2;

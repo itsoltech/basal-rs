@@ -18,6 +18,31 @@ use crate::{
     StageTransfers,
 };
 
+/// Source arithmetic for one separately loaded host-PLE replica, not allocator peaks or measured savings.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct HostPleMemory {
+    pub checkpoint_bytes: u64,
+    pub estimated_device_weight_bytes: u64,
+    pub host_table_bytes: u64,
+    pub max_staging_bytes_per_worker: u64,
+    pub checkpoint_mapping_bytes: u64,
+    pub estimated_host_load_scratch_bytes: u64,
+    pub estimated_device_load_scratch_bytes: u64,
+}
+
+impl HostPleMemory {
+    /// Additional host payload during load, including all mapped source pages conservatively.
+    /// Workers are counted independently even when their device gate serializes GPU execution.
+    pub fn host_load_bytes(&self, workers: u64) -> Result<u64> {
+        self.max_staging_bytes_per_worker
+            .checked_mul(workers)
+            .and_then(|n| n.checked_add(self.host_table_bytes))
+            .and_then(|n| n.checked_add(self.checkpoint_mapping_bytes))
+            .and_then(|n| n.checked_add(self.estimated_host_load_scratch_bytes))
+            .ok_or_else(|| anyhow::anyhow!("host PLE load estimate overflow"))
+    }
+}
+
 /// Where a planned model instance runs ([`RuntimeBackend::load_planned`]).
 #[derive(Clone, Copy, Debug)]
 pub enum PlannedPlacement<'a> {
@@ -36,6 +61,54 @@ pub enum RuntimeBackend {
 }
 
 impl RuntimeBackend {
+    /// Placement-aware single-device source estimate. The PLE source range must exist exactly once
+    /// and have its validated configuration's byte length before it can be removed from device bytes.
+    /// Other checkpoint bytes (including unused tensors/headers) remain conservative; generated device
+    /// tensors, allocator rounding, encoders' runtime work and process overhead are outside this estimate.
+    pub fn host_ple_memory(dir: &Path, cfg: &Architecture) -> Result<HostPleMemory> {
+        let placement = crate::PleMode::Host.resolve(cfg, false)?;
+        let Architecture::Gemma4(cfg) = cfg else { unreachable!("validated host PLE family") };
+        let host_table_bytes = crate::gemma::GemmaBackend::estimated_host_ple_bytes(cfg)?;
+        let crate::PlePlacement::Host { max_staging_bytes } = placement else { unreachable!("host placement") };
+        let mut found = false;
+        let mut largest = 0;
+        let mut header_scratch = 0u64;
+        for file in basal_core::checkpoint::files(dir)? {
+            let reader = crate::TensorReader::open(&file)?;
+            header_scratch = header_scratch.max(reader.base);
+            for (name, (start, end)) in &reader.ranges {
+                let bytes = end - start;
+                if name == "model.language_model.embed_tokens_per_layer.weight" {
+                    anyhow::ensure!(
+                        !found && bytes == host_table_bytes,
+                        "host PLE source range missing, duplicated or inconsistent"
+                    );
+                    found = true;
+                } else {
+                    largest = largest.max(bytes);
+                }
+            }
+        }
+        anyhow::ensure!(found, "host PLE source tensor is missing");
+        let checkpoint_bytes = basal_core::checkpoint::bytes(dir)?;
+        Ok(HostPleMemory {
+            checkpoint_bytes,
+            estimated_device_weight_bytes: checkpoint_bytes
+                .checked_sub(host_table_bytes)
+                .ok_or_else(|| anyhow::anyhow!("host PLE source exceeds checkpoint size"))?,
+            host_table_bytes,
+            max_staging_bytes_per_worker: max_staging_bytes,
+            checkpoint_mapping_bytes: checkpoint_bytes,
+            // Reusable bytes, CPU storage/cast and a conservative transfer copy; header parsing is separate.
+            estimated_host_load_scratch_bytes: largest
+                .checked_mul(4)
+                .and_then(|n| n.checked_add(header_scratch))
+                .ok_or_else(|| anyhow::anyhow!("host PLE load scratch estimate overflow"))?,
+            estimated_device_load_scratch_bytes: largest
+                .checked_mul(2)
+                .ok_or_else(|| anyhow::anyhow!("host PLE device load scratch estimate overflow"))?,
+        })
+    }
     /// Validate the actual pickle tensor inventory on CPU; exact FP32 resident head bytes, before device work.
     pub fn early_exit_resident_bytes(
         artifacts: &basal_core::early_exit::ExitArtifacts,
@@ -111,11 +184,34 @@ impl RuntimeBackend {
         placement: PlannedPlacement<'_>,
         media: bool,
     ) -> Result<(Self, Option<usize>)> {
+        let requested = if matches!(plan.ple_placement(), crate::PlePlacement::Host { .. }) {
+            crate::PleMode::Host
+        } else {
+            crate::PleMode::Device
+        };
+        anyhow::ensure!(
+            requested.resolve(cfg, matches!(placement, PlannedPlacement::Split(_)))? == plan.ple_placement(),
+            "frozen PLE placement does not match the loaded architecture"
+        );
         let (precision, readout, kernels, quantization) =
             (plan.precision(), plan.readout(), plan.kernels(), plan.quantization());
         let mut backend = match placement {
             PlannedPlacement::Single(device) => {
-                Self::load(dir, cfg, precision, readout, kernels, quantization, device, media, plan.kernel_set())?
+                if let crate::PlePlacement::Host { .. } = plan.ple_placement() {
+                    let Architecture::Gemma4(c) = cfg else { unreachable!("validated host PLE family") };
+                    anyhow::ensure!(quantization == Quantization::None, "Gemma needs quantization none");
+                    Self::Gemma(Box::new(crate::gemma::GemmaBackend::load_with_ple(
+                        dir,
+                        c,
+                        precision,
+                        readout,
+                        device,
+                        media,
+                        plan.ple_placement(),
+                    )?))
+                } else {
+                    Self::load(dir, cfg, precision, readout, kernels, quantization, device, media, plan.kernel_set())?
+                }
             }
             PlannedPlacement::Split(split) => {
                 Self::load_split_with_media(dir, cfg, precision, readout, kernels, quantization, split, media)?

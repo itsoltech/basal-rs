@@ -39,6 +39,7 @@ mod cublaslt;
 mod early_exit;
 mod fused;
 mod gemma;
+pub use gemma::PlePlacement;
 mod gemma_encoders;
 #[cfg(feature = "cuda")]
 mod gemma_ops;
@@ -50,7 +51,7 @@ mod memory;
 pub mod plan;
 pub use plan::{
     AttentionProducts, DeviceDefaultRule, DiagnosticOverrides, DispatchRule, ExecutionPolicy, GemmArtifact,
-    GemmFallback, GemmPolicy, GemmProvenance, KernelSet, PlanError, PlanOptions, Reproducibility,
+    GemmFallback, GemmPolicy, GemmProvenance, KernelSet, PlanError, PlanOptions, PleMode, Reproducibility,
     ResolvedExecutionPlan,
 };
 mod quant;
@@ -60,7 +61,7 @@ mod split;
 pub use memory::{gpu_memory, pool_probe, GpuMemory, GpuMemoryProbe, PoolProbe, PoolUsage};
 pub use quant::{estimated_stage_weight_bytes, estimated_weight_bytes, ParseQuantizationError, Quantization};
 use quant::{ProjWeight, Projection};
-pub use runtime::{PlannedPlacement, RuntimeBackend};
+pub use runtime::{HostPleMemory, PlannedPlacement, RuntimeBackend};
 pub use split::{LayerSplit, LayerSplitError, StageSpec};
 #[cfg(target_os = "macos")]
 pub mod gemm;

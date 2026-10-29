@@ -31,6 +31,17 @@ silniku i replice. Forki long/tła kopiują manifest, progi auto i politykę
 `OverflowSettings` (domyślnie refuse, head 1/3). Tożsamość
 jawnej kalibracji pochodzi z rzeczywistego repozytorium/ścieżki; ścieżka
 snapshotu HF dostarcza repo i rozwiązany commit.
+
+`ple_placement` jest typowanym opt-in Device/Host dla tabeli Gemma PLE.
+CLI/config odrzuca nieobsługiwaną architekturę przed GPU/GEMM, gdy pliki są
+dostępne. `ResolvedExecutionPlan` zamraża placement i pochodny limit stagingu;
+`RuntimeBackend::load_planned` przekazuje je do `GemmaBackend::load_with_ple`
+i sprawdza zgodność z rzeczywistym backendem. Device nie dodaje pola do JSON
+planu ani describe. Host jest widoczny w obu; istniejący profil Batch przejmuje
+describe oraz HostStaging, więc zmienia fingerprint bez zmiany źródła modelu.
+Immutable tabela należy do wspólnych Weights; osobno ładowane repliki mają
+osobne tabele. Startup sumuje PLE staging main/long/tła mimo wspólnych bramek
+GPU. Source/load estimates oraz ich granice: [OMNI.md](OMNI.md#tabela-ple-w-ram-hosta-opt-in).
 `serve` buduje metadane z silnika, a planer batchy z jego sklonowanego manifestu.
 API pokazuje ostrzeżenie kalibracji bez lokalnych ścieżek i tożsamości.
 

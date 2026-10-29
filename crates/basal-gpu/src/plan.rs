@@ -22,6 +22,44 @@ use crate::{InferenceConfigError, InferenceMode, Kernels, Precision, Quantizatio
 /// Schema of [`ResolvedExecutionPlan::identity`].
 pub const PLAN_SCHEMA: &str = "basal-execution-plan.2";
 
+/// Placement requested for Gemma's per-layer token table. Absence keeps the historical device path.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PleMode {
+    #[default]
+    Device,
+    Host,
+}
+
+impl std::str::FromStr for PleMode {
+    type Err = PlanError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "device" => Ok(Self::Device),
+            "host" => Ok(Self::Host),
+            _ => Err(PlanError::Option(format!("unknown PLE placement {value:?} (device, host)"))),
+        }
+    }
+}
+
+impl PleMode {
+    /// CPU-only validation, before GPU discovery or GEMM resolution. The host ceiling covers every
+    /// supported short bucket (8192 padded rows) and non-unified long/media chunk (at most 2048).
+    pub fn resolve(self, arch: &Architecture, split: bool) -> Result<crate::PlePlacement, PlanError> {
+        if self == Self::Device {
+            return Ok(crate::PlePlacement::Device);
+        }
+        if split {
+            return Err(PlanError::Option("host PLE does not support layer split".into()));
+        }
+        let Architecture::Gemma4(cfg) = arch else {
+            return Err(PlanError::Option("host PLE requires Gemma; Llama and Qwen are unsupported".into()));
+        };
+        crate::gemma::GemmaBackend::host_ple_placement(cfg).map_err(|e| PlanError::Option(format!("{e:#}")))
+    }
+}
+
 /// A versioned set of kernel variants with fixed arithmetic. A profile names the set it was measured with; a
 /// change of arithmetic is a new variant, and existing profiles keep their set until they are moved explicitly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -713,6 +751,7 @@ pub struct PlanOptions {
     pub kernels: Kernels,
     pub quantization: Quantization,
     pub reproducibility: Reproducibility,
+    pub ple: PleMode,
 }
 
 /// Why a plan cannot be frozen.
@@ -767,6 +806,7 @@ pub struct ResolvedExecutionPlan {
     gemm: GemmPolicy,
     overrides: DiagnosticOverrides,
     gpus: Value,
+    ple: crate::PlePlacement,
 }
 
 impl ResolvedExecutionPlan {
@@ -784,6 +824,10 @@ impl ResolvedExecutionPlan {
         table: Option<GemmArtifact>,
         tables_apply: bool,
     ) -> Result<Self, PlanError> {
+        let ple = options.ple.resolve(arch, devices.len() != 1)?;
+        if options.ple == PleMode::Host && options.mode == InferenceMode::Balanced {
+            return Err(PlanError::Inference(InferenceConfigError::UnsupportedBalanced));
+        }
         if !KernelSet::SUPPORTED.contains(&kernel_set) {
             return Err(PlanError::KernelSet(kernel_set.id()));
         }
@@ -862,11 +906,16 @@ impl ResolvedExecutionPlan {
             gemm: GemmPolicy { table, fallback },
             overrides: DiagnosticOverrides::process().clone(),
             gpus: gpus.identity(),
+            ple,
         })
     }
 
     pub fn profile(&self) -> &str {
         &self.profile
+    }
+    /// Actual placement and checked per-call ceiling, frozen before any weight upload.
+    pub fn ple_placement(&self) -> crate::PlePlacement {
+        self.ple
     }
     pub fn kernel_set(&self) -> KernelSet {
         self.kernel_set
@@ -911,7 +960,7 @@ impl ResolvedExecutionPlan {
     /// Canonical JSON of every input of the plan's decisions (no paths: the GEMM table is named by digest).
     pub fn identity(&self) -> Value {
         let o = &self.options;
-        json!({
+        let mut identity = json!({
             "schema": PLAN_SCHEMA,
             "profile": self.profile,
             "kernel_set": self.kernel_set.id(),
@@ -929,6 +978,11 @@ impl ResolvedExecutionPlan {
                 "fallback": match self.gemm.fallback { GemmFallback::RuntimeTiming => "runtime_timing", GemmFallback::FixedPerPrompt => "fixed_per_prompt", GemmFallback::Refused => "refused", GemmFallback::NotApplicable => "not_applicable" },
             },
             "overrides": self.overrides.identity(),
-        })
+        });
+        // Keep default plan JSON and all existing fingerprint inputs byte-for-byte unchanged.
+        if let crate::PlePlacement::Host { max_staging_bytes } = self.ple {
+            identity["ple"] = json!({"placement":"host", "max_staging_bytes_per_call":max_staging_bytes});
+        }
+        identity
     }
 }

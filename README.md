@@ -79,6 +79,11 @@ Docker: [niżej](#uruchomienie-w-dockerze). Wymagania, ścieżki i szczegóły:
 
 ## Co wnosi silnik basal-rs
 
+Gemma z PLE może jawnie trzymać tabelę tokenów w RAM hosta:
+`basal serve --model omni-mini --ple-placement host` lub per-model YAML
+`ple_placement: host`. Domyślnie pozostaje `device`. Warunki, rachunek pamięci
+i brak kwalifikacji runtime tej opcji opisuje [OMNI.md](docs/OMNI.md#tabela-ple-w-ram-hosta-opt-in).
+
 - **Wspólny stan liczony raz** — drzewo prefiksów współdzieli obliczenia między pytaniami i żądaniami w partii.
 - **Trzy backendy GPU** — własne kernele CUDA, Metal i Intel Vulkan, bez środowiska Pythona w runtime.
 - **Serwowanie istniejących API** — kontrakt TypeSafe System One i konwencje serwera Basal; kilka modeli w jednym procesie.

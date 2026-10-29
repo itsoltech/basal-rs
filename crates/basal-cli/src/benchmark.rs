@@ -1,7 +1,7 @@
 //! Hardware characterization through the production HTTP router, batching scheduler and long-request lane.
 
 mod http;
-mod resources;
+pub(crate) mod resources;
 mod workload;
 
 use std::io::Write;
@@ -240,6 +240,7 @@ pub(crate) fn run(model: &ModelArgs, gpu_options: &GpuArgs, options: &Options) -
     options.validate()?;
     // an unsupported weight format or layer split fails before any GPU check or download
     let quantization = gpu_options.quantization(&model.model)?;
+    gpu_options.check_ple_source(&model.model)?;
     gpu_options.check_layer_split(&model.model)?;
     let clients = if options.scenario == Scenario::Sequential {
         1
@@ -316,7 +317,11 @@ fn execute(
     let host = host_memory()?;
     // A layer split's coverage needs the model's config.json and is refused before any device context (each probe
     // below creates one), as in serve: its model files come next; one GPU keeps its device check before them.
-    let split_files = if g.model_options.exits_enabled() {
+    let split_files = if g.ple_placement == Some(basal_gpu::PleMode::Host) {
+        let files = model_files(model, g, report)?;
+        basal_gpu::PleMode::Host.resolve(&files.2.config, g.layer_split.is_some())?;
+        Some(files)
+    } else if g.model_options.exits_enabled() {
         let files = model_files(model, g, report)?;
         let readout = g.readout()?;
         GpuBackend::check_early_exit(
@@ -387,6 +392,24 @@ fn execute(
     }
     // quantization exists for Llama only: an Omni (Gemma) model is refused before the preflight
     crate::config::check_architecture(&manifest, quantization, g.layer_split.is_some())?;
+    let ple_memory = if g.ple_placement == Some(basal_gpu::PleMode::Host) {
+        let memory = GpuBackend::host_ple_memory(&dir, &manifest.config)?;
+        let workers = 1 + u64::from(options.long_tokens > 0);
+        let host_bytes = memory.host_load_bytes(workers)?;
+        let reserve = (options.ram_reserve_gib * 1073741824.0) as u64;
+        crate::config::check_host_ple_headroom(
+            host_bytes.checked_add(reserve).context("host PLE benchmark reserve overflow")?,
+        )?;
+        guard.reserve_host_ple(
+            memory.max_staging_bytes_per_worker.checked_mul(workers).context("host PLE worker staging overflow")?,
+        )?;
+        report["model"]["host_ple_memory"] = json!({"source_estimate":memory,
+            "loaded_replicas":1, "workers":workers, "estimated_additional_host_load_bytes":host_bytes,
+            "method":"source bytes and bounded PLE staging, separate checkpoint mappings/load scratch; not allocator peaks, an OOM guarantee or measured VRAM savings"});
+        Some(memory)
+    } else {
+        None
+    };
     // none: the checkpoint size, as before; q8_0 / q4_k: the same with the projections at the format's block size;
     // Intel (always none): the resident weight buffers from the validated checkpoint header
     #[cfg(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos")))]
@@ -396,9 +419,15 @@ fn execute(
     let (weight_bytes, method) = (match &manifest.config {
             basal_core::architecture::Architecture::Llama(c) => basal_gpu::estimated_weight_bytes(c, checkpoint_bytes, quantization)?,
             // dense weights only (checked above)
-            basal_core::architecture::Architecture::Gemma4(_) | basal_core::architecture::Architecture::Qwen35(_) => checkpoint_bytes,
+            basal_core::architecture::Architecture::Gemma4(_) | basal_core::architecture::Architecture::Qwen35(_) =>
+                ple_memory.as_ref().map_or(checkpoint_bytes, |m| m.estimated_device_weight_bytes),
         },
         "estimate from format arithmetic (checkpoint size; q8_0 / q4_k: projection matrices at Q8_0 / Q4_K block size with padding), not a measurement");
+    let method = if ple_memory.is_some() {
+        "host PLE: checkpoint file bytes minus the checked PLE source range; mappings, host table and host/device load scratch are reported separately; generated tensors and allocator overhead excluded, not a measurement"
+    } else {
+        method
+    };
     // The supported pair has identical tensor shapes, file sizes and load precision, with independent weights.
     let weight_bytes = weight_bytes
         .checked_mul(resident_models)
@@ -409,7 +438,10 @@ fn execute(
     report["model"]["estimated_resident_weight_bytes"] = json!(weight_bytes);
     match &g.layer_split {
         None => {
-            let preflight = guard.check(&host_memory()?, &basal_gpu::gpu_memory(g.device())?, weight_bytes);
+            let load_bytes = weight_bytes
+                .checked_add(ple_memory.as_ref().map_or(0, |m| m.estimated_device_load_scratch_bytes))
+                .context("host PLE device load estimate overflow")?;
+            let preflight = guard.check(&host_memory()?, &basal_gpu::gpu_memory(g.device())?, load_bytes);
             report["resources"] = guard.report();
             preflight?;
         }

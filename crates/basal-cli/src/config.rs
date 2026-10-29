@@ -119,6 +119,9 @@ pub struct ModelConfig {
     /// (Omni/Gemma refuses it). All replicas of the model use it.
     #[serde(default = "default_quantization")]
     pub quantization: String,
+    /// Per-layer token table: device by default; host needs single-device CUDA Gemma with PLE.
+    #[serde(default)]
+    pub ple_placement: basal_gpu::PleMode,
     /// GPU of the model: the CUDA device ordinal, an index among the GPUs visible to the process (after
     /// `CUDA_VISIBLE_DEVICES`; `basal doctor` lists them). Models on one device take turns on it; models on different
     /// devices run at the same time. Metal and Intel: 0 only. Not together with `replica_devices`.
@@ -228,6 +231,9 @@ fn default_tree_max_tokens() -> usize {
 }
 
 impl ModelConfig {
+    pub(crate) fn batch_qualification(&self) -> Result<crate::serve::batches::config::BackgroundQualification> {
+        self.batch_profile.validate(&describe(self), self.ple_placement).map_err(Into::into)
+    }
     pub(crate) fn collection_policy(&self) -> Result<crate::serve::collection::CollectionPolicy> {
         crate::serve::collection::CollectionPolicy::new(self.max_batch, self.wait_ms, self.batch_window_ms)
             .with_context(|| format!("model {}: collection settings", describe(self)))
@@ -280,6 +286,44 @@ impl ModelConfig {
         );
         Ok(Placement::Replicas(devices.clone()))
     }
+}
+
+/// Host opt-in refusals before device discovery whenever local/cached architecture is available.
+pub(crate) fn check_ple_source(ple: basal_gpu::PleMode, split: bool, model: &ModelConfig) -> Result<()> {
+    if ple == basal_gpu::PleMode::Device {
+        return Ok(());
+    }
+    ensure!(cfg!(feature = "cuda") && !cfg!(target_os = "macos"), "host PLE requires the CUDA build");
+    ensure!(!split, "host PLE does not support layer split");
+    ensure!(model.quantization == "none", "host PLE requires Gemma quantization none");
+    ensure!(
+        model.inference_mode != "balanced" && model.state_cache_mb == 0,
+        "host PLE Gemma does not support balanced inference or cross-request state cache"
+    );
+    if model.dtype != "auto" {
+        Precision::parse(&model.dtype)?;
+    }
+    ensure!(!model.model_options.exits_enabled(), "host PLE Gemma does not support trained early_exit");
+    let dir = model
+        .path
+        .clone()
+        .or_else(|| model.repo.as_deref().and_then(|repo| cached_model_dir(repo, model.revision.as_deref())));
+    if let Some(dir) = dir {
+        let value = serde_json::from_str(&std::fs::read_to_string(dir.join("config.json"))?)?;
+        ple.resolve(&basal_core::architecture::Architecture::parse(&value)?, split)?;
+    }
+    Ok(())
+}
+
+/// Narrow host-PLE startup check. A conservative source/reservation estimate, not an allocator or OOM guarantee.
+pub(crate) fn check_host_ple_headroom(bytes: u64) -> Result<()> {
+    let host = crate::benchmark::resources::host_memory()?;
+    ensure!(
+        !host.pressure && host.available_bytes >= bytes,
+        "host PLE needs {bytes} additional estimated host bytes; {} available within host/cgroup limits",
+        host.available_bytes
+    );
+    Ok(())
 }
 
 /// Where a configured model runs ([`ModelConfig::placement`]).

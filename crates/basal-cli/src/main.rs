@@ -170,6 +170,10 @@ struct GpuArgs {
     /// the format of every --model (a configuration file sets `quantization` per model instead)
     #[arg(long)]
     quantization: Option<String>,
+    /// Gemma per-layer token table: device (default) or host (single CUDA non-unified PLE models).
+    /// With a serve configuration file, set `ple_placement` per model instead.
+    #[arg(long)]
+    ple_placement: Option<basal_gpu::PleMode>,
     /// Do not precompute the K/V of the prompt template prefix
     #[arg(long)]
     no_prefix_cache: bool,
@@ -203,6 +207,19 @@ struct GpuArgs {
 }
 
 impl GpuArgs {
+    /// Refuse host-only option/source incompatibilities before callers can discover any GPU.
+    fn check_ple_source(&self, source: &str) -> Result<()> {
+        if self.ple_placement != Some(basal_gpu::PleMode::Host) {
+            return Ok(());
+        }
+        let mut model = config::model_ref(source)?;
+        model.quantization = self.quantization.clone().unwrap_or_else(|| "none".into());
+        model.inference_mode.clone_from(&self.inference_mode);
+        model.dtype.clone_from(&self.dtype);
+        model.state_cache_mb = self.state_cache_mb;
+        model.model_options = self.model_options.clone();
+        config::check_ple_source(basal_gpu::PleMode::Host, self.layer_split.is_some(), &model)
+    }
     /// The GPU ordinal (`--device`, default 0).
     fn device(&self) -> usize {
         self.device.unwrap_or(0)
@@ -673,6 +690,7 @@ fn read_request(src: &str) -> Result<Value> {
 fn gpu_engine(m: &ModelArgs, g: &GpuArgs) -> Result<Engine<GpuBackend>> {
     // an unsupported weight format or layer split fails before the model is downloaded
     g.quantization(&m.model)?;
+    g.check_ple_source(&m.model)?;
     g.check_layer_split(&m.model)?;
     let mut model = config::model_ref(&m.model)?;
     model.model_options = g.model_options.clone();
@@ -780,6 +798,8 @@ fn planned_engine_from_manifest(
     let quantization = g.quantization(&manifest.name)?;
     // Validate architecture-specific quantization and split constraints before any weight is read.
     config::check_architecture(&manifest, quantization, g.layer_split.is_some())?;
+    let ple = g.ple_placement.unwrap_or_default();
+    ple.resolve(&manifest.config, g.layer_split.is_some())?;
     let readout = g.readout()?;
     let profile = models::profile_for(&manifest);
     let kernels = Kernels::parse(&g.kernels)?;
@@ -797,6 +817,28 @@ fn planned_engine_from_manifest(
     let exits = g.model_options.load_exits(&manifest)?;
     if let Some(artifacts) = &exits {
         GpuBackend::early_exit_resident_bytes(artifacts, &manifest.config)?;
+    }
+    if ple == basal_gpu::PleMode::Host {
+        anyhow::ensure!(
+            inference_mode != basal_gpu::InferenceMode::Balanced && g.state_cache_mb == 0,
+            "host PLE Gemma does not support balanced inference or cross-request state cache"
+        );
+        if g.dtype != "auto" {
+            basal_gpu::Precision::parse(&g.dtype)?;
+        }
+        let memory = GpuBackend::host_ple_memory(dir, &manifest.config)?;
+        config::check_host_ple_headroom(memory.host_load_bytes(1)?)?;
+        let device_bytes = memory
+            .estimated_device_weight_bytes
+            .checked_add(memory.estimated_device_load_scratch_bytes)
+            .context("host PLE device load estimate overflow")?;
+        anyhow::ensure!(basal_gpu::gpu_memory(g.device())?.available_bytes >= device_bytes,
+            "host PLE estimated device weights plus load scratch need {device_bytes} bytes; this source estimate excludes allocator/context/runtime overhead");
+        crate::note!(
+            "{}: host PLE source estimate {} (not allocator peaks or measured VRAM savings)",
+            manifest.name,
+            serde_json::to_string(&memory)?
+        );
     }
     let precision = config::model_precision(&g.dtype, &manifest, g.devices()[0])?;
     if let Some(split) = &g.layer_split {
@@ -825,6 +867,7 @@ fn planned_engine_from_manifest(
         kernels,
         quantization,
         reproducibility: gemm.reproducibility,
+        ple,
     };
     let plan = basal_gpu::ResolvedExecutionPlan::freeze(
         profile.id,
@@ -865,6 +908,7 @@ fn planned_engine_from_manifest(
                     kernels,
                     quantization,
                     reproducibility: gemm.reproducibility,
+                    ple: basal_gpu::PleMode::Device,
                 },
                 table,
                 tables_apply,
@@ -1314,6 +1358,10 @@ fn run() -> Result<()> {
                     "--quantization applies to --model; with a configuration file set `quantization` per model in it"
                 );
                 anyhow::ensure!(
+                    g.ple_placement.is_none(),
+                    "--ple-placement applies to --model; with a configuration file set `ple_placement` per model in it"
+                );
+                anyhow::ensure!(
                     g.layer_split.is_none(),
                     "--layer-split applies to --model; with a configuration file set `layer_split` per model in it"
                 );
@@ -1325,6 +1373,7 @@ fn run() -> Result<()> {
                     }
                     m.inference_mode = g.inference_mode.clone();
                     m.quantization = g.quantization.clone().unwrap_or_else(|| Quantization::None.as_str().into());
+                    m.ple_placement = g.ple_placement.unwrap_or_default();
                     m.device = g.device;
                     m.replica_devices.clone_from(&replica_devices);
                     m.layer_split.clone_from(&g.layer_split);
@@ -1363,11 +1412,8 @@ fn run() -> Result<()> {
                 (None, database::DatabaseSection::Enabled(settings)) => Some(settings),
                 (None, database::DatabaseSection::Absent | database::DatabaseSection::Disabled) => None,
             };
-            let batch_qualifications = c
-                .models
-                .iter()
-                .map(|model| model.batch_profile.validate(&config::describe(model)))
-                .collect::<Result<Vec<_>, _>>()?;
+            let batch_qualifications =
+                c.models.iter().map(config::ModelConfig::batch_qualification).collect::<Result<Vec<_>, _>>()?;
             // devices of every model's instances, its weight format and layer split; the GPUs of a replica group or
             // a layer split are compared before any download
             let placements: Vec<config::Placement> = c
@@ -1375,6 +1421,7 @@ fn run() -> Result<()> {
                 .iter()
                 .map(|m| {
                     let model = config::describe(m);
+                    config::check_ple_source(m.ple_placement, m.layer_split.is_some(), m)?;
                     config::check_quantization(&model, &m.quantization, &m.dtype, &g.kernels, cfg!(feature = "cuda"))?;
                     let placement = m.placement().with_context(|| format!("model {model}"))?;
                     if let Some(split) = placement.split() {
@@ -1424,6 +1471,7 @@ fn run() -> Result<()> {
                 let quantization: Quantization =
                     mc.quantization.parse().with_context(|| format!("model {}", manifest.name))?;
                 config::check_architecture(manifest, quantization, placement.split().is_some())?;
+                mc.ple_placement.resolve(&manifest.config, placement.split().is_some())?;
                 if mc.model_options.exits_enabled() {
                     let readout = g.readout()?;
                     GpuBackend::check_early_exit(
@@ -1441,6 +1489,39 @@ fn run() -> Result<()> {
                 if let Some(split) = placement.split() {
                     config::check_split_coverage(&manifest.name, split, manifest.config.num_layers())?;
                 }
+            }
+            // All separately loaded host tables plus each worker's own PLE call reservation.
+            // Check before GEMM/device loading; mapped checkpoint pages and load scratch are separate estimates.
+            let mut host_ple_load = 0u64;
+            for (((mc, manifest), placement), qualification) in
+                c.models.iter().zip(&manifests).zip(&placements).zip(&batch_qualifications)
+            {
+                if mc.ple_placement == basal_gpu::PleMode::Host {
+                    let memory = GpuBackend::host_ple_memory(&manifest.dir, &manifest.config)?;
+                    let background = batch_settings.is_some()
+                        && matches!(qualification, serve::batches::config::BackgroundQualification::Qualified { .. });
+                    let workers = 1 + u64::from(mc.long_tokens > 0) + u64::from(background);
+                    let replicas = u64::try_from(placement.instances().len())?;
+                    let bytes = memory
+                        .host_load_bytes(workers)?
+                        .checked_mul(replicas)
+                        .context("host PLE replica estimate overflow")?;
+                    host_ple_load = host_ple_load.checked_add(bytes).context("host PLE server estimate overflow")?;
+                    crate::note!(
+                        "{}: host PLE {} loaded replica(s), {} workers/replica; source estimate {}",
+                        manifest.name,
+                        replicas,
+                        workers,
+                        serde_json::to_string(&memory)?
+                    );
+                }
+            }
+            if host_ple_load > 0 {
+                // The global Batch pool also owns plans/results; do not treat it as a shared worker buffer.
+                let pool = batch_settings.as_ref().map_or(0, |b| b.host.exec_pool_bytes);
+                config::check_host_ple_headroom(
+                    host_ple_load.checked_add(pool).context("host PLE plus Batch pool overflow")?,
+                )?;
             }
             // one table per model, chosen on its first device (first phase of the execution plan) and checked on
             // every device of the model before anything loads
@@ -1483,6 +1564,7 @@ fn run() -> Result<()> {
                         readout: g.readout.clone(),
                         kernels: g.kernels.clone(),
                         quantization: Some(mc.quantization.clone()),
+                        ple_placement: Some(mc.ple_placement),
                         no_prefix_cache: mc.no_prefix_cache,
                         state_cache_mb: mc.state_cache_mb,
                         tree_max_tokens: mc.tree_max_tokens,

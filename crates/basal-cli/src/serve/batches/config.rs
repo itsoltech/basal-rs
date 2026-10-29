@@ -207,6 +207,14 @@ impl BatchSettings {
 }
 
 impl BatchConfig {
+    /// The same host execution pool used at startup, for host-PLE doctor's aggregate headroom check.
+    pub(crate) fn host_exec_pool_bytes(&self) -> Result<u64, ConfigError> {
+        if self.enabled {
+            Ok(self.host.validate()?.exec_pool_bytes)
+        } else {
+            Ok(0)
+        }
+    }
     /// `basal serve --batches [--batch-data-dir DIR]`: enable the API; a directory from the command line replaces
     /// the one of the file.
     pub(crate) fn apply_cli(&mut self, enable: bool, data_dir: Option<PathBuf>) {
@@ -1185,6 +1193,9 @@ pub(crate) enum Composition {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct BackgroundProfileConfig {
+    /// Required for a host-PLE qualification; absent preserves existing device qualifications.
+    #[serde(default)]
+    ple_placement: Option<basal_gpu::PleMode>,
     #[serde(default)]
     background: bool,
     #[serde(default)]
@@ -1234,9 +1245,18 @@ impl BackgroundQualification {
 }
 
 impl BackgroundProfileConfig {
-    /// Check the qualification of model `model`: disabled unless `background: true` with evidence, both
-    /// capacities and a valid composition.
-    pub(crate) fn validate(&self, model: &str) -> Result<BackgroundQualification, ConfigError> {
+    /// Qualification must match placement; host also requires an explicit placement-specific opt-in.
+    pub(crate) fn validate(
+        &self,
+        model: &str,
+        ple: basal_gpu::PleMode,
+    ) -> Result<BackgroundQualification, ConfigError> {
+        if self.ple_placement.is_some_and(|value| value != ple)
+            || (self.background && ple == basal_gpu::PleMode::Host && self.ple_placement.is_none())
+        {
+            return Err(invalid(format!("models.{model}.batch_profile.ple_placement"),
+                "qualification must name the actual PLE placement; host requires explicit `ple_placement: host` and placement-specific measured evidence"));
+        }
         let field = |name: &str| format!("models.{model}.batch_profile.{name}");
         if !self.background {
             let configured = self.evidence.is_some()

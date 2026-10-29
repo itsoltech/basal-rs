@@ -16,6 +16,43 @@ pierwszeństwo. Przy dekoderze FP16 wieże mediów zachowują wagi, obliczenia i
 clippingu BF16. `--dtype f32` wybiera obliczenia FP32 do porównań numerycznych.
 Metal i Intel Vulkan nie uruchamiają omni.
 
+### Tabela PLE w RAM hosta (opt-in)
+
+`basal serve --model omni-mini --ple-placement host` trzyma tabelę tokenów
+per-layer input embeddings na CPU i kopiuje wybrane wiersze na CUDA. W YAML
+ustaw `models[].ple_placement: host`. Brak opcji lub `device` zachowuje
+dotychczasowy loader, JSON planu i wejścia fingerprintu. Przy pliku konfiguracji
+CLI odmawia `--ple-placement`; ustawienie należy do konkretnego modelu.
+Nie zmienia to nazwy źródła, profilu ani aliasu serwowanego modelu.
+
+Host wymaga CUDA i nie-unified Gemma z PLE. Llama, Pico/Qwen, Gemma bez PLE,
+Unified, Metal, Intel i `layer_split` są odrzucane. Dostępna lokalnie lub w cache
+architektura jest sprawdzana przed odkrywaniem GPU i wyborem GEMM. Plan zamraża
+placement oraz limit `8192 × (4W + 4)` bajtów na wywołanie, gdzie
+`W = liczba warstw × per_layer_input`. Limit obejmuje do 8192 padded wierszy
+krótkiego batcha oraz chunki tekstu/mediów do 2048 wierszy. Backend sprawdza go
+przed alokacją ID PLE. Dwie kopie storage i ID są konserwatywnym boundem;
+wybrany tensor identity nadal zajmuje pamięć GPU.
+
+Tabela zajmuje `2 × per_layer_vocab × W` bajtów na osobno ładowaną replikę.
+Forki współdzielą tabelę, ale każdy worker main/long/zakwalifikowanego tła ma
+osobny limit stagingu. Startup sprawdza ich sumę względem dostępnej pamięci
+hosta/cgroup, ponownie po ładowaniu. Pool Batch pozostaje dodatkowym budżetem
+planów i wyników; modele Host nadal podlegają istniejącemu HostStaging/admission.
+Kwalifikacja tła wymaga własnych pomiarów i jawnego
+`batch_profile.ple_placement: host`; samo włączenie Host nie kwalifikuje Batch.
+
+Startup, `doctor --config` i `benchmark --ple-placement host` rozdzielają
+rozmiar checkpointu, szacunek źródłowych wag na GPU, tabelę w RAM, mapowania,
+scratch ładowania i staging workerów. Źródłowy szacunek GPU odejmuje tylko
+sprawdzony zakres tabeli PLE od rozmiaru checkpointu; nie używa estymatora split.
+Scratch i mapowania nie są stałą rezydencją tabeli. Są to szacunki źródłowe,
+bez gwarancji alokatora/OOM całego procesu ani zmierzonej oszczędności VRAM.
+Zgodność bitowa Device/Host, jakość, transfery, rzeczywiste szczyty pamięci
+i wydajność pozostają niezweryfikowane runtime'owo.
+Szacunek Host w `doctor` wymaga uruchomienia binarki z włączoną obsługą CUDA;
+doctor bez CUDA odmawia tej opcji także przy obecnej osobnej binarce CUDA.
+
 Na wielu GPU omni działa na wskazanej karcie (`device`) albo jako niezależne repliki
 (`replica_devices`, karty jednego typu). Przy replikach bez pasującej tabeli GEMM każda
 replika używa stałych GEMM per prompt. Podział warstw (`layer_split`) obsługuje Gemma bez

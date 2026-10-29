@@ -207,6 +207,12 @@ impl GemmaBackend {
         Ok(ple::dimensions(cfg)?.1)
     }
 
+    /// Product ceiling for every supported padded/chunked host-PLE call, without device work.
+    pub fn host_ple_placement(cfg: &GemmaConfig) -> Result<PlePlacement> {
+        let (width, _) = ple::dimensions(cfg)?;
+        Ok(PlePlacement::Host { max_staging_bytes: HostPle::staging_bytes(width, ple::MAX_ROWS)? })
+    }
+
     #[expect(clippy::too_many_arguments, reason = "validated per-stage load placement and arithmetic")]
     fn load_on(
         dir: &std::path::Path,
@@ -524,6 +530,13 @@ impl GemmaBackend {
         }
         if plan.precision() != self.precision || plan.readout() != self.readout {
             return Err(crate::InferenceConfigError::PlanMismatch("precision or readout"));
+        }
+        let placement = match &self.weights.get().ple_embed {
+            Some(PleEmbedding::Host(table)) => PlePlacement::Host { max_staging_bytes: table.max_staging_bytes },
+            _ => PlePlacement::Device,
+        };
+        if plan.ple_placement() != placement {
+            return Err(crate::InferenceConfigError::PlanMismatch("PLE placement or staging ceiling"));
         }
         let crate::plan::ExecutionPolicy::Gemma { stages } = plan.policy() else {
             return Err(crate::InferenceConfigError::PlanMismatch("a Llama policy for a Gemma backend"));

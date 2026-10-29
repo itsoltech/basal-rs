@@ -76,8 +76,26 @@ pub fn run(file: Option<PathBuf>, model_refs: &[String], as_json: bool) -> Resul
     let mut r = Report::default();
     build(&mut r);
     system(&mut r);
-    let gpus = gpu(&mut r);
-    let config = configuration(&mut r, file, model_refs);
+    // Resolve local/cached host-PLE refusals before discovery, keeping historical report order for Device.
+    let mut config_report = Report::default();
+    let config = configuration(&mut config_report, file, model_refs);
+    let mut invalid_ple = false;
+    if let Some(c) = &config {
+        for model in &c.models {
+            if model.ple_placement == basal_gpu::PleMode::Host {
+                if let Err(e) = config::check_ple_source(model.ple_placement, model.layer_split.is_some(), model) {
+                    config_report.fail(
+                        "models",
+                        format!("{}: {e:#}", config::describe(model)),
+                        "host PLE needs a CUDA build and non-unified Gemma with PLE, without layer split",
+                    );
+                    invalid_ple = true;
+                }
+            }
+        }
+    }
+    let gpus = if invalid_ple { None } else { gpu(&mut r) };
+    r.0.extend(config_report.0);
     if let Some(c) = &config {
         models(&mut r, c, gpus.as_deref());
         port(&mut r, c);
@@ -515,6 +533,8 @@ fn models(r: &mut Report, c: &ServeConfig, gpus: Option<&[Gpu]>) {
     // checkpoint bytes of the models of each device
     let mut resident = std::collections::BTreeMap::<usize, u64>::new();
     let mut repos = Vec::new();
+    let mut ple_host_load = 0u64;
+    let mut ple_load_scratch = std::collections::BTreeMap::<usize, u64>::new();
     // replica groups and layer splits (several devices) whose GPUs are compared below
     let mut groups: Vec<(String, config::Placement)> = Vec::new();
     // the backend of `basal serve`: this build's, or the CUDA build of the Linux package
@@ -603,6 +623,55 @@ fn models(r: &mut Report, c: &ServeConfig, gpus: Option<&[Gpu]>) {
             _ => {}
         }
         let checkpoint = bytes;
+        if m.ple_placement == basal_gpu::PleMode::Host {
+            let estimate = (|| -> Result<_> {
+                let dir = model_dir.as_deref().context("host PLE estimate requires a local or cached checkpoint")?;
+                let value = serde_json::from_str(&std::fs::read_to_string(dir.join("config.json"))?)?;
+                let arch = basal_core::architecture::Architecture::parse(&value)?;
+                m.ple_placement.resolve(&arch, placement.split().is_some())?;
+                let qualification = m.batch_qualification()?;
+                let background = c.batches.enabled
+                    && matches!(
+                        qualification,
+                        crate::serve::batches::config::BackgroundQualification::Qualified { .. }
+                    );
+                let workers = 1 + u64::from(m.long_tokens > 0) + u64::from(background);
+                let memory = basal_gpu::RuntimeBackend::host_ple_memory(dir, &arch)?;
+                let replicas = u64::try_from(placement.instances().len())?;
+                let host = memory
+                    .host_load_bytes(workers)?
+                    .checked_mul(replicas)
+                    .context("host PLE replica estimate overflow")?;
+                Ok((memory, host, workers, replicas))
+            })();
+            match estimate {
+                Ok((memory, host, workers, replicas)) => {
+                    bytes = memory.estimated_device_weight_bytes;
+                    for devices in placement.instances() {
+                        for device in devices {
+                            ple_load_scratch
+                                .entry(device)
+                                .and_modify(|b| *b = (*b).max(memory.estimated_device_load_scratch_bytes))
+                                .or_insert(memory.estimated_device_load_scratch_bytes);
+                        }
+                    }
+                    match ple_host_load.checked_add(host) {
+                        Some(total) => ple_host_load = total,
+                        None => {
+                            r.fail("models", "host PLE server estimate overflow", "serve fewer replicas");
+                            continue;
+                        }
+                    }
+                    r.info("models", format!("{}: host PLE, {replicas} loaded replica(s), {workers} workers/replica; source estimate {}; checkpoint/mappings and scratch are separate, not allocator peaks or measured VRAM savings",
+                        config::describe(m), serde_json::to_string(&memory).unwrap_or_default()));
+                }
+                Err(e) => {
+                    r.fail("models", format!("{}: host PLE estimate unavailable ({e:#})", config::describe(m)),
+                        "use the CUDA build with a local/cached non-unified Gemma PLE checkpoint and placement-specific Batch qualification");
+                    continue;
+                }
+            }
+        }
         if quantization != basal_gpu::Quantization::None {
             bytes = quantized_bytes(r, m, model_dir.as_deref(), bytes, quantization);
         }
@@ -621,6 +690,18 @@ fn models(r: &mut Report, c: &ServeConfig, gpus: Option<&[Gpu]>) {
                     *resident.entry(d).or_default() += b;
                 }
             }
+        }
+    }
+    if ple_host_load > 0 {
+        let checked = (|| -> Result<u64> {
+            let pool = c.batches.host_exec_pool_bytes()?;
+            let total = ple_host_load.checked_add(pool).context("host PLE and Batch pool overflow")?;
+            config::check_host_ple_headroom(total)?;
+            Ok(total)
+        })();
+        match checked {
+            Ok(total) => r.info("models", format!("host PLE additional source/load/worker estimate plus Batch execution pool: {total} bytes within current host/cgroup headroom; process overhead and allocator rounding need additional space")),
+            Err(e) => r.fail("models", format!("{e:#}"), "serve fewer replicas or workers, or increase available host RAM"),
         }
     }
     for (model, placement) in &groups {
@@ -700,7 +781,7 @@ fn models(r: &mut Report, c: &ServeConfig, gpus: Option<&[Gpu]>) {
         let Some(b) = g.memory else { continue };
         // f16 weights take about the checkpoint size (bf16) on the GPU, plus activations and caches (q8_0 / q4_k
         // models: their estimated weight bytes)
-        let need = resident as f64 * 1.1;
+        let need = resident as f64 * 1.1 + ple_load_scratch.get(&device).copied().unwrap_or(0) as f64;
         if need > b as f64 {
             r.warn(
                 "models",

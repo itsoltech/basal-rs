@@ -510,6 +510,7 @@ fn load_local(args: &ClientArgs, name: &str) -> Result<basal_core::Engine<crate:
         readout: "f32".into(),
         kernels: "fused".into(),
         quantization: None,
+        ple_placement: None,
         no_prefix_cache: false,
         state_cache_mb: 0,
         tree_max_tokens: basal_core::engine::TREE_MAX_TOKENS,

@@ -22,6 +22,11 @@ pub(super) struct Guard {
 }
 
 impl Guard {
+    /// Host-only opt-in: retain every concurrent worker's PLE allowance throughout load and monitoring.
+    pub fn reserve_host_ple(&mut self, bytes: u64) -> Result<()> {
+        self.ram_reserve = self.ram_reserve.checked_add(bytes).context("host PLE RAM reserve overflow")?;
+        Ok(())
+    }
     pub fn new(host: HostMemory, gpu: &GpuMemory, options: &super::Options) -> Self {
         Self {
             min_ram: host.available_bytes,
@@ -224,7 +229,7 @@ impl Drop for Monitor {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(super) struct HostMemory {
+pub(crate) struct HostMemory {
     pub total_bytes: u64,
     pub system_available_bytes: u64,
     pub available_bytes: u64,
@@ -237,7 +242,7 @@ pub(super) struct HostMemory {
 
 /// Finite limits from the current group through its ancestors, without identifying paths.
 #[derive(Clone, Debug, Serialize)]
-pub(super) struct CgroupMemory {
+pub(crate) struct CgroupMemory {
     limit_bytes: u64,
     used_bytes: u64,
     reclaimable_file_bytes: u64,
@@ -251,7 +256,7 @@ fn command(cmd: &str, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8(out.stdout)?.trim().to_string())
 }
 
-pub(super) fn host_memory() -> Result<HostMemory> {
+pub(crate) fn host_memory() -> Result<HostMemory> {
     #[cfg(target_os = "macos")]
     {
         let vm = command("vm_stat", &[])?;
