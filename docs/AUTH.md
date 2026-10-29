@@ -99,7 +99,7 @@ rozpoznać wyciek. Serwer porównuje SHA-256 całego tokenu w stałym czasie.
 
 | Zakres | Trasy |
 |---|---|
-| `inference` | `/v1/basal`, `/v1/systemone`, `/v1/models` |
+| `inference` | `/v1/basal`, `/v1/systemone`, `/v1/decisions`, `/v1/models` |
 | `batches` | `/v1/files…`, `/v1/batches…` |
 | `mcp` | `/mcp`; narzędzia MCP wykonują inferencję, więc ten zakres też do niej uprawnia |
 | `metrics` | `/metrics`, tylko z `auth.protect_metrics: true` |

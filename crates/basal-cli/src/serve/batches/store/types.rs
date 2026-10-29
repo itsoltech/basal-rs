@@ -1254,7 +1254,7 @@ impl ApiKeyId {
 pub(crate) struct ApiScopes(u8);
 
 impl ApiScopes {
-    /// `/v1/basal`, `/v1/systemone`, `/v1/models`.
+    /// `/v1/basal`, `/v1/systemone`, `/v1/decisions`, `/v1/models`.
     pub(crate) const INFERENCE: Self = Self(1);
     /// `/v1/files*`, `/v1/batches*`.
     pub(crate) const BATCHES: Self = Self(2);

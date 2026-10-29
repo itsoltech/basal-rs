@@ -118,7 +118,7 @@ fn need(path: &str, protect_metrics: bool) -> Need {
         "/metrics" if !protect_metrics => Need::Nothing,
         "/metrics" => Need::Scope(ApiScopes::METRICS),
         "/mcp" => Need::Scope(ApiScopes::MCP),
-        "/v1/basal" | "/v1/systemone" | "/v1/models" => Need::Scope(ApiScopes::INFERENCE),
+        "/v1/basal" | "/v1/systemone" | "/v1/decisions" | "/v1/models" => Need::Scope(ApiScopes::INFERENCE),
         _ if under("/v1/files") || under("/v1/batches") => Need::Scope(ApiScopes::BATCHES),
         _ => Need::AnyKey,
     }
