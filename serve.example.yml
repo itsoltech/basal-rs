@@ -125,7 +125,7 @@ models:
     # First admitted long may be oversized/unknown (then no more long); unknown bounds are never short/zero-cost.
     # Native packed/entry/type ceilings still apply; only the first entry has the native packed oversize exception.
     # No new engine/thread/gate/PLE worker; no backlog on background or long lane. No cache-hit shortcut.
-    # No literal upstream, fairness/latency/memory/performance guarantee or runtime qualification; REQ-005 partial.
+    # No literal upstream, fairness/latency/memory/performance guarantee or runtime qualification.
     long_tokens: 4096              # strict > threshold in the selected basis; 0 disables legacy lane
     # long_lane: legacy           # absent/legacy: enabled iff long_tokens > 0; on: requires > 0; off: disabled
     # long_token_basis: packed    # absent/packed: old admission cost; prompt: longest actual post-truncation order

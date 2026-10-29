@@ -540,7 +540,7 @@ To polityka natywna z konserwatywnym kosztem, nie dowód literalnej zgodności
 upstream. Ciągłe short może zapełniać cap, atomic opóźniać inne wpisy, a long
 jest synchroniczne. Limit z wyjątkiem nie gwarantuje twardej granicy pracy,
 opóźnienia ani pamięci. Nie wykonano nowej kwalifikacji runtime, replayu
-bitowego, FP32, sprawiedliwości ani wydajności; REQ-005 pozostaje częściowe.
+bitowego, FP32, sprawiedliwości ani wydajności.
 `settings` zawiera efektywne `context_overflow` i `truncate_head`, tak jak
 profil batchy. Domyślne `refuse` zachowuje pomiar limitu kontekstu; przy
 jawnym `--context-overflow truncate` wynik może opisywać skrócone wejście,

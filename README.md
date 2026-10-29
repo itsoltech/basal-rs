@@ -894,7 +894,7 @@ zgodności z upstream. Ciągły napływ krótkich może wypełniać limit wpisó
 wyjątki atomowe mogą opóźniać inne typy, a długie wywołania są synchroniczne.
 Limit z wyjątkiem oversized/unknown nie stanowi twardej granicy faktycznej
 pracy, opóźnienia ani pamięci. Jakość, zgodność bitowa, sprawiedliwość
-i wydajność wymagają osobnych pomiarów; REQ-005 pozostaje częściowe.
+i wydajność wymagają osobnych pomiarów.
 
 `--soam on|off` nadpisuje per-model YAML `soam` tylko przy jawnym podaniu.
 Brak opcji i `on` zachowują dotychczasowy Tree, wybór backendu, plan numeryczny

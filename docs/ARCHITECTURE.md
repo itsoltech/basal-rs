@@ -859,7 +859,7 @@ Nie deklarujemy literalnej zgodności upstream, braku zagłodzenia, opóźnień
 ani przyspieszenia: short może stale wypełniać cap, wyjątki atomowe opóźniać
 inne typy, a long wykonuje się synchronicznie. Granica konserwatywna oraz
 oversized/unknown nie dają twardej granicy faktycznej pracy lub pamięci.
-REQ-005 nadal jest częściowe; runtime, replay bitowy i FP32 pozostają niezmierzone.
+Runtime, replay bitowy i FP32 pozostają niezmierzone.
 
 Przy aktywnym long lane żądania skierowane do niego liczy drugi silnik na tym samym
 GPU, ze wspólnymi wagami, tabelą GEMM i prefiksami szablonu. Oba tory
