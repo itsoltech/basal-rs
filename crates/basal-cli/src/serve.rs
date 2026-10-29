@@ -399,15 +399,20 @@ impl AdmissionCost {
                     return false;
                 }
                 size.insert(&prompts);
+                true
             }
-            Self::Rows(tokens) => {
-                let total = plan.prepared.iter().try_fold(*tokens, |n, p| n.checked_add(p.packed.ids.len()));
-                if !first && total.is_none_or(|n| n > limit) {
-                    return false;
-                }
-                *tokens = total.unwrap_or(usize::MAX);
-            }
+            Self::Rows(_) => self.try_add_rows(plan.prepared.iter().map(|p| p.packed.ids.len()), first, limit),
         }
+    }
+
+    /// Separate packed rows under the same first-entry and overflow rule. A trie budget admits no separate rows.
+    fn try_add_rows(&mut self, rows: impl IntoIterator<Item = usize>, first: bool, limit: usize) -> bool {
+        let Self::Rows(tokens) = self else { return false };
+        let total = rows.into_iter().try_fold(*tokens, usize::checked_add);
+        if !first && total.is_none_or(|n| n > limit) {
+            return false;
+        }
+        *tokens = total.unwrap_or(usize::MAX);
         true
     }
 }
@@ -589,18 +594,7 @@ impl Lane {
                 continue;
             }
             let fits = if branch.is_some() {
-                match &mut size {
-                    AdmissionCost::Rows(used) => {
-                        let total = used.checked_add(tokens);
-                        if entries.is_empty() || total.is_some_and(|n| n <= self.max_batch_tokens) {
-                            *used = total.unwrap_or(usize::MAX);
-                            true
-                        } else {
-                            false
-                        }
-                    }
-                    AdmissionCost::Tree(_) => false,
-                }
+                size.try_add_rows([tokens], entries.is_empty(), self.max_batch_tokens)
             } else {
                 size.try_add(self.waiting[owner].work.plan(), entries.is_empty(), self.max_batch_tokens)
             };
@@ -635,15 +629,9 @@ impl Lane {
         match result {
             Ok(outs) => {
                 for (waiting, out) in batch.into_iter().zip(outs) {
-                    let mut resp = served_response(&self.name, waiting.work.plan(), &out);
-                    if let (Some(lane), Ok(response)) = (self.usage_lane, &mut resp) {
-                        response["usage"]["lane"] = lane.into();
-                    }
-                    if let (Some(metrics), Ok(v)) = (&self.metrics, &resp) {
-                        metrics.usage(v);
-                    }
+                    let resp = served_response(&self.name, waiting.work.plan(), &out);
                     let queue_ms = (start - waiting.job.arrived).as_secs_f64() * 1e3;
-                    waiting.job.answer((resp, Some(Timing { queue_ms, compute_ms, batch: n })));
+                    self.reply(waiting.job, resp, Timing { queue_ms, compute_ms, batch: n });
                 }
             }
             Err(e) => {
@@ -706,19 +694,24 @@ impl Lane {
             self.rate = 0.8 * self.rate + 0.2 * (batch.tokens as f64 / (compute_ms / 1e3));
         }
         for (waiting, output) in completions {
-            let mut response = match output {
+            let response = match output {
                 Ok(output) => served_response(&self.name, waiting.work.plan(), &output),
                 Err(error) => Err(DecideError::Internal(error)),
             };
-            if let (Some(lane), Ok(value)) = (self.usage_lane, &mut response) {
-                value["usage"]["lane"] = lane.into();
-            }
-            if let (Some(metrics), Ok(value)) = (&self.metrics, &response) {
-                metrics.usage(value);
-            }
             let queue_ms = (waiting.first_admitted.unwrap_or(start) - waiting.job.arrived).as_secs_f64() * 1e3;
-            waiting.job.answer((response, Some(Timing { queue_ms, compute_ms: waiting.compute_ms, batch: n })));
+            self.reply(waiting.job, response, Timing { queue_ms, compute_ms: waiting.compute_ms, batch: n });
         }
+    }
+
+    /// Label and count a finished response, then answer its single owner.
+    fn reply(&self, job: Job, mut response: std::result::Result<Value, DecideError>, timing: Timing) {
+        if let (Some(lane), Ok(value)) = (self.usage_lane, &mut response) {
+            value["usage"]["lane"] = lane.into();
+        }
+        if let (Some(metrics), Ok(value)) = (&self.metrics, &response) {
+            metrics.usage(value);
+        }
+        job.answer((response, Some(timing)));
     }
 }
 

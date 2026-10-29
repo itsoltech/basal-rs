@@ -15,8 +15,8 @@ pub struct ReadyBranch {
 pub struct RequestExecution {
     plan: RequestPlan,
     decision: DecisionRounds,
-    continuation: Option<TaskContinuation>,
-    first: Option<PlanOutput>,
+    /// A task's second round, with the first round's output it completes.
+    continuation: Option<(TaskContinuation, PlanOutput)>,
     completed: bool,
     round: usize,
 }
@@ -51,7 +51,7 @@ impl<B: Backend> Engine<B> {
         ensure!(plan.media.is_none(), "media requests require atomic execution");
         ensure!(plan.early_exit.as_deref().is_none_or(|p| p == "off"), "active early-exit requires atomic execution");
         let decision = DecisionRounds::new(&[&plan]);
-        Ok(RequestExecution { plan, decision, continuation: None, first: None, completed: false, round: 0 })
+        Ok(RequestExecution { plan, decision, continuation: None, completed: false, round: 0 })
     }
 
     /// Execute only the selected ready primitives with Budget packing, then scatter their results. Each pair
@@ -74,7 +74,7 @@ impl<B: Backend> Engine<B> {
             ensure!(seen.insert((owner, branch.index)), "duplicate ready branch");
             let p = request.decision.prepared().get(branch.index).context("invalid ready branch")?;
             ensure!(request.decision.slots[branch.index].is_none(), "ready branch already executed");
-            let current = request.continuation.as_ref().map_or(&request.plan, |c| &c.plan);
+            let current = request.continuation.as_ref().map_or(&request.plan, |(c, _)| &c.plan);
             if prepared.is_empty() {
                 policy = current.early_exit.as_deref();
             } else {
@@ -96,7 +96,7 @@ impl<B: Backend> Engine<B> {
     pub fn advance_request(&mut self, request: &mut RequestExecution) -> Result<Option<PlanOutput>> {
         ensure!(!request.completed, "request already completed");
         loop {
-            let plan = request.continuation.as_ref().map_or(&request.plan, |c| &c.plan);
+            let plan = request.continuation.as_ref().map_or(&request.plan, |(c, _)| &c.plan);
             let before = request.decision.phase_number;
             let output = request.decision.advance(self, &[plan])?;
             if request.decision.phase_number != before {
@@ -104,8 +104,7 @@ impl<B: Backend> Engine<B> {
             }
             let Some(mut outputs) = output else { return Ok(None) };
             let mut output = outputs.remove(0);
-            if let Some(next) = request.continuation.take() {
-                let mut first = request.first.take().context("missing first task output")?;
+            if let Some((next, mut first)) = request.continuation.take() {
                 self.finish_task(&request.plan, &mut first, next, output)?;
                 request.completed = true;
                 return Ok(Some(first));
@@ -113,8 +112,7 @@ impl<B: Backend> Engine<B> {
             self.apply_thinking(&[&request.plan], std::slice::from_mut(&mut output))?;
             if let Some(next) = self.task_continuation(&request.plan, &mut output)? {
                 request.decision = DecisionRounds::new(&[&next.plan]);
-                request.continuation = Some(next);
-                request.first = Some(output);
+                request.continuation = Some((next, output));
                 request.round = request.round.checked_add(1).context("request round overflow")?;
             } else {
                 request.completed = true;
