@@ -1,3 +1,4 @@
+// Modified for basal-rs: deserialize BPE with typed merge-storage refusals.
 use super::{
     super::OrderedVocabIter, convert_merges_to_hashmap, BpeBuilder, BpeMergeSeed, BpeTrial, Pair,
     BPE,

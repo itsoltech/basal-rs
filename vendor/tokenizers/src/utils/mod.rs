@@ -1,3 +1,4 @@
+// Modified for basal-rs: expose the BPE merge-storage contract.
 pub(crate) mod cache;
 #[cfg(feature = "http")]
 pub(crate) mod from_pretrained;

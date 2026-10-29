@@ -1,3 +1,4 @@
+// Modified for basal-rs: support caller-provided BPE merge scratch storage.
 use super::{super::OrderedVocabIter, trainer::BpeTrainer, Error, Pair, Word};
 use crate::tokenizer::{Model, Result, Token};
 use crate::utils::cache::{DEFAULT_CACHE_CAPACITY, MAX_LENGTH};

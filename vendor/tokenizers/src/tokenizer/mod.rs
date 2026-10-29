@@ -1,4 +1,5 @@
 //! Represents a tokenization pipeline.
+// Modified for basal-rs: read tokenizers with typed BPE merge-storage refusals.
 //!
 //! A [`Tokenizer`](struct.Tokenizer.html) is composed of some of the following parts.
 //!   - [`Normalizer`](trait.Normalizer.html): Takes care of the text normalization (like unicode normalization).

@@ -1,3 +1,4 @@
+// Modified for basal-rs: retain typed BPE refusals through JSON completion.
 use std::cell::Cell;
 use std::convert::Infallible;
 use std::marker::PhantomData;

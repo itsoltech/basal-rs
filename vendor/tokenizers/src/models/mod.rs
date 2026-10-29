@@ -1,4 +1,5 @@
 //! Popular tokenizer models.
+// Modified for basal-rs: preserve model selection with caller-provided BPE scratch.
 
 pub mod bpe;
 pub mod unigram;

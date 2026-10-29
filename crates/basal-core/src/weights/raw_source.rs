@@ -60,8 +60,8 @@ pub(super) struct RawCharge {
 }
 
 impl RawCharge {
-    /// Only the three private raw owners and the opt-in BPE merge scratch call
-    /// this, after their length checks.
+    /// Used by private raw owners and opt-in BPE merge scratch. This checks the
+    /// requested layout before acquiring its charge and allocating the backing.
     /// The returned Vec must stay private, never grow, and die before this charge.
     pub(super) fn allocate(&mut self, bytes: usize) -> Result<Vec<u8>, GgufRawSourceError> {
         let layout = Layout::array::<u8>(bytes).map_err(|_| GgufRawSourceError::Layout { bytes })?;
@@ -80,8 +80,9 @@ impl RawCharge {
         // Vec; no fallible/panicking work intervenes. Alignment 1 and capacity
         // bytes reproduce exactly the allocated layout at deallocation. Length 0
         // exposes no uninitialized data; bounded safe appends initialize <=bytes
-        // elements and cannot reallocate. No pointer or owned Vec escapes the
-        // private raw owners; their charge outlives the backing, including moves,
+        // elements and cannot reallocate. Raw owners retain their Vec; BPE scratch
+        // moves its Vec in a private owner that exposes only a mutable slice to
+        // the provider. Each owner's charge outlives the backing, including moves,
         // errors and unwind. Vec/Mutex supply synchronization without unsafe impls.
         Ok(unsafe { Vec::from_raw_parts(pointer, 0, bytes) })
     }

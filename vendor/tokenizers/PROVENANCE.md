@@ -57,3 +57,7 @@ preimages in `UPSTREAM-SHA256SUMS` and creates the eighth. Apply it with
   and `MergeBuildError`.
 
 `SHA256SUMS` covers every file in this directory except itself.
+
+The six modified upstream Rust source files carry an in-file "Modified for
+basal-rs" notice. The new `merge_storage.rs` module is identified above and
+included in the patch and checksum manifest.
