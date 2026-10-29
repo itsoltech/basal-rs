@@ -91,6 +91,14 @@ models:
     # Metal and Intel: 0 only. Not together with replica_devices or layer_split (not even device: 0).
     device: 0
     max_batch_tokens: 8192         # packed tokens of one batch
+    # Optional controls, absent by default; explicit CLI --max-batch/--wait-ms/--batch-window-ms override YAML.
+    # max_batch: 64               # positive whole requests per batch, independently in main and long lanes
+    # wait_ms: 0                  # finite nonnegative milliseconds; fixed main-lane collection wait
+    # batch_window_ms: 3          # adaptive main-lane window, toward the previous admitted batch size (>1)
+    # Either timing key replaces profile timing; its absent companion is 0. Explicit 0/0 adds no delay but still
+    # batches queued requests. Without either key, legacy qualified profile coalescing remains (also with a cap).
+    # One fixed deadline uses max(wait_ms, adaptive window); full entry/token budgets stop collection early.
+    # The native long lane shares max_batch, with no added collection delay; upstream has separate long bounds.
     schedule: hrrn                 # hrrn (default) or fifo
     long_tokens: 4096              # requests above this run in the model's long lane (0: none)
     state_cache_mb: 0              # cross-request state cache (0: off)

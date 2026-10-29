@@ -801,11 +801,40 @@ writer lub błąd zapisu daje 500. Zawartość i lifecycle:
 | `replica_devices` | | CUDA: repliki modelu pod jedną nazwą, po jednej na każdy podany indeks (różne karty jednego typu); zamiast `device`; kilka wymaga `gemm_table` `auto` albo ścieżki: Llama wspólnej tabeli niezależnej od partii, Omni bez pasującej tabeli używa stałych GEMM per prompt |
 | `layer_split` | | CUDA, Llama oraz Gemma bez współdzielonego KV/PLE: jeden model na kilku kartach jednego typu, lista `{device, layers}` w kolejności warstw (co najmniej dwa etapy na różnych kartach, suma równa liczbie warstw modelu); wymaga `dtype` f16 (`auto` dla Llamy to f16); zamiast `device` i `replica_devices`; Gemma wymaga jawnego f16 i dense `none`; tekst i obrazy z enkoderem na pierwszej karcie; opis wyżej |
 | `max_batch_tokens` | 8192 | tokeny jednej partii, liczone po współdzieleniu prefiksów |
+| `max_batch` | brak | dodatni limit kompletnych żądań w jednej partii; niezależnie dla głównego i długiego toru |
+| `wait_ms` | brak | skończone nieujemne milisekundy stałego okna zbierania głównego toru |
+| `batch_window_ms` | brak | skończone nieujemne milisekundy okna adaptacyjnego głównego toru; `0` wyłącza adaptacyjne czekanie |
 | `schedule` | `hrrn` | kolejność przyjmowania żądań: `hrrn` (krótkie przed długimi, bez zagłodzenia) albo `fifo` |
 | `long_tokens` | 4096 | żądania powyżej tej liczby tokenów idą do toru długich żądań, który oddaje GPU krótkim partiom między warstwami; `0` wyłącza |
 | `state_cache_mb` | 0 | cache K/V stanu między żądaniami |
 
-Ustawienia są walidowane i stosowane po rozwiązaniu (i ewentualnym pobraniu)
+Jawne `--max-batch`, `--wait-ms` i `--batch-window-ms` nadpisują odpowiadające
+pola YAML we wszystkich modelach. Wartości są sprawdzane przed pobraniem modelu
+i dostępem do GPU; czasy muszą mieścić się w zegarze monotonicznym i po konwersji
+wynosić zero albo co najmniej 1 ns. Brak `max_batch` nie narzuca limitu 64.
+Wpis kolejki jest obecnie kompletnym `RequestPlan`; `max_inflight` oraz nagłówek
+`x-basal-batch-requests` nadal liczą całe żądania. Limit wpisów jest niezależny
+od tokenów trie i forwardu; pierwsze żądanie przekraczające budżet tokenów
+nadal wykonuje się samo.
+
+Bez obu pól czasu pozostaje dotychczasowe zbieranie według kwalifikowanego
+profilu modelu; sam `max_batch` ogranicza partię i kończy zbieranie po jej
+wypełnieniu. Podanie któregokolwiek pola czasu zastępuje politykę profilu;
+brakujące pole czasu oznacza wtedy `0`. Po zebraniu dostępnych żądań główny
+tor ustala jeden termin: teraz + maksimum stałego `wait_ms` i aktywnego okna
+adaptacyjnego. Adaptacja działa dopiero po partii z więcej niż jednym żądaniem
+i zbiera do rozmiaru poprzedniej partii. Dodatni `wait_ms` zbiera dalej do
+limitu lub terminu. Pierwsza partia serwera nie dostaje opóźnienia adaptacyjnego.
+Pełny limit wpisów lub tokenów kończy oczekiwanie; nowe przyjście
+nie przedłuża terminu. Jawne `batch_window_ms: 0` przy zerowym `wait_ms` zachowuje
+łączenie już oczekujących żądań bez dodatkowego czekania.
+
+Natywny tor długich żądań dostaje wspólny limit `max_batch`, bez dodatkowego
+okna zbierania; upstream ma osobne limity długiego toru. Ustawienia i ich
+pochodzenie są wypisywane przy starcie. Zmiana składu partii może zmieniać
+wyniki zależne od kształtu obliczeń, także F32; zgodność bitowa wymaga pomiaru.
+
+Ustawienia obliczeń modelu są walidowane i stosowane po rozwiązaniu (i ewentualnym pobraniu)
 plików modelu, przed wyborem tabel GEMM i ładowaniem wag na GPU, także
 w preflight oraz we wszystkich replikach i forkach. Automatyczna kalibracja
 wybiera `CALIBRATION.<layout>.json`, jeśli istnieje dla niekanonicznego layoutu,

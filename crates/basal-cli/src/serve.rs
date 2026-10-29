@@ -57,6 +57,7 @@ use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot, Semaphore};
 
 pub(crate) mod batches;
+pub(crate) mod collection;
 mod decisions;
 mod http;
 mod metrics;
@@ -119,6 +120,7 @@ pub struct ServedModel<B: Backend> {
     /// At least one; several are replicas of one model on distinct GPUs, routed by load.
     pub replicas: Vec<Replica<B>>,
     pub max_batch_tokens: usize,
+    pub(crate) collection: collection::CollectionPolicy,
     pub schedule: Schedule,
     /// Requests above this many packed tokens run in a second lane that yields the GPU between layers (0 = one lane).
     pub long_tokens: usize,
@@ -389,6 +391,7 @@ struct Lane {
     metrics: Option<LaneMetrics>,
     schedule: Schedule,
     max_batch_tokens: usize,
+    max_batch: Option<usize>,
     rate: f64,
     waiting: Vec<Waiting>,
 }
@@ -401,6 +404,7 @@ impl Lane {
             metrics,
             schedule,
             max_batch_tokens,
+            max_batch: None,
             rate: 3000.0,
             waiting: Vec::new(),
         }
@@ -428,7 +432,9 @@ impl Lane {
         let mut rest = Vec::with_capacity(self.waiting.len());
         for mut w in self.waiting.drain(..) {
             let prompts = plan_prompts(&w.plan);
-            if batch.is_empty() || size.tokens + size.growth(&prompts) <= self.max_batch_tokens {
+            if self.max_batch.is_none_or(|cap| batch.len() < cap)
+                && (batch.is_empty() || size.tokens + size.growth(&prompts) <= self.max_batch_tokens)
+            {
                 size.insert(&prompts);
                 // Both lanes leave queued only on admission, after planning and any long-lane handoff.
                 drop(w.job.queued.take());
@@ -538,50 +544,64 @@ fn scheduler<B: Backend>(
                 }
             }
         }
-        for mut job in arrived {
-            if job.reply.is_closed() {
-                continue;
-            }
-            let phase_start = basal_gpu::DiagnosticOverrides::process().phase_timing().then(Instant::now);
-            // Dispatch has already resolved the deployment name and hashed the ORIGINAL request. Translate only
-            // an explicit TypeSafe alias for the core's source-name check; missing/non-string fields still fail
-            // their schema validation. Upstream planning ignores `model`, so its body needs no translation.
-            if job.dialect == Dialect::TypeSafe
-                && lane.name != engine.manifest.name
-                && job.body.get("model").and_then(Value::as_str) == Some(lane.name.as_str())
-            {
-                job.body["model"] = engine.manifest.name.clone().into();
-            }
-            let planned = engine.plan_request_as(&job.body, job.dialect);
-            if let Some(start) = phase_start {
-                eprintln!(
-                    "{}",
-                    json!({"cpu_planning":true,"elapsed_ms":start.elapsed().as_secs_f64()*1000.0,
-                    "ok":planned.is_ok()})
-                );
-            }
-            match planned {
-                Ok(plan) => {
-                    let mut size = TrieSize::default();
-                    size.insert(&plan_prompts(&plan));
-                    let w = Waiting { job, plan, tokens: size.tokens.max(1) };
-                    match &long {
-                        Some((tx, limit)) if w.tokens > *limit => {
-                            if let Err(e) = tx.send(w) {
-                                lane.waiting.push(e.0); // the long lane stopped: run it here
-                            }
-                        }
-                        _ => lane.waiting.push(w),
-                    }
-                }
-                Err(e) => job.answer((Err(e), None)),
-            }
+        for job in arrived {
+            plan_job(&engine, job, &mut lane, &long);
         }
         let start = Instant::now();
         let (batch, tokens) = lane.admit(start);
         last_batch = batch.len().max(1);
         if !batch.is_empty() {
             lane.run(&mut engine, batch, tokens, start);
+        }
+    }
+}
+
+/// Plan and route one job. False ends opt-in collection after a validation failure or cancelled job, so a timing
+/// window cannot keep refilling with invalid work. Ownership and reply/permit release stay with the original job.
+fn plan_job<B: Backend>(
+    engine: &Engine<B>,
+    mut job: Job,
+    lane: &mut Lane,
+    long: &Option<(std::sync::mpsc::Sender<Waiting>, usize)>,
+) -> bool {
+    if job.reply.is_closed() {
+        return false;
+    }
+    let phase_start = basal_gpu::DiagnosticOverrides::process().phase_timing().then(Instant::now);
+    // Dispatch hashed the ORIGINAL request. Translate only the explicit TypeSafe deployment alias for the core's
+    // source-name check; missing/non-string fields still fail validation. Upstream ignores its `model` field.
+    if job.dialect == Dialect::TypeSafe
+        && lane.name != engine.manifest.name
+        && job.body.get("model").and_then(Value::as_str) == Some(lane.name.as_str())
+    {
+        job.body["model"] = engine.manifest.name.clone().into();
+    }
+    let planned = engine.plan_request_as(&job.body, job.dialect);
+    if let Some(start) = phase_start {
+        eprintln!(
+            "{}",
+            json!({"cpu_planning":true,"elapsed_ms":start.elapsed().as_secs_f64()*1000.0,
+            "ok":planned.is_ok()})
+        );
+    }
+    match planned {
+        Ok(plan) => {
+            let mut size = TrieSize::default();
+            size.insert(&plan_prompts(&plan));
+            let w = Waiting { job, plan, tokens: size.tokens.max(1) };
+            match long {
+                Some((tx, limit)) if w.tokens > *limit => {
+                    if let Err(e) = tx.send(w) {
+                        lane.waiting.push(e.0); // the long lane stopped: run it here
+                    }
+                }
+                _ => lane.waiting.push(w),
+            }
+            true
+        }
+        Err(e) => {
+            job.answer((Err(e), None));
+            false
         }
     }
 }
@@ -1312,6 +1332,7 @@ fn serve_inner<B: Backend + Send + 'static>(
         }
     }
     let mut threads = Vec::new();
+    let collection_stopping = Arc::new(AtomicBool::new(false));
     let batches_enabled = opts.batches.is_some();
     let (device_budget, online_reserves) = background_limits(&models, batches_enabled)?;
     // Synchronous startup, before any readiness message or HTTP runtime. Every subsequent exit joins it below.
@@ -1325,6 +1346,7 @@ fn serve_inner<B: Backend + Send + 'static>(
                 name,
                 replicas,
                 max_batch_tokens,
+                collection,
                 schedule,
                 long_tokens,
                 batch_profile,
@@ -1346,7 +1368,14 @@ fn serve_inner<B: Backend + Send + 'static>(
                 let mut health: Vec<DeviceHealth> = engine.work_health();
                 let (tx, rx) = mpsc::unbounded_channel();
                 let lane = |kind| {
-                    Lane::new(&name, schedule, max_batch_tokens, metrics.as_ref().map(|m| m.lane(&name, kind, index)))
+                    let mut lane = Lane::new(
+                        &name,
+                        schedule,
+                        max_batch_tokens,
+                        metrics.as_ref().map(|m| m.lane(&name, kind, index)),
+                    );
+                    lane.max_batch = collection.max_batch();
+                    lane
                 };
                 if batches_enabled {
                     if let batches::config::BackgroundQualification::Qualified { composition, max_requests, .. } =
@@ -1405,10 +1434,31 @@ fn serve_inner<B: Backend + Send + 'static>(
                 }
                 let mut main_lane = lane("main");
                 main_lane.usage_lane = long.as_ref().map(|_| "main");
+                crate::note!(
+                    "{label}: effective collection {collection:?}; profile {scheduling:?}; long lane: entry cap only"
+                );
+                let collection_runtime = collection::CollectionRuntime {
+                    max_inflight: opts.max_inflight,
+                    stopping: Arc::clone(&collection_stopping),
+                };
                 threads.push(
                     std::thread::Builder::new()
                         .name(label)
-                        .spawn(move || scheduler(engine, rx, main_lane, long, scheduling))
+                        .spawn(move || {
+                            if collection == collection::CollectionPolicy::default() {
+                                scheduler(engine, rx, main_lane, long, scheduling);
+                            } else {
+                                collection::scheduler(
+                                    engine,
+                                    rx,
+                                    main_lane,
+                                    long,
+                                    scheduling,
+                                    collection,
+                                    collection_runtime,
+                                );
+                            }
+                        })
                         .context("starting a GPU thread")?,
                 );
                 let on = match devices.as_slice() {
@@ -1481,6 +1531,8 @@ fn serve_inner<B: Backend + Send + 'static>(
         };
         let router = router.route("/v1/models", get(models_list)).route("/health", get(health)).with_state(app.clone());
         let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+        let collection_shutdown = Arc::clone(&collection_stopping);
+        let collection_http_exit = Arc::clone(&collection_stopping);
         rt.block_on(async move {
             let (listener, stop) = match owned {
                 Some((listener, stop)) => (tokio::net::TcpListener::from_std(listener)?, Some(stop)),
@@ -1553,6 +1605,7 @@ fn serve_inner<B: Backend + Send + 'static>(
                     }
                     None => shutdown_signal().await,
                 }
+                collection_shutdown.store(true, Ordering::Relaxed);
                 if let Some(stopping) = stop_batches {
                     stopping.cancel();
                 }
@@ -1565,6 +1618,8 @@ fn serve_inner<B: Backend + Send + 'static>(
                 None => axum::serve(listener, router).with_graceful_shutdown(shutdown).await,
             }
             .context("HTTP server");
+            // HTTP errors must also end collection waits before background shutdown or worker joins.
+            collection_http_exit.store(true, Ordering::Relaxed);
             let execution_result = match executor {
                 Some(executor) => executor.shutdown().await,
                 None => Ok(()),
@@ -1583,6 +1638,7 @@ fn serve_inner<B: Backend + Send + 'static>(
         drop(rt);
         Ok(())
     })();
+    collection_stopping.store(true, Ordering::Relaxed);
     // On setup / HTTP errors the closure also drops all queue senders before any worker is joined.
     let mut panicked = false;
     for thread in threads {

@@ -153,6 +153,14 @@ pub struct ModelConfig {
     /// Packed tokens of one batch (a larger request runs alone).
     #[serde(default = "default_max_batch_tokens")]
     pub max_batch_tokens: usize,
+    /// Optional whole-request ceiling per online batch, shared by main and long lanes.
+    #[serde(default)]
+    pub max_batch: Option<usize>,
+    /// Explicit main-lane collection times in milliseconds; absent together preserves profile timing.
+    #[serde(default)]
+    pub wait_ms: Option<f64>,
+    #[serde(default)]
+    pub batch_window_ms: Option<f64>,
     #[serde(default = "default_schedule")]
     pub schedule: Schedule,
     /// Requests above this many packed tokens run in this model's long lane (0 = none).
@@ -220,6 +228,11 @@ fn default_tree_max_tokens() -> usize {
 }
 
 impl ModelConfig {
+    pub(crate) fn collection_policy(&self) -> Result<crate::serve::collection::CollectionPolicy> {
+        crate::serve::collection::CollectionPolicy::new(self.max_batch, self.wait_ms, self.batch_window_ms)
+            .with_context(|| format!("model {}: collection settings", describe(self)))
+    }
+
     pub(crate) fn validate_name(&self) -> Result<()> {
         if let Some(name) = &self.name {
             ensure!(

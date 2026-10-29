@@ -510,7 +510,8 @@ enum Cmd {
         #[arg(long, value_enum)]
         mcp: Option<mcp::Switch>,
         /// YAML file with the served models and their options (serve.example.yml); replaces the model, GPU and
-        /// admission options below. Default: BASAL_CONFIG, else basal-serve.yml in the working directory
+        /// legacy admission options below. Explicit --max-batch/--wait-ms/--batch-window-ms override its per-model
+        /// collection settings. Default: BASAL_CONFIG, else basal-serve.yml in the working directory
         #[arg(long, conflicts_with_all = ["models", "name", "gemm_table", "device", "replica_devices", "layer_split"])]
         config: Option<PathBuf>,
         /// Model to serve: pico, 2.0-mini/2.0-4.5B/2.0-max, omni-mini/omni-max, name (owner Remek), owner/name,
@@ -533,6 +534,15 @@ enum Cmd {
         /// Packed tokens of the requests admitted into one batch (a larger request runs alone)
         #[arg(long, default_value_t = 8192)]
         max_batch_tokens: usize,
+        /// Maximum whole requests per online batch in both lanes; absent: no additional entry ceiling
+        #[arg(long)]
+        max_batch: Option<usize>,
+        /// Fixed main-lane collection wait in finite nonnegative milliseconds (overrides YAML)
+        #[arg(long)]
+        wait_ms: Option<f64>,
+        /// Adaptive main-lane collection window in milliseconds; explicit 0 disables it (overrides YAML)
+        #[arg(long)]
+        batch_window_ms: Option<f64>,
         /// Waiting + running requests; more are refused with 529 (Retry-After: 1)
         #[arg(long, default_value_t = 1024)]
         max_inflight: usize,
@@ -1211,6 +1221,9 @@ fn run() -> Result<()> {
             replica_devices,
             addr,
             max_batch_tokens,
+            max_batch,
+            wait_ms,
+            batch_window_ms,
             max_inflight,
             max_large_inflight,
             schedule,
@@ -1251,6 +1264,29 @@ fn run() -> Result<()> {
                 model.model_options.apply_cli(&g.model_options);
                 model.model_options.validate()?;
                 model.orders = model.orders.clone().or_else(|| g.orders.clone());
+                model.max_batch = max_batch.or(model.max_batch);
+                model.wait_ms = wait_ms.or(model.wait_ms);
+                model.batch_window_ms = batch_window_ms.or(model.batch_window_ms);
+                model.collection_policy()?;
+                let origin = |cli: bool, supplied: bool| {
+                    if cli {
+                        "CLI"
+                    } else if supplied {
+                        "YAML"
+                    } else {
+                        "absent"
+                    }
+                };
+                crate::note!(
+                    "collection {}: max_batch={:?} ({}), wait_ms={:?} ({}), batch_window_ms={:?} ({})",
+                    config::describe(model),
+                    model.max_batch,
+                    origin(max_batch.is_some(), model.max_batch.is_some()),
+                    model.wait_ms,
+                    origin(wait_ms.is_some(), model.wait_ms.is_some()),
+                    model.batch_window_ms,
+                    origin(batch_window_ms.is_some(), model.batch_window_ms.is_some())
+                );
             }
             match &source {
                 config::Source::File(p) => crate::note!("configuration {}", crate::term::P(p)),
@@ -1480,6 +1516,7 @@ fn run() -> Result<()> {
                     name,
                     replicas,
                     max_batch_tokens: mc.max_batch_tokens,
+                    collection: mc.collection_policy()?,
                     schedule: mc.schedule,
                     long_tokens: mc.long_tokens,
                     batch_profile,

@@ -615,6 +615,40 @@ Domyślna wartość obu budżetów wynosi 8192. Większe wartości zmieniają je
 użycie pamięci i czas zajęcia GPU; ich ocenę wykonujemy razem z opóźnieniami
 krótkich żądań w ruchu mieszanym.
 
+Opcjonalny `max_batch` / `--max-batch` ogranicza liczbę kompletnych
+`RequestPlan` wybranych przez admission, niezależnie od tokenów. Dotyczy obu
+torów i każdej repliki osobno; brak opcji zachowuje brak dodatkowego limitu.
+Pierwsze żądanie ponad budżetem tokenów nadal wchodzi samo. Odrzucone przez
+budżet lub limit wpisów pozostają w kolejce. `max_inflight`, rezerwacje,
+liczniki `/health` i `x-basal-batch-requests` nadal dotyczą całych żądań.
+
+Bez `wait_ms` i `batch_window_ms` pozostaje ścieżka dotychczasowego scheduler'a:
+natychmiastowy start albo kwalifikowane przez plan okno profilu. Sam limit
+wpisów zachowuje tę politykę czasu, ale pełna partia nie czeka. Jawne dowolne
+pole czasu wybiera politykę użytkownika zamiast profilu; brak drugiego pola
+oznacza zero. Po zaplanowaniu dostępnego wycinka kolejki ustalany jest jeden
+termin `now + max(wait, adaptive_window)`. Okno adaptacyjne działa tylko po
+poprzedniej przyjętej partii większej niż jeden i kończy się po zebraniu jej
+rozmiaru. Dodatni stały wait zbiera do limitu lub terminu. Pełny limit wpisów,
+tokenów, błąd planowania, anulowanie wszystkich oczekujących albo rozłączenie
+kanału kończą czekanie; termin nie przesuwa się po kolejnych przyjściach.
+Sygnał shutdown również wyłącza czekanie, zanim HTTP zacznie czekać na
+zakończenie aktywnych odpowiedzi; przyjęte żądania kończą się dotychczasową ścieżką.
+
+Kolekcja działa wyłącznie na dedykowanym wątku silnika. Nie tworzy osobnej
+kolejki surowych jobów; planuje najwyżej `max_inflight` nowych jobów w cyklu,
+a istniejące rezerwacje ograniczają sumę kanałów i planowanych żądań.
+FIFO/HRRN wybiera z zaplanowanego backlogu, również przy `max_batch: 1`.
+Błąd walidacji dostaje odpowiedź od razu i kończy bieżącą kolekcję, bez
+uzupełniania okna kolejnymi błędnymi wejściami. Podgląd pojemności nie zdejmuje
+znacznika queued; robi to dopiero faktyczne admission. Czas nie jest twardym
+limitem CPU planowania pojedynczego żądania.
+
+Natywny długi tor dzieli tylko `max_batch`; nie dostaje nowego opóźnienia
+kolekcji. Upstream konfiguruje długi tor osobno, więc te opcje nie oznaczają
+pełnej zgodności harmonogramów. Kontrole kolekcji nie zmieniają planu
+numerycznego ani odcisku trwałych batchy. Zmieniony skład partii wymaga jednak
+osobnego replayu zgodności, również dla F32 zależnego od kształtu obliczeń.
 
 Żądania powyżej `--long-tokens` liczy drugi tor: drugi silnik na tym samym
 GPU, ze wspólnymi wagami, tabelą GEMM i prefiksami szablonu. Oba tory
