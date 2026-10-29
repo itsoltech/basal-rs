@@ -1003,7 +1003,8 @@ impl GgufCompanionSemantics {
 }
 
 /// The entire Value/audit/normalization/provider/cache frontier is unadmitted.
-/// Both captured owners call this in the original construction position.
+/// Both captured owners call this in the original construction position; the
+/// opt-in merge-scratch read uses `build_captured_tokenizer_with` there instead.
 pub(super) fn build_captured_tokenizer(
     snapshot: &GgufCompanionSnapshot,
     directory: &Path,
@@ -1011,19 +1012,36 @@ pub(super) fn build_captured_tokenizer(
     style: ChatStyle,
     bos_token: &str,
 ) -> Result<(BasalTokenizer, u32), GgufSemanticError> {
+    build_captured_tokenizer_with(snapshot, directory, vocab, style, bos_token, |original, path, style| {
+        BasalTokenizer::from_json_value(original, path, style).map_err(tokenizer_input_error)
+    })
+}
+
+/// The captured route with the tokenizer constructed by `construct`, between
+/// the raw ID/BPE merge audits and the effective ID/BOS audit.
+pub(super) fn build_captured_tokenizer_with<E: From<GgufSemanticError>>(
+    snapshot: &GgufCompanionSnapshot,
+    directory: &Path,
+    vocab: usize,
+    style: ChatStyle,
+    bos_token: &str,
+    construct: impl FnOnce(Value, &Path, ChatStyle) -> Result<BasalTokenizer, E>,
+) -> Result<(BasalTokenizer, u32), E> {
     let original = json(snapshot, CompanionRole::Tokenizer, SemanticStage::Tokenizer)?;
     let added = BasalTokenizer::audit_raw_ids(&original, vocab)?;
     audit_bpe_merges(&original).map_err(|e| GgufSemanticError::semantic(SemanticStage::Tokenizer, e))?;
-    let tokenizer = BasalTokenizer::from_json_value(original, &directory.join("tokenizer.json"), style).map_err(
-        |error| match error {
-            TokenizerInputError::Semantic(source) => GgufSemanticError::semantic(SemanticStage::Tokenizer, source),
-            TokenizerInputError::Backend { source, .. } => {
-                GgufSemanticError::TokenizerBackend { stage: SemanticStage::Tokenizer, source }
-            }
-        },
-    )?;
+    let tokenizer = construct(original, &directory.join("tokenizer.json"), style)?;
     let bos = tokenizer.audit_effective_ids(&added, vocab, bos_token)?;
     Ok((tokenizer, bos))
+}
+
+pub(super) fn tokenizer_input_error(error: TokenizerInputError) -> GgufSemanticError {
+    match error {
+        TokenizerInputError::Semantic(source) => GgufSemanticError::semantic(SemanticStage::Tokenizer, source),
+        TokenizerInputError::Backend { source, .. } => {
+            GgufSemanticError::TokenizerBackend { stage: SemanticStage::Tokenizer, source }
+        }
+    }
 }
 
 /// Guard the pinned tokenizers 0.23.2 BPE builder's unchecked scratch writes and UTF-8 suffix.

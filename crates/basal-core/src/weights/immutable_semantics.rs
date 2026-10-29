@@ -1,4 +1,5 @@
-//! Direct immutable companion/calibration consumers. Tokenizer storage is excluded.
+//! Direct immutable companion/calibration consumers. Tokenizer storage is excluded,
+//! except the BPE merge scratch buffer on `read_with_bpe_merge_scratch_budget`.
 
 use std::alloc::{alloc, Layout};
 use std::fmt;
@@ -7,6 +8,7 @@ use std::path::{Path, PathBuf};
 use super::calibration_inventory::{
     CallerCalibrationDirectoryLease, GgufCalibrationInventory, GgufCalibrationInventoryError, InventoryPhase,
 };
+use super::provider_construction::{build_captured_tokenizer_with_merge_scratch, GgufMergeScratchReadError};
 use super::raw_source::RawCharge;
 use super::semantic_json::{
     GgufSemanticMembers, GgufSemanticObject, NodeId, SemanticConstructionError, SemanticDocument, SemanticPlan,
@@ -195,7 +197,8 @@ struct AdmittedIdentity {
 /// Actual immutable owner of directly consumed companion and calibration arenas.
 ///
 /// Only named requested layouts share the declaration budget's existing ledger.
-/// Tokenizer Value/provider/native/cache, diagnostics, paths/control/inventory
+/// Tokenizer Value/provider/native/cache (except opt-in BPE merge scratch, held
+/// only during the BPE build), diagnostics, paths/control/inventory
 /// records, GGUF parsing, staging/device and allocator overhead remain unadmitted.
 /// No Clone, mutable manifest or owned subtree conversion is provided.
 pub struct GgufImmutableCompanionSemantics {
@@ -223,6 +226,40 @@ impl GgufImmutableCompanionSemantics {
         lease: CallerCalibrationDirectoryLease,
         budget: &GgufDeclarationSourceBudget,
     ) -> Result<Self, Error> {
+        Self::read_with(directory, options, lease, budget, |snapshot, directory, vocab, style, bos| {
+            build_captured_tokenizer(snapshot, directory, vocab, style, bos)
+                .map_err(|source| Error::Tokenizer { source })
+        })
+    }
+
+    /// [`read`](Self::read), but the tokenizer's BPE merge scratch buffer is
+    /// admitted on the same ledger before allocation and released when the
+    /// BPE build returns. Every other tokenizer heap remains unadmitted.
+    pub fn read_with_bpe_merge_scratch_budget(
+        directory: &Path,
+        options: ModelLoadOptions<'_>,
+        lease: CallerCalibrationDirectoryLease,
+        budget: &GgufDeclarationSourceBudget,
+    ) -> Result<Self, GgufMergeScratchReadError> {
+        Self::read_with(directory, options, lease, budget, |snapshot, directory, vocab, style, bos| {
+            build_captured_tokenizer_with_merge_scratch(snapshot, directory, vocab, style, bos, budget.raw())
+        })
+    }
+
+    /// The single read chronology; `construct_tokenizer` runs at the original tokenizer position.
+    fn read_with<E: From<Error>>(
+        directory: &Path,
+        options: ModelLoadOptions<'_>,
+        lease: CallerCalibrationDirectoryLease,
+        budget: &GgufDeclarationSourceBudget,
+        construct_tokenizer: impl FnOnce(
+            &GgufCompanionSnapshot,
+            &Path,
+            usize,
+            ChatStyle,
+            &str,
+        ) -> Result<(BasalTokenizer, u32), E>,
+    ) -> Result<Self, E> {
         let (mut inventory, handle) = GgufCalibrationInventory::capture(directory, lease, Some(budget.raw()))
             .map_err(|source| Error::Inventory { source })?;
         let snapshot =
@@ -254,8 +291,7 @@ impl GgufImmutableCompanionSemantics {
         let loaded = load_immutable_calibration(directory, options, &protocol, &mut calibration, budget)?;
         let manifest = finish_manifest_ref(protocol, basal_doc.root(), bos, &loaded)?;
         let (tokenizer, effective_bos) =
-            build_captured_tokenizer(&snapshot, directory, vocab, manifest.chat_style, tcfg_doc.text(bos.span))
-                .map_err(|source| Error::Tokenizer { source })?;
+            construct_tokenizer(&snapshot, directory, vocab, manifest.chat_style, tcfg_doc.text(bos.span))?;
         audit_specials_ref(config_doc.root(), vocab, effective_bos, "config special ID")?;
         audit_specials_ref(tcfg_doc.root(), vocab, effective_bos, "tokenizer_config special ID")?;
         let identity_state = match options.calibration {

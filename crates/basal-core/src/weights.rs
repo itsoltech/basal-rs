@@ -19,6 +19,7 @@ mod calibration_inventory;
 mod declaration_construction;
 mod immutable_semantics;
 mod json_envelope;
+mod provider_construction;
 mod raw_source;
 mod semantic_json;
 mod semantics;
@@ -35,6 +36,7 @@ pub use immutable_semantics::{
 };
 use json_envelope::JsonReadMode;
 pub use json_envelope::{JsonEnvelopeError, JsonEnvelopeResource};
+pub use provider_construction::{GgufMergeScratchError, GgufMergeScratchReadError};
 use raw_source::RawCharge;
 pub use raw_source::{GgufRawSourceBudget, GgufRawSourceError};
 pub use semantic_json::{

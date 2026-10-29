@@ -16,7 +16,8 @@ use super::{
 /// Create one before loads and share it (or its clones) across concurrent loads
 /// and reloads. Other semantic/native/tokenizer/cache heaps, containing objects,
 /// inventory names/records, paths/errors, GGUF scratch and device memory remain
-/// unadmitted. This is not a bound on allocator internals, RSS or physical OOM.
+/// unadmitted; the opt-in immutable read can also admit the transient BPE merge
+/// scratch. This is not a bound on allocator internals, RSS or physical OOM.
 #[derive(Clone)]
 pub struct GgufDeclarationSourceBudget {
     raw: GgufRawSourceBudget,

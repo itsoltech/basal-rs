@@ -324,6 +324,53 @@ wykluczenia writerów. Nie ma dowodu runtime, bitwise/FP32, jakości, pomiaru
 pamięci, wydajności ani pokrycia pakietów. Legacy/defaults/numerics,
 accepted thinking FAIL i brak vLLM pozostają bez zmian.
 
+### Opcjonalne admission scratch scalania BPE
+
+`GgufImmutableCompanionSemantics::read_with_bpe_merge_scratch_budget(directory,
+options, lease, &budget)` przyjmuje te same wejścia co `read` i zwraca tego
+samego właściciela albo `GgufMergeScratchReadError`. Wariant
+`Existing { source: GgufImmutableSemanticError }` przenosi bez zmian każdy błąd
+dotychczasowej ścieżki. `Scratch { source: GgufMergeScratchError }` oznacza
+odmowę bufora: `Admission { source: GgufRawSourceError }` albo
+`ProviderLength { requested, actual }`. `read`, istniejące typy błędów
+i wcześniejsze konstruktory nie zmieniają się.
+
+Obie metody wykonują jedną prywatną implementację odczytu w tej samej kolejności:
+inventory, capture, dokumenty, protokół, kalibracja i manifest, raw-ID audit,
+BPE merge guard, normalizacja i konstrukcja tokenizera, effective-ID/BOS
+i special-ID audits, binding inventory oraz stamp. Różni się wyłącznie budowa
+backendu. Raw-ID audit wymaga pola `type` modelu, więc ta ścieżka deserializuje
+model w wariancie z tagiem.
+
+Backend pochodzi z lokalnie łatanego tokenizers 0.23.2 (zob.
+[vendor/README.md](../vendor/README.md)). `Tokenizer::from_str_with_merge_storage`
+przekazuje jawny magazyn przez seedy deserializacji tokenizera, modelu i BPE.
+Model BPE powstaje tą samą funkcją budowy co `BpeBuilder::build`; tylko bufor
+scratch o długości najdłuższego tokenu słownika pochodzi z magazynu. Rdzeń
+sprawdza `Layout::array::<u8>(n)`, pobiera opłatę na tym samym ledgerze przed
+alokacją, alokuje dokładnie `n` bajtów i zeruje je bez realokacji. Budowa bierze
+z bufora jeden mutowalny slice, wymaga długości `n` i używa go do wszystkich
+zapisów oraz odczytu nowego tokenu, także przy niesprawdzanej konwersji UTF-8.
+Pusty słownik nie alokuje ani nie opłaca bufora. Bufor zwalnia pamięć przed
+zwrotem opłaty, gdy budowa BPE kończy się sukcesem, błędem albo unwind.
+Zwrócony tokenizer nie przechowuje ani bufora, ani opłaty.
+
+Odmowa (busy, poisoned, overflow, limit, layout, brak pamięci) jest stałym
+wariantem, bez formatowania, `Box` ani nowej diagnostyki. Konstrukcja kończy się
+po niej bez budowy kolejnych składników. serde_json wymaga jednak domknięcia
+obiektu tokenizera, więc pozostałe wpisy są pomijane leksykalnie; błąd składni
+w tych bajtach jest wtedy zgłaszany jako dotychczasowy błąd backendu. Próba
+modelu bez pola `type` nie traktuje odmowy jako niedopasowania wariantu.
+Błędy parsowania i budowy, np. merge spoza słownika, pozostają w kanale
+`Existing` jako błąd `Tokenizer`.
+
+Admitowany jest tylko ten tymczasowy bufor. Value i znormalizowany tekst JSON,
+pomocnicze bufory serde, mapy i odwrotne kopie tekstów modelu, merges, added
+vocabulary, dekodery, native Oniguruma i cache TLS pozostają nieadmitowane,
+podobnie jak kopia Value modelu na ścieżce bez `type`. Nie ma dowodu runtime,
+pomiaru pamięci, ochrony OOM, wydajności, bitwise ani pokrycia pakietów.
+REQ009 pozostaje częściowe.
+
 ## Zamknięty zakres semantyki G1
 
 Nowe API wymaga zwykłej architektury Llama: `LlamaForCausalLM`, `silu`, osobnej

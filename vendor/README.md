@@ -1,4 +1,4 @@
-# Candle archive dependency and GGUF/GGML reader patches
+# Vendored Candle and tokenizers patches
 
 `candle-core/` is the library from the official crates.io `candle-core 0.11.0`
 release. The workspace patches that package locally because both the published
@@ -220,3 +220,70 @@ initial child CUDA attempt lacked `nvcc` in its command environment. Metal
 compilation is not available on this Linux host. Neither GPU runtime behavior nor model bitwise
 equivalence, performance or general OOM safety was measured. REQ-009 remains
 partial; model mapping and resource policy remain open.
+
+## tokenizers 0.23.2: explicit BPE merge scratch
+
+`tokenizers/` is the library from the official crates.io `tokenizers 0.23.2`
+release. It is patched locally so that one opt-in core route can admit the BPE
+builder's temporary merge scratch buffer on the existing GGUF source ledger;
+see `read_with_bpe_merge_scratch_budget` in [GGUF.md](../docs/GGUF.md). No
+advisory motivates this patch. The `[patch.crates-io]` entry matches only
+`0.23.2`; `tokenizers 0.22.2`, required by another dependency, stays on
+crates.io.
+
+- Source, archive SHA-256, upstream commit and the exact omissions are in
+  `tokenizers/PROVENANCE.md`. `tokenizers/UPSTREAM-SHA256SUMS` lists the 77
+  copied release files before the change. Of the 73 copied source files, 67
+  remain byte for byte identical; `LICENSE`, `README.md` and `Cargo.toml.orig`
+  are unchanged.
+- The normalized release manifest omits only the upstream test and benchmark
+  targets, their dev dependencies and the profiles that Cargo ignores outside
+  the workspace root. Runtime dependencies, features and edition are unchanged.
+  `Cargo.lock` changes only the `tokenizers 0.23.2` entry, which loses its
+  registry source and checksum. No dependency version changes.
+- `BpeBuilder::build` and the new `build_with_merge_storage` share one build
+  body. The legacy build still allocates `vec![0; max_len]` at the same point;
+  the new one takes the buffer from a caller's `MergeStorage`, requires the
+  slice to have the requested length and uses that one slice for all merge
+  writes and reads. Maximum length, maps, merge order, ranks and the returned
+  model are computed by the same code. `Tokenizer::from_str_with_merge_storage`
+  passes the storage through explicit deserialization seeds for the tokenizer,
+  model and BPE; they reuse the existing visitors and tagged/legacy helpers.
+  Existing `Deserialize`, `FromStr`, file and builder routes keep their code
+  paths and allocations.
+- Storage refusal is returned unchanged as `MergeBuildError::Storage`, never
+  boxed or formatted; a legacy untagged model trial does not treat it as a
+  mismatch. Parsing and model errors keep the existing boxed backend channel.
+  After a refusal the remaining tokenizer JSON entries are only skipped, not
+  constructed, because serde_json requires the closing brace.
+
+Verify the copied files with:
+
+```sh
+cd vendor/tokenizers
+sha256sum --check SHA256SUMS
+```
+
+`merge-scratch.patch` applies with `patch -p1` to the seven preimages listed in
+`UPSTREAM-SHA256SUMS` and creates `src/utils/merge_storage.rs`; the result is
+byte for byte equal to the vendored files. Remove this directory, its workspace
+exclusion and patch entry when the admitted provider route no longer needs the
+explicit storage hook or upstream provides an equivalent. The existing Docker,
+release and sync paths copy the whole `vendor/` directory; no package build was
+run for this change.
+
+Static validation with Rust 1.95.0, offline and locked: workspace formatting,
+release Clippy and private Rustdoc with warnings denied pass for default,
+Intel and CUDA all-features builds. The changed and new tokenizers files are
+formatted with rustfmt's 100-column defaults, as upstream. Direct uncapped
+Clippy of the vendored crate reports no diagnostics. Its direct private
+Rustdoc keeps six upstream diagnostics in unchanged files (`unigram/lattice.rs`,
+`normalizers/bert.rs`, `pre_tokenizers/byte_level.rs`,
+`tokenizer/added_vocabulary.rs`); they are not suppressed. `cargo deny
+--offline` passes with the existing 22 duplicate warnings, using the cached
+advisory database only. `tools/ci/check-paste-exception.sh` fails: Cargo now
+prints `tokenizers v0.23.2` with its local path, which differs from the
+approved list. The exception's dependents and `paste` version are otherwise
+unchanged; updating the approved list requires a separate policy review. No
+test, tokenizer execution, model comparison, memory measurement or GPU check
+was performed. REQ-009 remains partial.

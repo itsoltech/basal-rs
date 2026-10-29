@@ -60,7 +60,8 @@ pub(super) struct RawCharge {
 }
 
 impl RawCharge {
-    /// Only the three private raw owners call this, after their length checks.
+    /// Only the three private raw owners and the opt-in BPE merge scratch call
+    /// this, after their length checks.
     /// The returned Vec must stay private, never grow, and die before this charge.
     pub(super) fn allocate(&mut self, bytes: usize) -> Result<Vec<u8>, GgufRawSourceError> {
         let layout = Layout::array::<u8>(bytes).map_err(|_| GgufRawSourceError::Layout { bytes })?;

@@ -61,13 +61,26 @@ impl BasalTokenizer {
     }
 
     pub(crate) fn from_json_value(
-        mut json: serde_json::Value,
+        json: serde_json::Value,
         path: &Path,
         style: ChatStyle,
     ) -> Result<Self, TokenizerInputError> {
-        Self::normalize_json(&mut json, style)?;
+        Self::from_json_value_with(json, path, style, |text| {
+            tokenizers::Tokenizer::from_str(text)
+                .map_err(|source| TokenizerInputError::Backend { path: path.to_path_buf(), source })
+        })
+    }
+
+    /// The `from_json_value` steps, with the backend built from normalized JSON text by `build`.
+    pub(crate) fn from_json_value_with<E: From<TokenizerInputError>>(
+        mut json: serde_json::Value,
+        path: &Path,
+        style: ChatStyle,
+        build: impl FnOnce(&str) -> Result<tokenizers::Tokenizer, E>,
+    ) -> Result<Self, E> {
+        Self::normalize_json(&mut json, style).map_err(TokenizerInputError::Semantic)?;
         let backend = |source| TokenizerInputError::Backend { path: path.to_path_buf(), source };
-        let mut inner = tokenizers::Tokenizer::from_str(&json.to_string()).map_err(backend)?;
+        let mut inner = build(&json.to_string())?;
         // Upstream encodes without truncation, including when the serialized file enables it.
         inner.with_truncation(None).map_err(backend)?;
         inner.with_padding(None);
