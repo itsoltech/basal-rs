@@ -3,10 +3,9 @@
 use anyhow::{ensure, Result};
 use basal_core::{engine::RequestPlan, Backend, Engine};
 
-#[derive(Clone, Copy, Debug, Default, clap::ValueEnum, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Copy, Debug, clap::ValueEnum, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum LongLane {
-    #[default]
     Legacy,
     On,
     Off,

@@ -544,7 +544,7 @@ fn models(r: &mut Report, c: &ServeConfig, gpus: Option<&[Gpu]>) {
             Err(e) => {
                 r.fail(
                     "models",
-                    format!("{}: {e:#}", config::describe(m)),
+                    format!("{e:#}"),
                     "set positive `long_tokens` for `long_lane: on`, or use `long_lane: off`",
                 );
                 continue;

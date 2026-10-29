@@ -11,11 +11,11 @@
 //! whose client disconnected while waiting are dropped. More than `max_inflight` waiting or running requests are
 //! refused with 529 and `Retry-After: 1` (the TypeSafe API's status when it is overloaded).
 //!
-//! Long requests (`--long-tokens`, default 4096 packed tokens; optional lane/basis controls) go to a second lane:
-//! a second engine on the same GPU
+//! Long requests (`--long-tokens`, default 4096 packed tokens) go to a second lane: a second engine on the same GPU
 //! sharing the weights, admitted the same way. The two lanes take turns on the GPU (`basal_core::gate`): when the
 //! main lane has a batch, the long lane pauses after its current layer (once it has worked `--long-slice-ms`), the
 //! main batch runs, and the long forward continues. Results do not depend on the lane or the pauses.
+//! Optional `--long-lane` and `--long-token-basis` can disable that lane or route by a longest-prompt bound.
 //!
 //! Several models (`basal serve --config FILE`, [`crate::config`]) run in one process: each has its own engine,
 //! queue and long lane, requests go to the model named in their `model` field (/v1/basal: the default model when the
