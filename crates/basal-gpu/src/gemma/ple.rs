@@ -88,14 +88,19 @@ impl HostPle {
         Ok((per_token, per_token.checked_mul(31).context("host PLE padding coefficient overflow")?))
     }
 
+    /// Per-call ceiling `rows*(4*width+4)`: selected rows, one transfer copy and u32 PLE IDs.
+    pub fn staging_bytes(width: usize, rows: usize) -> Result<u64> {
+        let (per_token, _) = Self::staging_coefficients(width)?;
+        per_token
+            .checked_add(4)
+            .and_then(|n| n.checked_mul(rows as u64))
+            .context("host PLE staging byte count overflow")
+    }
+
     /// Check before allocating even the substituted host ID vector.
     pub fn check_staging(&self, rows: usize) -> Result<()> {
         ensure!(rows > 0 && rows <= MAX_ROWS, "host PLE step bounds");
-        let (per_token, _) = Self::staging_coefficients(self.width)?;
-        let bytes = per_token
-            .checked_add(4)
-            .and_then(|n| n.checked_mul(rows as u64))
-            .context("host PLE staging byte count overflow")?;
+        let bytes = Self::staging_bytes(self.width, rows)?;
         ensure!(
             bytes <= self.max_staging_bytes,
             "host PLE staging requires {bytes} bytes, limit {}",
@@ -121,13 +126,8 @@ impl HostPle {
         dev: &Device,
         health: &basal_core::DeviceHealth,
     ) -> Result<Tensor> {
-        let elements = ids
-            .len()
-            .checked_mul(self.width)
-            .and_then(|n| n.checked_mul(2))
-            .filter(|n| *n <= isize::MAX as usize)
-            .context("host PLE selected allocation overflow")?
-            / 2;
+        // try_reserve_exact rejects byte sizes above isize::MAX without panicking.
+        let elements = ids.len().checked_mul(self.width).context("host PLE selected allocation overflow")?;
         let mut selected = Vec::new();
         selected.try_reserve_exact(elements).context("allocating selected host PLE rows")?;
         for &id in ids {

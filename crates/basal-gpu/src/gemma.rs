@@ -180,9 +180,8 @@ impl GemmaBackend {
         ensure!(cfg!(feature = "cuda"), "basal-omni currently requires the CUDA backend");
         if let PlePlacement::Host { max_staging_bytes } = placement {
             let (width, _) = ple::dimensions(cfg)?;
-            let (per_token, _) = HostPle::staging_coefficients(width)?;
             ensure!(
-                max_staging_bytes >= per_token.checked_add(4).context("host PLE staging overflow")?,
+                max_staging_bytes >= HostPle::staging_bytes(width, 1)?,
                 "host PLE staging limit cannot hold one token"
             );
         }
