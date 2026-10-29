@@ -570,9 +570,9 @@ impl Content {
             let mut dimensions = Vec::with_capacity(n_dimensions as usize);
             for _ in 0..n_dimensions {
                 let dim = read_length(reader, &magic)?;
-                dimensions.push(usize::try_from(dim).context(format!(
-                    "gguf: tensor '{tensor_name}' dimension {dim} does not fit usize"
-                ))?);
+                dimensions.push(usize::try_from(dim).with_context(|| {
+                    format!("gguf: tensor '{tensor_name}' dimension {dim} does not fit usize")
+                })?);
             }
 
             dimensions.reverse();
@@ -607,11 +607,8 @@ impl Content {
         if alignment == 0 {
             crate::bail!("gguf: general.alignment must not be zero")
         }
-        // Add only the missing padding: position + alignment - 1 could overflow
-        // even when an already-aligned position itself is representable.
-        let padding = (alignment - position % alignment) % alignment;
         let tensor_data_offset = position
-            .checked_add(padding)
+            .checked_next_multiple_of(alignment)
             .context("gguf: aligned tensor data offset overflows u64")?;
         // No global data-offset/EOF check: an empty inventory has no spans.
         // In particular, seeking over optional final padding needs no data read.
