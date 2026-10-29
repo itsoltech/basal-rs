@@ -629,9 +629,13 @@ pole czasu wybiera politykę użytkownika zamiast profilu; brak drugiego pola
 oznacza zero. Po zaplanowaniu dostępnego wycinka kolejki ustalany jest jeden
 termin `now + max(wait, adaptive_window)`. Okno adaptacyjne działa tylko po
 poprzedniej przyjętej partii większej niż jeden i kończy się po zebraniu jej
-rozmiaru. Dodatni stały wait zbiera do limitu lub terminu. Pełny limit wpisów,
-tokenów, błąd planowania, anulowanie wszystkich oczekujących albo rozłączenie
-kanału kończą czekanie; termin nie przesuwa się po kolejnych przyjściach.
+rozmiaru. Pusta selekcja po błędzie, anulowaniu lub przekazaniu pracy do długiego
+toru nie zastępuje historii ostatniej partii głównego toru. Dodatni stały wait
+zbiera do limitu lub terminu. Pełny limit wpisów, pierwsze żądanie ponad budżetem
+tokenów lub odrzucenie kolejnego żądania przez ten budżet kończą czekanie.
+Samo osiągnięcie budżetu tokenów pozwala dołączyć prompt bez przyrostu trie.
+Błąd planowania, anulowanie wszystkich oczekujących albo rozłączenie kanału
+również kończą czekanie; termin nie przesuwa się po kolejnych przyjściach.
 Sygnał shutdown również wyłącza czekanie, zanim HTTP zacznie czekać na
 zakończenie aktywnych odpowiedzi; przyjęte żądania kończą się dotychczasową ścieżką.
 

@@ -97,7 +97,8 @@ models:
     # batch_window_ms: 3          # adaptive main-lane window, toward the previous admitted batch size (>1)
     # Either timing key replaces profile timing; its absent companion is 0. Explicit 0/0 adds no delay but still
     # batches queued requests. Without either key, legacy qualified profile coalescing remains (also with a cap).
-    # One fixed deadline uses max(wait_ms, adaptive window); full entry/token budgets stop collection early.
+    # One fixed deadline uses max(wait_ms, adaptive window); the entry cap, an oversized first request or
+    # token-budget rejection stops collection. Exact token-budget equality still permits zero-growth prompts.
     # The native long lane shares max_batch, with no added collection delay; upstream has separate long bounds.
     schedule: hrrn                 # hrrn (default) or fifo
     long_tokens: 4096              # requests above this run in the model's long lane (0: none)

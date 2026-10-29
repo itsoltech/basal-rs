@@ -825,8 +825,10 @@ tor ustala jeden termin: teraz + maksimum stałego `wait_ms` i aktywnego okna
 adaptacyjnego. Adaptacja działa dopiero po partii z więcej niż jednym żądaniem
 i zbiera do rozmiaru poprzedniej partii. Dodatni `wait_ms` zbiera dalej do
 limitu lub terminu. Pierwsza partia serwera nie dostaje opóźnienia adaptacyjnego.
-Pełny limit wpisów lub tokenów kończy oczekiwanie; nowe przyjście
-nie przedłuża terminu. Jawne `batch_window_ms: 0` przy zerowym `wait_ms` zachowuje
+Pełny limit wpisów, pierwsze żądanie ponad budżetem tokenów lub odrzucenie
+kolejnego żądania przez ten budżet kończą oczekiwanie. Samo osiągnięcie budżetu
+tokenów pozwala nadal dołączyć prompt bez przyrostu trie. Nowe przyjście nie
+przedłuża terminu. Jawne `batch_window_ms: 0` przy zerowym `wait_ms` zachowuje
 łączenie już oczekujących żądań bez dodatkowego czekania.
 
 Natywny tor długich żądań dostaje wspólny limit `max_batch`, bez dodatkowego

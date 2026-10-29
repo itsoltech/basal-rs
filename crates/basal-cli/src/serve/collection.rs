@@ -85,7 +85,8 @@ impl Lane {
                 token_full = true;
             }
         }
-        (count, token_full || size.tokens >= self.max_batch_tokens || self.max_batch.is_some_and(|cap| count >= cap))
+        // At equality, another request can still fit when its prompts add no trie tokens.
+        (count, token_full || size.tokens > self.max_batch_tokens || self.max_batch.is_some_and(|cap| count >= cap))
     }
 }
 
@@ -162,7 +163,10 @@ pub(super) fn scheduler<B: Backend>(
         }
         let start = Instant::now();
         let (batch, tokens) = lane.admit(start);
-        last_batch = batch.len().max(1);
+        // Explicit adaptive history follows engine calls, not empty invalid/cancelled/long-only cycles.
+        if !batch.is_empty() || policy.timing.is_none() {
+            last_batch = batch.len().max(1);
+        }
         if !batch.is_empty() {
             lane.run(&mut engine, batch, tokens, start);
         }
