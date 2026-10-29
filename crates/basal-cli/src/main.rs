@@ -570,6 +570,9 @@ enum Cmd {
         /// Admission order of waiting requests
         #[arg(long, value_enum, default_value_t = serve::Schedule::Hrrn)]
         schedule: serve::Schedule,
+        /// Explicit short-first backlog: auto enables only without a long lane; on requires it off (overrides YAML)
+        #[arg(long, value_enum)]
+        scheduler: Option<serve::backlog::Scheduler>,
         /// Strict long-lane token threshold in the selected basis (0 disables the legacy lane)
         #[arg(long, default_value_t = 4096)]
         long_tokens: usize,
@@ -1294,6 +1297,7 @@ fn run() -> Result<()> {
             max_inflight,
             max_large_inflight,
             schedule,
+            scheduler,
             long_tokens,
             long_lane,
             long_token_basis,
@@ -1331,6 +1335,7 @@ fn run() -> Result<()> {
                 model.batch_window_ms = batch_window_ms.or(model.batch_window_ms);
                 model.long_lane = long_lane.or(model.long_lane);
                 model.long_token_basis = long_token_basis.or(model.long_token_basis);
+                model.scheduler = scheduler.or(model.scheduler);
                 model.collection_policy()?;
                 let origin = |cli: bool, supplied: bool| {
                     if cli {
@@ -1416,6 +1421,9 @@ fn run() -> Result<()> {
             for model in &c.models {
                 let routing = model.routing_policy()?;
                 crate::note!("routing {}: {}", config::describe(model), routing.identity());
+                if let Some(identity) = model.scheduler_policy()?.identity() {
+                    crate::note!("scheduler {}: {}", config::describe(model), identity);
+                }
             }
             serve::check_admission_limits(c.max_inflight, c.max_large_inflight)?;
             // once a day: is there a newer release (BASAL_NO_UPDATE_CHECK=1 turns it off)
@@ -1633,7 +1641,7 @@ fn run() -> Result<()> {
                     replicas,
                     max_batch_tokens: mc.max_batch_tokens,
                     collection: mc.collection_policy()?,
-                    schedule: mc.schedule,
+                    scheduler: mc.scheduler_policy()?,
                     routing: mc.routing_policy()?,
                     batch_profile,
                     batch_qualification,

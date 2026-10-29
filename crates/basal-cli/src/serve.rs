@@ -16,6 +16,8 @@
 //! main lane has a batch, the long lane pauses after its current layer (once it has worked `--long-slice-ms`), the
 //! main batch runs, and the long forward continues. Results do not depend on the lane or the pauses.
 //! Optional `--long-lane` and `--long-token-basis` can disable that lane or route by a longest-prompt bound.
+//! Explicit `--scheduler on` with the long lane disabled selects a short-first/long-HRRN main backlog,
+//! conservatively charged per owner with an independent 8192-token long allowance and a first-long exception.
 //!
 //! Several models (`basal serve --config FILE`, [`crate::config`]) run in one process: each has its own engine,
 //! queue and long lane, requests go to the model named in their `model` field (/v1/basal: the default model when the
@@ -60,6 +62,7 @@ use basal_core::{Backend, DecideError, DeviceHealth, Engine};
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot, Semaphore};
 
+pub(crate) mod backlog;
 pub(crate) mod batches;
 pub(crate) mod collection;
 mod decisions;
@@ -128,7 +131,7 @@ pub struct ServedModel<B: Backend> {
     pub replicas: Vec<Replica<B>>,
     pub max_batch_tokens: usize,
     pub(crate) collection: collection::CollectionPolicy,
-    pub schedule: Schedule,
+    pub(crate) scheduler: backlog::SchedulerPolicy,
     /// Validated requested/effective lane policy, shared by routing and resource accounting.
     pub(crate) routing: routing::RoutingPolicy,
     /// Captured before moving the online engine; hashing and CPU planning are independent of GPU execution.
@@ -371,7 +374,7 @@ fn plan_prompts(p: &RequestPlan) -> Vec<&[u32]> {
     p.prepared.iter().flat_map(|q| q.prompts()).collect()
 }
 
-/// One cost rule for routing/HRRN, admission and collection preview. Tree retains legacy trie accounting;
+/// Packed cost for native routing/HRRN, admission and collection preview. Tree retains legacy trie accounting;
 /// separate rows count each Prepared's actual packing, without allocating or deduplicating its prompts.
 enum AdmissionCost {
     Tree(TrieSize),
@@ -437,6 +440,8 @@ struct Waiting {
     job: Job,
     work: WaitingWork,
     tokens: usize,
+    /// Computed only for effective backlog; None there means unproved and always oversized/long.
+    prompt_bound: Option<usize>,
     first_admitted: Option<Instant>,
     compute_ms: f64,
 }
@@ -462,6 +467,14 @@ struct Selection {
     full: bool,
 }
 
+/// Borrow-free identity/cost view into the existing owner vector, never another work queue.
+struct Candidate {
+    owner: usize,
+    branch: Option<basal_core::engine::ReadyBranch>,
+    tokens: usize,
+    prompt: Option<usize>,
+}
+
 struct LaneBatch {
     requests: Vec<Waiting>,
     branches: Vec<(usize, basal_core::engine::ReadyBranch)>,
@@ -482,7 +495,7 @@ struct Lane {
     /// Actual execution lane, reported only when this replica has an active long lane.
     usage_lane: Option<&'static str>,
     metrics: Option<LaneMetrics>,
-    schedule: Schedule,
+    scheduler: backlog::SchedulerPolicy,
     batching: basal_core::Batching,
     max_batch_tokens: usize,
     max_batch: Option<usize>,
@@ -493,7 +506,7 @@ struct Lane {
 impl Lane {
     fn new(
         name: &str,
-        schedule: Schedule,
+        scheduler: backlog::SchedulerPolicy,
         batching: basal_core::Batching,
         max_batch_tokens: usize,
         max_batch: Option<usize>,
@@ -503,7 +516,7 @@ impl Lane {
             name: name.into(),
             usage_lane: None,
             metrics,
-            schedule,
+            scheduler,
             batching,
             max_batch_tokens,
             max_batch,
@@ -516,7 +529,10 @@ impl Lane {
     /// the budget (Tree shares trie tokens; Budget counts separate packed primitive rows).
     fn admit(&mut self, start: Instant) -> LaneBatch {
         self.waiting.retain(|w| !w.job.reply.is_closed()); // clients gone (their handlers were dropped)
-        if self.schedule == Schedule::Hrrn && self.batching == basal_core::Batching::Tree {
+        if self.scheduler.threshold().is_none()
+            && self.scheduler.schedule() == Schedule::Hrrn
+            && self.batching == basal_core::Batching::Tree
+        {
             // Retain the legacy stable owner order for the default whole-plan path and its deferred backlog.
             let rate = self.rate;
             let ratio = |w: &Waiting| (start - w.job.arrived).as_secs_f64() * rate / w.tokens as f64;
@@ -562,31 +578,73 @@ impl Lane {
     /// validated plan/round's branch/option limits. A primitive contributes its complete packed row, all orders.
     fn select(&self, start: Instant) -> Selection {
         let mut candidates = Vec::new();
+        let threshold = self.scheduler.threshold();
         for (owner, waiting) in self.waiting.iter().enumerate() {
             if waiting.job.reply.is_closed() {
                 continue;
             }
+            // No prompt scan on native/default/off paths. Unknown remains unknown even with finite ready work.
+            let prompt = threshold.and_then(|_| {
+                waiting.prompt_bound.map(|bound| {
+                    let ready_max = match &waiting.work {
+                        WaitingWork::Atomic(plan) => {
+                            plan.prepared.iter().flat_map(|p| &p.orders).map(|o| o.input_ids.len()).max()
+                        }
+                        WaitingWork::Primitive(request) => {
+                            request.ready().flat_map(|(_, p)| &p.orders).map(|o| o.input_ids.len()).max()
+                        }
+                    };
+                    bound.max(ready_max.unwrap_or(0))
+                })
+            });
             match &waiting.work {
-                WaitingWork::Atomic(_) => candidates.push((owner, None, waiting.tokens)),
+                WaitingWork::Atomic(_) => {
+                    candidates.push(Candidate { owner, branch: None, tokens: waiting.tokens, prompt })
+                }
                 WaitingWork::Primitive(request) => {
-                    candidates.extend(request.ready().map(|(branch, p)| (owner, Some(branch), p.packed.ids.len())));
+                    candidates.extend(request.ready().map(|(branch, p)| Candidate {
+                        owner,
+                        branch: Some(branch),
+                        tokens: p.packed.ids.len(),
+                        // Charge the whole original owner bound to EACH primitive, including later rounds.
+                        prompt,
+                    }));
                 }
             }
         }
-        if self.schedule == Schedule::Hrrn {
+        if let Some(threshold) = threshold {
+            // Restore arrival order after partial owners rejoin the vector. Stable ties retain branch order.
+            candidates.sort_by_key(|c| self.waiting[c.owner].job.arrived);
+            let ratio = |c: &Candidate| {
+                (start - self.waiting[c.owner].job.arrived).as_secs_f64() / c.prompt.unwrap_or(usize::MAX).max(1) as f64
+            };
+            candidates.sort_by(|a, b| {
+                let long_a = a.prompt.is_none_or(|n| n > threshold);
+                let long_b = b.prompt.is_none_or(|n| n > threshold);
+                long_a.cmp(&long_b).then_with(|| {
+                    if long_a {
+                        ratio(b).total_cmp(&ratio(a))
+                    } else {
+                        std::cmp::Ordering::Equal
+                    }
+                })
+            });
+        } else if self.scheduler.schedule() == Schedule::Hrrn {
             let rate = self.rate;
-            let ratio = |&(owner, _, tokens): &(usize, Option<basal_core::engine::ReadyBranch>, usize)| {
-                (start - self.waiting[owner].job.arrived).as_secs_f64() * rate / tokens.max(1) as f64
+            let ratio = |c: &Candidate| {
+                (start - self.waiting[c.owner].job.arrived).as_secs_f64() * rate / c.tokens.max(1) as f64
             };
             candidates.sort_by(|a, b| ratio(b).total_cmp(&ratio(a)));
         } else if self.batching == basal_core::Batching::Budget {
-            candidates.sort_by_key(|&(owner, _, _)| self.waiting[owner].job.arrived);
+            candidates.sort_by_key(|c| self.waiting[c.owner].job.arrived);
         }
         let mut entries = Vec::new();
         let mut size = AdmissionCost::new(self.batching);
         let mut full = false;
-        let primitive = candidates.first().is_some_and(|(_, branch, _)| branch.is_some());
-        for (owner, branch, tokens) in candidates {
+        let primitive = candidates.first().is_some_and(|c| c.branch.is_some());
+        let mut long_admitted = false;
+        let mut long_remaining = backlog::LONG_CALL_TOKENS;
+        for Candidate { owner, branch, tokens, prompt } in candidates {
             if self.max_batch.is_some_and(|cap| entries.len() >= cap) {
                 full = true;
                 break;
@@ -597,6 +655,11 @@ impl Lane {
                 full = true;
                 continue;
             }
+            let long = threshold.is_some_and(|threshold| prompt.is_none_or(|n| n > threshold));
+            if long && long_admitted && prompt.is_none_or(|n| n > long_remaining) {
+                full = true;
+                continue;
+            }
             let fits = if branch.is_some() {
                 size.try_add_rows([tokens], entries.is_empty(), self.max_batch_tokens)
             } else {
@@ -604,6 +667,11 @@ impl Lane {
             };
             if fits {
                 entries.push((owner, branch));
+                if long {
+                    long_admitted = true;
+                    // Unknown or oversized consumes the entire allowance. Every long charge is positive.
+                    long_remaining = long_remaining.saturating_sub(prompt.unwrap_or(usize::MAX));
+                }
             } else {
                 full = true;
             }
@@ -818,6 +886,7 @@ fn plan_job<B: Backend>(
             let mut size = AdmissionCost::new(lane.batching);
             size.try_add(&plan, true, lane.max_batch_tokens);
             let tokens = size.tokens().max(1);
+            let prompt_bound = lane.scheduler.threshold().and_then(|_| plan.prompt_token_bound(&engine.shape_limits()));
             let long_route = long.as_ref().filter(|(_, policy)| policy.routes_long(engine, &plan, tokens));
             let split = long_route.is_none()
                 && lane.batching == basal_core::Batching::Budget
@@ -835,7 +904,7 @@ fn plan_job<B: Backend>(
             } else {
                 WaitingWork::Atomic(Box::new(plan))
             };
-            let w = Waiting { job, work, tokens, first_admitted: None, compute_ms: 0.0 };
+            let w = Waiting { job, work, tokens, prompt_bound, first_admitted: None, compute_ms: 0.0 };
             if let Some((tx, _)) = long_route {
                 if let Err(e) = tx.send(w) {
                     lane.waiting.push(e.0); // the long lane stopped: retain its atomic entry here
@@ -1531,6 +1600,9 @@ fn serve_inner<B: Backend + Send + 'static>(
     let mut layout: Vec<(String, Vec<Vec<usize>>)> = Vec::with_capacity(models.len());
     for m in &models {
         crate::note!("routing {}: {}", m.name, m.routing.identity());
+        if let Some(identity) = m.scheduler.identity() {
+            crate::note!("scheduler {}: {}", m.name, identity);
+        }
         let first = m.replicas.first().context("a served model needs at least one engine")?;
         let name = &m.name;
         let mut devices: Vec<Vec<usize>> = Vec::with_capacity(m.replicas.len());
@@ -1641,7 +1713,7 @@ fn serve_inner<B: Backend + Send + 'static>(
                 replicas,
                 max_batch_tokens,
                 collection,
-                schedule,
+                scheduler: scheduler_policy,
                 routing,
                 batch_profile,
                 batch_qualification,
@@ -1665,7 +1737,7 @@ fn serve_inner<B: Backend + Send + 'static>(
                 let lane = |kind| {
                     Lane::new(
                         &name,
-                        schedule,
+                        scheduler_policy,
                         batching,
                         max_batch_tokens,
                         collection.max_batch(),
@@ -1742,6 +1814,7 @@ fn serve_inner<B: Backend + Send + 'static>(
                         .spawn(move || {
                             if collection == collection::CollectionPolicy::default()
                                 && batching != basal_core::Batching::Budget
+                                && scheduler_policy.threshold().is_none()
                             {
                                 scheduler(engine, rx, main_lane, long, scheduling);
                             } else {
@@ -1766,8 +1839,9 @@ fn serve_inner<B: Backend + Send + 'static>(
                     ),
                 };
                 crate::note!(
-                    "serving {name}{} on {on} (batch {max_batch_tokens} tokens, {schedule:?}); routing {}",
+                    "serving {name}{} on {on} (batch {max_batch_tokens} tokens, {:?}); routing {}",
                     if group { format!(" replica {index}") } else { String::new() },
+                    scheduler_policy.schedule(),
                     routing.identity()
                 );
                 // a group routes by its reservations; a single instance counts them only for its metrics

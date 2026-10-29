@@ -515,9 +515,32 @@ wejścia i pozostałe ustawienia, a wybrane kontrole podaj jawnie, np.
 Prompt oznacza rzeczywiste maksimum po truncation oraz konserwatywne granice
 późniejszych rund, nie koszt packed ani długość samego pierwszego promptu.
 [Architektura](ARCHITECTURE.md) opisuje evidence/thinking/tasks/media i bezpieczny
-wybór long przy braku dowiedzionej granicy. FIFO/HRRN oraz budżet packed nie
-zmieniają reguł; brak short-first scheduler'a i skrótu cache-hit. To okablowanie
-porównywalnych pomiarów, bez nowej deklaracji zgodności lub wydajności.
+wybór long przy braku dowiedzionej granicy. Bez `--scheduler` FIFO/HRRN oraz
+budżet packed nie zmieniają reguł. Skrót cache-hit pozostaje nieobecny.
+
+Opcjonalne `--scheduler auto|on|off` odpowiada serve, bez czytania ambientowego
+YAML. Brak zachowuje dotychczasowe zachowanie i klucze JSON. `off` używa
+natywnego `--schedule`; `auto` pozostawia tę politykę przy aktywnym long lane,
+a przy wyłączonym włącza short-first. `on` z aktywnym long lane odmawia startu;
+każdy aktywowany backlog wymaga dodatniego `--long-tokens`. Walidacja poprzedza
+zasoby i model. Przykład jawnego porównywalnego wariantu:
+`--scheduler on --long-lane off --long-tokens 4096`. Raport przed `execute`
+otrzymuje `scheduler` z requested i effective (tryb, natywne schedule, próg,
+allowance); zachowuje go także przy błędzie execute. Po ładowaniu identyczny
+opis trafia do `settings.scheduler`. Pominięcie opcji nie dodaje tych kluczy.
+
+Short idzie FIFO, long w HRRN według wieku i granicy promptu całego właściciela,
+naliczonej osobno każdej gotowej gałęzi, co konserwatywnie zawyża mixed owners.
+Bezpieczna granica obejmuje późniejsze rundy; nieznana oznacza oversized long.
+Niezależny limit sumy naliczeń long to 8192 tokenów na wywołanie, short go nie
+zużywa. Pierwszy dopuszczony long może być oversized/unknown, po nim nie wejdzie
+inny long. Nadal obowiązują natywne limity packed/wpisów i rozdzielenie typów;
+nie powstaje drugi worker, a background i long lane nie stosują backlogu.
+To polityka natywna z konserwatywnym kosztem, nie dowód literalnej zgodności
+upstream. Ciągłe short może zapełniać cap, atomic opóźniać inne wpisy, a long
+jest synchroniczne. Limit z wyjątkiem nie gwarantuje twardej granicy pracy,
+opóźnienia ani pamięci. Nie wykonano nowej kwalifikacji runtime, replayu
+bitowego, FP32, sprawiedliwości ani wydajności; REQ-005 pozostaje częściowe.
 `settings` zawiera efektywne `context_overflow` i `truncate_head`, tak jak
 profil batchy. Domyślne `refuse` zachowuje pomiar limitu kontekstu; przy
 jawnym `--context-overflow truncate` wynik może opisywać skrócone wejście,

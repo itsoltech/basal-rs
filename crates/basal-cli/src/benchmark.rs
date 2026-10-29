@@ -64,6 +64,9 @@ pub(crate) struct Options {
     /// Server queue admission order
     #[arg(long, value_enum, default_value_t = Schedule::Hrrn)]
     schedule: Schedule,
+    /// Explicit short-first backlog; auto enables only without a long lane, on requires it off
+    #[arg(long, value_enum)]
+    scheduler: Option<crate::serve::backlog::Scheduler>,
     /// Strict long-lane token threshold in the selected basis (0 disables the legacy lane)
     #[arg(long, default_value_t = 4096)]
     long_tokens: usize,
@@ -88,6 +91,16 @@ pub(crate) struct Options {
 }
 
 impl Options {
+    fn scheduler_policy(&self) -> Result<crate::serve::backlog::SchedulerPolicy> {
+        crate::serve::backlog::SchedulerPolicy::new(
+            self.scheduler,
+            self.schedule,
+            self.routing_policy()?,
+            self.long_tokens,
+        )
+        .context("benchmark scheduler")
+    }
+
     fn routing_policy(&self) -> Result<crate::serve::routing::RoutingPolicy> {
         crate::serve::routing::RoutingPolicy::new(self.long_tokens, self.long_lane, self.long_token_basis)
             .context("benchmark long-lane routing")
@@ -95,6 +108,7 @@ impl Options {
 
     fn validate(&self) -> Result<()> {
         self.routing_policy()?;
+        self.scheduler_policy()?;
         crate::serve::check_long_share(self.long_share)?;
         ensure!(
             !self.concurrency.is_empty() && self.concurrency.iter().all(|c| (1..=256).contains(c)),
@@ -165,7 +179,7 @@ impl Server {
             replicas: vec![Replica { engine, devices, scheduling }],
             max_batch_tokens: options.max_batch_tokens,
             collection: Default::default(),
-            schedule: options.schedule,
+            scheduler: options.scheduler_policy()?,
             routing: options.routing_policy()?,
             batch_profile: None,
             batch_qualification: crate::serve::batches::config::BackgroundQualification::not_configured(),
@@ -295,6 +309,9 @@ pub(crate) fn run(model: &ModelArgs, gpu_options: &GpuArgs, options: &Options) -
     if options.long_lane.is_some() || options.long_token_basis.is_some() {
         // Record before execute so resource/model/startup failures retain the comparable policy identity.
         report["routing"] = options.routing_policy()?.identity();
+    }
+    if let Some(identity) = options.scheduler_policy()?.identity() {
+        report["scheduler"] = identity;
     }
     let result = execute(model, gpu_options, quantization, options, raw, &mut report);
     if let Err(e) = &result {
@@ -588,6 +605,9 @@ fn execute(
     }
     if let Some(split) = &g.layer_split {
         report["settings"]["layer_split"] = json!(split.stages());
+    }
+    if let Some(identity) = options.scheduler_policy()?.identity() {
+        report["settings"]["scheduler"] = identity;
     }
     crate::model_options::record_effective_settings(
         &mut report["settings"],

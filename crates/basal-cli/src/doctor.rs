@@ -74,13 +74,24 @@ const GIB: f64 = (1u64 << 30) as f64;
 /// Run the checks; prints the report (text or `--json`) and returns false when something blocks `basal serve`.
 pub fn run(file: Option<PathBuf>, model_refs: &[String], as_json: bool) -> Result<bool> {
     let mut r = Report::default();
-    build(&mut r);
-    system(&mut r);
-    // Resolve local/cached host-PLE refusals before discovery, keeping historical report order for Device.
+    // Resolve scheduler/routing and local/cached host-PLE refusals before discovery.
     let mut config_report = Report::default();
     let config = configuration(&mut config_report, file, model_refs);
     let mut invalid_ple = false;
+    let mut invalid_scheduler = false;
     if let Some(c) = &config {
+        for model in &c.models {
+            if let Err(e) = model.scheduler_policy() {
+                config_report.fail(
+                    "models",
+                    format!("{e:#}"),
+                    "long_lane: on needs positive long_tokens; short-first needs long_lane: off and positive long_tokens, or use scheduler: off",
+                );
+                invalid_scheduler = true;
+            }
+        }
+    }
+    if let Some(c) = config.as_ref().filter(|_| !invalid_scheduler) {
         for model in &c.models {
             // Device returns Ok before any check.
             if let Err(e) = config::check_ple_source(model.ple_placement, model.layer_split.is_some(), model) {
@@ -93,10 +104,15 @@ pub fn run(file: Option<PathBuf>, model_refs: &[String], as_json: bool) -> Resul
             }
         }
     }
-    let gpus = if invalid_ple { None } else { gpu(&mut r) };
+    // Resolve scheduler/routing conflicts before update notices and device discovery for Device and Host alike.
+    build(&mut r, !invalid_scheduler);
+    system(&mut r);
+    let gpus = if invalid_ple || invalid_scheduler { None } else { gpu(&mut r) };
     r.0.extend(config_report.0);
     if let Some(c) = &config {
-        models(&mut r, c, gpus.as_deref());
+        if !invalid_scheduler {
+            models(&mut r, c, gpus.as_deref());
+        }
         port(&mut r, c);
     }
     let worst = r.0.iter().map(|c| c.level).max().unwrap_or(Level::Ok);
@@ -149,7 +165,7 @@ fn command(cmd: &str, args: &[&str]) -> Option<String> {
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-fn build(r: &mut Report) {
+fn build(r: &mut Report, check_update: bool) {
     r.ok("basal", format!("basal {}", crate::version()));
     // the binary itself (Homebrew links bin/basal to Cellar/basal-rs/<version>/bin/basal)
     let exe = std::env::current_exe().ok().map(|e| e.canonicalize().unwrap_or(e));
@@ -162,7 +178,7 @@ fn build(r: &mut Report) {
         None => "unknown location".to_string(),
     };
     r.info("basal", format!("installed: {how}"));
-    if let Some(v) = crate::update::notice() {
+    if let Some(v) = check_update.then(crate::update::notice).flatten() {
         r.warn("basal", format!("version {v} is available"), crate::update::how());
     }
     if let Some(b) = crate::paths::cuda_binary() {

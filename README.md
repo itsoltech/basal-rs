@@ -834,7 +834,8 @@ writer lub błąd zapisu daje 500. Zawartość i lifecycle:
 | `max_batch` | brak | dodatni limit wpisów w jednej partii: gotowych gałęzi zwykłego tekstowego SOAM-off, całych żądań przy SOAM-on i wyjątkach atomowych; niezależnie dla głównego i długiego toru |
 | `wait_ms` | brak | skończone nieujemne milisekundy stałego okna zbierania głównego toru |
 | `batch_window_ms` | brak | skończone nieujemne milisekundy okna adaptacyjnego głównego toru; `0` wyłącza adaptacyjne czekanie |
-| `schedule` | `hrrn` | kolejność przyjmowania żądań: `hrrn` (krótkie przed długimi, bez zagłodzenia) albo `fifo` |
+| `schedule` | `hrrn` | natywna kolejność przyjmowania żądań: `hrrn` albo `fifo`; zachowana przy braku `scheduler` lub `off` |
+| `scheduler` | brak | `off`: natywne `schedule`; `auto`: short-first tylko przy wyłączonym efektywnym long lane; `on`: wymaga wyłączonego long lane; backlog wymaga dodatniego `long_tokens` |
 | `long_tokens` | 4096 | ścisły próg `>` w wybranej podstawie; oddawanie GPU między warstwami podlega głównej polityce `long_share`; `0` wyłącza tor w trybie legacy |
 | `long_lane` | `legacy` | `legacy`: tor aktywny przy dodatnim `long_tokens`; `off`: wyłączony niezależnie od progu; `on`: wymaga dodatniego progu |
 | `long_token_basis` | `packed` | `packed`: dotychczasowy koszt admission całego planu; `prompt`: najdłuższy rzeczywisty prompt po truncation lub konserwatywna granica późniejszej pracy |
@@ -858,8 +859,42 @@ dowiedzionej zgodności z zaplanowanym promptem również trafia do long.
 Szczegóły i granice dowodu: [architektura](docs/ARCHITECTURE.md).
 Całe żądanie wybiera tor raz; cache-hit nie skraca klasyfikacji. Koszt HRRN,
 budżet tokenowy i limity/rezerwacje żądań pozostają niezależne od tej podstawy.
-Natywne FIFO/HRRN zachowują swoje reguły; nie jest to scheduler upstream ani
-short-first backlog. Główne `long_share` nadal dotyczy wspólnego urządzenia.
+Bez `scheduler` natywne FIFO/HRRN zachowują swoje reguły. Główne `long_share`
+nadal dotyczy wspólnego urządzenia.
+
+`--scheduler auto|on|off` nadpisuje per-model YAML `scheduler` tylko przy jawnym
+podaniu, również z `--config`, `BASAL_CONFIG` i autodetekcją. Brak obu źródeł
+zachowuje dotychczasową kolekcję i kolejność, bez dodatkowego liczenia promptów.
+`off` używa istniejącego `schedule`; nie wyłącza long lane. `auto` z aktywnym
+long lane również pozostawia natywną politykę. `on` z aktywnym long lane jest
+błędem. `on` oraz `auto` przy wyłączonym torze wymagają dodatniego `long_tokens`.
+Walidacja następuje po nadpisaniach CLI, przed sprawdzaniem aktualizacji,
+urządzenia i ładowaniem modelu. Typowy opt-in:
+`basal serve --model mini --scheduler on --long-lane off` (próg 4096).
+
+Backlog działa w istniejącym głównym torze: krótkie wpisy idą najpierw w FIFO
+według pierwotnego przyjścia żądania, długie potem w HRRN według wieku i granicy
+promptu. Klasyfikacja zawsze używa bezpiecznej granicy promptów całego
+właściciela, podniesionej co najmniej do maksimum aktualnie gotowych
+promptów; `long_token_basis` jej nie zmienia. Każda gotowa gałąź SOAM-off jest
+obciążona tą samą granicą właściciela. To konserwatywnie zawyża koszt gałęzi
+w mieszanym żądaniu. Wiele zwykłych, niezależnych krótkich pytań pozostaje
+krótkie także przy dużej sumie packed. Nieznana granica zawsze oznacza long.
+
+Suma naliczonych promptów **długich wpisów** jednej partii ma niezależny limit
+8192 tokenów; krótkie go nie zużywają. Pierwszy dopuszczony długi wpis może
+przekroczyć ten limit albo mieć nieznaną granicę, po czym żaden kolejny długi
+nie wejdzie do tej partii. `max_batch_tokens`, `max_batch` i rozdzielenie
+wyjątków atomowych od gotowych gałęzi nadal obowiązują; tylko pierwszy wpis
+całej partii zachowuje natywny wyjątek packed ponad budżetem. Niedopasowane
+długie wpisy zostają do następnej selekcji. Nie powstaje dodatkowy silnik,
+wątek, bramka ani worker PLE; background i long lane nie wykonują backlogu.
+Brak skrótu cache-hit. Jest to natywna polityka, bez deklaracji literalnej
+zgodności z upstream. Ciągły napływ krótkich może wypełniać limit wpisów,
+wyjątki atomowe mogą opóźniać inne typy, a długie wywołania są synchroniczne.
+Limit z wyjątkiem oversized/unknown nie stanowi twardej granicy faktycznej
+pracy, opóźnienia ani pamięci. Jakość, zgodność bitowa, sprawiedliwość
+i wydajność wymagają osobnych pomiarów; REQ-005 pozostaje częściowe.
 
 `--soam on|off` nadpisuje per-model YAML `soam` tylko przy jawnym podaniu.
 Brak opcji i `on` zachowują dotychczasowy Tree, wybór backendu, plan numeryczny

@@ -115,14 +115,25 @@ models:
     # token-budget rejection stops collection. Exact equality still permits zero-cost work (Tree: shared prompts).
     # The native long lane shares max_batch, with no added collection delay; upstream has separate long bounds.
     schedule: hrrn                 # hrrn (default) or fifo
+    # scheduler: on              # absent/off: native schedule; auto: short-first iff effective long lane is off
+    # On requires long_lane: off (or otherwise disabled) and positive long_tokens; auto with lane off also needs >0.
+    # Explicit --scheduler overrides YAML, including --config/env/autodetection, before effective validation.
+    # Short-first: short entries FIFO, long HRRN by age / whole-owner prompt bound, independent of long_token_basis.
+    # Every ready primitive is charged at least the original owner bound and the current ready prompt maximum.
+    # Mixed owners may overcount; many ordinary short questions stay short despite a large packed aggregate.
+    # Long entries have an independent 8192 prompt-token allowance per call; short entries do not consume it.
+    # First admitted long may be oversized/unknown (then no more long); unknown bounds are never short/zero-cost.
+    # Native packed/entry/type ceilings still apply; only the first entry has the native packed oversize exception.
+    # No new engine/thread/gate/PLE worker; no backlog on background or long lane. No cache-hit shortcut.
+    # No literal upstream, fairness/latency/memory/performance guarantee or runtime qualification; REQ-005 partial.
     long_tokens: 4096              # strict > threshold in the selected basis; 0 disables legacy lane
     # long_lane: legacy           # absent/legacy: enabled iff long_tokens > 0; on: requires > 0; off: disabled
     # long_token_basis: packed    # absent/packed: old admission cost; prompt: longest actual post-truncation order
     # Explicit --long-lane / --long-token-basis override these per-model keys, including with --config.
     # Prompt includes known reverse orders; later grouped finals/tasks/thinking use conservative context bounds.
     # Evidence without a proven matching prompt bound chooses long. See docs/ARCHITECTURE.md for each case.
-    # Whole requests choose a lane once; no cache-hit shortcut or short-first scheduler. HRRN/admission costs
-    # remain packed. Off removes the fork/thread/PLE worker charge, retaining shared-device/background gates.
+    # Whole requests choose a lane once; no cache-hit shortcut. Without effective short-first, HRRN/admission
+    # costs remain packed. Lane off removes the fork/thread/PLE worker charge, retaining shared/background gates.
     state_cache_mb: 0              # cross-request state cache (0: off)
 
   - path: .models/basal-1.5-4.5B   # or a local model directory

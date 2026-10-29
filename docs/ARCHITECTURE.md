@@ -793,12 +793,75 @@ Konserwatywne przypadki mają następujące uzasadnienie źródłowe:
 Te granice nie są obserwowaną długością przyszłych promptów. Mogą skierować
 krótkie żądanie do long; nawet próg równy max_positions nie pozwala ominąć
 przypadku bez dowiedzionej granicy. Cache-hit nie zmienia klasyfikacji.
-Long zachowuje atomowe wykonanie, fallback do main po zamknięciu kanału,
-jedną odpowiedź i rezerwację oraz synchroniczny drain. Native FIFO/HRRN nie
-dostaje short-first backlog ani aliasu upstream; zgodność harmonogramów i
-wyników, jakość FP32, zużycie pamięci i wydajność wymagają osobnych pomiarów.
+Long lane zachowuje atomowe wykonanie, fallback do main po zamknięciu kanału,
+jedną odpowiedź i rezerwację oraz synchroniczny drain. Zgodność harmonogramów
+i wyników, jakość FP32, zużycie pamięci i wydajność wymagają osobnych pomiarów.
 
-Żądania sklasyfikowane jako long liczy drugi tor: drugi silnik na tym samym
+Opcjonalne per-model `scheduler: auto|on|off` i `--scheduler` wybierają natywny
+short-first backlog głównego toru. Brak opcji zachowuje dotychczasowe
+`schedule: hrrn|fifo` i wybór kolekcji. `off` używa tej samej natywnej polityki.
+Jawne `auto` włącza backlog tylko przy wyłączonym efektywnym long lane;
+z aktywnym torem pozostawia jego kolejność i naliczenie workerów. `on` wymaga
+wyłączonego toru. Każdy aktywowany backlog wymaga dodatniego `long_tokens`.
+CLI nadpisuje YAML dla wszystkich ścieżek wyboru konfiguracji, a walidacja
+odbywa się dopiero po scaleniu, przed update/device/download/model work.
+Pozwala to wyłączyć nieprawidłowy YAML przez `--scheduler off`; niezależny
+konflikt `long_lane: on` z progiem 0 nadal wymaga naprawienia long lane.
+Common doctor sprawdza tę samą politykę dla Device i Host przed discovery.
+Oba konstruktory ServedModel przekazują zwalidowany `SchedulerPolicy`;
+startup pokazuje jawne requested/effective, bez zmiany profili numerycznych,
+odcisków batchy, liczby silników, wątków, bramek ani workerów PLE.
+
+W aktywnym backlogu gotowe wpisy pozostają widokiem istniejącego `Lane.waiting`.
+Nie powstaje druga kolejka właścicieli, jobów, odpowiedzi, permitów, queued
+ani OnlineDemand. Krótkie wpisy są stabilnie porządkowane FIFO po oryginalnym
+czasie przyjścia, także po częściowym wykonaniu i kolejnych rundach. Długie
+następują po nich w stabilnym HRRN: wiek / max(1, granica promptu); remis
+zachowuje kolejność przyjścia i gałęzi. Brak dowiedzionej granicy jest long,
+z mianownikiem `usize::MAX` do porządkowania i kosztem oversized przy admission.
+
+Przy planowaniu tylko aktywny backlog oblicza i zachowuje
+`RequestPlan::prompt_token_bound`. Dla każdego wpisu, w tym każdej gotowej
+gałęzi, koszt wynosi co najmniej tę granicę całego oryginalnego właściciela
+oraz maksimum aktualnie gotowych promptów tego właściciela. Granice reverse,
+grouped choice, tasks, thinking, evidence i media opisane wyżej nadal obowiązują.
+`None` pozostaje nieznane niezależnie od aktualnej rundy. Mieszany właściciel
+może więc mieć wszystkie gałęzie long i wielokrotnie naliczoną tę samą granicę;
+nie jest to dokładna upstreamowa klasyfikacja gałęzi. Wiele niezależnych
+krótkich pytań pozostaje short mimo dużej sumy packed. `long_token_basis`
+dotyczy wyłącznie routingu do long lane, nie tej selekcji. Ścieżki bez opcji
+oraz `off` nie wykonują dodatkowego obliczenia ani skanu promptów.
+
+Stałe `LONG_CALL_TOKENS = 8192` odpowiada upstream `SCHED_CALL_TOKENS`.
+Ogranicza sumę kosztów **long** w jednym wywołaniu, niezależnie od short.
+Pierwszy przyjęty long może przekroczyć allowance; nieznana granica również
+zużywa całe allowance. Następne long muszą mieścić się w pozostałej części.
+Odejmowanie saturuje do zera, nie zawija licznika. Odrzucony kandydat zostaje
+u właściciela, a selekcja szuka kolejnych pasujących. Te reguły nie omijają
+`AdmissionCost`, `max_batch_tokens`, `max_batch` ani izolacji atomic/primitive.
+Wyjątek packed ponad budżetem nadal przysługuje wyłącznie pierwszemu wpisowi
+całej partii. Osiągnięcie równości packed samo nie kończy kolekcji: Tree może
+jeszcze dopuścić wpis bez przyrostu trie; wyczerpanie allowance long nie
+blokuje short. Faktyczne odrzucenie przez prompt/typ/tokeny lub pełny cap
+ustawia wspólny sygnał full.
+
+Podgląd kolekcji i admission używają tego samego `Lane::select`. Aktywny
+backlog zawsze trafia do ograniczonej kolekcji, także bez timing/cap.
+Istniejący backlog nie czeka na nowe `rx.blocking_recv`; nowe wejścia i deadline
+są ograniczone dotychczasowym `max_inflight` i jednym terminem okna.
+Cancellation, błędy i zamknięcie kanału nie odnawiają okna. Pusta selekcja
+nie wykonuje silnika; w aktywnym backlogu ewentualni właściciele bez gotowych
+gałęzi dostają błąd i zwalniają swoje zasoby, zamiast tworzyć pustą pętlę.
+Pierwsze admission usuwa queued raz, częściowe rundy zachowują właściciela,
+a run/advance/finalizacja i synchroniczny drain pozostają dotychczasowe.
+Background i long lane nie stosują backlogu, cache-hit nie zmienia klasyfikacji.
+Nie deklarujemy literalnej zgodności upstream, braku zagłodzenia, opóźnień
+ani przyspieszenia: short może stale wypełniać cap, wyjątki atomowe opóźniać
+inne typy, a long wykonuje się synchronicznie. Granica konserwatywna oraz
+oversized/unknown nie dają twardej granicy faktycznej pracy lub pamięci.
+REQ-005 nadal jest częściowe; runtime, replay bitowy i FP32 pozostają niezmierzone.
+
+Przy aktywnym long lane żądania skierowane do niego liczy drugi silnik na tym samym
 GPU, ze wspólnymi wagami, tabelą GEMM i prefiksami szablonu. Oba tory
 korzystają z GPU na zmianę (`basal_core::gate`): tor długich żądań po każdej
 warstwie czeka na zakończenie swoich kerneli i oddaje GPU, gdy główny tor ma

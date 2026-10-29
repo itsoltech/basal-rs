@@ -148,6 +148,18 @@ pub(super) fn scheduler<B: Backend>(
         }
         if !batch.is_empty() {
             lane.run(&mut engine, batch, start);
+        } else if lane.scheduler.threshold().is_some() {
+            // With the first-entry exception, an empty selection can retain only stale primitive owners.
+            // No synchronous work is in flight here. Fail/release them instead of spinning on a closed channel
+            // or blocking for another arrival while retaining an owner that can never be selected.
+            for waiting in lane.waiting.drain(..) {
+                waiting
+                    .job
+                    .answer((Err(basal_core::DecideError::Internal(anyhow::anyhow!("no ready backlog entry"))), None));
+            }
+            if let Some(metrics) = &lane.metrics {
+                metrics.waiting(0);
+            }
         }
     }
 }

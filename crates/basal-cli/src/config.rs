@@ -169,6 +169,9 @@ pub struct ModelConfig {
     pub batch_window_ms: Option<f64>,
     #[serde(default = "default_schedule")]
     pub schedule: Schedule,
+    /// Explicit short-first backlog; absent preserves native scheduling and collection.
+    #[serde(default)]
+    pub(crate) scheduler: Option<crate::serve::backlog::Scheduler>,
     /// Strict long-lane threshold in the selected basis (legacy default: packed; 0 disables legacy).
     #[serde(default = "default_long_tokens")]
     pub long_tokens: usize,
@@ -240,6 +243,16 @@ fn default_tree_max_tokens() -> usize {
 }
 
 impl ModelConfig {
+    pub(crate) fn scheduler_policy(&self) -> Result<crate::serve::backlog::SchedulerPolicy> {
+        crate::serve::backlog::SchedulerPolicy::new(
+            self.scheduler,
+            self.schedule,
+            self.routing_policy()?,
+            self.long_tokens,
+        )
+        .with_context(|| format!("model {}: scheduler", describe(self)))
+    }
+
     pub(crate) fn routing_policy(&self) -> Result<crate::serve::routing::RoutingPolicy> {
         crate::serve::routing::RoutingPolicy::new(self.long_tokens, self.long_lane, self.long_token_basis)
             .with_context(|| format!("model {}: long-lane routing", describe(self)))
