@@ -807,7 +807,7 @@ writer lub błąd zapisu daje 500. Zawartość i lifecycle:
 | `layer_split` | | CUDA, Llama oraz Gemma bez współdzielonego KV/PLE: jeden model na kilku kartach jednego typu, lista `{device, layers}` w kolejności warstw (co najmniej dwa etapy na różnych kartach, suma równa liczbie warstw modelu); wymaga `dtype` f16 (`auto` dla Llamy to f16); zamiast `device` i `replica_devices`; Gemma wymaga jawnego f16 i dense `none`; tekst i obrazy z enkoderem na pierwszej karcie; opis wyżej |
 | `soam` | `on` | `on`: dotychczasowy Tree; `off`: Budget i gotowe gałęzie prymitywne jako wpisy głównego toru tekstowego |
 | `max_batch_tokens` | 8192 | tokeny jednej partii: trie przy SOAM-on, suma spakowanych wierszy gałęzi przy off |
-| `max_batch` | brak | dodatni limit kompletnych żądań w jednej partii; niezależnie dla głównego i długiego toru |
+| `max_batch` | brak | dodatni limit wpisów w jednej partii: gotowych gałęzi zwykłego tekstowego SOAM-off, całych żądań przy SOAM-on i wyjątkach atomowych; niezależnie dla głównego i długiego toru |
 | `wait_ms` | brak | skończone nieujemne milisekundy stałego okna zbierania głównego toru |
 | `batch_window_ms` | brak | skończone nieujemne milisekundy okna adaptacyjnego głównego toru; `0` wyłącza adaptacyjne czekanie |
 | `schedule` | `hrrn` | kolejność przyjmowania żądań: `hrrn` (krótkie przed długimi, bez zagłodzenia) albo `fifo` |

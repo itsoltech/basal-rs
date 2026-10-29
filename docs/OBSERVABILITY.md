@@ -241,8 +241,9 @@ prymitywne. `max_batch` i adaptacyjne okno liczą te wpisy, natomiast histogramy
 żądań w danym wykonaniu. To samo żądanie może mieć próbkę w kilku partiach;
 histogram kolejki za każdym razem mierzy czas od jego pierwotnego przyjścia.
 Nie należy interpretować sumy tych próbek jako liczby ukończonych żądań ani
-sumy wyłącznych czasów czekania. Anulowana częściowa praca bez finalnej
-odpowiedzi nie zwiększa liczników usage.
+sumy wyłącznych czasów czekania. Żądanie pominięte po odczytach wskutek
+anulowania nie zwiększa liczników usage. Ukończony wynik może je zwiększyć,
+jeśli klient rozłączy się podczas finalizacji lub przed wysłaniem odpowiedzi.
 
 Nagłówek `x-basal-batch-requests` zachowuje jednostkę całych żądań: różnych
 właścicieli w wykonaniu, które kończy daną odpowiedź. `x-basal-queue-ms` mierzy

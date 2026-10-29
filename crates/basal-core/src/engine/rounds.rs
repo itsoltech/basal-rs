@@ -57,6 +57,8 @@ impl<B: Backend> Engine<B> {
     /// Execute only the selected ready primitives with Budget packing, then scatter their results. Each pair
     /// identifies an owner in `requests` and one of its current ready branches. Duplicate/stale identities are
     /// rejected before backend work; no phase advances until all of its primitive slots are complete.
+    /// Requests in one call must share the same resolved early-exit policy. Plan them with this engine so omitted
+    /// fields inherit its default policy; `None` and explicit `"off"` are distinct policy identities here.
     pub fn run_ready(
         &mut self,
         requests: &mut [&mut RequestExecution],
