@@ -22,7 +22,9 @@ const GGUF_MAX_VALUE_DEPTH: usize = 64;
 // seeking to the end and back on every length-prefixed read.
 fn remaining_bytes<R: std::io::Seek>(reader: &mut R, file_size: u64) -> Result<u64> {
     let cur = reader.stream_position()?;
-    Ok(file_size.saturating_sub(cur))
+    file_size
+        .checked_sub(cur)
+        .context("gguf: reader position exceeds file size")
 }
 
 fn read_length<R: std::io::Read>(reader: &mut R, magic: &VersionedMagic) -> Result<u64> {
@@ -85,29 +87,61 @@ pub struct TensorInfo {
 }
 
 impl TensorInfo {
+    // Validate before allocating or calling the GGML decoder, which computes
+    // these products again without checked arithmetic. Keep the same dimension
+    // order, including intermediate products for shapes containing zero.
+    fn size_in_bytes(&self) -> Result<usize> {
+        let tensor_elems = self.shape.dims().iter().try_fold(1usize, |n, &dim| {
+            n.checked_mul(dim)
+                .context("gguf: tensor element count overflows usize")
+        })?;
+        let block_size = self.ggml_dtype.block_size();
+        if !tensor_elems.is_multiple_of(block_size) {
+            crate::bail!("gguf: tensor element count {tensor_elems} is not divisible by block size {block_size}")
+        }
+        if let Some(&last_dim) = self.shape.dims().last() {
+            if !last_dim.is_multiple_of(block_size) {
+                crate::bail!("gguf: tensor last dimension {last_dim} is not divisible by block size {block_size}")
+            }
+        }
+        (tensor_elems / block_size)
+            .checked_mul(self.ggml_dtype.type_size())
+            .context("gguf: tensor byte length overflows usize")
+    }
+
+    fn byte_range(&self, tensor_data_offset: u64, file_size: u64) -> Result<(u64, usize)> {
+        let size_in_bytes = self.size_in_bytes()?;
+        let byte_len =
+            u64::try_from(size_in_bytes).context("gguf: tensor byte length does not fit u64")?;
+        let tensor_start = tensor_data_offset
+            .checked_add(self.offset)
+            .context("gguf: tensor start offset overflows u64")?;
+        let tensor_end = tensor_start
+            .checked_add(byte_len)
+            .context("gguf: tensor end offset overflows u64")?;
+        if tensor_end > file_size {
+            crate::bail!("gguf: tensor needs {size_in_bytes} bytes at offset {tensor_start}, file size is {file_size}")
+        }
+        Ok((tensor_start, size_in_bytes))
+    }
+
     pub fn read<R: std::io::Seek + std::io::Read>(
         &self,
         reader: &mut R,
         tensor_data_offset: u64,
         device: &Device,
     ) -> Result<QTensor> {
-        let tensor_elems = self.shape.elem_count();
-        let block_size = self.ggml_dtype.block_size();
-        if !tensor_elems.is_multiple_of(block_size) {
-            crate::bail!(
-            "the number of elements {tensor_elems} is not divisible by the block size {block_size}"
-        )
-        }
-        let size_in_bytes = tensor_elems / block_size * self.ggml_dtype.type_size();
-        let tensor_start = tensor_data_offset.saturating_add(self.offset);
         let file_size = reader.seek(std::io::SeekFrom::End(0))?;
-        let remaining = file_size.saturating_sub(tensor_start);
-        if size_in_bytes as u64 > remaining {
-            crate::bail!(
-                "tensor needs {size_in_bytes} bytes at offset {tensor_start}, only {remaining} remaining in file"
-            )
+        let (tensor_start, size_in_bytes) = self.byte_range(tensor_data_offset, file_size)?;
+        // QTensor does not support scalars, even for unquantized GGML dtypes.
+        if self.shape.dims().is_empty() {
+            crate::bail!("gguf: scalar tensor cannot be quantized")
         }
-        let mut raw_data = vec![0u8; size_in_bytes];
+        let mut raw_data = Vec::new();
+        raw_data
+            .try_reserve_exact(size_in_bytes)
+            .context("gguf: cannot allocate tensor read buffer")?;
+        raw_data.resize(size_in_bytes, 0u8);
         reader.seek(std::io::SeekFrom::Start(tensor_start))?;
         reader.read_exact(&mut raw_data)?;
         super::ggml_file::qtensor_from_ggml(
@@ -140,7 +174,11 @@ fn read_string<R: std::io::Read + std::io::Seek>(
     if len > remaining {
         crate::bail!("gguf: string length {len} exceeds remaining file bytes {remaining}")
     }
-    let mut v = vec![0u8; len as usize];
+    let len = usize::try_from(len).context("gguf: string length does not fit usize")?;
+    let mut v = Vec::new();
+    v.try_reserve_exact(len)
+        .context("gguf: cannot allocate string read buffer")?;
+    v.resize(len, 0u8);
     reader.read_exact(&mut v)?;
     // GGUF strings are supposed to be non-null terminated but in practice this happens.
     while let Some(0) = v.last() {
@@ -350,7 +388,8 @@ impl Value {
                 if len > GGUF_MAX_ARRAY_ELEMENTS {
                     crate::bail!("gguf: array length {len} exceeds max {GGUF_MAX_ARRAY_ELEMENTS}")
                 }
-                let needed = len.saturating_mul(value_type.min_disk_size(magic));
+                // The capped length and the at-most-12-byte minimum fit u64.
+                let needed = len * value_type.min_disk_size(magic);
                 let remaining = remaining_bytes(reader, file_size)?;
                 if needed > remaining {
                     crate::bail!(
@@ -493,9 +532,8 @@ impl Content {
         let prefix = magic.length_prefix_size();
         let min_per_kv = prefix + 4 + 1;
         let min_per_tensor = prefix + 4 + 4 + 8;
-        let needed = metadata_kv_count
-            .saturating_mul(min_per_kv)
-            .saturating_add(tensor_count.saturating_mul(min_per_tensor));
+        // Both counts are capped at 2^30 and each minimum is at most 24 bytes.
+        let needed = metadata_kv_count * min_per_kv + tensor_count * min_per_tensor;
         let remaining = remaining_bytes(reader, file_size)?;
         if needed > remaining {
             crate::bail!(
@@ -506,6 +544,11 @@ impl Content {
         let mut metadata = HashMap::new();
         for _idx in 0..metadata_kv_count {
             let key = read_string(reader, &magic, file_size)?;
+            // Compare decoded names, preserving read_string's trailing-NUL
+            // removal and lossy UTF-8 handling for existing files.
+            if metadata.contains_key(&key) {
+                crate::bail!("gguf: duplicate metadata key '{key}'")
+            }
             let value_type = reader.read_u32::<LittleEndian>()?;
             let value_type = ValueType::from_u32(value_type)?;
             let value = Value::read(reader, value_type, &magic, 0, file_size)?;
@@ -514,6 +557,9 @@ impl Content {
         let mut tensor_infos = HashMap::new();
         for _idx in 0..tensor_count {
             let tensor_name = read_string(reader, &magic, file_size)?;
+            if tensor_infos.contains_key(&tensor_name) {
+                crate::bail!("gguf: duplicate tensor name '{tensor_name}'")
+            }
             let n_dimensions = reader.read_u32::<LittleEndian>()?;
             if n_dimensions > GGUF_MAX_TENSOR_DIMS {
                 crate::bail!(
@@ -521,18 +567,13 @@ impl Content {
                 )
             }
 
-            let mut dimensions: Vec<usize> = match magic {
-                VersionedMagic::GgufV1 => {
-                    let mut dimensions = vec![0; n_dimensions as usize];
-                    reader.read_u32_into::<LittleEndian>(&mut dimensions)?;
-                    dimensions.into_iter().map(|c| c as usize).collect()
-                }
-                VersionedMagic::GgufV2 | VersionedMagic::GgufV3 => {
-                    let mut dimensions = vec![0; n_dimensions as usize];
-                    reader.read_u64_into::<LittleEndian>(&mut dimensions)?;
-                    dimensions.into_iter().map(|c| c as usize).collect()
-                }
-            };
+            let mut dimensions = Vec::with_capacity(n_dimensions as usize);
+            for _ in 0..n_dimensions {
+                let dim = read_length(reader, &magic)?;
+                dimensions.push(usize::try_from(dim).context(format!(
+                    "gguf: tensor '{tensor_name}' dimension {dim} does not fit usize"
+                ))?);
+            }
 
             dimensions.reverse();
             let ggml_dtype = reader.read_u32::<LittleEndian>()?;
@@ -555,9 +596,29 @@ impl Content {
             Some(Value::I8(v)) if *v >= 0 => *v as u64,
             Some(Value::I16(v)) if *v >= 0 => *v as u64,
             Some(Value::I32(v)) if *v >= 0 => *v as u64,
-            _ => DEFAULT_ALIGNMENT,
+            None => DEFAULT_ALIGNMENT,
+            Some(value) => {
+                crate::bail!(
+                    "gguf: general.alignment must be a positive 8-, 16- or 32-bit integer, got type {:?}",
+                    value.value_type()
+                )
+            }
         };
-        let tensor_data_offset = position.div_ceil(alignment) * alignment;
+        if alignment == 0 {
+            crate::bail!("gguf: general.alignment must not be zero")
+        }
+        // Add only the missing padding: position + alignment - 1 could overflow
+        // even when an already-aligned position itself is representable.
+        let padding = (alignment - position % alignment) % alignment;
+        let tensor_data_offset = position
+            .checked_add(padding)
+            .context("gguf: aligned tensor data offset overflows u64")?;
+        // No global data-offset/EOF check: an empty inventory has no spans.
+        // In particular, seeking over optional final padding needs no data read.
+        for (name, info) in &tensor_infos {
+            info.byte_range(tensor_data_offset, file_size)
+                .map_err(|err| err.context(format!("gguf: tensor '{name}'")))?;
+        }
         Ok(Self {
             magic,
             metadata,
