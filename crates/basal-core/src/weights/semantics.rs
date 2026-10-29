@@ -536,14 +536,12 @@ impl GgufCompanionSemantics {
             .check_identity(served)
             .map_err(|source| GgufIdentityBindingError::Calibration { source })?;
         let (outcome, identity_state) = match self.calibration.decision.mode {
-            CalibrationMode::Explicit => (
-                if warning.is_some() {
-                    GgufCalibrationBindingOutcome::CheckedWarning
-                } else {
-                    GgufCalibrationBindingOutcome::CheckedNoWarning
-                },
-                CalibrationIdentityState::Checked,
-            ),
+            CalibrationMode::Explicit if warning.is_some() => {
+                (GgufCalibrationBindingOutcome::CheckedWarning, CalibrationIdentityState::Checked)
+            }
+            CalibrationMode::Explicit => {
+                (GgufCalibrationBindingOutcome::CheckedNoWarning, CalibrationIdentityState::Checked)
+            }
             CalibrationMode::Automatic | CalibrationMode::Off => {
                 (GgufCalibrationBindingOutcome::NotRequired, CalibrationIdentityState::NotRequired)
             }
