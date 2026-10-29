@@ -1,7 +1,7 @@
 //! Held admission for exact requested layouts of private raw source buffers.
 
 use std::alloc::{alloc, Layout};
-use std::sync::{Arc, Mutex, TryLockError};
+use std::sync::{Arc, Mutex, PoisonError, TryLockError};
 
 /// Shared allowance for original raw source-content requested layouts only.
 ///
@@ -111,10 +111,7 @@ impl Drop for RawCharge {
     fn drop(&mut self) {
         // Cleanup alone recovers poison; admission never clears or recovers it.
         // This may wait only for another short arithmetic critical section.
-        let mut state = match self.ledger.lock() {
-            Ok(state) => state,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut state = self.ledger.lock().unwrap_or_else(PoisonError::into_inner);
         match state.held.checked_sub(self.bytes) {
             Some(held) => state.held = held,
             None => state.failed_closed = true,
