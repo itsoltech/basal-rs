@@ -540,8 +540,7 @@ fn policy_costs(
     let gate_up = mul(2, i)?;
     // Fixed final groups, not an inventory or a promise about upload order.
     // Norm and bias groups apply even when biases must be synthesized.
-    let mut max_assembly_group_bytes = 0;
-    for bytes in [
+    let max_assembly_group_bytes = [
         mul(head, t)?,
         mul(head, m)?,
         mul(h, u)?,
@@ -553,9 +552,9 @@ fn policy_costs(
         mul(h, u)?,
         mul(gate_up, u)?,
         mul(h, u)?,
-    ] {
-        max_assembly_group_bytes = max_assembly_group_bytes.max(bytes);
-    }
+    ]
+    .into_iter()
+    .fold(0, u64::max);
     let two_copy_staging_bytes = add(mul(2, max_assembly_group_bytes)?, SCAN_BUFFER_BYTES)?;
     Ok(GgufPolicyCosts { source_tensor_bytes, resident_weight_bytes, max_assembly_group_bytes, two_copy_staging_bytes })
 }
@@ -1040,9 +1039,7 @@ fn check_inventory(
     let bias_per_layer = add(add(mul(3, h)?, mul(2, k)?)?, mul(2, i)?)?;
     let vectors = add(mul(add(mul(2, l)?, 1)?, h)?, if cfg.bias { mul(l, bias_per_layer)? } else { 0 })?;
     let expected = add(mul(width, matrix_elements)?, mul(4, vectors)?)?;
-    if source_bytes != expected {
-        return Err(GgufInspectionError::SourceBytes { expected, actual: source_bytes });
-    }
+    check_source_bytes(expected, source_bytes)?;
     Ok(source_bytes)
 }
 
@@ -1086,7 +1083,7 @@ fn visit_roles(
         for &(role, shape, dtype, role_width) in weights.iter().chain(biases) {
             name.clear();
             // String's fmt::Write cannot fail. Fixed suffixes plus <=8195's
-            // layer index fit <128 bytes, already fallibly reserved above.
+            // layer index fit <128 bytes, already fallibly reserved by the caller.
             let _ = write!(name, "blk.{layer}.{role}");
             visit(name, shape, dtype, role_width, false)?;
         }
