@@ -358,10 +358,13 @@ impl GgufCompanionSemantics {
     /// Capture once, then parse those bytes. Only selected calibration opens extra files.
     /// No GGUF file, device, model execution or companion path reload is involved.
     pub fn read(directory: &Path, options: ModelLoadOptions<'_>) -> Result<Self, GgufSemanticError> {
-        let snapshot = GgufCompanionSnapshot::read(directory).map_err(|source| {
-            if matches!(&source, WeightSourceError::Io { role: "config.json", operation: "open", source } if source.kind() == std::io::ErrorKind::NotFound) {
+        let snapshot = GgufCompanionSnapshot::read(directory).map_err(|source| match &source {
+            WeightSourceError::Io { role: "config.json", operation: "open", source: io }
+                if io.kind() == std::io::ErrorKind::NotFound =>
+            {
                 GgufSemanticError::MissingConfigG3 { source }
-            } else { GgufSemanticError::Capture { source } }
+            }
+            _ => GgufSemanticError::Capture { source },
         })?;
         Self::from_snapshot(snapshot, directory, options)
     }
@@ -378,6 +381,7 @@ impl GgufCompanionSemantics {
             return unsupported("model_type", "ordinary Llama");
         };
         validate_config(&config, llama)?;
+        let vocab = llama.vocab;
         let basal = json(&snapshot, CompanionRole::Basal, Stage::Protocol)?;
         let mut protocol = ManifestProtocol::parse(architecture, &basal, options)
             .map_err(|e| GgufSemanticError::semantic(Stage::Protocol, e))?;
@@ -401,12 +405,8 @@ impl GgufCompanionSemantics {
             .finish(directory, &basal, bos, loaded)
             .map_err(|e| GgufSemanticError::semantic(Stage::CalibrationManifest, e))?;
         drop(basal);
-        // The protocol was built with a Llama architecture and never replaces it.
-        let Architecture::Llama(llama) = &manifest.config else {
-            return unsupported("model_type", "ordinary Llama");
-        };
         let original = json(&snapshot, CompanionRole::Tokenizer, Stage::Tokenizer)?;
-        let added = BasalTokenizer::audit_raw_ids(&original, llama.vocab)?;
+        let added = BasalTokenizer::audit_raw_ids(&original, vocab)?;
         audit_bpe_merges(&original).map_err(|e| GgufSemanticError::semantic(Stage::Tokenizer, e))?;
         let tokenizer =
             BasalTokenizer::from_json_value(original, &directory.join("tokenizer.json"), style).map_err(|error| {
@@ -417,9 +417,9 @@ impl GgufCompanionSemantics {
                     }
                 }
             })?;
-        let bos = tokenizer.audit_effective_ids(&added, llama.vocab, &manifest.bos_token)?;
-        audit_specials(&config, llama.vocab, bos, "config special ID")?;
-        audit_specials(&tcfg, llama.vocab, bos, "tokenizer_config special ID")?;
+        let bos = tokenizer.audit_effective_ids(&added, vocab, &manifest.bos_token)?;
+        audit_specials(&config, vocab, bos, "config special ID")?;
+        audit_specials(&tcfg, vocab, bos, "tokenizer_config special ID")?;
         let identity_state = match options.calibration {
             CalibrationSource::File(_) if options.served_identity.is_none() => CalibrationIdentityState::Deferred,
             CalibrationSource::File(_) => CalibrationIdentityState::Checked,
@@ -599,20 +599,21 @@ fn audit_specials(raw: &Value, vocab: usize, bos: u32, location: &'static str) -
         let Some(value) = raw.get(key).filter(|v| !v.is_null()) else {
             continue;
         };
-        if key == "eos_token_id" && value.is_array() {
-            if let Some(ids) = value.as_array() {
+        match value.as_array() {
+            Some(ids) if key == "eos_token_id" => {
                 for id in ids {
                     GgufSemanticError::parse_id(id, location, vocab)?;
                 }
             }
-        } else {
-            let id = GgufSemanticError::parse_id(value, location, vocab)?;
-            if key == "bos_token_id" && id != bos {
-                return Err(GgufSemanticError::TokenId {
-                    location: "declared BOS disagreement",
-                    id: Some(u64::from(id)),
-                    vocab,
-                });
+            _ => {
+                let id = GgufSemanticError::parse_id(value, location, vocab)?;
+                if key == "bos_token_id" && id != bos {
+                    return Err(GgufSemanticError::TokenId {
+                        location: "declared BOS disagreement",
+                        id: Some(u64::from(id)),
+                        vocab,
+                    });
+                }
             }
         }
     }

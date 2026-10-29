@@ -230,12 +230,10 @@ fn load_impl(
     let mut unvalidated = layout_mismatch(&data, &path, layout)?;
     mode.layout(true, unvalidated.is_some());
     if unvalidated.is_none() {
-        let replace = if !explicit && !off {
+        let replace = !explicit && !off && {
             let fitted = fitted_orders(&data)?;
             mode.orders(true, fitted, orders);
             fitted.is_some_and(|o| o != orders)
-        } else {
-            false
         };
         if replace {
             // Automatic names are CALIBRATION[.<layout>].json; the variant is CALIBRATION[.<layout>].o<orders>.json.

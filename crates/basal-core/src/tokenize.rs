@@ -134,7 +134,7 @@ impl BasalTokenizer {
             Some("Unigram") => {
                 let entries =
                     model.get("vocab").and_then(Value::as_array).ok_or_else(|| invalid("raw Unigram vocab"))?;
-                for (id, _) in entries.iter().enumerate() {
+                for id in 0..entries.len() {
                     let id = u64::try_from(id).map_err(|_| invalid("raw Unigram index"))?;
                     GgufSemanticError::check_id(id, "raw Unigram index", vocab)?;
                 }
