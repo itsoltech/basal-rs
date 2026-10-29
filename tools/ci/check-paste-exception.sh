@@ -13,8 +13,11 @@ fi
 
 # Compare package names and exact versions, including paste itself, across all target platforms.
 # A changed version, new dependent or removal of paste requires a fresh policy review.
+# The pinned local tokenizers patch has the same package/version/dependents;
+# normalize only its checkout location, leaving every other identity unchanged.
 cargo tree --locked --workspace --all-features --target all --invert paste \
     --depth 1 --prefix none --format '{p}' \
+    | sed -E 's#^(tokenizers v0\.23\.2) \(/.*/vendor/tokenizers\)$#\1#' \
     | LC_ALL=C sort -u \
     | diff -u .github/paste-dependents.txt -
 

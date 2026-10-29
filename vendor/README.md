@@ -281,9 +281,9 @@ Rustdoc keeps six upstream diagnostics in unchanged files (`unigram/lattice.rs`,
 `normalizers/bert.rs`, `pre_tokenizers/byte_level.rs`,
 `tokenizer/added_vocabulary.rs`); they are not suppressed. `cargo deny
 --offline` passes with the existing 22 duplicate warnings, using the cached
-advisory database only. `tools/ci/check-paste-exception.sh` fails: Cargo now
-prints `tokenizers v0.23.2` with its local path, which differs from the
-approved list. The exception's dependents and `paste` version are otherwise
-unchanged; updating the approved list requires a separate policy review. No
+advisory database only. `tools/ci/check-paste-exception.sh` normalizes only the
+checkout path of the pinned local `tokenizers v0.23.2` package before comparing
+the exact approved list. The exception's dependents, versions and expiry are
+unchanged; new dependents or changed versions still fail the check. No
 test, tokenizer execution, model comparison, memory measurement or GPU check
 was performed. REQ-009 remains partial.
