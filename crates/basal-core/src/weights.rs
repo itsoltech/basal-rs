@@ -18,8 +18,9 @@ use sha2::{Digest, Sha256};
 mod semantics;
 pub use semantics::{
     CalibrationCapture, CalibrationDecision, CalibrationIdentityState, CalibrationMode, CalibrationProbe,
-    CalibrationProbeRole, CalibrationReadRole, CapturedCalibrationFile, GgufCompanionSemantics, GgufSemanticError,
-    LayoutCheck, OrdersCheck, OrdersVariantDecision, SemanticStage,
+    CalibrationProbeRole, CalibrationReadRole, CapturedCalibrationFile, GgufCalibrationBinding,
+    GgufCalibrationBindingOutcome, GgufCompanionSemantics, GgufIdentityBindingError, GgufSemanticError, LayoutCheck,
+    OrdersCheck, OrdersVariantDecision, SemanticStage,
 };
 
 const DECLARATION: &str = "gguf-source.json";

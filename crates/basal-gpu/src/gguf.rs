@@ -11,8 +11,9 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 
 use basal_core::architecture::Architecture;
+use basal_core::calibration::ServedIdentity;
 use basal_core::manifest::LlamaConfig;
-use basal_core::weights::{GgufCompanionSemantics, GgufOuttype};
+use basal_core::weights::{GgufCompanionSemantics, GgufIdentityBindingError, GgufOuttype};
 use candle_core::quantized::gguf_file::{Content, ReadLimits, Value, ValueType};
 use candle_core::quantized::GgmlDType;
 use sha2::{Digest, Sha256};
@@ -273,6 +274,23 @@ pub struct GgufPayloadInspection {
 }
 
 impl GgufPayloadInspection {
+    /// Consume this exact owner to bind logical identity on its retained companions.
+    ///
+    /// Compares the original descriptor stamp on entry and success without reading,
+    /// rehashing or reopening payload/companions. A core refusal returns immediately;
+    /// any error drops the consumed owner. Precision, digest, costs and all source
+    /// owners are preserved on success. This grants no durable identity, admission
+    /// or publication authority; future reads still owe stamps and a final rehash.
+    pub fn bind_served_identity(mut self, served: ServedIdentity<'_>) -> Result<Self, GgufInspectionError> {
+        self.header._stamp.compare(&SourceStamp::capture(&self.header._file, "before identity binding")?)?;
+        self.header
+            .companions
+            .bind_served_identity(served)
+            .map_err(|source| GgufInspectionError::IdentityBinding { source })?;
+        self.header._stamp.compare(&SourceStamp::capture(&self.header._file, "after identity binding")?)?;
+        Ok(self)
+    }
+
     /// Borrow the actual retained companion and calibration semantics.
     pub fn companions(&self) -> &GgufCompanionSemantics {
         self.header.companions()
@@ -327,11 +345,11 @@ impl GgufPolicyCosts {
     }
 }
 
-/// Implemented host/header/inventory/digest/payload and policy-cost refusals.
+/// Implemented host/header/inventory/digest/payload, policy-cost and identity-binding refusals.
 ///
 /// Top-level Display/Debug bounds key/name/value text and omits nested causes,
 /// buffers, JSON, origin and paths. Callers must treat `source()` diagnostics
-/// from Candle, I/O and allocation as untrusted; those may contain input text.
+/// from Candle, I/O, allocation and calibration as untrusted; those may contain input text.
 #[non_exhaustive]
 pub enum GgufInspectionError {
     UnsupportedHost,
@@ -344,6 +362,7 @@ pub enum GgufInspectionError {
     ResourceLimit { resource: &'static str, actual: u64, limit: u64 },
     ArithmeticOverflow { operation: &'static str },
     Allocation { source: TryReserveError },
+    IdentityBinding { source: GgufIdentityBindingError },
     CompanionConfig { field: &'static str },
     MissingMetadata { key: &'static str },
     MetadataType { key: String, expected: &'static str, actual: ValueType },
@@ -397,6 +416,7 @@ impl fmt::Display for GgufInspectionError {
             }
             Self::ArithmeticOverflow { operation } => write!(f, "GGUF arithmetic overflow: {}", Text(operation)),
             Self::Allocation { .. } => f.write_str("GGUF inspection scratch reservation failed"),
+            Self::IdentityBinding { .. } => f.write_str("GGUF served identity binding failed"),
             Self::CompanionConfig { field } => {
                 write!(f, "GGUF companion config cannot be represented: {}", Text(field))
             }
@@ -474,6 +494,7 @@ impl Error for GgufInspectionError {
             Self::Io { source, .. } => Some(source),
             Self::Parse { source } => Some(source),
             Self::Allocation { source } => Some(source),
+            Self::IdentityBinding { source } => Some(source),
             _ => None,
         }
     }

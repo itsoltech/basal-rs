@@ -1,5 +1,6 @@
 //! Captured companion semantics. No GGUF payload or runtime admission lives here.
 
+use std::collections::TryReserveError;
 use std::fmt;
 use std::path::Path;
 
@@ -8,7 +9,7 @@ use serde_json::Value;
 
 use super::{read_path, CompanionRole, GgufCompanionSnapshot, Sha256Digest, WeightSourceError};
 use crate::architecture::Architecture;
-use crate::calibration::CalibrationSource;
+use crate::calibration::{CalibrationIdentityError, CalibrationSource, ServedIdentity};
 use crate::manifest::{LlamaConfig, ManifestProtocol, ModelLoadOptions, ModelManifest};
 use crate::prompt::{OptionOrders, PromptFormat, PromptLayout};
 use crate::tokenize::{BasalTokenizer, TokenizerInputError};
@@ -342,6 +343,84 @@ pub enum CalibrationIdentityState {
     Checked,
 }
 
+/// Result of checking the retained calibration against a supplied logical identity.
+/// Missing fitted fields or an unknown revision can skip comparisons; this is not a match proof.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GgufCalibrationBindingOutcome {
+    NotRequired,
+    CheckedNoWarning,
+    CheckedWarning,
+}
+
+/// Exact logical identity and check result retained by the actual semantic owner.
+/// The warning, if any, belongs to that owner's manifest provenance, not this binding.
+pub struct GgufCalibrationBinding {
+    model: String,
+    revision: Option<String>,
+    outcome: GgufCalibrationBindingOutcome,
+}
+
+impl GgufCalibrationBinding {
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+    pub fn revision(&self) -> Option<&str> {
+        self.revision.as_deref()
+    }
+    pub fn outcome(&self) -> GgufCalibrationBindingOutcome {
+        self.outcome
+    }
+}
+
+/// One-shot binding refusals. Top-level text omits even externally supplied field/reason text.
+/// Allocation and calibration causes remain available through `source()` and are untrusted.
+#[derive(thiserror::Error)]
+pub enum GgufIdentityBindingError {
+    #[error("GGUF served identity is already bound")]
+    AlreadyBound,
+    #[error("invalid GGUF served identity field")]
+    InvalidField { field: &'static str, reason: &'static str },
+    #[error("GGUF served identity reservation failed")]
+    Allocation {
+        #[source]
+        source: TryReserveError,
+    },
+    #[error("GGUF calibration identity check failed")]
+    Calibration {
+        #[source]
+        source: CalibrationIdentityError,
+    },
+}
+
+impl fmt::Debug for GgufIdentityBindingError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, formatter)
+    }
+}
+
+fn validate_identity_field(value: &str, field: &'static str) -> Result<(), GgufIdentityBindingError> {
+    let reason = if value.is_empty() || value.len() > 4096 {
+        Some("expected 1..=4096 UTF-8 bytes")
+    } else if value.bytes().any(|byte| byte.is_ascii_control()) {
+        Some("ASCII control byte is forbidden")
+    } else if value.starts_with('/') || value.contains(['\\', ':']) {
+        Some("expected a logical identity without a leading slash, backslash or colon")
+    } else {
+        None
+    };
+    match reason {
+        Some(reason) => Err(GgufIdentityBindingError::InvalidField { field, reason }),
+        None => Ok(()),
+    }
+}
+
+fn copy_identity_field(value: &str) -> Result<String, GgufIdentityBindingError> {
+    let mut owned = String::new();
+    owned.try_reserve_exact(value.len()).map_err(|source| GgufIdentityBindingError::Allocation { source })?;
+    owned.push_str(value);
+    Ok(owned)
+}
+
 /// Owned, validated companions plus the actual shared manifest and tokenizer.
 ///
 /// Requires trusted local inputs. Byte quotas do not bound parser amplification,
@@ -352,6 +431,7 @@ pub struct GgufCompanionSemantics {
     tokenizer: BasalTokenizer,
     calibration: CalibrationCapture,
     identity_state: CalibrationIdentityState,
+    binding: Option<GgufCalibrationBinding>,
 }
 
 impl GgufCompanionSemantics {
@@ -425,7 +505,59 @@ impl GgufCompanionSemantics {
             CalibrationSource::File(_) => CalibrationIdentityState::Checked,
             _ => CalibrationIdentityState::NotRequired,
         };
-        Ok(Self { snapshot, manifest, tokenizer, calibration, identity_state })
+        Ok(Self { snapshot, manifest, tokenizer, calibration, identity_state, binding: None })
+    }
+
+    /// Bind once to an exact application-supplied logical model/revision and recheck provenance.
+    ///
+    /// Each present field must contain 1..=4096 UTF-8 bytes, without ASCII controls,
+    /// a leading slash, backslash or colon. Case and internal/trailing slashes are
+    /// retained exactly; no normalization or identity inference occurs. Existing
+    /// read-time identity checks do not create a binding or bypass this fresh check.
+    /// Errors leave the binding, warning and identity state unchanged. Success
+    /// preserves temperatures and certificates, including a non-strict warning.
+    ///
+    /// Input copies request at most 8192 bytes; allocator capacity/overhead and the
+    /// unchanged matcher's warning/error allocations are not covered by that limit.
+    /// This is neither semantic heap admission nor durable source/publication approval.
+    pub fn bind_served_identity(&mut self, served: ServedIdentity<'_>) -> Result<(), GgufIdentityBindingError> {
+        if self.binding.is_some() {
+            return Err(GgufIdentityBindingError::AlreadyBound);
+        }
+        validate_identity_field(served.model, "model")?;
+        if let Some(revision) = served.revision {
+            validate_identity_field(revision, "revision")?;
+        }
+        let model = copy_identity_field(served.model)?;
+        let revision = served.revision.map(copy_identity_field).transpose()?;
+        let warning = self
+            .manifest
+            .calibration_provenance
+            .check_identity(served)
+            .map_err(|source| GgufIdentityBindingError::Calibration { source })?;
+        let (outcome, identity_state) = match self.calibration.decision.mode {
+            CalibrationMode::Explicit => (
+                if warning.is_some() {
+                    GgufCalibrationBindingOutcome::CheckedWarning
+                } else {
+                    GgufCalibrationBindingOutcome::CheckedNoWarning
+                },
+                CalibrationIdentityState::Checked,
+            ),
+            CalibrationMode::Automatic | CalibrationMode::Off => {
+                (GgufCalibrationBindingOutcome::NotRequired, CalibrationIdentityState::NotRequired)
+            }
+        };
+        // All fallible work is complete; only the actual provenance owns the warning.
+        self.manifest.calibration_provenance.identity_warning = warning;
+        self.binding = Some(GgufCalibrationBinding { model, revision, outcome });
+        self.identity_state = identity_state;
+        Ok(())
+    }
+
+    /// Borrow the one-shot binding; all existing read constructors start without one.
+    pub fn calibration_binding(&self) -> Option<&GgufCalibrationBinding> {
+        self.binding.as_ref()
     }
 
     pub fn snapshot(&self) -> &GgufCompanionSnapshot {

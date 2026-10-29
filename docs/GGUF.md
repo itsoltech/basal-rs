@@ -117,12 +117,57 @@ zastąpiony wariantem nie jest przedwcześnie walidowany pod tym kątem.
 Jawny mismatch tożsamości ostrzega bez usuwania certyfikatów/temperatur;
 strict zwraca istniejący błąd. Pooled format-1 certificates pozostają bez zmian.
 
-`identity_state()` zwraca `CalibrationIdentityState`: NotRequired dla Automatic
+Po odczycie `identity_state()` zwraca `CalibrationIdentityState`: NotRequired dla Automatic
 i Off, Checked dla Explicit z podaną rzeczywistą served identity oraz Deferred
 dla Explicit bez niej, nawet przy braku fitted model. Checked nie jest obietnicą
-braku ostrzeżenia ani uwierzytelnienia pochodzenia. Przyszły runtime musi wykonać
-`calibration_provenance.check_identity(actual_served)` przed publikacją; wywołanie
-nie zapamiętuje sukcesu. Attested origin nie zastępuje served identity.
+braku ostrzeżenia ani uwierzytelnienia pochodzenia. Samo
+`calibration_provenance.check_identity(actual_served)` nie zapamiętuje wyniku.
+Attested origin nie zastępuje served identity.
+
+### Jednorazowe wiązanie logicznej served identity
+
+`GgufCompanionSemantics::bind_served_identity(&mut self, ServedIdentity<'_>)`
+zapisuje dokładny logiczny model i opcjonalną revision wraz z wynikiem kontroli
+na rzeczywistym właścicielu semantyki. `calibration_binding()` pożycza
+`Option<&GgufCalibrationBinding>`; gettery bindingu to `model()`, `revision()`
+i kopiowany `outcome()`. Binding ma prywatne pola, bez publicznego konstruktora,
+Clone, Default, serializacji, wymiany ani usuwania. Każdy dotychczasowy odczyt
+zaczyna z None, także gdy początkowe `ModelLoadOptions.served_identity` dało Checked.
+
+Najpierw odrzucany jest istniejący binding, również identyczne powtórzenie.
+Następnie w całości walidowane są model i revision, przed kopiowaniem pól.
+Każde obecne pole wymaga 1..=4096 bajtów UTF-8, bez ASCII control (także DEL),
+początkowego `/`, dowolnego `\` lub `:`. Revision None jest dozwolone, Some
+pustego stringa odrzucane. Zachowane są case, wewnętrzne i końcowe `/` oraz
+pozostałe dozwolone bajty; nie ma trimowania, normalizacji ani wnioskowania
+z basename, origin, aliasu czy basal.json. Ta opcjonalna metoda odrzuca lokalne
+ścieżki absolutne i URI; dotychczasowe API kalibracji, ServedIdentity i CLI
+zachowują wcześniejsze zachowanie.
+
+Po fallible `String::try_reserve_exact` i skopiowaniu obu pól do lokalnych
+wartości metoda ponownie wywołuje istniejący matcher na zachowanej provenance,
+także dla wcześniejszego Checked. Dopiero po sukcesie przenosi ostrzeżenie do
+rzeczywistego `manifest.calibration_provenance.identity_warning` i zapisuje
+binding oraz stan. Każdy błąd pozostawia core warning/state/binding bez zmian.
+Strict mismatch zachowuje oryginalny `CalibrationIdentityError` jako przyczynę;
+nonstrict warning nie usuwa temperatur ani rzeczywistych certyfikatów. Pozostałe
+mapy, fitted fields, wybór i read-set kalibracji pozostają bez zmian.
+
+`GgufCalibrationBindingOutcome` to NotRequired dla zachowanego Automatic/Off
+albo CheckedNoWarning/CheckedWarning dla Explicit, zgodnie z obecnością
+zwróconego ostrzeżenia. Stan Explicit po sukcesie to Checked, nigdy Deferred;
+Automatic/Off pozostaje NotRequired. Wynik oznacza wykonaną kontrolę, nie dowód
+zgodności: istniejący matcher pomija brak fitted model i porównuje revision
+tylko, gdy obie są znane. Matcher nadal porównuje końcowy komponent modelu bez
+uwzględniania case i końcowych `/`; zapisany binding zachowuje pełne wejście.
+
+Nowe kopie wejścia żądają najwyżej 8192 bajtów plus struktury. Nie jest to limit
+capacity, RSS ani admission heapu: niezmieniony matcher nadal alokuje lowercase,
+ostrzeżenia i błędy z zachowanych pól. `GgufIdentityBindingError` rozróżnia
+AlreadyBound, InvalidField, Allocation i Calibration. Top-level Display/Debug
+pomija identity, warning, ścieżki i przyczyny, także dla zewnętrznie utworzonych
+field/reason. Pola wariantu pozostają dostępne do inspekcji; `source()` zachowuje
+rzeczywistą niezaufaną przyczynę alokacji lub kalibracji bez przepisywania tekstu.
 
 ## Publiczne API
 
@@ -623,8 +668,23 @@ rehashu tego samego deskryptora przed publikacją.
 
 Brak nadal ilościowego admission całego heap semantycznego, utrzymywanych
 rezerwacji host/resident/staging, trwałej tożsamości źródła i pełnego zbioru
-wariantów kalibracji, sprawdzenia deferred provenance przed publikacją,
+wariantów kalibracji, bramki publikacji porównującej dokładny binding z faktycznie
+wybraną logiczną tożsamością i przenoszącej semantykę z zachowanym ostrzeżeniem,
 materializera i dowodu kopii/completion/error retention dla uploadu, readout,
 owned Engine/RequestPlanner/fork, CLI i runtime. API nie jest loaderem ani
 gotowością do alokacji. Nie dostarcza dowodu zgodności bitowej, FP32, jakości,
 pamięci, wydajności ani zachowania runtime GPU/Metal modelu.
+
+`GgufPayloadInspection::bind_served_identity(self, ServedIdentity<'_>)` konsumuje
+ten sam wynik payloadu. Porównuje pierwotny stamp na wejściu, mutuje rzeczywiste
+companions przez powyższą metodę i ponownie porównuje pierwotny stamp przed
+sukcesem. Zwraca tego samego właściciela File/Content/stamp/token/companions,
+zamrożonej Precision, digestu i kosztów. Nie odczytuje ani nie hashuje payloadu,
+nie otwiera plików, nie rekonstruuje tokenizera i nie odświeża stampu.
+Core error wraca od razu jako `GgufInspectionError::IdentityBinding`, bez
+maskowania dodatkowym stampem. Każdy błąd wrappera porzuca konsumowanego
+właściciela, także zmiana pliku wykryta po udanym core bindingu. Top-level
+Display/Debug nowego wariantu ma stały tekst; `source()` prowadzi do błędu core.
+Udany binding nadal nie daje trwałego fingerprintu, admission ani zgody na
+publikację. Obowiązek caller’a oraz stampy późniejszych odczytów i końcowy pełny
+rehash tego samego deskryptora pozostają wymagane.
