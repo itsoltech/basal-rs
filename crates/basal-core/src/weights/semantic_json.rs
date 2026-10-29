@@ -219,7 +219,7 @@ pub struct GgufSemanticMembers<'a> {
     remaining: usize,
 }
 impl<'a> GgufSemanticMembers<'a> {
-    pub(super) fn next_with_offset(&mut self) -> Option<(&'a str, ValueRef<'a>, usize)> {
+    fn next_edge(&mut self) -> Option<(&'a SemanticDocument, &'a Edge)> {
         if self.remaining == 0 {
             return None;
         }
@@ -227,19 +227,17 @@ impl<'a> GgufSemanticMembers<'a> {
         let edge = doc.edges.get(self.next?.0)?;
         self.next = edge.next;
         self.remaining -= 1;
+        Some((doc, edge))
+    }
+    pub(super) fn next_with_offset(&mut self) -> Option<(&'a str, ValueRef<'a>, usize)> {
+        let (doc, edge) = self.next_edge()?;
         Some((doc.text(edge.key?), doc.value(edge.value), edge.key_offset?))
     }
 }
 impl<'a> Iterator for GgufSemanticMembers<'a> {
     type Item = (&'a str, GgufSemanticValue<'a>);
     fn next(&mut self) -> Option<Self::Item> {
-        if self.remaining == 0 {
-            return None;
-        }
-        let doc = self.doc?;
-        let edge = doc.edges.get(self.next?.0)?;
-        self.next = edge.next;
-        self.remaining -= 1;
+        let (doc, edge) = self.next_edge()?;
         Some((doc.text(edge.key?), doc.value(edge.value)))
     }
     fn size_hint(&self) -> (usize, Option<usize>) {
