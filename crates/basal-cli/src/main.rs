@@ -577,7 +577,7 @@ enum Cmd {
         /// Least time the long lane works between two hand-overs to the main lane
         #[arg(long, default_value_t = 100)]
         long_slice_ms: u64,
-        /// Root long-lane share of occupied online wall time, finite `[0,1]` (overrides YAML); absent: legacy
+        /// Root long-lane share of occupied online wall time, finite `[0,1]` (overrides YAML); absent: YAML or legacy
         #[arg(long)]
         long_share: Option<f64>,
         /// One log line per HTTP request: method, status, path, time, queue and compute time (also `access_log: true`
