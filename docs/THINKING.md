@@ -287,7 +287,12 @@ gwarantuje identycznych tokenów ani wyników z vLLM. Różne harmonogramy
 prefillu i decode mogą zmieniać wyniki numeryczne. FP32 pozostaje wybieralne;
 ścieżka `inherit` zachowuje dotychczasowe kernele BF16, RoPE i SiLU.
 Opcjonalny profil powyżej ma własne kernele i wymaga pomiarów. Dotychczasowe FAIL pozostają
-FAIL; bieżąca ścieżka inkrementalna wymaga osobnej kwalifikacji runtime.
+FAIL. Ścieżkę inkrementalną zmierzono w skończonych seriach J1/J2 i J4 opisanych
+wyżej. W J2 domyślne `inherit` przy FP32 zgadza się z diagnostyką Torch FP32
+w 19/19 odpowiedzi. Parytet z vLLM pozostaje FAIL; decyzja z 2026-10-29
+akceptuje tę różnicę. Wyniki dotyczą binarek i korpusu z tych raportów.
+Split, limit generacji, błędy, przerwania, utrata urządzenia, długie obciążenie
+i Metal/macOS pozostają niezakwalifikowane.
 Nie ma zmierzonej obietnicy przyspieszenia.
 Ogólny parytet detokenizacji, stop/EOS i ich liczenia poza badanym korpusem,
 jakość, bounds i wydajność pozostają **GAP**. Czas `think.ms` pozostaje bez

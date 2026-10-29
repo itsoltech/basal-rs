@@ -338,13 +338,20 @@ tokenizer; niezgodność z obsługiwanym kontraktem promptu kończy się błęde
 Opcjonalne [wytrenowane early-exit](docs/EARLY_EXIT.md) obsługuje opublikowany
 basal-1.0-4.5B na pojedynczym CUDA z jawnym `--kernels candle --early-exit off`.
 Pominięcie `early_exit` i `exit_heads` pozostawia plain backend bez głowic.
-Polityka requestu jest izolowana; dodatnia kwalifikacja 4.5B pozostaje GAP.
+Polityka requestu jest izolowana. [Skończony pomiar CUDA FP32](reports/upstream-api-241-trained-2026-10-28/README.md)
+dał 32/32 przypadki zgodne z upstream w progu 1e-4 i potwierdził pomijanie
+warstw. Pamięć, wydajność i pozostałe konfiguracje pozostają GAP.
 
 Opcjonalne [natywne thinking](docs/THINKING.md) uruchamia generowanie i drugi
 readout na osobnym pełnym checkpoincie opublikowanego modelu 2.0 4.5B.
 `--think off` jest domyślne i nie ładuje drugiego modelu. Włączenie wymaga
-obu przypiętych checkpointów i odpowiedniej pamięci; pozytywna kwalifikacja
-runtime tej ścieżki pozostaje otwarta. `--think-numerics inherit` zachowuje
+obu przypiętych checkpointów i odpowiedniej pamięci. Skończone pomiary
+[J1/J2](reports/upstream-api-241-thinking-rebuild-2026-10-28/README.md) i
+[J4](reports/upstream-api-241-gemm-diagnostic-2026-10-29/README.md) na RTX 6000 Ada
+objęły tę ścieżkę. Parytet z upstream vLLM ma status FAIL; użytkownik
+[zaakceptował](reports/upstream-api-241-gemm-diagnostic-2026-10-29/ACCEPTANCE.md)
+te różnice. Pamięć, wydajność, ogólna jakość i inne konfiguracje pozostają
+niezakwalifikowane. `--think-numerics inherit` zachowuje
 dotychczasową numerykę (domyślnie); opt-in `upstream-bf16-pointwise` wybiera
 osobny profil BF16 tylko dla CUDA Llama think, bez gwarancji parytetu.
 Odmowy konfiguracji i deklarację obliczeń opisuje [THINKING.md](docs/THINKING.md).

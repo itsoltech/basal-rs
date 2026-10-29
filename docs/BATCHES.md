@@ -22,6 +22,10 @@ wygasnąć z częściowymi wynikami.
 Implementacja jest w trakcie kwalifikacji. Włączenie API nie włącza wykonywania
 GPU: model wymaga osobnego `batch_profile` popartego pomiarami. Bez niego można
 obsługiwać pliki i lifecycle, ale żądania nie uzyskają wyników inferencji w tle.
+Model z `validates=false` i `background_supported=false` w `/health/batches`
+(obecnie Pico) przyjmuje upload i zlecenie, ale poprawny batch pozostaje
+w `validating` do anulowania albo wygaśnięcia. [Pomiar Pico](../reports/upstream-api-241-remediation-2026-10-28/README.md)
+potwierdził start i anulowanie; nie kwalifikuje walidacji ani inferencji Batch.
 Kompilacja, próby magazynu i syntetyczne wyniki nie potwierdzają zgodności numerycznej
 ani opóźnień na GPU. Aktualne dowody magazynów:
 [PostgreSQL](../reports/batches-postgresql-store-2026-10-19/README.md),
