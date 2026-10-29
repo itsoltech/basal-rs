@@ -521,8 +521,9 @@ Kolejność odmów i odczytów jest stała:
    stringa nazwy 128 bajtów. Żądana pojemność nie jest gwarancją RSS ani OOM.
 3. Stamp przed hashem, seek tego samego File do zera i SHA-256 dokładnie
    pierwotnej długości: nagłówek, luki, padding, tensory i końcowe bajty.
-   Krótki odczyt przed EOF odmawia; jednobajtowa próba wzrostu nie jest hashowana
-   ani zachowywana. Po stampie końcowym digest musi zgadzać się z deklaracją.
+   Odczyt 0 przed pierwotną długością odmawia; dodatnie częściowe odczyty są
+   kontynuowane. Jednobajtowa próba wzrostu nie jest hashowana ani zachowywana.
+   Po stampie końcowym digest musi zgadzać się z deklaracją.
 4. Stamp przed skanem, następnie odczyt każdego zachowanego zakresu w kolejności
    trzech globalnych ról, warstw rosnąco, dziewięciu wag i siedmiu bias iff bias.
    Każdy fragment mieści się w tym samym scratch, jest wyrównany do szerokości
@@ -610,8 +611,8 @@ wyłącznie jako 64 cyfry hex), `NonFinitePayload` (ograniczona nazwa i indeks),
 `NonFiniteConversion` (także Precision), `ResidentBudget` (required/remaining)
 i `StagingBudget` (required/effective_limit, jawnie plan prowizoryczny).
 Zachowane błędy I/O/alokacji/arytmetyki/źródła utrzymują przyczyny i ograniczone
-Display/Debug, także dla wariantów utworzonych zewnętrznie. Krótki odczyt lub
-wzrost ma osobny statyczny opis fazy w `SourceChanged`.
+Display/Debug, także dla wariantów utworzonych zewnętrznie. Przedwczesny EOF
+lub wzrost ma osobny statyczny opis fazy w `SourceChanged`.
 
 REQ009 pozostaje częściowe. Zaobserwowany digest nie uwierzytelnia źródła,
 nie wymusza lease ani nie dowodzi niezmienności: racing/restored writes mogą
