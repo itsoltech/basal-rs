@@ -16,6 +16,10 @@ use serde_json::{json, Value};
 
 use crate::{GateOwners, Lineage, OnStage, Precision, Readout, StageGates};
 
+mod ple;
+pub use ple::PlePlacement;
+use ple::{HostPle, PleEmbedding};
+
 #[derive(Clone)]
 struct Layer {
     input_norm: Tensor,
@@ -45,7 +49,7 @@ struct Weights {
     norm: Option<Tensor>,
     unit_norm: Tensor,
     layers: Vec<Layer>,
-    ple_embed: Option<Tensor>,
+    ple_embed: Option<PleEmbedding>,
     ple_projection: Option<Tensor>,
     ple_norm: Option<Tensor>,
     encoders: Option<crate::gemma_encoders::Encoders>,
@@ -158,11 +162,50 @@ impl GemmaBackend {
         device: usize,
         media: bool,
     ) -> Result<Self> {
+        Self::load_with_ple(dir, cfg, precision, readout, device, media, PlePlacement::Device)
+    }
+
+    /// Backend-only opt-in; existing loaders retain device placement. Host staging is per call,
+    /// while the immutable table is shared by forks. Split loading never accepts host PLE.
+    pub fn load_with_ple(
+        dir: &std::path::Path,
+        cfg: &GemmaConfig,
+        precision: Precision,
+        readout: Readout,
+        device: usize,
+        media: bool,
+        placement: PlePlacement,
+    ) -> Result<Self> {
         cfg.validate()?;
         ensure!(cfg!(feature = "cuda"), "basal-omni currently requires the CUDA backend");
+        if let PlePlacement::Host { max_staging_bytes } = placement {
+            let (width, _) = ple::dimensions(cfg)?;
+            let (per_token, _) = HostPle::staging_coefficients(width)?;
+            ensure!(
+                max_staging_bytes >= per_token.checked_add(4).context("host PLE staging overflow")?,
+                "host PLE staging limit cannot hold one token"
+            );
+        }
         let dev = crate::gpu_device(device)?;
         ensure!(dev.is_cuda(), "basal-omni currently requires the CUDA backend");
-        Self::load_on(dir, cfg, precision, readout, dev, device, media, 0..cfg.layers.len(), Lineage::default())
+        Self::load_on(
+            dir,
+            cfg,
+            precision,
+            readout,
+            dev,
+            device,
+            media,
+            0..cfg.layers.len(),
+            Lineage::default(),
+            placement,
+        )
+    }
+
+    /// Owned host table bytes only (F16 and BF16 both use two bytes, including F32 compute).
+    /// This is not a single-device load/VRAM estimate or a bound on checkpoint mappings/scratch.
+    pub fn estimated_host_ple_bytes(cfg: &GemmaConfig) -> Result<u64> {
+        Ok(ple::dimensions(cfg)?.1)
     }
 
     #[expect(clippy::too_many_arguments, reason = "validated per-stage load placement and arithmetic")]
@@ -176,6 +219,7 @@ impl GemmaBackend {
         media: bool,
         range: Range<usize>,
         lineage: Lineage,
+        placement: PlePlacement,
     ) -> Result<Self> {
         let start = Instant::now();
         let processor = if media {
@@ -185,7 +229,7 @@ impl GemmaBackend {
         };
         let paths = basal_core::checkpoint::files(dir)?;
         // SAFETY: all checkpoint shards stay immutable for the mappings' lifetime. Mappings and readers
-        // remain local until tensors have been copied to owned device storage; loading is synchronous.
+        // remain local until weights have been copied to owned host/device storage; loading is synchronous.
         let st = unsafe { candle_core::safetensors::MmapedSafetensors::multi(&paths) }
             .context("mapping Gemma checkpoint shards")?;
         let readers = paths.iter().map(|p| crate::TensorReader::open(p)).collect::<Result<Vec<_>>>()?;
@@ -315,7 +359,17 @@ impl GemmaBackend {
             ple_embed: if packed_ple == 0 {
                 None
             } else {
-                Some(load("model.language_model.embed_tokens_per_layer.weight", &[cfg.per_layer_vocab, packed_ple])?)
+                let name = "model.language_model.embed_tokens_per_layer.weight";
+                let shape = &[cfg.per_layer_vocab, packed_ple];
+                Some(match placement {
+                    PlePlacement::Device => PleEmbedding::Device(load(name, shape)?),
+                    PlePlacement::Host { max_staging_bytes } => {
+                        crate::check(&st, name, shape)?;
+                        // Copy validated BF16 checkpoint bytes directly into owned CPU storage;
+                        // neither the reusable loader buffer nor a full-table GPU tensor is used.
+                        PleEmbedding::Host(HostPle::load(st.get(name)?.data(), cfg, precision, max_staging_bytes)?)
+                    }
+                })
             },
             ple_projection: if packed_ple == 0 {
                 None
@@ -431,6 +485,7 @@ impl GemmaBackend {
                 media && range.start == 0,
                 range,
                 lineage.clone(),
+                PlePlacement::Device,
             )?);
         }
         let mut first = built.remove(0);
@@ -863,6 +918,9 @@ impl GemmaBackend {
         ensure!(media.is_none() || batch == 1, "media batches are separate");
         let n = ids.len() / batch;
         ensure!(readouts.iter().all(|pos| *pos < n), "Gemma batch readout bounds");
+        if let Some(PleEmbedding::Host(table)) = &self.weights.get().ple_embed {
+            table.check_staging(ids.len())?;
+        }
         let (mut x, ple) = {
             let dt = self.precision.compute();
             let indices = Tensor::from_slice(ids, ids.len(), &self.dev)?;
@@ -906,12 +964,25 @@ impl GemmaBackend {
                     x = Tensor::cat(&parts, 1)?;
                 }
             }
-            let ple_indices = Tensor::from_vec(ple_ids, ids.len(), &self.dev)?;
+            let host_ple = matches!(&self.weights.get().ple_embed, Some(PleEmbedding::Host(_)));
+            // Keep the default index upload and its tensor lifetime unchanged. Host selection uses
+            // the already substituted IDs without a GPU round trip or a second host ID allocation.
+            let ple_indices = if host_ple {
+                None
+            } else {
+                Some(Tensor::from_vec(std::mem::take(&mut ple_ids), ids.len(), &self.dev)?)
+            };
 
             let ple = if let (Some(embed), Some(proj), Some(w)) =
                 (&self.weights.get().ple_embed, &self.weights.get().ple_projection, &self.weights.get().ple_norm)
             {
-                let identity = (embed.index_select(&ple_indices, 0)?.to_dtype(dt)?
+                let identity = (match embed {
+                    PleEmbedding::Device(embed) => {
+                        embed.index_select(ple_indices.as_ref().context("Gemma device PLE indices missing")?, 0)?
+                    }
+                    PleEmbedding::Host(embed) => embed.select(&ple_ids, &self.dev, &self.lineage.health)?,
+                }
+                .to_dtype(dt)?
                     * rounded((self.cfg.per_layer_input as f64).sqrt(), dt))?
                 .reshape((batch, n, self.cfg.layers.len(), self.cfg.per_layer_input))?;
                 let context = (self.linear(&x, proj)? / (self.cfg.hidden as f64).sqrt())?.reshape(identity.shape())?;
@@ -1600,6 +1671,12 @@ impl Backend for GemmaBackend {
                 "media_encoders":s.processor.is_some()})).collect::<Vec<_>>(),
                 "transfer": crate::STAGE_TRANSFER, "execution":"sequential layers; independent gates per GPU"});
         }
+        if let Some(PleEmbedding::Host(table)) = &self.weights.get().ple_embed {
+            description["ple"] = json!({"placement":"host", "host_resident_bytes":table.resident_bytes,
+                "storage_dtype":format!("{:?}", self.precision.storage()),
+                "max_staging_bytes_per_call":table.max_staging_bytes,
+                "host_row_copies_bound":2, "transfer":"selected rows; synchronous drain before layers"});
+        }
         description
     }
     fn letter_logits(&mut self, rows: &[&Packed], letters: &[&[Vec<u32>]]) -> Result<Vec<Vec<Vec<f32>>>> {
@@ -1777,7 +1854,7 @@ impl Backend for GemmaBackend {
         let mask = (QUERY_TILE * 4) as u64;
         #[cfg(feature = "cuda")]
         let mask = 0u64;
-        Some(basal_core::planner::HostStaging {
+        let mut staging = basal_core::planner::HostStaging {
             fixed: 1 << 20,
             per_token: (2 * 2 * head_dim * 4 * 2 + 64) as u64 + mask,
             per_row: 1024,
@@ -1785,7 +1862,14 @@ impl Backend for GemmaBackend {
             per_letter: 16,
             per_media_value: 4,
             per_evidence_token: 0,
-        })
+        };
+        if let Some(PleEmbedding::Host(_)) = &self.weights.get().ple_embed {
+            let width = self.cfg.layers.len().checked_mul(self.cfg.per_layer_input)?;
+            let (per_token, per_row) = HostPle::staging_coefficients(width).ok()?;
+            staging.per_token = staging.per_token.checked_add(per_token)?;
+            staging.per_row = staging.per_row.checked_add(per_row)?;
+        }
+        Some(staging)
     }
     fn device_health(&self) -> Option<basal_core::DeviceHealth> {
         Some(self.lineage.health.clone())
