@@ -15,7 +15,13 @@ use serde::de::{value::MapAccessDeserializer, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use sha2::{Digest, Sha256};
 
+mod calibration_inventory;
 mod semantics;
+pub use calibration_inventory::{
+    CallerCalibrationDirectoryLease, GgufCalibrationInventory, GgufCalibrationInventoryError, GgufCalibrationVariant,
+    GgufInventoryReadError, InventoryNameReason, InventoryOperation, InventoryPhase, InventoryReadMismatch,
+    InventoryResource, InventoryStampField,
+};
 pub use semantics::{
     CalibrationCapture, CalibrationDecision, CalibrationIdentityState, CalibrationMode, CalibrationProbe,
     CalibrationProbeRole, CalibrationReadRole, CapturedCalibrationFile, GgufCalibrationBinding,

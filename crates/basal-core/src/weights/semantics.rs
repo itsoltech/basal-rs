@@ -7,6 +7,10 @@ use std::path::Path;
 use anyhow::{bail, ensure, Context};
 use serde_json::Value;
 
+use super::calibration_inventory::{
+    CallerCalibrationDirectoryLease, GgufCalibrationInventory, GgufCalibrationInventoryError, GgufInventoryReadError,
+    InventoryPhase, InventoryReadMismatch, InventoryResource,
+};
 use super::{read_path, CompanionRole, GgufCompanionSnapshot, Sha256Digest, WeightSourceError};
 use crate::architecture::Architecture;
 use crate::calibration::{CalibrationIdentityError, CalibrationSource, ServedIdentity};
@@ -333,6 +337,212 @@ impl CalibrationCapture {
         self.selected = Some(slot);
         Ok((data, sha256.to_string()))
     }
+
+    /// Cross-bind only this constructor's actual private slots and observations.
+    /// No path reads, matcher calls or parsing of unused inventory members.
+    fn bind_inventory(
+        &self,
+        inventory: &mut GgufCalibrationInventory,
+        manifest: &ModelManifest,
+    ) -> Result<(), GgufCalibrationInventoryError> {
+        use CalibrationProbeRole as Probe;
+        use CalibrationReadRole as Role;
+        use GgufCalibrationInventoryError as Error;
+        let decision = &self.decision;
+        let mismatch = |role, reason| Error::ReadSetMismatch { role, reason };
+        let preference = self.inventory_probe(Probe::LayoutPreference)?;
+        let candidate = self.inventory_probe(Probe::Candidate)?;
+        let orders = self.inventory_probe(Probe::OrdersVariant)?;
+        let needs_preference = decision.mode != CalibrationMode::Explicit && decision.layout != PromptLayout::Canonical;
+        if preference.is_some() != needs_preference {
+            return Err(Error::ProbeMismatch { role: Probe::LayoutPreference });
+        }
+        let automatic = decision.mode == CalibrationMode::Automatic;
+        if candidate.is_some() != automatic {
+            return Err(Error::ProbeMismatch { role: Probe::Candidate });
+        }
+        let replacement = automatic
+            && decision.initial_layout == LayoutCheck::NoMismatch
+            && matches!(decision.initial_orders, OrdersCheck::Mismatch(_));
+        if orders.is_some() != replacement {
+            return Err(Error::ProbeMismatch { role: Probe::OrdersVariant });
+        }
+        let variant = match orders {
+            None => OrdersVariantDecision::NotConsidered,
+            Some(false) => OrdersVariantDecision::ProbeFalse,
+            Some(true) => OrdersVariantDecision::Selected,
+        };
+        if decision.variant != variant {
+            return Err(mismatch(Role::OrdersVariant, InventoryReadMismatch::Decision));
+        }
+        let expected_roles = match decision.mode {
+            CalibrationMode::Off => [None, None],
+            CalibrationMode::Explicit => [Some(Role::Explicit), None],
+            CalibrationMode::Automatic => {
+                if candidate == Some(true) {
+                    [Some(Role::Candidate), (orders == Some(true)).then_some(Role::OrdersVariant)]
+                } else {
+                    if orders.is_some() {
+                        return Err(mismatch(Role::OrdersVariant, InventoryReadMismatch::Mode));
+                    }
+                    [None, None]
+                }
+            }
+        };
+        let mut name = inventory_name_scratch()?;
+        automatic_inventory_name(&mut name, decision.layout, preference == Some(true));
+        let base_length = name.len();
+        // Slot order is the actual read order; equal content never merges roles.
+        for (file, expected) in self.files.iter().zip(expected_roles) {
+            if file.as_ref().map(|file| file.role) != expected {
+                return Err(mismatch(expected.unwrap_or(Role::Candidate), InventoryReadMismatch::Structure));
+            }
+            let Some(file) = file else { continue };
+            match file.role {
+                Role::Candidate | Role::OrdersVariant => {
+                    if file.role == Role::OrdersVariant {
+                        orders_inventory_name(&mut name, base_length, decision.orders)?;
+                    }
+                    let index = inventory.find(&name).ok_or(mismatch(file.role, InventoryReadMismatch::Name))?;
+                    let entry = &inventory.entries()[index];
+                    if file.bytes.len() != entry.bytes().len()
+                        || file.sha256 != entry.sha256()
+                        || file.bytes.as_slice() != entry.bytes()
+                    {
+                        return Err(mismatch(file.role, InventoryReadMismatch::Content));
+                    }
+                    inventory.bind_read(file.role, index);
+                }
+                Role::Explicit => {
+                    // Separate actual evidence, even when the path aliases a member.
+                    // No membership inference or additional override buffer/read.
+                    let length = u64::try_from(file.bytes.len())
+                        .map_err(|_| mismatch(Role::Explicit, InventoryReadMismatch::Content))?;
+                    if length > MAX_CALIBRATION_BYTES || file.sha256 != Sha256Digest::of(&file.bytes) {
+                        return Err(mismatch(Role::Explicit, InventoryReadMismatch::Content));
+                    }
+                }
+            }
+        }
+        if preference.is_some() {
+            automatic_inventory_name(&mut name, decision.layout, true);
+            check_inventory_probe(inventory, &name, Probe::LayoutPreference, preference)?;
+        }
+        automatic_inventory_name(&mut name, decision.layout, preference == Some(true));
+        check_inventory_probe(inventory, &name, Probe::Candidate, candidate)?;
+        if orders.is_some() {
+            orders_inventory_name(&mut name, base_length, decision.orders)?;
+            check_inventory_probe(inventory, &name, Probe::OrdersVariant, orders)?;
+        }
+        let expected_selected = if expected_roles[1].is_some() {
+            Some(1)
+        } else if expected_roles[0].is_some() {
+            Some(0)
+        } else {
+            None
+        };
+        if self.selected != expected_selected {
+            return Err(Error::SelectedMismatch);
+        }
+        let selected = self.selected.and_then(|slot| self.files.get(slot)).and_then(Option::as_ref);
+        let provenance = &manifest.calibration_provenance;
+        let digest = provenance
+            .content_sha256
+            .as_deref()
+            .map(str::parse::<Sha256Digest>)
+            .transpose()
+            .map_err(|_| Error::SelectedMismatch)?;
+        if selected.map(|file| file.sha256) != digest
+            || provenance.explicit != (decision.mode == CalibrationMode::Explicit)
+            || provenance.off != (decision.mode == CalibrationMode::Off)
+            || provenance.strict != decision.strict
+        {
+            return Err(Error::SelectedMismatch);
+        }
+        // NotEvaluated remains distinct from an evaluated absence or mismatch.
+        if decision.initial_layout == LayoutCheck::NotEvaluated
+            || decision.selected_layout == LayoutCheck::NotEvaluated
+            || (decision.initial_layout == LayoutCheck::Mismatch
+                && decision.initial_orders != OrdersCheck::NotEvaluated)
+            || (decision.selected_layout == LayoutCheck::Mismatch
+                && decision.selected_orders != OrdersCheck::NotEvaluated)
+            || (decision.selected_layout == LayoutCheck::NoMismatch
+                && decision.selected_orders == OrdersCheck::NotEvaluated)
+            || (!automatic && decision.initial_orders != OrdersCheck::NotEvaluated)
+            || (automatic
+                && decision.initial_layout == LayoutCheck::NoMismatch
+                && decision.initial_orders == OrdersCheck::NotEvaluated)
+            || (variant != OrdersVariantDecision::Selected && decision.selected_layout != decision.initial_layout)
+        {
+            return Err(mismatch(Role::Candidate, InventoryReadMismatch::Decision));
+        }
+        Ok(())
+    }
+
+    fn inventory_probe(&self, role: CalibrationProbeRole) -> Result<Option<bool>, GgufCalibrationInventoryError> {
+        let probe = self.decision.probes[role as usize];
+        if probe.is_some_and(|probe| probe.role != role) {
+            return Err(GgufCalibrationInventoryError::ProbeMismatch { role });
+        }
+        Ok(probe.map(|probe| probe.exists))
+    }
+}
+
+fn inventory_name_scratch() -> Result<String, GgufCalibrationInventoryError> {
+    let mut name = String::new();
+    name.try_reserve_exact(128).map_err(|source| GgufCalibrationInventoryError::Allocation { source })?;
+    let actual = u64::try_from(name.capacity())
+        .map_err(|_| GgufCalibrationInventoryError::Arithmetic { resource: InventoryResource::BindingNameCapacity })?;
+    if actual > 256 {
+        return Err(GgufCalibrationInventoryError::Limit {
+            resource: InventoryResource::BindingNameCapacity,
+            actual,
+            limit: 256,
+        });
+    }
+    Ok(name)
+}
+
+fn automatic_inventory_name(name: &mut String, layout: PromptLayout, preferred: bool) {
+    name.clear();
+    name.push_str("CALIBRATION");
+    if preferred {
+        name.push('.');
+        name.push_str(layout.as_str());
+    }
+    name.push_str(".json");
+}
+
+fn orders_inventory_name(
+    name: &mut String,
+    base_length: usize,
+    orders: OptionOrders,
+) -> Result<(), GgufCalibrationInventoryError> {
+    use fmt::Write;
+    // At most CALIBRATION.state_twice.o2le<20 decimal digits>.json on the
+    // admitted 64-bit host, well within the pre-reserved 128 bytes. Formatting
+    // only these closed enum/integer values cannot grow that buffer.
+    let stem_length = base_length.checked_sub(".json".len()).ok_or(GgufCalibrationInventoryError::ReadSetMismatch {
+        role: CalibrationReadRole::OrdersVariant,
+        reason: InventoryReadMismatch::Name,
+    })?;
+    name.truncate(stem_length);
+    write!(name, ".o{orders}.json").map_err(|_| GgufCalibrationInventoryError::ReadSetMismatch {
+        role: CalibrationReadRole::OrdersVariant,
+        reason: InventoryReadMismatch::Name,
+    })
+}
+
+fn check_inventory_probe(
+    inventory: &GgufCalibrationInventory,
+    name: &str,
+    role: CalibrationProbeRole,
+    exists: Option<bool>,
+) -> Result<(), GgufCalibrationInventoryError> {
+    if exists.is_some_and(|exists| exists != inventory.find(name).is_some()) {
+        return Err(GgufCalibrationInventoryError::ProbeMismatch { role });
+    }
+    Ok(())
 }
 
 /// Explicit files without actual served identity must still be checked by a later runtime.
@@ -432,9 +642,39 @@ pub struct GgufCompanionSemantics {
     calibration: CalibrationCapture,
     identity_state: CalibrationIdentityState,
     binding: Option<GgufCalibrationBinding>,
+    calibration_inventory: Option<GgufCalibrationInventory>,
 }
 
 impl GgufCompanionSemantics {
+    /// Capture the complete bounded calibration namespace before the unchanged
+    /// semantic read, then cross-bind its actual reads, reached probes and selected
+    /// provenance. The caller must hold the arrangement documented by the lease
+    /// through success/error return. Matching symlinks/nonregular files and every
+    /// invalid UTF-8 directory entry are refused on this opt-in route.
+    ///
+    /// Successful local capacity caps do not prevent transient allocation excess,
+    /// OS path/name allocations or semantic/tokenizer amplification. This is not
+    /// held admission, an acquired guard, durable identity or loader readiness.
+    pub fn read_with_calibration_inventory(
+        directory: &Path,
+        options: ModelLoadOptions<'_>,
+        lease: CallerCalibrationDirectoryLease,
+    ) -> Result<Self, GgufInventoryReadError> {
+        let (mut inventory, handle) = GgufCalibrationInventory::capture(directory, lease)?;
+        let mut semantics =
+            Self::read(directory, options).map_err(|source| GgufInventoryReadError::Semantic { source })?;
+        semantics.calibration.bind_inventory(&mut inventory, &semantics.manifest)?;
+        inventory.check_directory(&handle, InventoryPhase::BeforeInstall)?;
+        // Atomic install after all fallible work; no retrofit to older owners.
+        semantics.calibration_inventory = Some(inventory);
+        Ok(semantics)
+    }
+
+    /// Borrow conditional membership evidence; legacy constructors return None.
+    pub fn calibration_inventory(&self) -> Option<&GgufCalibrationInventory> {
+        self.calibration_inventory.as_ref()
+    }
+
     /// Capture once, then parse those bytes. Only selected calibration opens extra files.
     /// No GGUF file, device, model execution or companion path reload is involved.
     pub fn read(directory: &Path, options: ModelLoadOptions<'_>) -> Result<Self, GgufSemanticError> {
@@ -505,7 +745,15 @@ impl GgufCompanionSemantics {
             CalibrationSource::File(_) => CalibrationIdentityState::Checked,
             _ => CalibrationIdentityState::NotRequired,
         };
-        Ok(Self { snapshot, manifest, tokenizer, calibration, identity_state, binding: None })
+        Ok(Self {
+            snapshot,
+            manifest,
+            tokenizer,
+            calibration,
+            identity_state,
+            binding: None,
+            calibration_inventory: None,
+        })
     }
 
     /// Bind once to an exact application-supplied logical model/revision and recheck provenance.

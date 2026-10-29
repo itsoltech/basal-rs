@@ -100,7 +100,7 @@ sprawdzić jeden wariant `.o<orders>.json`; wybrany wariant zastępuje kandydata
 także przy niezgodnym layout, bez powrotu. Explicit czyta dokładnie podaną
 ścieżkę, także poza katalogiem; brak i błędny plik są błędami bez fallbacku.
 Off nie czyta plików, ale dla niekanonicznego layout może wykonać dotychczasowy
-probe preferowanego pliku. Nie ma skanowania ani hashowania wszystkich wariantów.
+probe preferowanego pliku. Sam `read` nie skanuje ani nie hashuje wszystkich wariantów.
 
 `decision()` pożycza `CalibrationDecision`: mode, efektywny layout/orders/prompt,
 strict, rzeczywiście osiągnięte initial/selected layout/orders checks, decyzję
@@ -168,6 +168,111 @@ AlreadyBound, InvalidField, Allocation i Calibration. Top-level Display/Debug
 pomija identity, warning, ścieżki i przyczyny, także dla zewnętrznie utworzonych
 field/reason. Pola wariantu pozostają dostępne do inspekcji; `source()` zachowuje
 rzeczywistą niezaufaną przyczynę alokacji lub kalibracji bez przepisywania tekstu.
+
+### Opcjonalne zachowanie pełnej przestrzeni nazw kalibracji
+
+`GgufCompanionSemantics::read_with_calibration_inventory(directory, options, lease)`
+na 64-bitowym little-endian Linux/macOS najpierw zachowuje pełną ograniczoną
+przestrzeń nazw kalibracji, potem wywołuje dotychczasowy `read` dokładnie raz.
+Po jego sukcesie wiąże inventory z rzeczywistymi odczytami, osiągniętymi probes
+i wybranym digestem manifestu, sprawdza pierwotny stamp katalogu i dopiero wtedy
+zapisuje inventory na tym samym właścicielu. Błąd porzuca cały częściowy wynik.
+Nie ma operacji dołączania nowego inventory do wcześniej odczytanej semantyki.
+
+`CallerCalibrationDirectoryLease::acknowledge_trusted_local_contract()` potwierdza
+rzeczywiste zewnętrzne wykluczenie zapisów, zapewnione **przed wejściem** i utrzymane
+przez caller’a do zwrotu sukcesu lub błędu. Osobno obejmuje członkostwo katalogu
+(tworzenie, usuwanie, rename, exchange i zastępowanie), rozwiązywanie katalogu,
+root i ancestors oraz zapisy treści/metadanych przez inne deskryptory, procesy,
+aliasy, hardlinki i writable mmap. Jawny override wymaga osobnego pokrycia jego
+ścieżki i celu, również poza katalogiem. Companions nadal wymagają zaufania według
+wcześniejszego kontraktu. Gdy caller nie potrafi zapewnić tego układu, musi odmówić
+użycia tej ścieżki. Token nie uzyskuje blokady i nie produkuje snapshotu.
+
+Caller musi wcześniej ustalić, że Explicit rozwiązuje się do zaufanego regularnego
+pliku. Dziedziczony odczyt otwiera go przed kontrolą typu; FIFO naruszające ten
+warunek może blokować. Explicit nadal może być symlinkiem do regularnego celu,
+objętym rzeczywistym wykluczeniem zmian rozwiązywania i treści. Nie dodano probe
+override ani gwarancji wrogiego systemu plików, czasu wykonania czy odporności
+na niekooperującego writer’a. Stampy dev/ino/typ/długość/mtime/ctime nie obejmują
+atime odczytów; równe obserwacje nie zastępują rzeczywistego wykluczenia.
+
+| Zasób nowego inventory | Stały limit / polityka |
+|---|---|
+| Jedno nierekurencyjne przejście katalogu do EOF | 4096 wszystkich wpisów, także niedopasowanych; 4097. odmawia |
+| Nazwy spełniające dokładnie `starts_with("CALIBRATION") && ends_with(".json")` | 256 wpisów, 255 bajtów UTF-8 na nazwę i 64 KiB sumy długości; case i bajty zachowane bez normalizacji |
+| Typy i kodowanie | Każdy nie-UTF-8 wpis katalogu odrzucany, także niedopasowany; matching symlinki i inne nieregularne wpisy odrzucane przed open; duplikaty po sortowaniu odrzucane |
+| Początkowe długości i pomyślnie zachowane capacities bajtów | 64 MiB na plik, 128 MiB łącznie, osobno dla długości i capacities |
+| Nowe metadane i scratch | Capacity wektora rekordów razy rozmiar rekordu plus capacities Stringów do 256 KiB; scratch odczytu 8192 bajtów, jeden bajt EOF, jeden hash i otwarty plik naraz; ponownie używany String nazw cross-binding żąda 128 bajtów, przyjmuje capacity do 256 |
+
+To świadomie węższa polityka nowego opt-in: symlinkowane pliki kalibracji,
+np. w układzie cache HF, są odrzucane. Dotychczasowe `read` i profile zachowują
+wcześniejsze reguły symlinków/nazw. Limity nie mają zmierzonego pokrycia paczek.
+Nie ma cichego skracania, deduplikacji, lossy decoding ani pustego sukcesu po błędzie.
+Puste `entries()` oznacza ukończony pusty zbiór; `calibration_inventory() == None`
+w dotychczasowych konstruktorach oznacza, że pełnego zbioru nigdy nie zachowano.
+
+Kolejność błędów jest jawna: host, otwarty katalog/pierwotny stamp, rezerwacja,
+ograniczona enumeracja; traversal/I/O/alokacja przerywają od razu. Po EOF
+pierwszeństwo mają niepoprawny UTF-8, limit pojedynczej nazwy, liczby matching
+i sumy nazw; potem sort bajtowy i duplikaty. Pliki są sprawdzane i czytane w tej
+kolejności: symlink_metadata/typ/długość, budżet, open/zgodność pierwotnego stampu,
+fallible reserve/actual capacity, dokładny odczyt/hash, próba EOF i stamp tego
+samego fd. Krótkie odczyty są kontynuowane, Interrupted ponawiane tylko w nowych
+odczytach capture; wczesny EOF lub wzrost odmawia. Stamp nie jest odświeżany.
+Po stampie katalogu następuje istniejący odczyt semantyki; jego błąd, także strict,
+wraca bez późniejszego stampu maskującego przyczynę. Dopiero sukces przechodzi
+cross-binding i ostatni stamp katalogu. Deskryptor katalogu pozostaje otwarty
+przez całą operację. Kolejność błędów OS nie jest deterministycznie gwarantowana.
+
+`GgufCalibrationInventory::entries()` pożycza posortowane rekordy
+`GgufCalibrationVariant` z getterami `name()`, `bytes()` i typowanym `sha256()`.
+`entry_for_read(Candidate|OrdersVariant)` pożycza osobno powiązane rekordy,
+także gdy mają identyczne bajty. Nazwy wynikają wyłącznie z zachowanych
+layout/orders i osiągniętych probes. Każdy osiągnięty true/false musi zgadzać
+się z obecnością dokładnej nazwy w pełnym zbiorze. Automatic wiąże długość,
+bajty i digest rzeczywistych slotów; digest wybranego slotu musi odpowiadać
+rzeczywistej provenance manifestu. Explicit zachowuje osobny rzeczywisty odczyt,
+również przy aliasie wpisu; `entry_for_read(Explicit)` zawsze zwraca None.
+Off nie ma wybranego odczytu/digestu, lecz jego osiągnięty probe preferencji
+layout też jest sprawdzany. Missing, NotEvaluated i NotConsidered pozostają
+odrębne; nieosiągnięte warianty nie otrzymują wymyślonych wyników probes.
+
+Nieużywane warianty nie są parsowane. Cross-binding nie wywołuje exists, nie
+otwiera ponownie ścieżek, nie zmienia wyboru, fitted fields, wartości kalibracji,
+certyfikatów, ostrzeżeń ani matchera. Served binding nadal zaczyna od None.
+Inventory ma prywatne pola, bez publicznego konstruktora, Clone, Default,
+serializacji, mutacji czy into_parts. Cały wzbogacony właściciel companions
+przechodzi już przez istniejące inspekcje GPU bez zmiany ich wrapperów.
+
+`GgufInventoryReadError::Inventory` zachowuje typowany
+`GgufCalibrationInventoryError`, a `Semantic` oryginalny `GgufSemanticError`.
+Inventory rozróżnia host, I/O/operację, katalog, nazwę, limit/zasób, duplikat,
+nieregularny wpis, zmianę stampu/fazę/pole, alokację, arytmetykę, read-set,
+probe i selected provenance. Top-level Display/Debug obu błędów ma stały,
+ograniczony tekst także dla zewnętrznie skonstruowanych wariantów; nie wypisuje
+nazw, ścieżek, JSON, identity, warning ani zagnieżdżonych przyczyn. `source()`
+zachowuje rzeczywiste niezaufane przyczyny I/O, rezerwacji i semantyki.
+
+Wybrane i zastąpione bajty są celowo przechowywane ponownie: inventory oraz
+rzeczywiste odczyty selektora mają osobne bufory. Suma surowych logicznych
+długości wynosi najwyżej 384 MiB + 64 KiB deklaracji, plus nowe metadane/scratch
+i istniejące obiekty semantyczne. Nie jest to limit capacities całego właściciela,
+szczytu/RSS, OOM ani admission. Actual capacity jest sprawdzana **po** fallible
+reserve, więc chwilowa nadmiarowa alokacja może już wystąpić. Alokacje OS
+enumeracji/nazw/ścieżek, narzut allocatora i amplifikacja JSON/tokenizera są poza
+tym rachunkiem. Nie zadeklarowano poprawy pamięci ani wydajności.
+
+Po zwrocie kalibracja używa zachowanych bajtów, więc jej zewnętrzny guard może
+się zakończyć. Inventory opisuje chroniony przedział capture, nie aktualny stan
+ścieżek. Niezależny obowiązek no-writer GGUF trwa przez końcowe odczyty/rehash
+i publikację. Warunkowe świadectwo członkostwa nie daje autentyczności,
+snapshotu, trwałej tożsamości, loadera, admission ani uprawnień publikacji.
+REQ009 pozostaje częściowe: otwarte są utrzymywane admission przed alokacjami,
+rzeczywista trwała tożsamość źródła/numeryki, materializer/upload/completion
+i error retention, owned konsumenci, readout/CLI/runtime. Domyślne zachowanie,
+numeryka, legacy fingerprint i zaakceptowany thinking FAIL pozostają bez zmian;
+nie dodano nowego źródła fused/split/Intel/CPU/media/evidence/exits/thinking.
 
 ## Publiczne API
 
@@ -320,14 +425,15 @@ uploadu. Przed obietnicą ograniczonego host preflight trzeba uwzględnić żywe
 alokacje parserów/tokenizera w budżecie hosta albo osobno zweryfikować parse
 quotas; mnożnik rozmiaru pliku nie dowodzi takiego ograniczenia.
 
-Każdy rzeczywiście czytany plik kalibracji ma limit 64 MiB, najwyżej dwa odczyty
+W podstawowym `read` każdy rzeczywiście czytany plik kalibracji ma limit 64 MiB, najwyżej dwa odczyty
 i razem 128 MiB. Companions z kalibracją mają wspólny limit 256 MiB, a deklaracja
 osobno 64 KiB. Jeden licznik zaczyna od sprawdzonej sumy rzeczywistych długości
 pięciu companions S; jego granica to `min(S.checked_add(128 MiB)?, 256 MiB)`.
 Kalibracja używa tego samego czytnika i obciąża sumę przed rezerwacją; opłata za
 zastąpionego kandydata nie znika. Łączne zachowane długości raw to najwyżej
 256 MiB + 64 KiB, z możliwym narzutem capacity/allocatora oraz dodatkowymi
-strukturami semantycznymi. Nie ma cichej kopii całych zachowanych buforów.
+strukturami semantycznymi. Opcjonalne inventory dodaje osobne, jawnie opisane
+wyżej bufory do 128 MiB; podstawowy `read` ich nie tworzy.
 Konstrukcja tokenizera przejściowo posiada Value, znormalizowany string i obiekt
 zależności; audyt bazowego vocab tworzy też przejściową kopię mapy z API zależności.
 Na błędzie częściowy wynik jest odrzucany, a bufory zwalniane normalnie.
@@ -354,16 +460,17 @@ Opisane niżej API GPU sprawdza nagłówek, metadane oraz inventory i zakresy
 tensorów tego samego otwartego GGUF. Dalszy preflight musi zweryfikować payload
 i jego finitość, digest tego samego pliku, niezmienność źródła oraz jawne budżety
 pamięci. Musi też zachować późniejsze granice ID żądań. API semantyczne
-zamyka wyłącznie opisany etap companions/wybranej kalibracji. Nie definiuje
-fingerprintu całego źródła ani trwałego inventory wszystkich wariantów kalibracji.
-Późniejsza tożsamość musi wiązać również zastąpionego kandydata, wybrany digest,
-tryb/protokół oraz rzeczywiście wykonane decyzje/probes, bez lokalnych ścieżek.
+zamyka opisany etap companions/wybranej kalibracji, a nowe opt-in dodaje
+warunkowo zachowany pełny zbiór wariantów. Nie definiuje fingerprintu całego
+źródła ani trwałej tożsamości. Późniejsza tożsamość musi wiązać również pełne
+nazwy/digests inventory, zastąpionego kandydata, wybrany digest, tryb/protokół
+oraz rzeczywiście wykonane decyzje/probes, bez lokalnych ścieżek.
 
 Przyszłe konstruktory Engine i RequestPlanner muszą przejąć zwalidowany tokenizer
 wraz z manifestem. Obecny `Engine::fork` ponownie używa konstruktora ścieżkowego
 i wymaga osobnego dostosowania. Nowa ścieżka nie może otwierać companions przez
 `manifest.dir`, zachowując stare hashe. Ownership workerów, source lease/snapshot,
-host/device/staging budgets, warianty, materializacja, CLI/runtime i kwalifikacja
+host/device/staging budgets, trwała tożsamość wariantów, materializacja, CLI/runtime i kwalifikacja
 numeryczna pozostają otwarte. Nie potwierdzono dystrybucji modeli, zgodności
 bitowej, wyników FP32, runtime GPU ani nowej akceptacji thinking.
 
@@ -667,8 +774,9 @@ i publikację. Przyszłe odczyty wymagają własnych stampów i końcowego pełn
 rehashu tego samego deskryptora przed publikacją.
 
 Brak nadal ilościowego admission całego heap semantycznego, utrzymywanych
-rezerwacji host/resident/staging, trwałej tożsamości źródła i pełnego zbioru
-wariantów kalibracji, bramki publikacji porównującej dokładny binding z faktycznie
+rezerwacji host/resident/staging, trwałej tożsamości źródła wykorzystującej pełny
+warunkowo zachowany zbiór wariantów kalibracji, bramki publikacji porównującej
+dokładny binding z faktycznie
 wybraną logiczną tożsamością i przenoszącej semantykę z zachowanym ostrzeżeniem,
 materializera i dowodu kopii/completion/error retention dla uploadu, readout,
 owned Engine/RequestPlanner/fork, CLI i runtime. API nie jest loaderem ani
