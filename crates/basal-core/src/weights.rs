@@ -249,16 +249,9 @@ impl GgufDeclaration {
         }
         let origin = data.origin.0;
         let mut safetensors = Vec::new();
-        let inventory_bytes = origin.safetensors.len().checked_mul(std::mem::size_of::<OriginSafetensor>()).ok_or(
-            WeightSourceError::ResourceLimit {
-                role: DECLARATION,
-                limit: MAX_DECLARATION_BYTES,
-                reason: "origin inventory allocation size overflows",
-            },
-        )?;
         safetensors.try_reserve_exact(origin.safetensors.len()).map_err(|source| WeightSourceError::Allocation {
             role: DECLARATION,
-            bytes: inventory_bytes,
+            bytes: origin.safetensors.len().saturating_mul(std::mem::size_of::<OriginSafetensor>()),
             source,
         })?;
         for Object(entry) in origin.safetensors {
