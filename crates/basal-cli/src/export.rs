@@ -85,7 +85,7 @@ pub fn export<B: Backend>(
                     })
                     .collect();
                 line["items"] = json!(items);
-                // The served answer: questions of the request in one shared-prefix row (Engine::request_batching).
+                // The served answer uses Engine::request_batching (Tree by default, Budget with SOAM off).
                 // Its distributions are compared with the per-question forwards above.
                 let answer = match engine.decide_as(&case["request"], dialect) {
                     Ok(a) => a,

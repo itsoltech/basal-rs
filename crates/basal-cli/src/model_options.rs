@@ -13,8 +13,29 @@ use clap::Args;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+/// Cross-branch prefix packing; option orders within one primitive branch stay packed together.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Soam {
+    On,
+    Off,
+}
+
+impl Soam {
+    pub(crate) fn batching(self) -> basal_core::Batching {
+        match self {
+            Self::On => basal_core::Batching::Tree,
+            Self::Off => basal_core::Batching::Budget,
+        }
+    }
+}
+
 #[derive(Args, Clone, Default, Deserialize)]
 pub(crate) struct ModelOptions {
+    /// Cross-branch prefix packing: on (default) or off (separate packed primitive rows; whole-request queue)
+    #[arg(long, value_enum)]
+    #[serde(default)]
+    pub soam: Option<Soam>,
     /// Opt in to trained exits: off (head-capable full depth) or a policy from thresholds.json
     #[arg(long)]
     #[serde(default)]
@@ -79,7 +100,8 @@ pub(crate) struct ModelOptions {
 
 impl ModelOptions {
     pub(crate) fn is_set(&self) -> bool {
-        self.early_exit.is_some()
+        self.soam.is_some()
+            || self.early_exit.is_some()
             || self.exit_heads.is_some()
             || self.think.is_some()
             || self.think_numerics.is_some()
@@ -97,6 +119,9 @@ impl ModelOptions {
     }
     /// Explicit shared CLI values override per-model YAML; one calibration source replaces the other.
     pub(crate) fn apply_cli(&mut self, cli: &Self) {
+        if cli.soam.is_some() {
+            self.soam = cli.soam;
+        }
         if cli.early_exit.is_some() {
             self.early_exit.clone_from(&cli.early_exit);
         }
@@ -138,6 +163,10 @@ impl ModelOptions {
         if cli.truncate_head.is_some() {
             self.truncate_head = cli.truncate_head;
         }
+    }
+
+    pub(crate) fn request_batching(&self) -> basal_core::Batching {
+        self.soam.unwrap_or(Soam::On).batching()
     }
 
     pub(crate) fn overflow(&self) -> Result<OverflowSettings> {

@@ -805,7 +805,8 @@ writer lub błąd zapisu daje 500. Zawartość i lifecycle:
 | `device` | 0 | GPU modelu: indeks urządzenia CUDA widoczny dla procesu; modele z tym samym `device` dzielą GPU, z różnymi liczą jednocześnie; Metal i Intel: tylko 0 |
 | `replica_devices` | | CUDA: repliki modelu pod jedną nazwą, po jednej na każdy podany indeks (różne karty jednego typu); zamiast `device`; kilka wymaga `gemm_table` `auto` albo ścieżki: Llama wspólnej tabeli niezależnej od partii, Omni bez pasującej tabeli używa stałych GEMM per prompt |
 | `layer_split` | | CUDA, Llama oraz Gemma bez współdzielonego KV/PLE: jeden model na kilku kartach jednego typu, lista `{device, layers}` w kolejności warstw (co najmniej dwa etapy na różnych kartach, suma równa liczbie warstw modelu); wymaga `dtype` f16 (`auto` dla Llamy to f16); zamiast `device` i `replica_devices`; Gemma wymaga jawnego f16 i dense `none`; tekst i obrazy z enkoderem na pierwszej karcie; opis wyżej |
-| `max_batch_tokens` | 8192 | tokeny jednej partii, liczone po współdzieleniu prefiksów |
+| `soam` | `on` | `on`: dotychczasowy Tree; `off`: osobny spakowany wiersz każdej gałęzi prymitywnej (Budget), kolejka nadal całymi żądaniami |
+| `max_batch_tokens` | 8192 | tokeny jednej partii: trie przy SOAM-on, suma spakowanych wierszy gałęzi przy off |
 | `max_batch` | brak | dodatni limit kompletnych żądań w jednej partii; niezależnie dla głównego i długiego toru |
 | `wait_ms` | brak | skończone nieujemne milisekundy stałego okna zbierania głównego toru |
 | `batch_window_ms` | brak | skończone nieujemne milisekundy okna adaptacyjnego głównego toru; `0` wyłącza adaptacyjne czekanie |
@@ -813,13 +814,44 @@ writer lub błąd zapisu daje 500. Zawartość i lifecycle:
 | `long_tokens` | 4096 | żądania powyżej tej liczby tokenów idą do toru długich żądań, który oddaje GPU krótkim partiom między warstwami; `0` wyłącza |
 | `state_cache_mb` | 0 | cache K/V stanu między żądaniami |
 
+`--soam on|off` nadpisuje per-model YAML `soam` tylko przy jawnym podaniu.
+Brak opcji i `on` zachowują dotychczasowy Tree, wybór backendu, plan numeryczny
+i tożsamość modelu. `off` wybiera `Budget`, zachowując razem wszystkie option
+orders jednej gałęzi `Prepared`, także ich wspólny prefiks. Nie współdzieli
+wiersza drzewa pomiędzy gałęziami ani żądaniami. Niezależne `state_cache_mb`
+i cache stałych prefiksów szablonu zachowują swoje ustawienia.
+
+W `off` koszt HRRN, próg `long_tokens`, admission obu torów i podgląd kolekcji
+sumują rzeczywiste `Prepared.packed.ids.len()` bez deduplikacji. Przepełnienie
+nie może zawinąć kosztu do małej liczby ani wpuścić kolejnego żądania. Kolejka,
+`max_batch` i długi tor nadal obejmują całe żądania. To etap S2a obejmujący
+packing i rachunek kosztu: **REQ-003 pozostaje częściowe** do S2b, które wydzieli
+wpisy gałęzi prymitywnych i postęp rund, oraz kwalifikacji runtime. Nie jest to
+jeszcze dosłowny harmonogram upstream SOAM-off ani zamknięcie interakcji REQ-004.
+
+Opcja działa we wspólnym konstruktorze CLI, `serve`, `client --local` i plannerze.
+`bench-requests --batching` steruje tymi samymi forwardami; sprzeczne jawne
+`--soam` i `--batching` są odrzucane. W `export` opcja `--batching` niezależnie
+steruje wyłącznie fazą bench (domyślnie Single), surowe item readouts System One
+pozostają Single, a `--soam` steruje kompletnymi odpowiedziami żądań. W `bench`
+fazy kontrolne i latency zachowują swój Single/Budget, a throughput własne
+`--batching`; pozostałe narzędzia diagnostyczne również zachowują jawnie wybrane
+tryby `Engine::run`. Aktywne early-exit, media i sesje generowania zachowują swoje
+odizolowane ścieżki i ich packing; `soam` nie zmienia tych mechanizmów.
+
+Batch zapisuje efektywne `request_batching` w odcisku numerycznym i limitach
+kształtów, więc Budget ma inny odcisk niż Tree. `soam: off` z
+`batch_profile.background: true` jest obecnie odrzucane: kwalifikacja Tree
+nie obejmuje Budget. Nie potwierdzono zgodności bitowej, FP32 ani wydajności
+nowego grupowania.
+
 Jawne `--max-batch`, `--wait-ms` i `--batch-window-ms` nadpisują odpowiadające
 pola YAML we wszystkich modelach. Wartości są sprawdzane przed pobraniem modelu
 i dostępem do GPU; czasy muszą mieścić się w zegarze monotonicznym i po konwersji
 wynosić zero albo co najmniej 1 ns. Brak `max_batch` nie narzuca limitu 64.
 Wpis kolejki jest obecnie kompletnym `RequestPlan`; `max_inflight` oraz nagłówek
 `x-basal-batch-requests` nadal liczą całe żądania. Limit wpisów jest niezależny
-od tokenów trie i forwardu; pierwsze żądanie przekraczające budżet tokenów
+od kosztu tokenów i forwardu; pierwsze żądanie przekraczające budżet tokenów
 nadal wykonuje się samo.
 
 Bez obu pól czasu pozostaje dotychczasowe zbieranie według kwalifikowanego
@@ -832,7 +864,8 @@ i zbiera do rozmiaru poprzedniej partii. Dodatni `wait_ms` zbiera dalej do
 limitu lub terminu. Pierwsza partia serwera nie dostaje opóźnienia adaptacyjnego.
 Pełny limit wpisów, pierwsze żądanie ponad budżetem tokenów lub odrzucenie
 kolejnego żądania przez ten budżet kończą oczekiwanie. Samo osiągnięcie budżetu
-tokenów pozwala nadal dołączyć prompt bez przyrostu trie. Nowe przyjście nie
+tokenów pozwala nadal dołączyć pracę o zerowym przyroście kosztu (w Tree także
+prompt bez przyrostu trie). Nowe przyjście nie
 przedłuża terminu. Jawne `batch_window_ms: 0` przy zerowym `wait_ms` zachowuje
 łączenie już oczekujących żądań bez dodatkowego czekania.
 

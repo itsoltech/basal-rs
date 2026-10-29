@@ -364,6 +364,51 @@ fn plan_prompts(p: &RequestPlan) -> Vec<&[u32]> {
     p.prepared.iter().flat_map(|q| q.prompts()).collect()
 }
 
+/// One cost rule for routing/HRRN, admission and collection preview. Tree retains legacy trie accounting;
+/// separate rows count each Prepared's actual packing, without allocating or deduplicating its prompts.
+enum AdmissionCost {
+    Tree(TrieSize),
+    Rows(usize),
+}
+
+impl AdmissionCost {
+    fn new(batching: basal_core::Batching) -> Self {
+        match batching {
+            basal_core::Batching::Tree => Self::Tree(TrieSize::default()),
+            basal_core::Batching::Budget | basal_core::Batching::Single => Self::Rows(0),
+        }
+    }
+
+    fn tokens(&self) -> usize {
+        match self {
+            Self::Tree(size) => size.tokens,
+            Self::Rows(tokens) => *tokens,
+        }
+    }
+
+    /// The first whole request may exceed the independent token budget. Overflow cannot admit a later request;
+    /// an overflowing first cost saturates for routing and telemetry instead of wrapping to a small value.
+    fn try_add(&mut self, plan: &RequestPlan, first: bool, limit: usize) -> bool {
+        match self {
+            Self::Tree(size) => {
+                let prompts = plan_prompts(plan);
+                if !first && size.tokens + size.growth(&prompts) > limit {
+                    return false;
+                }
+                size.insert(&prompts);
+            }
+            Self::Rows(tokens) => {
+                let total = plan.prepared.iter().try_fold(*tokens, |n, p| n.checked_add(p.packed.ids.len()));
+                if !first && total.is_none_or(|n| n > limit) {
+                    return false;
+                }
+                *tokens = total.unwrap_or(usize::MAX);
+            }
+        }
+        true
+    }
+}
+
 /// Order in which waiting requests are admitted to a batch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -390,6 +435,7 @@ struct Lane {
     usage_lane: Option<&'static str>,
     metrics: Option<LaneMetrics>,
     schedule: Schedule,
+    batching: basal_core::Batching,
     max_batch_tokens: usize,
     max_batch: Option<usize>,
     rate: f64,
@@ -400,6 +446,7 @@ impl Lane {
     fn new(
         name: &str,
         schedule: Schedule,
+        batching: basal_core::Batching,
         max_batch_tokens: usize,
         max_batch: Option<usize>,
         metrics: Option<LaneMetrics>,
@@ -409,6 +456,7 @@ impl Lane {
             usage_lane: None,
             metrics,
             schedule,
+            batching,
             max_batch_tokens,
             max_batch,
             rate: 3000.0,
@@ -417,7 +465,7 @@ impl Lane {
     }
 
     /// Take the next batch: the first waiting request in schedule order always, then every other one that still fits
-    /// the budget (packed tokens of the batch, a state shared by several requests counted once).
+    /// the budget (Tree shares trie tokens; Budget counts separate packed primitive rows).
     fn admit(&mut self, start: Instant) -> (Vec<(Job, RequestPlan)>, usize) {
         self.waiting.retain(|w| !w.job.reply.is_closed()); // clients gone (their handlers were dropped)
         let (batch, tokens) = self.take(start);
@@ -434,14 +482,12 @@ impl Lane {
             self.waiting.sort_by(|a, b| ratio(b).total_cmp(&ratio(a)));
         }
         let mut batch = Vec::new();
-        let mut size = TrieSize::default();
+        let mut size = AdmissionCost::new(self.batching);
         let mut rest = Vec::with_capacity(self.waiting.len());
         for mut w in self.waiting.drain(..) {
-            let prompts = plan_prompts(&w.plan);
             if self.max_batch.is_none_or(|cap| batch.len() < cap)
-                && (batch.is_empty() || size.tokens + size.growth(&prompts) <= self.max_batch_tokens)
+                && size.try_add(&w.plan, batch.is_empty(), self.max_batch_tokens)
             {
-                size.insert(&prompts);
                 // Both lanes leave queued only on admission, after planning and any long-lane handoff.
                 drop(w.job.queued.take());
                 batch.push((w.job, w.plan));
@@ -450,7 +496,7 @@ impl Lane {
             }
         }
         self.waiting = rest;
-        (batch, size.tokens)
+        (batch, size.tokens())
     }
 
     /// Run a batch and answer its requests.
@@ -592,9 +638,9 @@ fn plan_job<B: Backend>(
     }
     match planned {
         Ok(plan) => {
-            let mut size = TrieSize::default();
-            size.insert(&plan_prompts(&plan));
-            let w = Waiting { job, plan, tokens: size.tokens.max(1) };
+            let mut size = AdmissionCost::new(lane.batching);
+            size.try_add(&plan, true, lane.max_batch_tokens);
+            let w = Waiting { job, plan, tokens: size.tokens().max(1) };
             match long {
                 Some((tx, limit)) if w.tokens > *limit => {
                     if let Err(e) = tx.send(w) {
@@ -1395,10 +1441,12 @@ fn serve_inner<B: Backend + Send + 'static>(
                     devices.iter().filter_map(|&d| gates.get(&d).map(|g| (d, g))).collect();
                 let mut health: Vec<DeviceHealth> = engine.work_health();
                 let (tx, rx) = mpsc::unbounded_channel();
+                let batching = engine.request_batching;
                 let lane = |kind| {
                     Lane::new(
                         &name,
                         schedule,
+                        batching,
                         max_batch_tokens,
                         collection.max_batch(),
                         metrics.as_ref().map(|m| m.lane(&name, kind, index)),

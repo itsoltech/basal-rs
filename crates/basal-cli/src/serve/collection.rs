@@ -5,11 +5,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{ensure, Context, Result};
-use basal_core::pack::TrieSize;
 use basal_core::{Backend, Engine};
 use tokio::sync::mpsc;
 
-use super::{plan_job, plan_prompts, Job, Lane, Schedule, Waiting};
+use super::{plan_job, AdmissionCost, Job, Lane, Schedule, Waiting};
 use crate::models::SchedulingPolicy;
 
 /// Checked options only; timing absence selects the qualified profile policy. One entry is a whole RequestPlan.
@@ -71,22 +70,20 @@ impl Lane {
             waiting.sort_by(|a, b| ratio(b).total_cmp(&ratio(a)));
         }
         let mut count = 0;
-        let mut size = TrieSize::default();
+        let mut size = AdmissionCost::new(self.batching);
         let mut token_full = false;
         for w in waiting {
             if self.max_batch.is_some_and(|cap| count >= cap) {
                 return (count, true);
             }
-            let prompts = plan_prompts(&w.plan);
-            if count == 0 || size.tokens + size.growth(&prompts) <= self.max_batch_tokens {
-                size.insert(&prompts);
+            if size.try_add(&w.plan, count == 0, self.max_batch_tokens) {
                 count += 1;
             } else {
                 token_full = true;
             }
         }
         // At equality, another request can still fit when its prompts add no trie tokens.
-        (count, token_full || size.tokens > self.max_batch_tokens || self.max_batch.is_some_and(|cap| count >= cap))
+        (count, token_full || size.tokens() > self.max_batch_tokens || self.max_batch.is_some_and(|cap| count >= cap))
     }
 }
 

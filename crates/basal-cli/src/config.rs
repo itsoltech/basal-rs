@@ -232,7 +232,9 @@ fn default_tree_max_tokens() -> usize {
 
 impl ModelConfig {
     pub(crate) fn batch_qualification(&self) -> Result<crate::serve::batches::config::BackgroundQualification> {
-        self.batch_profile.validate(&describe(self), self.ple_placement).map_err(Into::into)
+        self.batch_profile
+            .validate(&describe(self), self.ple_placement, self.model_options.request_batching())
+            .map_err(Into::into)
     }
     pub(crate) fn collection_policy(&self) -> Result<crate::serve::collection::CollectionPolicy> {
         crate::serve::collection::CollectionPolicy::new(self.max_batch, self.wait_ms, self.batch_window_ms)

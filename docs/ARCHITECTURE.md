@@ -597,7 +597,7 @@ strategie (`basal eval-choice-set --strategies`) służą do porównań.
 Handlery HTTP (tokio) przekazują żądania do wątku modelu z pola `model`
 (`/v1/basal` bez tego pola: do modelu domyślnego). Wątek
 tokenizuje i planuje każde żądanie przy przyjściu (błędy walidacji wracają
-od razu), szacuje jego koszt liczbą tokenów po współdzieleniu prefiksów i
+od razu), szacuje jego koszt liczbą tokenów według efektywnego packingu i
 układa kolejkę:
 
 - `hrrn` (domyślnie): najwyższy stosunek (czekanie + szacowany czas) /
@@ -618,11 +618,47 @@ limit przyjęcia powinien mieć zapas ponad liczbę klientów; odrzuceń 529 nie
 zaliczać do poprawnych odpowiedzi/s. Osobno porównujemy przepustowość oraz
 czas request→response wraz z oczekiwaniem w kolejce.
 
+Opcjonalne `soam: on|off` / `--soam on|off` jest typowanym ustawieniem modelu.
+Tylko jawny CLI nadpisuje YAML. Brak/on zachowuje dotychczasowy `Batching::Tree`;
+off ustawia `Engine::request_batching = Budget`, również w plannerze i wspólnym
+konstruktorze lokalnego klienta. `Engine::fork` już kopiuje batching do drugiego
+toru; `shape_limits` i Batch numeric fingerprint już zapisują wartość efektywną.
+Nie dodajemy pola do domyślnej tożsamości planu GPU ani zmiany backendu.
+
+Budget używa istniejącego `Prepared.packed`: jeden wiersz per gałąź prymitywna,
+ze wszystkimi jej option orders i ich wspólnym prefiksem, bez wspólnego wiersza
+między gałęziami/żądaniami. Cache stanu oraz stałe prefiksy szablonu pozostają
+niezależne. Prywatny `AdmissionCost` zachowuje dotychczasową ścieżkę `TrieSize`
+dla Tree. Dla Budget sumuje długości `Prepared.packed.ids` przez `checked_add`,
+bez alokacji list promptów i deduplikacji. Ten sam helper służy `plan_job`
+(HRRN i long routing), faktycznemu admission oraz podglądowi kolekcji.
+Przepełnienie blokuje kolejnego kandydata; koszt pierwszego żądania może nasycić
+się do `usize::MAX` i wejść zgodnie z regułą oversized-first. Minimalny koszt 1
+dla HRRN pozostaje tylko zabezpieczeniem dzielenia przy żądaniu bez promptów.
+
+S2a obejmuje wyłącznie packing i ten rachunek: kolejka, `max_batch`, long lane,
+permit, completion, anulowanie, queued/running i odpowiedź nadal należą do całego
+żądania. Nie zmieniono algorytmu decyzji ani stanu rund. REQ-003 pozostaje
+częściowe do S2b (primitive-branch entries i wspólny postęp rund) i kwalifikacji;
+interakcja REQ-004 także nie jest zamknięta. Aktywne early-exit nadal izoluje
+żądanie i buduje własne exit units; media zachowują osobne readouty/session,
+thinking i generowanie swoje dotychczasowe sesje. Te ścieżki nie stają się
+Budget wskutek samej opcji; tekstowe ordinary/off-exit ścieżki używają Budget.
+Nie przypisujemy Budget dotychczasowej kwalifikacji Tree: background Batch
+z SOAM-off jest odrzucane, choć planner i fingerprint modelu odzwierciedlają Budget.
+
+`bench-requests` odrzuca sprzeczne jawne `--batching`/`--soam`. W `export`
+`--batching` dotyczy wyłącznie fazy bench, surowe readouty System One pozostają
+Single, a SOAM steruje odpowiedziami `decide`. Diagnostyczne `Engine::run`
+(w tym latency/throughput `bench`) zachowuje jawny tryb swojej fazy. Brak/on
+nie zmienia domyślnych ustawień tych poleceń.
+
 Budżet `max_batch_tokens` każdego obsługiwanego modelu ustawia też
 `Engine::forward_max_tokens` przed utworzeniem obu lane'ów. Zwiększenie limitu
-pozwala więc łączyć wiele spakowanych wierszy jednej grupy językowej w większy
+pozwala więc w Tree łączyć wiele spakowanych wierszy jednej grupy językowej w większy
 forward. Pojedynczy wiersz przekraczający budżet nadal może zostać wykonany osobno.
-Domyślna wartość obu budżetów wynosi 8192. Większe wartości zmieniają jednoczesne
+Budget zachowuje własne istniejące chunki `pack::TOKEN_BUDGET`; tokenowy limit
+admission pozostaje niezależny. Domyślna wartość budżetów wynosi 8192. Większe wartości zmieniają jednoczesne
 użycie pamięci i czas zajęcia GPU; ich ocenę wykonujemy razem z opóźnieniami
 krótkich żądań w ruchu mieszanym.
 
@@ -644,7 +680,8 @@ rozmiaru. Pusta selekcja po błędzie, anulowaniu lub przekazaniu pracy do dług
 toru nie zastępuje historii ostatniej partii głównego toru. Dodatni stały wait
 zbiera do limitu lub terminu. Pełny limit wpisów, pierwsze żądanie ponad budżetem
 tokenów lub odrzucenie kolejnego żądania przez ten budżet kończą czekanie.
-Samo osiągnięcie budżetu tokenów pozwala dołączyć prompt bez przyrostu trie.
+Samo osiągnięcie budżetu tokenów pozwala dołączyć pracę bez przyrostu kosztu
+(w Tree także prompt bez przyrostu trie).
 Błąd planowania, anulowanie wszystkich oczekujących albo rozłączenie kanału
 również kończą czekanie; termin nie przesuwa się po kolejnych przyjściach.
 Sygnał shutdown również wyłącza czekanie, zanim HTTP zacznie czekać na

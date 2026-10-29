@@ -566,6 +566,9 @@ fn execute(
         engine.context_overflow(),
     );
     report["settings"]["thinking"] = engine.thinking_profile();
+    if engine.request_batching != basal_core::Batching::Tree {
+        report["settings"]["request_batching"] = format!("{:?}", engine.request_batching).into();
+    }
     report["settings"]["early_exit"] =
         engine.backend.early_exit_caps().map(basal_core::early_exit::profile).unwrap_or(Value::Null);
     let probes = engine.backend.memory_probes();

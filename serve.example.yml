@@ -94,7 +94,11 @@ models:
     # devices run at the same time. Without replica_devices or layer_split a model is loaded once, on one GPU.
     # Metal and Intel: 0 only. Not together with replica_devices or layer_split (not even device: 0).
     device: 0
-    max_batch_tokens: 8192         # packed tokens of one batch
+    # soam: off                   # absent/on: legacy Tree; off: one packed row per primitive branch (Budget)
+    # All option orders within one branch still share their prefix; state/template caches remain independent.
+    # S2a packing/accounting only: queue/max_batch/long lane still use whole requests. REQ-003 needs S2b+qualification.
+    # Explicit CLI --soam on|off overrides YAML. Off refuses batch_profile.background: true (Tree evidence is not Budget).
+    max_batch_tokens: 8192         # Tree: trie tokens; SOAM-off: sum of actual Prepared packed row lengths
     # Optional controls, absent by default; explicit CLI --max-batch/--wait-ms/--batch-window-ms override YAML.
     # max_batch: 64               # positive whole requests per batch, independently in main and long lanes
     # wait_ms: 0                  # finite nonnegative milliseconds; fixed main-lane collection wait
@@ -102,7 +106,7 @@ models:
     # Either timing key replaces profile timing; its absent companion is 0. Explicit 0/0 adds no delay but still
     # batches queued requests. Without either key, legacy qualified profile coalescing remains (also with a cap).
     # One fixed deadline uses max(wait_ms, adaptive window); the entry cap, an oversized first request or
-    # token-budget rejection stops collection. Exact token-budget equality still permits zero-growth prompts.
+    # token-budget rejection stops collection. Exact equality still permits zero-cost work (Tree: shared prompts).
     # The native long lane shares max_batch, with no added collection delay; upstream has separate long bounds.
     schedule: hrrn                 # hrrn (default) or fifo
     long_tokens: 4096              # requests above this run in the model's long lane (0: none)

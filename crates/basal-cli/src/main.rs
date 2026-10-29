@@ -334,7 +334,7 @@ enum Cmd {
         /// Prepare/export the upstream endpoint dialect (default: TypeSafe)
         #[arg(long)]
         upstream: bool,
-        /// Forwards of the bench items: single (one question each), budget or tree
+        /// Bench-item forwards: single (default), budget or tree; --soam controls served request answers separately
         #[arg(long, default_value = "single")]
         batching: String,
     },
@@ -351,9 +351,9 @@ enum Cmd {
         #[arg(long, default_value_t = 10)]
         reps: usize,
         /// How the questions of a request are run: tree (shared state prefix), budget (one row per question, upstream
-        /// chunks) or single (one forward per question)
-        #[arg(long, default_value = "tree")]
-        batching: String,
+        /// chunks) or single (one forward per question); default tree unless --soam is explicit
+        #[arg(long)]
+        batching: Option<String>,
     },
     /// Evaluate the grouped 11..255 choice strategy on reference items with added distractor options
     /// Choice questions with more than 10 options from a labelled set (tools/choice-sets), with each grouped strategy
@@ -712,6 +712,7 @@ fn planning_engine(
     let manifest = options.load_manifest(&config::model_dir(&model)?, orders, &model.source_name())?;
     let thinking = options.load_thinking(&manifest)?;
     let mut engine = Engine::new(manifest, NoBackend)?;
+    engine.request_batching = options.request_batching();
     if let Some(t) = thinking {
         engine.set_thinking(basal_core::thinking::Thinking::new(
             t.manifest,
@@ -983,6 +984,12 @@ fn planned_engine_from_manifest(
     }
     backend.set_state_cache_bytes(g.state_cache_mb.checked_mul(1 << 20).context("state cache budget overflow")?)?;
     let mut engine = Engine::new(manifest, backend)?;
+    engine.request_batching = g.model_options.request_batching();
+    if g.model_options.soam == Some(model_options::Soam::Off) {
+        crate::note!(
+            "SOAM off: Budget primitive rows, option orders packed together; queue entries remain whole requests"
+        );
+    }
     if let Some(t) = thinking {
         engine.set_thinking(t);
     }
@@ -1020,6 +1027,17 @@ fn parse_batching(s: &str) -> Result<basal_core::Batching> {
         "tree" => basal_core::Batching::Tree,
         b => bail!("unknown batching {b:?} (single, budget, tree)"),
     })
+}
+
+/// Both bench-requests switches control the same request forwards; refuse conflicting explicit choices.
+fn request_batching(options: &model_options::ModelOptions, batching: Option<&str>) -> Result<basal_core::Batching> {
+    let explicit = batching.map(parse_batching).transpose()?;
+    let soam = options.soam.map(model_options::Soam::batching);
+    anyhow::ensure!(
+        !matches!((explicit, soam), (Some(a), Some(b)) if a != b),
+        "explicit --batching conflicts with --soam (on requires tree; off requires budget)"
+    );
+    Ok(explicit.unwrap_or_else(|| options.request_batching()))
 }
 
 fn write_json(path: &Path, v: &Value) -> Result<()> {
@@ -1116,6 +1134,7 @@ fn run() -> Result<()> {
             }
         }
         Cmd::Export { m, g, inputs, out, batching, upstream } => {
+            let batching = parse_batching(&batching)?;
             let mut engine = gpu_engine(&m, &g)?;
             let load_s = engine.backend.load_s();
             let mut run = json!({"dtype": g.dtype, "inference_mode": g.inference_mode, "quantization": g.quantization(&m.model)?.as_str(), "readout": g.readout, "kernels": g.kernels, "prefix_cache": !g.no_prefix_cache, "load_s": load_s});
@@ -1127,19 +1146,15 @@ fn run() -> Result<()> {
                 &mut engine,
                 &inputs,
                 &out,
-                parse_batching(&batching)?,
+                batching,
                 if upstream { basal_core::request::Dialect::Upstream } else { basal_core::request::Dialect::TypeSafe },
                 run,
             )?;
         }
         Cmd::BenchRequests { m, g, requests, out, reps, batching } => {
+            let batching = request_batching(&g.model_options, batching.as_deref())?;
             let mut engine = gpu_engine(&m, &g)?;
-            engine.request_batching = match batching.as_str() {
-                "tree" => basal_core::Batching::Tree,
-                "budget" => basal_core::Batching::Budget,
-                "single" => basal_core::Batching::Single,
-                b => bail!("unknown batching {b:?}"),
-            };
+            engine.request_batching = batching;
             let mut r = bench::bench_requests(&mut engine, &requests, reps)?;
             r["backend"] = engine.backend.describe();
             r["state_cache"] =
@@ -1684,13 +1699,10 @@ fn run() -> Result<()> {
             eprintln!("facts: {n} states -> {}", out.display());
         }
         Cmd::Bench { m, g, reference, out, lat_n, batching } => {
+            let batch = parse_batching(&batching)?;
+            anyhow::ensure!(batch != basal_core::Batching::Single, "bench --batching requires budget or tree");
             let mut engine = gpu_engine(&m, &g)?;
             let load_s = engine.backend.load_s();
-            let batch = match batching.as_str() {
-                "budget" => basal_core::Batching::Budget,
-                "tree" => basal_core::Batching::Tree,
-                b => bail!("unknown batching {b:?}"),
-            };
             // GPU condition probe before and after: the same GEMM (f16, 480x2048 @ 11008x2048^T). A drop between the
             // two marks throttling or outside load during the run. A layer split probes every stage's GPU, one after
             // another (each probe owns its device and operands and returns host values only).

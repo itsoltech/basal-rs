@@ -1250,7 +1250,12 @@ impl BackgroundProfileConfig {
         &self,
         model: &str,
         ple: basal_gpu::PleMode,
+        batching: basal_core::Batching,
     ) -> Result<BackgroundQualification, ConfigError> {
+        if self.background && batching != basal_core::Batching::Tree {
+            return Err(invalid(format!("models.{model}.batch_profile.background"),
+                "SOAM-off background execution is not qualified in this packing-only slice; Tree qualification cannot be reused for Budget"));
+        }
         if self.ple_placement.is_some_and(|value| value != ple)
             || (self.background && ple == basal_gpu::PleMode::Host && self.ple_placement.is_none())
         {
