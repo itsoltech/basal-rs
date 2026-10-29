@@ -539,6 +539,17 @@ fn models(r: &mut Report, c: &ServeConfig, gpus: Option<&[Gpu]>) {
     // the backend of `basal serve`: this build's, or the CUDA build of the Linux package
     let cuda = cfg!(feature = "cuda") || crate::paths::cuda_binary().is_some();
     for m in &c.models {
+        let routing = match m.routing_policy() {
+            Ok(routing) => routing,
+            Err(e) => {
+                r.fail(
+                    "models",
+                    format!("{}: {e:#}", config::describe(m)),
+                    "set positive `long_tokens` for `long_lane: on`, or use `long_lane: off`",
+                );
+                continue;
+            }
+        };
         // the check `basal serve` makes before any download (with its default kernel set, fused)
         let checked = config::check_quantization(&config::describe(m), &m.quantization, &m.dtype, "fused", cuda);
         let quantization = match checked {
@@ -634,7 +645,7 @@ fn models(r: &mut Report, c: &ServeConfig, gpus: Option<&[Gpu]>) {
                         qualification,
                         crate::serve::batches::config::BackgroundQualification::Qualified { .. }
                     );
-                let workers = m.routing_policy()?.workers(background);
+                let workers = routing.workers(background);
                 let memory = basal_gpu::RuntimeBackend::host_ple_memory(dir, &arch)?;
                 let replicas = u64::try_from(placement.instances().len())?;
                 let host = memory
