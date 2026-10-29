@@ -511,21 +511,19 @@ fn check_metadata(
             GgufInspectionError::UnsupportedMetadata { key: bounded(key) }
         });
     }
-    if let Some((key, value)) = content
+    if let Some((key, value, kind)) = content
         .metadata
         .iter()
-        .filter(|(k, v)| remaining(k) && passive_kind(k).is_some_and(|kind| !kind.matches(v)))
-        .min_by(|(a, _), (b, _)| a.cmp(b))
+        .filter(|(k, _)| remaining(k))
+        .filter_map(|(k, v)| passive_kind(k).filter(|kind| !kind.matches(v)).map(|kind| (k, v, kind)))
+        .min_by(|(a, ..), (b, ..)| a.cmp(b))
     {
-        // Every remaining supported key has a passive kind; avoid recapturing
-        // untrusted values or copying arrays into the error.
-        if let Some(kind) = passive_kind(key) {
-            return Err(GgufInspectionError::MetadataType {
-                key: bounded(key),
-                expected: kind.name(),
-                actual: value.value_type(),
-            });
-        }
+        // Report only the type; never copy untrusted values or arrays into the error.
+        return Err(GgufInspectionError::MetadataType {
+            key: bounded(key),
+            expected: kind.name(),
+            actual: value.value_type(),
+        });
     }
     Ok(())
 }
@@ -678,39 +676,34 @@ fn check_inventory(
     visit("token_embd.weight", &[v, h], matrix, width)?;
     visit("output_norm.weight", &[h], GgmlDType::F32, 4)?;
     visit("output.weight", &[v, h], matrix, width)?;
+    let weights: [(&str, &[u64], GgmlDType, u64); 9] = [
+        ("attn_norm.weight", &[h], GgmlDType::F32, 4),
+        ("attn_q.weight", &[h, h], matrix, width),
+        ("attn_k.weight", &[k, h], matrix, width),
+        ("attn_v.weight", &[k, h], matrix, width),
+        ("attn_output.weight", &[h, h], matrix, width),
+        ("ffn_norm.weight", &[h], GgmlDType::F32, 4),
+        ("ffn_gate.weight", &[i, h], matrix, width),
+        ("ffn_up.weight", &[i, h], matrix, width),
+        ("ffn_down.weight", &[h, i], matrix, width),
+    ];
+    let biases: [(&str, &[u64], GgmlDType, u64); 7] = [
+        ("attn_q.bias", &[h], GgmlDType::F32, 4),
+        ("attn_k.bias", &[k], GgmlDType::F32, 4),
+        ("attn_v.bias", &[k], GgmlDType::F32, 4),
+        ("attn_output.bias", &[h], GgmlDType::F32, 4),
+        ("ffn_gate.bias", &[i], GgmlDType::F32, 4),
+        ("ffn_up.bias", &[i], GgmlDType::F32, 4),
+        ("ffn_down.bias", &[h], GgmlDType::F32, 4),
+    ];
+    let biases: &[_] = if cfg.bias { &biases } else { &[] };
     for layer in 0..cfg.num_layers {
-        for (role, shape, dtype, role_width) in [
-            ("attn_norm.weight", [h, 0], GgmlDType::F32, 4),
-            ("attn_q.weight", [h, h], matrix, width),
-            ("attn_k.weight", [k, h], matrix, width),
-            ("attn_v.weight", [k, h], matrix, width),
-            ("attn_output.weight", [h, h], matrix, width),
-            ("ffn_norm.weight", [h, 0], GgmlDType::F32, 4),
-            ("ffn_gate.weight", [i, h], matrix, width),
-            ("ffn_up.weight", [i, h], matrix, width),
-            ("ffn_down.weight", [h, i], matrix, width),
-        ] {
+        for &(role, shape, dtype, role_width) in weights.iter().chain(biases) {
             name.clear();
             // String's fmt::Write cannot fail. Fixed suffixes plus <=8195's
             // layer index fit <128 bytes, already fallibly reserved above.
             let _ = write!(name, "blk.{layer}.{role}");
-            let rank = if shape[1] == 0 { 1 } else { 2 };
-            visit(&name, &shape[..rank], dtype, role_width)?;
-        }
-        if cfg.bias {
-            for (role, dim) in [
-                ("attn_q.bias", h),
-                ("attn_k.bias", k),
-                ("attn_v.bias", k),
-                ("attn_output.bias", h),
-                ("ffn_gate.bias", i),
-                ("ffn_up.bias", i),
-                ("ffn_down.bias", h),
-            ] {
-                name.clear();
-                let _ = write!(name, "blk.{layer}.{role}");
-                visit(&name, &[dim], GgmlDType::F32, 4)?;
-            }
+            visit(&name, shape, dtype, role_width)?;
         }
     }
     spans.sort_unstable_by_key(|&(start, end)| (start, end));
