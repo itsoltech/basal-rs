@@ -511,13 +511,16 @@ enum Cmd {
         mcp: Option<mcp::Switch>,
         /// YAML file with the served models and their options (serve.example.yml); replaces the model, GPU and
         /// admission options below. Default: BASAL_CONFIG, else basal-serve.yml in the working directory
-        #[arg(long, conflicts_with_all = ["models", "gemm_table", "device", "replica_devices", "layer_split"])]
+        #[arg(long, conflicts_with_all = ["models", "name", "gemm_table", "device", "replica_devices", "layer_split"])]
         config: Option<PathBuf>,
         /// Model to serve: pico, 2.0-mini/2.0-4.5B/2.0-max, omni-mini/omni-max, name (owner Remek), owner/name,
         /// @revision, or a local directory; mini/4.5B/max select basal-1.5. Repeat
         /// for several (the options below apply to each). Without --model and a configuration file: basal-2.0-4.5B
         #[arg(long = "model")]
         models: Vec<String>,
+        /// Deployment name for one model; with a configuration file set `name` per model instead
+        #[arg(long)]
+        name: Option<String>,
         #[command(flatten)]
         g: GpuArgs,
         /// CUDA: independent replicas of every --model under its one name, one per listed device (e.g. 0,1; distinct
@@ -1203,6 +1206,7 @@ fn run() -> Result<()> {
             mcp,
             config,
             models,
+            name,
             g,
             replica_devices,
             addr,
@@ -1230,11 +1234,20 @@ fn run() -> Result<()> {
                 }
             });
             let (source, mut c) = config::select(config, &models)?;
+            if let Some(name) = name {
+                anyhow::ensure!(
+                    !matches!(source, config::Source::File(_)),
+                    "--name cannot be used with a configuration file; set `name` per model in it"
+                );
+                anyhow::ensure!(c.models.len() == 1, "--name requires exactly one model; use YAML `name` per model");
+                c.models[0].name = Some(name);
+            }
             c.systemone_dialect = cli.systemone_dialect.unwrap_or(c.systemone_dialect);
             if cli.log_decisions.is_some() {
                 c.log_decisions = cli.log_decisions;
             }
             for model in &mut c.models {
+                model.validate_name()?;
                 model.model_options.apply_cli(&g.model_options);
                 model.model_options.validate()?;
                 model.orders = model.orders.clone().or_else(|| g.orders.clone());
@@ -1352,6 +1365,7 @@ fn run() -> Result<()> {
                 .zip(&c.models)
                 .map(|(d, m)| m.model_options.load_manifest(d, m.orders.as_deref(), &m.source_name()))
                 .collect::<Result<_>>()?;
+            let served_names = c.model_names(&manifests)?;
             // Validate every second checkpoint and calibration before any model's GEMM search or GPU load.
             let thinking: Vec<_> = c
                 .models
@@ -1369,14 +1383,6 @@ fn run() -> Result<()> {
                     mc.model_options.load_thinking(manifest)
                 })
                 .collect::<Result<_>>()?;
-            // one engine per model name (the `model` field of requests) before any GEMM search or load
-            for (i, m) in manifests.iter().enumerate() {
-                anyhow::ensure!(
-                    manifests[..i].iter().all(|o| o.name != m.name),
-                    "model {} configured twice (one entry per model; `replica_devices` serves it on several GPUs)",
-                    m.name
-                );
-            }
             // Validate architecture-specific placement and exact layer coverage before any GEMM table or load.
             for ((mc, manifest), placement) in c.models.iter().zip(&manifests).zip(&placements) {
                 let quantization: Quantization =
@@ -1419,8 +1425,15 @@ fn run() -> Result<()> {
                 tables.push(table);
             }
             let mut served = Vec::new();
-            for (((((mc, table), manifest), thinking), placement), batch_qualification) in
-                c.models.iter().zip(tables).zip(manifests).zip(thinking).zip(placements).zip(batch_qualifications)
+            for ((((((mc, table), manifest), thinking), placement), batch_qualification), name) in c
+                .models
+                .iter()
+                .zip(tables)
+                .zip(manifests)
+                .zip(thinking)
+                .zip(placements)
+                .zip(batch_qualifications)
+                .zip(served_names)
             {
                 let instances = placement.instances();
                 let mut replicas = Vec::with_capacity(instances.len());
@@ -1455,6 +1468,7 @@ fn run() -> Result<()> {
                     Some(
                         serve::batches::ModelProfile::from_engine(
                             &replicas[0].engine,
+                            &name,
                             table.table.as_ref().map(basal_gpu::GemmArtifact::bytes_sha256),
                         )?
                         .with_background(batch_qualification.clone()),
@@ -1463,6 +1477,7 @@ fn run() -> Result<()> {
                     None
                 };
                 served.push(serve::ServedModel {
+                    name,
                     replicas,
                     max_batch_tokens: mc.max_batch_tokens,
                     schedule: mc.schedule,

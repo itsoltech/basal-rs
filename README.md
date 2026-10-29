@@ -382,6 +382,23 @@ dowolnego z nich idą przed długimi żądaniami. Pamięć GPU to suma wag model
 tego GPU (bf16/f16: 1.5-max ~23 GB, 1.5-4.5B ~9,5 GB, 1.5-mini ~3,2 GB) plus
 aktywacje.
 
+Opcjonalny alias wdrożenia ustawia `basal serve --model mini --name decyzje`
+albo `name: decyzje` w konkretnym wpisie `models` w YAML. Alias zastępuje nazwę
+źródłową w routingu obu API, `default_model`, odkrywaniu modeli i MCP,
+odpowiedziach, health, metrykach oraz katalogu i wynikach trwałych batchy.
+TypeSafe nadal wymaga jawnego pola `model`; dla tego przykładu użyj
+`"model": "decyzje"`. Nazwa źródłowa nie jest dodatkową trasą.
+Alias ma 1–256 znaków ASCII: pierwszy to litera lub cyfra, pozostałe to litery,
+cyfry albo `._:/@-`; wielkość liter ma znaczenie. Powtórzone nazwy i alias
+równy nazwie źródłowej innego wpisu są odrzucane. Nadal obowiązuje jeden wpis
+na model źródłowy; kopie konfiguruje `replica_devices`. `--name` wymaga jednego
+modelu i nie łączy się z konfiguracją z pliku, także wybraną automatycznie.
+`basal.json`, dobór profilu, dtype, GEMM, kalibracja i checkpointy thinking/early-exit
+zachowują źródłową tożsamość. Bez aliasu nazwy pozostają dotychczasowe.
+Zmiana aliasu zmienia fingerprint batchy: lokalny katalog odświeża się przy
+starcie, a produkcyjny wymaga zgodnego wpisu nowej rewizji katalogu. Stare
+batche wymagają workera z poprzednią tożsamością i fingerprintem.
+
 Na CUDA klucz `device` przypisuje model do GPU (domyślnie 0), np. max na
 jednej karcie, a 4.5B i mini na drugiej. Modele na różnych GPU liczą
 jednocześnie, za tym samym API i z tymi samymi nazwami modeli. Bez

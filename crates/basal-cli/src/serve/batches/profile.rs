@@ -76,9 +76,11 @@ pub(crate) struct ModelProfile {
 
 impl ModelProfile {
     /// Capture the profile of `engine` (call on its GPU thread, before the engine moves to a worker). `gemm_table_sha256`
-    /// is the SHA-256 of the bytes of the GEMM table the engine's backend uses, if any.
+    /// is the SHA-256 of the bytes of the GEMM table the engine's backend uses, if any. `served_name` is the
+    /// deployment/catalog identity; the planner and numeric model identity remain those of the source engine.
     pub(crate) fn from_engine<B: Backend>(
         engine: &Engine<B>,
+        served_name: &str,
         gemm_table_sha256: Option<&[u8; 32]>,
     ) -> Result<Self, ProfileError> {
         let name = engine.manifest.name.clone();
@@ -107,8 +109,13 @@ impl ModelProfile {
         numeric["early_exit"] =
             engine.backend.early_exit_caps().map(basal_core::early_exit::profile).unwrap_or(Value::Null);
         mask_device_ordinals(&mut numeric["thinking"]);
+        // Alias-specific routing and result bounds must not share work with the source-name deployment. Keep
+        // the old fingerprint byte-for-byte when the served name is unchanged; source provenance stays intact.
+        if served_name != name {
+            numeric["served_name"] = served_name.into();
+        }
         Ok(Self {
-            name,
+            name: served_name.into(),
             dir: engine.manifest.dir.clone(),
             planner,
             host_staging: engine.backend.host_staging(),

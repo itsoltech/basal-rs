@@ -144,6 +144,7 @@ impl Server {
             batches: None,
         };
         let model = ServedModel {
+            name: engine.manifest.name.clone(),
             replicas: vec![Replica { engine, devices, scheduling }],
             max_batch_tokens: options.max_batch_tokens,
             schedule: options.schedule,

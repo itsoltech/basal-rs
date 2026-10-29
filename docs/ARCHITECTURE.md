@@ -34,6 +34,19 @@ snapshotu HF dostarcza repo i rozwiązany commit.
 `serve` buduje metadane z silnika, a planer batchy z jego sklonowanego manifestu.
 API pokazuje ostrzeżenie kalibracji bez lokalnych ścieżek i tożsamości.
 
+Opcjonalny alias wdrożenia (`serve --name` dla jednego modelu albo YAML
+`models[].name`) jest oddzielnym polem `ServedModel`, bez zmiany manifestu.
+Router, metadane, MCP, health i metryki używają tej nazwy; `default_model`
+wskazuje wyłącznie nazwę serwowaną. Po routingu i hashowaniu oryginalnego
+żądania worker tłumaczy jawny alias TypeSafe na źródłową nazwę dla planera.
+Wewnętrzne rundy tasks/thinking i dobór profili nadal używają źródła. Finalny
+serializer online i background przypisuje alias także gotowym odpowiedziom
+tasks, przed loggerem decyzji i zapisem wyników batcha. Profil batchy zachowuje
+źródłowy planer i hashe artefaktów, lecz używa aliasu w katalogu i boundach
+wyniku; alias różny od źródła jest dodatkowym wejściem fingerprintu. To
+rozdziela pracę produkcyjnych workerów o różnych nazwach wdrożenia. Brak
+aliasu zachowuje dotychczasowe wejścia fingerprintu.
+
 Opt-in [early_exit](EARLY_EXIT.md) ładuje przypięte wytrenowane głowice
 basal-1.0-4.5B tylko dla CUDA Llama/Candle bez split. PlanCaps przechowuje
 available/default, RequestPlan efektywną niezmienną politykę. Aktywne plany

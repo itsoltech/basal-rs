@@ -21,7 +21,8 @@
 //!       - {device: 5, layers: 25}  # layers 25-49, final norm, lm_head, evidence head
 //! ```
 //!
-//! A model is addressed by the name in its `basal.json` (the `model` field of requests). The optional durable features
+//! A model is addressed by its optional `name`, otherwise the name in `basal.json` (the `model` field of requests).
+//! The alias never changes the source identity used by runtime profiles or calibration. The optional durable features
 //! have their own sections: `database:` (`crate::database`, docs/DATABASE.md) and `batches:`
 //! (`serve::batches::config`, docs/BATCHES.md).
 
@@ -94,6 +95,9 @@ pub struct ServeConfig {
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelConfig {
+    /// Deployment name for discovery, routing and responses; absent uses `basal.json`. Does not rename the source.
+    #[serde(default)]
+    pub name: Option<String>,
     #[serde(flatten)]
     pub(crate) model_options: crate::model_options::ModelOptions,
     /// Local model directory (config.json, basal.json, tokenizer.json, model.safetensors, CALIBRATION.json, ...).
@@ -216,6 +220,19 @@ fn default_tree_max_tokens() -> usize {
 }
 
 impl ModelConfig {
+    pub(crate) fn validate_name(&self) -> Result<()> {
+        if let Some(name) = &self.name {
+            ensure!(
+                !name.is_empty()
+                    && name.len() <= 256
+                    && name.as_bytes()[0].is_ascii_alphanumeric()
+                    && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"._:/@-".contains(&b)),
+                "model name {name:?}: expected 1–256 ASCII bytes, starting with a letter or digit, then letters, digits or ._:/@-"
+            );
+        }
+        Ok(())
+    }
+
     /// Actual configured source, without a routing alias or an unresolved revision suffix.
     pub(crate) fn source_name(&self) -> String {
         self.repo
@@ -456,12 +473,45 @@ impl ServeConfig {
         ensure_single_document(text)?;
         ensure!(!serving || !c.models.is_empty(), "no models");
         for model in &c.models {
+            model.validate_name()?;
             model.model_options.validate()?;
             crate::parse_inference_mode(&model.inference_mode)?;
             crate::gemm_artifact::TableRequest::parse(&model.gemm_table)?;
         }
         crate::serve::check_admission_limits(c.max_inflight, c.max_large_inflight)?;
         Ok(c)
+    }
+
+    /// Validate the deployment namespace before any GEMM search or GPU load. Only served names are routable;
+    /// an alias cannot borrow another entry's source name, even if that entry is also renamed.
+    pub(crate) fn model_names(&self, manifests: &[ModelManifest]) -> Result<Vec<String>> {
+        ensure!(self.models.len() == manifests.len(), "model configurations and manifests differ in length");
+        let names: Vec<String> = self
+            .models
+            .iter()
+            .zip(manifests)
+            .map(|(model, manifest)| model.name.clone().unwrap_or_else(|| manifest.name.clone()))
+            .collect();
+        for (i, manifest) in manifests.iter().enumerate() {
+            ensure!(
+                manifests[..i].iter().all(|other| other.name != manifest.name),
+                "model {} configured twice (one entry per source model; use `replica_devices` for replicas)",
+                manifest.name
+            );
+            ensure!(!names[..i].contains(&names[i]), "served model {} configured twice", names[i]);
+            ensure!(
+                manifests.iter().enumerate().all(|(j, other)| i == j || names[i] != other.name),
+                "served model {} collides with another model's source name",
+                names[i]
+            );
+        }
+        if let Some(default) = &self.default_model {
+            ensure!(
+                names.contains(default),
+                "default model {default} is not served ({names:?}); use its deployment name"
+            );
+        }
+        Ok(names)
     }
 
     /// Configuration with default options for the given models (`basal serve --model`, the built-in one).

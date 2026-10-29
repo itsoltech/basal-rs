@@ -48,7 +48,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
-use basal_core::engine::{plan_response, RequestPlan};
+use basal_core::engine::{plan_response, PlanOutput, RequestPlan};
 use basal_core::gate::Gate;
 use basal_core::pack::TrieSize;
 use basal_core::request::Dialect;
@@ -114,6 +114,8 @@ pub struct Replica<B: Backend> {
 
 /// One served model: its instances and admission options.
 pub struct ServedModel<B: Backend> {
+    /// Deployment identity; the engines retain their source manifest names.
+    pub name: String,
     /// At least one; several are replicas of one model on distinct GPUs, routed by load.
     pub replicas: Vec<Replica<B>>,
     pub max_batch_tokens: usize,
@@ -381,6 +383,7 @@ struct Waiting {
 /// Admission of one lane: order of the waiting requests, budget, packed tokens per second of its recent batches
 /// (exponential average, converts tokens to seconds for HRRN).
 struct Lane {
+    name: String,
     /// Actual execution lane, reported only when this replica has an active long lane.
     usage_lane: Option<&'static str>,
     metrics: Option<LaneMetrics>,
@@ -391,8 +394,16 @@ struct Lane {
 }
 
 impl Lane {
-    fn new(schedule: Schedule, max_batch_tokens: usize, metrics: Option<LaneMetrics>) -> Self {
-        Self { usage_lane: None, metrics, schedule, max_batch_tokens, rate: 3000.0, waiting: Vec::new() }
+    fn new(name: &str, schedule: Schedule, max_batch_tokens: usize, metrics: Option<LaneMetrics>) -> Self {
+        Self {
+            name: name.into(),
+            usage_lane: None,
+            metrics,
+            schedule,
+            max_batch_tokens,
+            rate: 3000.0,
+            waiting: Vec::new(),
+        }
     }
 
     /// Take the next batch: the first waiting request in schedule order always, then every other one that still fits
@@ -451,7 +462,7 @@ impl Lane {
         match result {
             Ok(outs) => {
                 for ((job, plan), out) in batch.into_iter().zip(outs) {
-                    let mut resp = plan_response(&engine.manifest.name, &plan, &out);
+                    let mut resp = served_response(&self.name, &plan, &out);
                     if let (Some(lane), Ok(response)) = (self.usage_lane, &mut resp) {
                         response["usage"]["lane"] = lane.into();
                     }
@@ -471,6 +482,14 @@ impl Lane {
             }
         }
     }
+}
+
+/// Final deployment identity, including native task responses already assembled by the source engine.
+/// Internal continuations continue to use the source model; only the completed public response is renamed.
+fn served_response(name: &str, plan: &RequestPlan, out: &PlanOutput) -> std::result::Result<Value, DecideError> {
+    let mut response = plan_response(name, plan, out)?;
+    response["model"] = name.into();
+    Ok(response)
 }
 
 /// GPU thread of the main lane: plan arriving requests (validation errors are answered at once), pass requests above
@@ -519,11 +538,20 @@ fn scheduler<B: Backend>(
                 }
             }
         }
-        for job in arrived {
+        for mut job in arrived {
             if job.reply.is_closed() {
                 continue;
             }
             let phase_start = basal_gpu::DiagnosticOverrides::process().phase_timing().then(Instant::now);
+            // Dispatch has already resolved the deployment name and hashed the ORIGINAL request. Translate only
+            // an explicit TypeSafe alias for the core's source-name check; missing/non-string fields still fail
+            // their schema validation. Upstream planning ignores `model`, so its body needs no translation.
+            if job.dialect == Dialect::TypeSafe
+                && lane.name != engine.manifest.name
+                && job.body.get("model").and_then(Value::as_str) == Some(lane.name.as_str())
+            {
+                job.body["model"] = engine.manifest.name.clone().into();
+            }
             let planned = engine.plan_request_as(&job.body, job.dialect);
             if let Some(start) = phase_start {
                 eprintln!(
@@ -1120,12 +1148,12 @@ fn overloaded(dialect: Dialect, typesafe: &str, upstream: &str) -> Response {
     response
 }
 
-fn metadata_for_model<B: Backend>(engine: &Engine<B>) -> Value {
+fn metadata_for_model<B: Backend>(name: &str, engine: &Engine<B>) -> Value {
     let manifest = &engine.manifest;
     let temperatures: serde_json::Map<String, Value> =
         manifest.temperatures.iter().map(|(k, v)| (k.as_str().into(), json!(v))).collect();
     let mut metadata = json!({
-        "name": manifest.name,
+        "name": name,
         "description": "basal typed-decision model (choice / noul / score / act / multi / tool), Polish and English",
         "mode": "basal-rs",
         "early_exit": [],
@@ -1228,10 +1256,13 @@ fn serve_inner<B: Backend + Send + 'static>(
     let mut layout: Vec<(String, Vec<Vec<usize>>)> = Vec::with_capacity(models.len());
     for m in &models {
         let first = m.replicas.first().context("a served model needs at least one engine")?;
-        let name = &first.engine.manifest.name;
+        let name = &m.name;
         let mut devices: Vec<Vec<usize>> = Vec::with_capacity(m.replicas.len());
         for r in &m.replicas {
-            anyhow::ensure!(r.engine.manifest.name == *name, "replicas of {name} load different models");
+            anyhow::ensure!(
+                r.engine.manifest.name == first.engine.manifest.name,
+                "replicas of {name} load different models"
+            );
             anyhow::ensure!(!r.devices.is_empty(), "{name}: an instance without a GPU");
             for d in &r.devices {
                 anyhow::ensure!(!devices.iter().flatten().any(|o| o == d), "{name}: two replicas on GPU {d}");
@@ -1243,7 +1274,8 @@ fn serve_inner<B: Backend + Send + 'static>(
     let names: Vec<String> = layout.iter().map(|(n, _)| n.clone()).collect();
     let supports_media = models.iter().any(|m| m.replicas.iter().any(|r| !r.engine.backend.media_kinds().is_empty()));
     // replicas load the same model with the same options: the first one describes it
-    let model_metadata: Vec<Value> = models.iter().map(|m| metadata_for_model(&m.replicas[0].engine)).collect();
+    let model_metadata: Vec<Value> =
+        models.iter().map(|m| metadata_for_model(&m.name, &m.replicas[0].engine)).collect();
     for (i, n) in names.iter().enumerate() {
         anyhow::ensure!(!names[..i].contains(n), "model {n} configured twice");
     }
@@ -1289,12 +1321,18 @@ fn serve_inner<B: Backend + Send + 'static>(
         let mut batch_profiles = Vec::new();
         let mut background_lanes = Vec::new();
         for m in models {
-            let ServedModel { replicas, max_batch_tokens, schedule, long_tokens, batch_profile, batch_qualification } =
-                m;
+            let ServedModel {
+                name,
+                replicas,
+                max_batch_tokens,
+                schedule,
+                long_tokens,
+                batch_profile,
+                batch_qualification,
+            } = m;
             if let Some(profile) = batch_profile {
                 batch_profiles.push(profile);
             }
-            let name = replicas[0].engine.manifest.name.clone();
             let group = replicas.len() > 1;
             let mut queues = Vec::with_capacity(replicas.len());
             for (index, Replica { mut engine, devices, scheduling }) in replicas.into_iter().enumerate() {
@@ -1307,8 +1345,9 @@ fn serve_inner<B: Backend + Send + 'static>(
                     devices.iter().filter_map(|&d| gates.get(&d).map(|g| (d, g))).collect();
                 let mut health: Vec<DeviceHealth> = engine.work_health();
                 let (tx, rx) = mpsc::unbounded_channel();
-                let lane =
-                    |kind| Lane::new(schedule, max_batch_tokens, metrics.as_ref().map(|m| m.lane(&name, kind, index)));
+                let lane = |kind| {
+                    Lane::new(&name, schedule, max_batch_tokens, metrics.as_ref().map(|m| m.lane(&name, kind, index)))
+                };
                 if batches_enabled {
                     if let batches::config::BackgroundQualification::Qualified { composition, max_requests, .. } =
                         &batch_qualification
@@ -1331,7 +1370,7 @@ fn serve_inner<B: Backend + Send + 'static>(
                         );
                         background_lanes.push(batches::executor::ExecutionLane {
                             model: name.clone(),
-                            worker: batches::bg_lane::BgLane::start(&label, background)?,
+                            worker: batches::bg_lane::BgLane::start(&label, &name, background)?,
                             composition_qualified: *composition == batches::config::Composition::Group,
                             max_requests: *max_requests as usize,
                             devices: devices.clone(),

@@ -10,7 +10,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use basal_core::engine::{plan_response, RequestPlan};
+use basal_core::engine::RequestPlan;
 use basal_core::request::DecideError;
 use basal_core::{Backend, Engine, StopReason, StopToken};
 use serde_json::Value;
@@ -107,14 +107,15 @@ pub(in crate::serve) struct BgLane {
 
 impl BgLane {
     /// The caller has already configured the fork, all device gates and its qualification policy.
-    pub fn start<B: Backend + Send + 'static>(label: &str, engine: Engine<B>) -> Result<Self> {
+    pub fn start<B: Backend + Send + 'static>(label: &str, name: &str, engine: Engine<B>) -> Result<Self> {
         anyhow::ensure!(engine.backend.work_health().is_some(), "background requires reported work health");
         let (tx, rx) = mpsc::channel(1);
         let control = Arc::new(Mutex::new(Control::default()));
         let shared = control.clone();
+        let name = name.to_owned();
         let thread = std::thread::Builder::new()
             .name(format!("{label}-bg"))
-            .spawn(move || worker(engine, rx, shared))
+            .spawn(move || worker(&name, engine, rx, shared))
             .context("starting a background GPU thread")?;
         Ok(Self { submit: Submit { tx }, control, thread: Some(thread) })
     }
@@ -174,7 +175,12 @@ impl Drop for BgLane {
     }
 }
 
-fn worker<B: Backend>(mut engine: Engine<B>, mut rx: mpsc::Receiver<Command>, control: Arc<Mutex<Control>>) {
+fn worker<B: Backend>(
+    name: &str,
+    mut engine: Engine<B>,
+    mut rx: mpsc::Receiver<Command>,
+    control: Arc<Mutex<Control>>,
+) {
     while let Some(command) = rx.blocking_recv() {
         let Command::Run { work, reply } = command else { break };
         let shutting_down = match control.lock() {
@@ -229,7 +235,7 @@ fn worker<B: Backend>(mut engine: Engine<B>, mut rx: mpsc::Receiver<Command>, co
                 Err(error @ DeviceBudgetError::Telemetry(_)) => return Outcome::Deferred(error.to_string()),
                 Err(error) => return Outcome::Unavailable(error.to_string()),
             };
-            execute(&mut engine, &items, stop, &mut phase)
+            execute(name, &mut engine, &items, stop, &mut phase)
         }));
         let health = engine.work_health();
         let mut lost = health.is_empty() || health.iter().any(|h| h.is_lost());
@@ -276,6 +282,7 @@ fn worker<B: Backend>(mut engine: Engine<B>, mut rx: mpsc::Receiver<Command>, co
 }
 
 fn execute<B: Backend>(
+    name: &str,
     engine: &mut Engine<B>,
     items: &[PlannedItem],
     stop: StopToken,
@@ -304,7 +311,7 @@ fn execute<B: Backend>(
             items
                 .iter()
                 .zip(outputs)
-                .map(|(item, out)| plan_response(&engine.manifest.name, &item.plan, &out))
+                .map(|(item, out)| super::super::served_response(name, &item.plan, &out))
                 .collect(),
         ),
         Err(error) => match basal_core::execution::interrupted(&error) {
