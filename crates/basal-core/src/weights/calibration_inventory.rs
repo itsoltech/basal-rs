@@ -132,13 +132,12 @@ impl GgufCalibrationInventory {
         let directory_stamp = SourceStamp::from_metadata(&metadata)?;
         let mut entries = Vec::new();
         let count = to_usize(MAX_MATCHES, InventoryResource::Matches)?;
-        let requested = to_u64(size_of::<GgufCalibrationVariant>(), InventoryResource::MetadataCapacity)?
-            .checked_mul(MAX_MATCHES)
-            .ok_or(arithmetic(InventoryResource::MetadataCapacity))?;
+        let record = to_u64(size_of::<GgufCalibrationVariant>(), InventoryResource::MetadataCapacity)?;
+        let requested = record.checked_mul(MAX_MATCHES).ok_or(arithmetic(InventoryResource::MetadataCapacity))?;
         limit(InventoryResource::MetadataCapacity, requested, MAX_METADATA)?;
         entries.try_reserve_exact(count).map_err(allocation)?;
         let metadata_capacity = to_u64(entries.capacity(), InventoryResource::MetadataCapacity)?
-            .checked_mul(to_u64(size_of::<GgufCalibrationVariant>(), InventoryResource::MetadataCapacity)?)
+            .checked_mul(record)
             .ok_or(arithmetic(InventoryResource::MetadataCapacity))?;
         limit(InventoryResource::MetadataCapacity, metadata_capacity, MAX_METADATA)?;
         let mut inventory = Self {

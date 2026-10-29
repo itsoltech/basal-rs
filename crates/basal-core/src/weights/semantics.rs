@@ -434,17 +434,11 @@ impl CalibrationCapture {
             orders_inventory_name(&mut name, base_length, decision.orders)?;
             check_inventory_probe(inventory, &name, Probe::OrdersVariant, orders)?;
         }
-        let expected_selected = if expected_roles[1].is_some() {
-            Some(1)
-        } else if expected_roles[0].is_some() {
-            Some(0)
-        } else {
-            None
-        };
-        if self.selected != expected_selected {
+        // The selector's last actual read is selected.
+        if self.selected != expected_roles.iter().rposition(Option::is_some) {
             return Err(Error::SelectedMismatch);
         }
-        let selected = self.selected.and_then(|slot| self.files.get(slot)).and_then(Option::as_ref);
+        let selected = self.selected();
         let provenance = &manifest.calibration_provenance;
         let digest = provenance
             .content_sha256
