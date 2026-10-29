@@ -95,6 +95,8 @@ pub struct ServeOptions {
     pub default_model: Option<String>,
     /// Least work of a long lane between two hand-overs of the GPU.
     pub long_slice_ms: u64,
+    /// Optional share target for every shared device gate; absent uses the legacy gate constructor.
+    pub long_share: Option<f64>,
     /// One log line per HTTP request.
     pub access_log: bool,
     /// Collect and expose Prometheus metrics; disabled by default.
@@ -1384,6 +1386,14 @@ async fn health(State(app): State<Arc<App>>) -> Response {
     error_response(status, body)
 }
 
+/// Validate root policy before downloads/device discovery, and again for direct serving callers.
+pub(crate) fn check_long_share(long_share: Option<f64>) -> Result<()> {
+    if long_share.is_some_and(|share| !share.is_finite() || !(0.0..=1.0).contains(&share)) {
+        return Err(basal_core::gate::InvalidLongShare).context("long_share (--long-share)");
+    }
+    Ok(())
+}
+
 pub fn serve<B: Backend + Send + 'static>(models: Vec<ServedModel<B>>, opts: ServeOptions) -> Result<()> {
     serve_inner(models, opts, None)
 }
@@ -1513,6 +1523,7 @@ fn serve_inner<B: Backend + Send + 'static>(
     opts: ServeOptions,
     owned: Option<(std::net::TcpListener, oneshot::Receiver<()>)>,
 ) -> Result<()> {
+    check_long_share(opts.long_share)?;
     anyhow::ensure!(!models.is_empty(), "no models to serve");
     check_admission_limits(opts.max_inflight, opts.max_large_inflight)?;
     let mut layout: Vec<(String, Vec<Vec<usize>>)> = Vec::with_capacity(models.len());
@@ -1549,8 +1560,8 @@ fn serve_inner<B: Backend + Send + 'static>(
         .transpose()
         .context("initializing Prometheus metrics")?;
     // Per GPU: with several engines (models or replicas of different models, a layer-split instance counting on each
-    // of its GPUs) or a long lane on it, every engine on that GPU takes turns through its gate (short batches of any of
-    // them before long requests, which yield between layers). GPUs do not wait for each other; a layer-split instance
+    // of its GPUs) or a long lane on it, every engine on that GPU takes turns through its gate (long requests yield
+    // between layers according to the root policy). GPUs do not wait for each other; a layer-split instance
     // holds one of its gates at a time.
     let instances: Vec<(&[usize], usize)> =
         models.iter().flat_map(|m| m.replicas.iter().map(move |r| (r.devices.as_slice(), m.long_tokens))).collect();
@@ -1567,11 +1578,25 @@ fn serve_inner<B: Backend + Send + 'static>(
         for &device in devices {
             let on_device = instances.iter().filter(|(ds, _)| ds.contains(&device)).count();
             if on_device > 1 || long_tokens > 0 || background_devices.contains(&device) {
-                gates
-                    .entry(device)
-                    .or_insert_with(|| Arc::new(Gate::new(std::time::Duration::from_millis(opts.long_slice_ms))));
+                if let std::collections::hash_map::Entry::Vacant(entry) = gates.entry(device) {
+                    let slice = std::time::Duration::from_millis(opts.long_slice_ms);
+                    let gate = match opts.long_share {
+                        None => Gate::new(slice),
+                        Some(share) => Gate::with_long_share(slice, share)
+                            .with_context(|| format!("device {device}: long_share gate"))?,
+                    };
+                    entry.insert(Arc::new(gate));
+                    let active_long = instances.iter().any(|(ds, tokens)| ds.contains(&device) && *tokens > 0);
+                    crate::note!(
+                        "device {device}: one shared gate across models/replicas, active long lane={active_long}"
+                    );
+                }
             }
         }
+    }
+    match opts.long_share {
+        None => crate::note!("long_share absent: legacy yielding after min_slice={} ms; {} shared device gates", opts.long_slice_ms, gates.len()),
+        Some(share) => crate::note!("root long_share={share} in [0,1]: {} shared device gates; yields require a waiting main lane and min_slice={} ms, then recent long share >= target (0: legacy, 1: no mid-forward yield). Continuous 2s occupied-online-wall-time memory across models; idle/background/reservation time excluded. No active long lane: no share effect; no new lanes/gates. Not GPU utilization or a throughput/fairness guarantee", gates.len(), opts.long_slice_ms),
     }
     let mut threads = Vec::new();
     let collection_stopping = Arc::new(AtomicBool::new(false));

@@ -11,6 +11,12 @@ default_model: basal-1.5-max       # default: the first model
 max_inflight: 1024                 # waiting + running requests of all models; more get 529
 max_large_inflight: 4              # shared limit for large/chunked bodies and expanded input above 128 KiB
 long_slice_ms: 100                 # least work of a long-request lane between two hand-overs of the GPU
+# long_share: 0.5                  # optional root policy, finite [0,1]; explicit --long-share overrides YAML
+# Absent: legacy yielding; 0: legacy condition; 1: no mid-forward yield. A waiting main lane and long_slice_ms
+# remain prerequisites. Each shared device gate aggregates all models' occupied main/long online wall time
+# with continuous exponential memory (2s). Idle/background/reservation time only decays history.
+# No GPU-utilization, throughput or fairness guarantee; no new lanes/workers/gates. Without an active long lane
+# the target has no share effect. Keep long_share here at root, never under models; routing still uses long_tokens.
 access_log: false                  # one log line per request: [POST] 200 /v1/systemone 31 ms (queue, compute, batch)
 # log_decisions: ./decisions.jsonl # optional process-wide append log of final online answers, no background batches
 metrics: false                     # opt in to Prometheus collection and GET /metrics (also --metrics)

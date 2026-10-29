@@ -749,6 +749,30 @@ curl --fail-with-body localhost:8000/v1/systemone -H 'content-type: application/
 }'
 ```
 
+Opcjonalne główne pole YAML `long_share` lub `serve --long-share` ustawia jeden
+cel udziału długiego toru dla każdej współdzielonej bramki urządzenia. Jawna
+flaga CLI nadpisuje YAML także przy `--config`, `BASAL_CONFIG` i automatycznym
+wyborze `basal-serve.yml`. Brak obu ustawień zachowuje dotychczasową politykę.
+Wartość musi być skończona i należeć do `[0,1]`; błędna blokuje start przed
+pobieraniem modeli, rozpoznawaniem GPU, wyborem GEMM i ładowaniem wag.
+Pole jest globalne: `models[].long_share` jest błędem konfiguracji.
+
+Długi tor ustępuje między warstwami, gdy główny tor czeka, minęło co najmniej
+`long_slice_ms` (domyślnie 100 ms) nieprzerwanego posiadania bramki, a jego
+ostatni udział jest co najmniej równy celowi. `0` zachowuje warunek ustępowania
+legacy; `1` wyłącza ustępowanie w trakcie forwardu. Nowe długie zadanie nadal
+czeka na główny tor, a zakończenie forwardu zwalnia GPU. Udział ma ciągłą
+pamięć wykładniczą o stałej 2 s i sumuje czas posiadania bramki przez oba tory
+online wszystkich modeli na urządzeniu. Bezczynność, tło i czas rezerwacji
+nie zwiększają udziałów, tylko wygaszają historię. To czas zajęcia bramki,
+bez gwarancji wykorzystania GPU, przepustowości ani sprawiedliwości.
+
+Ustawienie nie tworzy torów ani dodatkowych bramek, nie zmienia liczby workerów
+i nie wybiera klasy żądania. Nadal obowiązuje próg `long_tokens`; bez aktywnego
+długiego toru cel nie wpływa na wykonanie. Każde urządzenie ma własną bramkę
+wspólną dla modeli, replik i etapów podziału, gdy wymaga tego dotychczasowa
+serializacja. Startup podaje cel oraz obecność długiego toru na urządzeniu.
+
 Opcje modelu (klucze YAML w `models`; dla jednego modelu te same opcje
 wiersza poleceń, np. `--max-batch-tokens`):
 
@@ -811,7 +835,7 @@ writer lub błąd zapisu daje 500. Zawartość i lifecycle:
 | `wait_ms` | brak | skończone nieujemne milisekundy stałego okna zbierania głównego toru |
 | `batch_window_ms` | brak | skończone nieujemne milisekundy okna adaptacyjnego głównego toru; `0` wyłącza adaptacyjne czekanie |
 | `schedule` | `hrrn` | kolejność przyjmowania żądań: `hrrn` (krótkie przed długimi, bez zagłodzenia) albo `fifo` |
-| `long_tokens` | 4096 | żądania powyżej tej liczby tokenów idą do toru długich żądań, który oddaje GPU krótkim partiom między warstwami; `0` wyłącza |
+| `long_tokens` | 4096 | żądania powyżej tej liczby tokenów idą do toru długich żądań; oddawanie GPU między warstwami podlega głównej polityce `long_share`; `0` wyłącza tor |
 | `state_cache_mb` | 0 | cache K/V stanu między żądaniami |
 
 `--soam on|off` nadpisuje per-model YAML `soam` tylko przy jawnym podaniu.
@@ -997,6 +1021,11 @@ mieszanym przez rzeczywisty serwer HTTP. Wystarcza sama binarka:
 ```sh
 basal benchmark --model mini --json --out benchmark-mini.json
 ```
+
+`benchmark --long-share` stosuje tę samą politykę urządzenia. Jawna wartość
+trafia do JSON `long_share` także po nieudanym ładowaniu oraz do
+`settings.long_share` po załadowaniu. Brak opcji zachowuje dotychczasowe pola
+i domyślną ścieżkę wykonania.
 
 Komenda mierzy minimum, p50 i p99 odpowiedzi, czas kolejki, requesty/s,
 błędy oraz RAM/VRAM i CPU dla każdego poziomu współbieżności (domyślnie

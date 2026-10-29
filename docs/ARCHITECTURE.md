@@ -741,17 +741,51 @@ osobnego replayu zgodności, również dla F32 zależnego od kształtu obliczeń
 GPU, ze wspólnymi wagami, tabelą GEMM i prefiksami szablonu. Oba tory
 korzystają z GPU na zmianę (`basal_core::gate`): tor długich żądań po każdej
 warstwie czeka na zakończenie swoich kerneli i oddaje GPU, gdy główny tor ma
-partię, a on sam pracował co najmniej `--long-slice-ms`. Po jednej partii
+partię, a on sam pracował co najmniej `--long-slice-ms` (domyślnie 100 ms),
+przy nieustawionym `long_share`. Po jednej partii
 głównego toru wraca do tej samej warstwy. Zatrzymany forward kontynuuje z tymi
 samymi tensorami. Parametr przydziału steruje kompromisem między czasem
 dużych dokumentów a oczekiwaniem krótkich żądań; większa wartość oznacza
 rzadsze oddawanie GPU. Niezmienność wyników potwierdzamy pomiarami danej konfiguracji.
 
+Główne YAML `long_share` i jawne `serve --long-share` (pierwszeństwo przed YAML,
+także z `BASAL_CONFIG` lub autodetekcji) przekazują `Option<f64>` przez
+`ServeOptions` do istniejącej mapy `device -> Arc<Gate>`. Brak wybiera `Gate::new`,
+wartość wybiera fallible `Gate::with_long_share`. Wspólny check na wejściu
+serwera i benchmarku odrzuca NaN, nieskończoności i wartości poza `[0,1]`;
+zwykłe `serve` robi to po połączeniu CLI/YAML, przed pobraniem modeli, GPU,
+GEMM i wagami. Bezpośrednie `ServeOptions` jest sprawdzane ponownie przed
+tworzeniem bramek. Konstruktor bramki nadal waliduje wartość i zachowuje
+typowaną przyczynę błędu. `models[].long_share` pozostaje nieznanym polem.
+
+Jawny cel dodaje warunek: po oczekiwaniu głównego toru i upływie `min_slice`
+długi tor oddaje bramkę tylko przy swoim udziale co najmniej równym celowi.
+`0` daje legacy yielding, `1` nie oddaje bramki w trakcie forwardu. Nowe długie
+zadania nadal dają pierwszeństwo głównym, a koniec forwardu zwalnia bramkę.
+Każda bramka integruje czas faktycznego posiadania przez main/long wszystkich
+modeli na tym urządzeniu z ciągłą pamięcią wykładniczą o stałej 2 s; idle,
+tło i zaparkowane rezerwacje wyłącznie wygaszają historię. Przy zerowej
+historii aktualny długi holder ma udział 1. Jest to natywna ciągła interpretacja,
+bez pomiaru dokładnego wykorzystania GPU i bez gwarancji przepustowości lub
+sprawiedliwości.
+
+Warunki utworzenia bramki pozostają te same: kilka instancji na urządzeniu,
+długi tor lub kwalifikowane tło. Cel nie tworzy workerów ani torów i nie zmienia
+progów routingu, FIFO/HRRN, kolekcji ani postępu rund. Bez długiego toru
+pozostaje skonfigurowany bez efektu udziału; startup pokazuje żądany cel,
+liczbę bramek oraz aktywność długiego toru na każdym współdzielonym urządzeniu.
+Repliki, modele i etapy split dzielą jedną bramkę danego ordinalu; tło używa
+tej samej serializacji i dotychczasowego pierwszeństwa online. Benchmark HTTP
+przekazuje tę samą opcję; JSON zapisuje jawną wartość w `long_share` przed
+ładowaniem oraz w `settings.long_share` po ładowaniu. Nieobecna opcja nie dodaje
+tych pól ani nie zmienia tożsamości planu numerycznego lub kwalifikacji tła.
+
 Kilka modeli w jednym procesie (`basal serve --config`): każdy ma własny
 silnik, kolejkę i tor długich żądań. Model jest przypisany do jednego GPU
 (`device`, domyślnie 0); silniki wszystkich modeli tego samego GPU, łącznie z
 ich torami długich żądań, korzystają z jednego `gate` tego GPU. Główne tory są
-pilne, tory długich żądań oddają GPU między warstwami, więc krótkie partie
+pilne, tory długich żądań oddają GPU między warstwami według `long_share`
+(domyślnie legacy), więc przy domyślnej polityce krótkie partie
 dowolnego modelu wyprzedzają długie żądania każdego modelu tego GPU. Silniki
 na jednym GPU nie liczą jednocześnie: GPU jest i tak ograniczone mocą, a
 kolejność decyduje harmonogram zamiast sterownika. Różne GPU mają osobne

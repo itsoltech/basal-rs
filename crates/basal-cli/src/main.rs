@@ -577,6 +577,9 @@ enum Cmd {
         /// Least time the long lane works between two hand-overs to the main lane
         #[arg(long, default_value_t = 100)]
         long_slice_ms: u64,
+        /// Root long-lane share of occupied online wall time, finite `[0,1]` (overrides YAML); absent: legacy
+        #[arg(long)]
+        long_share: Option<f64>,
         /// One log line per HTTP request: method, status, path, time, queue and compute time (also `access_log: true`
         /// in the configuration or BASAL_ACCESS_LOG=1)
         #[arg(long)]
@@ -1288,6 +1291,7 @@ fn run() -> Result<()> {
             schedule,
             long_tokens,
             long_slice_ms,
+            long_share,
             access_log,
             metrics,
             batches,
@@ -1295,6 +1299,9 @@ fn run() -> Result<()> {
             release_date,
         } => {
             let access_log = access_log || std::env::var("BASAL_ACCESS_LOG").is_ok_and(|v| !v.is_empty() && v != "0");
+            let (source, mut c) = config::select(config, &models)?;
+            c.long_share = long_share.or(c.long_share);
+            serve::check_long_share(c.long_share)?;
             // once a day: is there a newer release (BASAL_NO_UPDATE_CHECK=1 turns it off)
             std::thread::spawn(|| {
                 if let Some(v) = update::notice() {
@@ -1305,7 +1312,6 @@ fn run() -> Result<()> {
                     );
                 }
             });
-            let (source, mut c) = config::select(config, &models)?;
             if let Some(name) = name {
                 anyhow::ensure!(
                     !matches!(source, config::Source::File(_)),
@@ -1630,6 +1636,7 @@ fn run() -> Result<()> {
                 max_large_inflight: c.max_large_inflight,
                 default_model: c.default_model,
                 long_slice_ms: c.long_slice_ms,
+                long_share: c.long_share,
                 access_log: access_log || c.access_log,
                 metrics: metrics || c.metrics,
                 database: database.map(database::Database::new),

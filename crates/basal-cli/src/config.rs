@@ -71,6 +71,9 @@ pub struct ServeConfig {
     /// Least time a long-request lane works between two hand-overs of the GPU to short batches (any model).
     #[serde(default = "default_long_slice_ms")]
     pub long_slice_ms: u64,
+    /// Optional device-wide long-lane share target in `[0, 1]`; absent keeps legacy checkpoint yielding.
+    #[serde(default)]
+    pub long_share: Option<f64>,
     /// One log line per HTTP request (method, status, path, time); also `basal serve --access-log` or
     /// `BASAL_ACCESS_LOG=1`.
     #[serde(default)]

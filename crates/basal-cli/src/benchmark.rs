@@ -70,6 +70,9 @@ pub(crate) struct Options {
     /// Minimum long-lane slice before handing the GPU to short requests
     #[arg(long, default_value_t = 100)]
     long_slice_ms: u64,
+    /// Device-wide long-lane share of occupied online wall time, finite `[0,1]`; absent: legacy
+    #[arg(long)]
+    long_share: Option<f64>,
     /// Save the machine-readable result to a NEW file
     #[arg(long)]
     out: Option<PathBuf>,
@@ -80,6 +83,7 @@ pub(crate) struct Options {
 
 impl Options {
     fn validate(&self) -> Result<()> {
+        crate::serve::check_long_share(self.long_share)?;
         ensure!(
             !self.concurrency.is_empty() && self.concurrency.iter().all(|c| (1..=256).contains(c)),
             "--concurrency needs levels between 1 and 256"
@@ -138,6 +142,7 @@ impl Server {
             max_large_inflight: options.max_large_inflight,
             default_model: None,
             long_slice_ms: options.long_slice_ms,
+            long_share: options.long_share,
             access_log: false,
             metrics: false,
             database: None,
@@ -272,6 +277,9 @@ pub(crate) fn run(model: &ModelArgs, gpu_options: &GpuArgs, options: &Options) -
             "Load generator and server share this host and process; CPU/RSS include both.",
             "Memory is sampled, not a true allocation peak; reserve checks cannot prevent an OOM inside a forward.",
             "No sustained thermal/power guarantee. Answer consistency is not upstream FP32 quality validation."]});
+    if let Some(share) = options.long_share {
+        report["long_share"] = json!(share);
+    }
     let result = execute(model, gpu_options, quantization, options, raw, &mut report);
     if let Err(e) = &result {
         report["reason"] = json!(format!("{e:#}"));
@@ -556,6 +564,9 @@ fn execute(
         "max_batch_tokens": options.max_batch_tokens, "max_inflight": options.max_inflight,
         "max_large_inflight": options.max_large_inflight, "schedule": format!("{:?}", options.schedule),
         "long_tokens": options.long_tokens, "long_slice_ms": options.long_slice_ms});
+    if let Some(share) = options.long_share {
+        report["settings"]["long_share"] = json!(share);
+    }
     if let Some(split) = &g.layer_split {
         report["settings"]["layer_split"] = json!(split.stages());
     }
