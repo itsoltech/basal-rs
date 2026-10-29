@@ -151,8 +151,9 @@ G0b uses Rust 1.95.0 offline static checks: direct uncapped Candle Clippy via
 private Rustdoc passes; direct Candle Rustdoc retains the ten inherited
 diagnostics listed above. The combined patch reproduces both sources from their
 pinned preimages and all vendor checksums pass. Dependency-policy results are
-inherited for the unchanged manifests and lockfile. CUDA compilation is blocked
-locally by the missing CUDA toolkit (`nvcc`); Metal compilation is
-not available on this Linux host. Neither GPU runtime behavior nor model bitwise
+inherited for the unchanged manifests and lockfile. Parent verification also
+passes all-features workspace Clippy with the local CUDA 12.9.1 toolchain; the
+initial child CUDA attempt lacked `nvcc` in its command environment. Metal
+compilation is not available on this Linux host. Neither GPU runtime behavior nor model bitwise
 equivalence, performance or general OOM safety was measured. REQ-009 remains
 partial; model mapping and resource policy remain open.
