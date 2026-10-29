@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 
 mod calibration_inventory;
 mod json_envelope;
+mod raw_source;
 mod semantics;
 pub use calibration_inventory::{
     CallerCalibrationDirectoryLease, GgufCalibrationInventory, GgufCalibrationInventoryError, GgufCalibrationVariant,
@@ -25,6 +26,8 @@ pub use calibration_inventory::{
 };
 use json_envelope::JsonReadMode;
 pub use json_envelope::{JsonEnvelopeError, JsonEnvelopeResource};
+use raw_source::RawCharge;
+pub use raw_source::{GgufRawSourceBudget, GgufRawSourceError};
 pub use semantics::{
     CalibrationCapture, CalibrationDecision, CalibrationIdentityState, CalibrationMode, CalibrationProbe,
     CalibrationProbeRole, CalibrationReadRole, CapturedCalibrationFile, GgufCalibrationBinding,
@@ -298,6 +301,8 @@ pub struct GgufCompanionSnapshot {
     declaration_bytes: Vec<u8>,
     declaration_sha256: Sha256Digest,
     companions: [Vec<u8>; 5],
+    // Fields drop in declaration order: release only after all raw backing dies.
+    _raw_charge: Option<RawCharge>,
 }
 
 impl GgufCompanionSnapshot {
@@ -314,13 +319,25 @@ impl GgufCompanionSnapshot {
     /// Future parsers must consume these bytes, not reopen the original paths
     /// while claiming the captured hashes still apply.
     pub fn read(directory: &Path) -> Result<Self, WeightSourceError> {
-        Self::read_mode(directory, JsonReadMode::Legacy)
+        Self::read_mode(directory, JsonReadMode::Legacy, None)
     }
 
-    fn read_mode(directory: &Path, mode: JsonReadMode) -> Result<Self, WeightSourceError> {
+    fn read_mode(
+        directory: &Path,
+        mode: JsonReadMode,
+        budget: Option<&GgufRawSourceBudget>,
+    ) -> Result<Self, WeightSourceError> {
+        // Locals drop in reverse order, so the charge must precede raw locals.
+        let mut raw_charge = budget.map(GgufRawSourceBudget::charge);
         let mut declaration_total = 0;
-        let declaration_bytes =
-            read_file(directory, DECLARATION, MAX_DECLARATION_BYTES, &mut declaration_total, MAX_DECLARATION_BYTES)?;
+        let declaration_bytes = read_file(
+            directory,
+            DECLARATION,
+            MAX_DECLARATION_BYTES,
+            &mut declaration_total,
+            MAX_DECLARATION_BYTES,
+            raw_charge.as_mut(),
+        )?;
         let declaration_sha256 = Sha256Digest::of(&declaration_bytes);
         mode.check(&declaration_bytes)
             .map_err(|source| WeightSourceError::JsonEnvelope { role: DECLARATION, source })?;
@@ -328,8 +345,14 @@ impl GgufCompanionSnapshot {
         let mut companions = std::array::from_fn(|_| Vec::new());
         let mut total = 0;
         for role in CompanionRole::ALL {
-            let bytes =
-                read_file(directory, role.filename(), MAX_COMPANION_BYTES, &mut total, MAX_TOTAL_COMPANION_BYTES)?;
+            let bytes = read_file(
+                directory,
+                role.filename(),
+                MAX_COMPANION_BYTES,
+                &mut total,
+                MAX_TOTAL_COMPANION_BYTES,
+                raw_charge.as_mut(),
+            )?;
             let actual = Sha256Digest::of(&bytes);
             let expected = declaration.companion_sha256(role);
             if actual != expected {
@@ -341,7 +364,7 @@ impl GgufCompanionSnapshot {
             }
             companions[role as usize] = bytes;
         }
-        Ok(Self { declaration, declaration_bytes, declaration_sha256, companions })
+        Ok(Self { declaration, declaration_bytes, declaration_sha256, companions, _raw_charge: raw_charge })
     }
 
     /// Borrow the checked declaration; this does not validate the GGUF itself.
@@ -373,6 +396,12 @@ impl GgufCompanionSnapshot {
 /// callers must treat that detailed diagnostic as untrusted declaration data.
 #[derive(thiserror::Error)]
 pub enum WeightSourceError {
+    #[error("{role} raw source admission failed")]
+    RawSource {
+        role: &'static str,
+        #[source]
+        source: GgufRawSourceError,
+    },
     #[error("{role} JSON envelope check failed")]
     JsonEnvelope {
         role: &'static str,
@@ -459,8 +488,9 @@ fn read_file(
     per_file_limit: u64,
     total: &mut u64,
     total_limit: u64,
+    raw_charge: Option<&mut RawCharge>,
 ) -> Result<Vec<u8>, WeightSourceError> {
-    read_path(&directory.join(role), role, per_file_limit, total, total_limit)
+    read_path(&directory.join(role), role, per_file_limit, total, total_limit, raw_charge)
 }
 
 fn read_path(
@@ -469,6 +499,7 @@ fn read_path(
     per_file_limit: u64,
     total: &mut u64,
     total_limit: u64,
+    raw_charge: Option<&mut RawCharge>,
 ) -> Result<Vec<u8>, WeightSourceError> {
     let io_error = |operation, source| WeightSourceError::Io { role, operation, source };
     let mut file = File::open(path).map_err(|source| io_error("open", source))?;
@@ -494,8 +525,18 @@ fn read_path(
         limit: per_file_limit,
         reason: "file length cannot fit in usize",
     })?;
-    let mut bytes = Vec::new();
-    bytes.try_reserve_exact(length).map_err(|source| WeightSourceError::Allocation { role, bytes: length, source })?;
+    let mut bytes = match raw_charge {
+        Some(charge) => charge.allocate(length).map_err(|source| WeightSourceError::RawSource { role, source })?,
+        None => {
+            let mut bytes = Vec::new();
+            bytes.try_reserve_exact(length).map_err(|source| WeightSourceError::Allocation {
+                role,
+                bytes: length,
+                source,
+            })?;
+            bytes
+        }
+    };
     let mut chunk = [0; 8192];
     while bytes.len() < length {
         let allowed = (length - bytes.len()).min(chunk.len());
@@ -503,7 +544,7 @@ fn read_path(
         if count == 0 {
             return Err(WeightSourceError::SourceChanged { role, reason: "EOF before initial length" });
         }
-        // Capacity for the full initial length was reserved fallibly above.
+        // count <= allowed <= length-len: neither allocation route can grow.
         bytes.extend_from_slice(&chunk[..count]);
     }
     let mut probe = [0; 1];

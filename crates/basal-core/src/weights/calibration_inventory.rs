@@ -9,8 +9,9 @@ use std::path::Path;
 
 use sha2::{Digest, Sha256};
 
+use super::raw_source::RawCharge;
 use super::semantics::{CalibrationProbeRole, CalibrationReadRole, GgufSemanticError};
-use super::Sha256Digest;
+use super::{GgufRawSourceBudget, GgufRawSourceError, Sha256Digest};
 
 const MAX_SCANNED: u64 = 4096;
 const MAX_MATCHES: u64 = 256;
@@ -82,6 +83,8 @@ pub struct GgufCalibrationInventory {
     metadata_capacity: u64,
     content_bytes: u64,
     content_capacity: u64,
+    // Entries and all their content backing drop before this aggregate charge.
+    raw_charge: Option<RawCharge>,
 }
 
 impl GgufCalibrationInventory {
@@ -116,6 +119,7 @@ impl GgufCalibrationInventory {
     pub(super) fn capture(
         directory: &Path,
         lease: CallerCalibrationDirectoryLease,
+        budget: Option<&GgufRawSourceBudget>,
     ) -> Result<(Self, File), GgufCalibrationInventoryError> {
         if !cfg!(all(
             target_pointer_width = "64",
@@ -130,6 +134,8 @@ impl GgufCalibrationInventory {
             return Err(GgufCalibrationInventoryError::NonDirectory);
         }
         let directory_stamp = SourceStamp::from_metadata(&metadata)?;
+        // Precede entries so unwind also destroys raw backing before release.
+        let raw_charge = budget.map(GgufRawSourceBudget::charge);
         let mut entries = Vec::new();
         let count = to_usize(MAX_MATCHES, InventoryResource::Matches)?;
         let record = to_u64(size_of::<GgufCalibrationVariant>(), InventoryResource::MetadataCapacity)?;
@@ -149,6 +155,7 @@ impl GgufCalibrationInventory {
             metadata_capacity,
             content_bytes: 0,
             content_capacity: 0,
+            raw_charge,
         };
         inventory.enumerate(directory)?;
         inventory.entries.sort_unstable_by(|left, right| left.name.as_bytes().cmp(right.name.as_bytes()));
@@ -233,8 +240,20 @@ impl GgufCalibrationInventory {
         let length = to_usize(stamp.len, InventoryResource::FileBytes)?;
         let requested = add(self.content_capacity, stamp.len, InventoryResource::ContentCapacity)?;
         limit(InventoryResource::ContentCapacity, requested, MAX_CONTENT)?;
-        entry.bytes.try_reserve_exact(length).map_err(allocation)?;
-        let capacity = to_u64(entry.bytes.capacity(), InventoryResource::ContentCapacity)?;
+        let capacity = match self.raw_charge.as_mut() {
+            Some(charge) => {
+                entry.bytes = charge
+                    .allocate(length)
+                    .map_err(|source| GgufCalibrationInventoryError::RawSource { index, source })?;
+                // Exact requested layout, known before allocation, not a capacity
+                // observation granting retroactive authority. Each entry is read once.
+                stamp.len
+            }
+            None => {
+                entry.bytes.try_reserve_exact(length).map_err(allocation)?;
+                to_u64(entry.bytes.capacity(), InventoryResource::ContentCapacity)?
+            }
+        };
         limit(InventoryResource::FileCapacity, capacity, MAX_FILE)?;
         self.content_capacity = add(self.content_capacity, capacity, InventoryResource::ContentCapacity)?;
         limit(InventoryResource::ContentCapacity, self.content_capacity, MAX_CONTENT)?;
@@ -251,6 +270,7 @@ impl GgufCalibrationInventory {
                 });
             }
             hash.update(&scratch[..read]);
+            // read <= remaining, initially length: the exact backing cannot grow.
             entry.bytes.extend_from_slice(&scratch[..read]);
             remaining = remaining
                 .checked_sub(to_u64(read, InventoryResource::FileBytes)?)
@@ -437,6 +457,12 @@ pub enum InventoryReadMismatch {
 /// even for externally constructed variants. Source chains remain untrusted.
 #[derive(thiserror::Error)]
 pub enum GgufCalibrationInventoryError {
+    #[error("calibration inventory raw source admission failed")]
+    RawSource {
+        index: usize,
+        #[source]
+        source: GgufRawSourceError,
+    },
     #[error("unsupported calibration inventory host")]
     UnsupportedHost,
     #[error("calibration inventory I/O failed")]

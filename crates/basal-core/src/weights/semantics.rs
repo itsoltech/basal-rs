@@ -11,8 +11,10 @@ use super::calibration_inventory::{
     CallerCalibrationDirectoryLease, GgufCalibrationInventory, GgufCalibrationInventoryError, GgufInventoryReadError,
     InventoryPhase, InventoryReadMismatch, InventoryResource,
 };
+use super::raw_source::RawCharge;
 use super::{
-    read_path, CompanionRole, GgufCompanionSnapshot, JsonEnvelopeError, JsonReadMode, Sha256Digest, WeightSourceError,
+    read_path, CompanionRole, GgufCompanionSnapshot, GgufRawSourceBudget, JsonEnvelopeError, JsonReadMode,
+    Sha256Digest, WeightSourceError,
 };
 use crate::architecture::Architecture;
 use crate::calibration::{CalibrationIdentityError, CalibrationSource, ServedIdentity};
@@ -247,6 +249,8 @@ pub struct CalibrationCapture {
     decision: CalibrationDecision,
     total: u64,
     total_limit: u64,
+    // Both actual-read slots (including replaced candidate) die before release.
+    raw_charge: Option<RawCharge>,
 }
 
 impl CalibrationCapture {
@@ -255,6 +259,7 @@ impl CalibrationCapture {
         protocol: &ManifestProtocol,
         options: ModelLoadOptions<'_>,
         json_mode: JsonReadMode,
+        budget: Option<&GgufRawSourceBudget>,
     ) -> Result<Self, WeightSourceError> {
         let overflow = || WeightSourceError::ResourceLimit {
             role: "calibration",
@@ -291,6 +296,7 @@ impl CalibrationCapture {
                 variant: OrdersVariantDecision::NotConsidered,
                 probes: [None; 3],
             },
+            raw_charge: budget.map(GgufRawSourceBudget::charge),
         })
     }
 
@@ -339,8 +345,15 @@ impl CalibrationCapture {
             limit: 2,
             reason: "calibration read count exceeds allowance",
         })?;
-        let bytes = read_path(path, "calibration", MAX_CALIBRATION_BYTES, &mut self.total, self.total_limit)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let bytes = read_path(
+            path,
+            "calibration",
+            MAX_CALIBRATION_BYTES,
+            &mut self.total,
+            self.total_limit,
+            self.raw_charge.as_mut(),
+        )
+        .with_context(|| format!("reading {}", path.display()))?;
         self.json_mode.check(&bytes).map_err(|source| GgufSemanticError::CalibrationJsonEnvelope { source })?;
         let data = serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))?;
         let sha256 = Sha256Digest::of(&bytes);
@@ -665,7 +678,7 @@ impl GgufCompanionSemantics {
         options: ModelLoadOptions<'_>,
         lease: CallerCalibrationDirectoryLease,
     ) -> Result<Self, GgufInventoryReadError> {
-        Self::read_inventory_mode(directory, options, lease, JsonReadMode::Legacy)
+        Self::read_inventory_mode(directory, options, lease, JsonReadMode::Legacy, None)
     }
 
     /// Capture the full calibration inventory and preflight each original JSON
@@ -686,7 +699,32 @@ impl GgufCompanionSemantics {
         options: ModelLoadOptions<'_>,
         lease: CallerCalibrationDirectoryLease,
     ) -> Result<Self, GgufInventoryReadError> {
-        Self::read_inventory_mode(directory, options, lease, JsonReadMode::Envelope)
+        Self::read_inventory_mode(directory, options, lease, JsonReadMode::Envelope, None)
+    }
+
+    /// Capture full inventory and envelope-checked semantics while admitting each
+    /// original raw-content requested layout before allocation. The same ledger
+    /// covers inventory, declaration, five companions and both actual calibration
+    /// reads, including their independent copies and replaced-candidate overlap.
+    ///
+    /// Pass one application-created budget (or sharing clones) to all concurrent
+    /// loads/reloads for that allowance. Charges stay private in the three real
+    /// owners until their backing is destroyed, including errors/unwind and moves
+    /// into GGUF inspection. Admission uses try_lock and may refuse Busy; cleanup
+    /// may wait for a short arithmetic lock. Existing length caps still apply.
+    ///
+    /// Requires the same caller lease/no-writer contract as the inventory route.
+    /// Excludes bootstrap/objects/names/records/paths/errors, semantic/native/
+    /// tokenizer/cache heaps, GGUF scratch, staging/device and allocator rounding.
+    /// This is neither whole-process memory admission nor OS/RSS/OOM protection
+    /// or loader readiness. CLI/Engine do not yet share this application context.
+    pub fn read_with_raw_source_budget(
+        directory: &Path,
+        options: ModelLoadOptions<'_>,
+        lease: CallerCalibrationDirectoryLease,
+        budget: &GgufRawSourceBudget,
+    ) -> Result<Self, GgufInventoryReadError> {
+        Self::read_inventory_mode(directory, options, lease, JsonReadMode::Envelope, Some(budget))
     }
 
     fn read_inventory_mode(
@@ -694,10 +732,11 @@ impl GgufCompanionSemantics {
         options: ModelLoadOptions<'_>,
         lease: CallerCalibrationDirectoryLease,
         mode: JsonReadMode,
+        budget: Option<&GgufRawSourceBudget>,
     ) -> Result<Self, GgufInventoryReadError> {
-        let (mut inventory, handle) = GgufCalibrationInventory::capture(directory, lease)?;
-        let mut semantics =
-            Self::read_mode(directory, options, mode).map_err(|source| GgufInventoryReadError::Semantic { source })?;
+        let (mut inventory, handle) = GgufCalibrationInventory::capture(directory, lease, budget)?;
+        let mut semantics = Self::read_mode(directory, options, mode, budget)
+            .map_err(|source| GgufInventoryReadError::Semantic { source })?;
         semantics.calibration.bind_inventory(&mut inventory, &semantics.manifest)?;
         inventory.check_directory(&handle, InventoryPhase::BeforeInstall)?;
         // Atomic install after all fallible work; no retrofit to older owners.
@@ -713,15 +752,16 @@ impl GgufCompanionSemantics {
     /// Capture once, then parse those bytes. Only selected calibration opens extra files.
     /// No GGUF file, device, model execution or companion path reload is involved.
     pub fn read(directory: &Path, options: ModelLoadOptions<'_>) -> Result<Self, GgufSemanticError> {
-        Self::read_mode(directory, options, JsonReadMode::Legacy)
+        Self::read_mode(directory, options, JsonReadMode::Legacy, None)
     }
 
     fn read_mode(
         directory: &Path,
         options: ModelLoadOptions<'_>,
         mode: JsonReadMode,
+        budget: Option<&GgufRawSourceBudget>,
     ) -> Result<Self, GgufSemanticError> {
-        let snapshot = GgufCompanionSnapshot::read_mode(directory, mode).map_err(|source| match &source {
+        let snapshot = GgufCompanionSnapshot::read_mode(directory, mode, budget).map_err(|source| match &source {
             WeightSourceError::Io { role: "config.json", operation: "open", source: io }
                 if io.kind() == std::io::ErrorKind::NotFound =>
             {
@@ -729,7 +769,7 @@ impl GgufCompanionSemantics {
             }
             _ => GgufSemanticError::Capture { source },
         })?;
-        Self::from_snapshot(snapshot, directory, options, mode)
+        Self::from_snapshot(snapshot, directory, options, mode, budget)
     }
 
     fn from_snapshot(
@@ -737,6 +777,7 @@ impl GgufCompanionSemantics {
         directory: &Path,
         options: ModelLoadOptions<'_>,
         mode: JsonReadMode,
+        budget: Option<&GgufRawSourceBudget>,
     ) -> Result<Self, GgufSemanticError> {
         use SemanticStage as Stage;
         let config = json(&snapshot, CompanionRole::Config, Stage::Config)?;
@@ -755,7 +796,7 @@ impl GgufCompanionSemantics {
         let tcfg = json(&snapshot, CompanionRole::TokenizerConfig, Stage::TokenizerConfig)?;
         let bos = protocol.parse_bos(&tcfg).map_err(|e| GgufSemanticError::semantic(Stage::TokenizerConfig, e))?;
         let style = protocol.chat_style();
-        let mut calibration = CalibrationCapture::new(&snapshot, &protocol, options, mode)
+        let mut calibration = CalibrationCapture::new(&snapshot, &protocol, options, mode, budget)
             .map_err(|source| GgufSemanticError::Capture { source })?;
         let loaded = crate::calibration::load_captured(
             directory,

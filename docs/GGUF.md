@@ -29,7 +29,7 @@ kalibracji, następnie wykonuje wspólny odczyt semantyki, cross-binding, kontro
 pierwotnego stampu katalogu i instalację inwentarza. Nie ma operacji nadawania
 tego trybu wcześniej skonstruowanemu właścicielowi ani znacznika gotowości.
 
-Wyłącznie ta nowa ścieżka sprawdza oryginalne zachowane bajty JSON przed ich
+Ta ścieżka oraz opisany niżej `read_with_raw_source_budget` sprawdzają oryginalne zachowane bajty JSON przed ich
 pierwszym parsowaniem przez serde. Obejmuje `gguf-source.json`, `config.json`,
 `basal.json`, `tokenizer.json`, `tokenizer_config.json` i najwyżej dwa faktyczne
 odczyty kalibracji: kandydata i zamiennik albo plik jawny, także zewnętrzny.
@@ -78,7 +78,7 @@ CalibrationSelection i zachowany błąd anyhow do
 Nie ma zamiany przyczyn na tekst. Mapowanie open NotFound config do
 `MissingConfigG3` pozostaje bez zmian.
 
-**Tylko sam skaner działa bez alokacji.** Surowe odczyty, inwentarz, zwykła
+**Tylko sam skaner działa bez alokacji.** W `read_with_json_envelope` surowe odczyty, inwentarz, zwykła
 propagacja błędów, serde, normalizacja i backend nadal nie mają utrzymywanych
 rezerwacji pamięci. Limity leksykalne nie dowodzą rozmiarów capacity, scratch,
 serializacji, helper Content, map, automatów, natywnego regex, głębokości
@@ -87,6 +87,85 @@ narzutu allocatorów czy danych ścieżek systemu operacyjnego i nie chronią pr
 OOM. API nie daje permitu, admission ani gotowości loadera. REQ-009 pozostaje
 częściowe; nie ma dowodu runtime, zgodności bitowej/FP32, jakości, pamięci,
 wydajności ani pokrycia pakietów.
+
+## Opcjonalne utrzymywane admission surowych źródeł
+
+`GgufCompanionSemantics::read_with_raw_source_budget(directory, options, lease, &budget)`
+zwraca `Result<Self, GgufInventoryReadError>`. Łączy pełny inwentarz i preflight
+Envelope z rzeczywistym admission **żądanego layoutu oryginalnych buforów raw**
+przed każdą ich alokacją. Nie ma konwersji wcześniej utworzonego właściciela.
+Obowiązki trusted-local lease, no-writer i wiązania źródeł pozostają bez zmian.
+
+Aplikacja tworzy jeden `GgufRawSourceBudget::new(limit_bytes: usize)` przed
+odczytami i przekazuje ten sam uchwyt albo jego klony do wszystkich równoległych
+odczytów i reloadów w ramach tego allowance. Clone współdzieli ledger przez
+Arc; oddzielne `new` tworzą niezależne limity. Limit zero odmawia niepustych
+buforów; równość jest dozwolona. CLI ani Engine nie dostarczają jeszcze tego
+kontekstu. Osobny budżet na każdy load nie oznacza admission całego procesu.
+Bootstrap Arc/Mutex jest poza rachunkiem i nie ma obietnicy fallible konstrukcji.
+
+| Właściciel utrzymujący prywatną rezerwację | Pokryte bufory |
+|---|---|
+| Snapshot | Oryginalna deklaracja i pięć companions, także chat template |
+| Inventory | Zawartość każdego pasującego wpisu, także nigdy nieparsowanego |
+| CalibrationCapture | Oba faktyczne odczyty selektora, w tym zastąpiony kandydat albo zewnętrzny plik jawny |
+
+Kopie inventory i faktycznych odczytów pozostają oddzielnymi alokacjami i obie
+obciążają ten sam ledger, nawet przy identycznych bajtach. Dotychczasowe limity
+plików i sum nadal obowiązują. Admission jest przyrostowe, osobno przed każdym
+buforem; późniejsza odmowa niszczy wcześniejsze bufory i ich właścicieli.
+
+Po istniejących kontrolach pliku/długości i konwersji usize następuje walidacja
+`Layout::array::<u8>(n)`, checked dodawanie do prywatnej rezerwacji i wspólnego
+licznika oraz porównanie z limitem. Admission używa `Mutex::try_lock`, bez
+alokacji, I/O ani parsowania pod lockiem. Następnie dla n>0 globalne `alloc`
+żąda dokładnie tego layoutu; niezerowy wskaźnik jest natychmiast przejmowany
+przez prywatny Vec o len=0 i capacity=n. Null daje typowany błąd. Dla n=0
+powstaje pusty Vec bez alokacji i bez zajmowania ledgera. Ograniczone odczyty
+dopisują najwyżej n bajtów, więc nie wywołują wzrostu Vec. To wąska granica
+unsafe z lokalnym uzasadnieniem layoutu, inicjalizacji i globalnej dealokacji;
+capacity odczytane po reserve nie stanowi podstawy admission.
+
+Trzy prywatne, nieklonowalne rezerwacje są ostatnimi polami rzeczywistych
+właścicieli. Bufory są niszczone przed oddaniem allowance, także przy błędach,
+unwind i przenoszeniu semantyki do inspekcji GGUF. Współdzielenie całego
+właściciela przez Arc utrzymuje rezerwacje do ostatniego drop. Nowy load
+pozyskuje własne rezerwacje z tego samego ledgera. Po null lub innym błędzie
+możliwe jest konserwatywne utrzymanie nadmiarowego obciążenia do zniszczenia
+właściciela; wcześniejszego refundu nie ma. Gettery pożyczają bajty, bez
+publicznego owned Vec, permitu, ręcznego release ani resetu. Kopie wykonane
+przez caller’a z pożyczonego slice są poza zakresem loadera.
+
+`GgufRawSourceError` rozróżnia Busy, Poisoned, Overflow,
+Limit { requested, held, limit }, Layout { bytes } i Allocation { bytes }.
+Nie przechowuje ścieżek ani wejścia. Odmowa zajętego locka nie czeka na
+allowance. Cleanup może czekać na krótki lock arytmetyczny; wyłącznie cleanup
+odzyskuje poisoned guard, bez ponownego otwarcia admission. Checked odejmowanie
+przy niemożliwym underflow zamyka admission zamiast zawijać licznik lub panikować.
+Nie ma obietnicy wait-free cleanup ani granicy czasu odczytu.
+
+`WeightSourceError::RawSource { role, source }` oraz
+`GgufCalibrationInventoryError::RawSource { index, source }` zachowują typowaną
+przyczynę przez `source()`. Kalibracja zachowuje ją przez dotychczasowy anyhow
+context i etap CalibrationSelection. Wrapper `GgufInventoryReadError` pozostaje
+ten sam. **Dodanie wariantów publicznych enumów błędów wymaga aktualizacji
+wyczerpujących matchów downstream**, także przy używaniu starych konstruktorów.
+Stare entrypointy pozostają bez rezerwacji i zachowują kolejność odczytów,
+alokacji, błędów, hashy, selekcji oraz fingerprint. Nowa ścieżka może odmówić
+admission przed odczytem zawartości/preflight/serde, ale po wcześniejszych
+kontrolach pliku i limitach długości. Hash deklaracji poprzedza Envelope i DTO;
+hash companion jest porównywany przed Envelope. Inwentarz i actual-read binding
+oraz końcowy stamp i atomowa instalacja pozostają bez zmian.
+
+Poza rachunkiem są obiekty i control blocks, rekordy/nazwy/ścieżki/błędy,
+serde/Value/normalizacja, native/tokenizer/cache, scratch nagłówka/payloadu GGUF,
+staging i urządzenie. Nie obejmuje zaokrągleń/metadata/fragmentacji allocatora,
+OS, page cache, RSS ani fizycznego OOM. Nie ogranicza liczby zerobajtowych
+loadów ani współbieżności semantycznych builderów. REQ-009 pozostaje częściowe:
+brak admission całego heapu, owned Engine/Planner, trwałej tożsamości, końcowego
+same-fd rehash przed publikacją i materializacji/upload/completion/error retention.
+Nie uzyskano dowodu runtime, zgodności bitowej/FP32, jakości ani pomiaru pamięci
+lub wydajności. Zaakceptowany thinking FAIL pozostaje bez zmian.
 
 ## Zamknięty zakres semantyki G1
 
@@ -327,7 +406,7 @@ Wybrane i zastąpione bajty są celowo przechowywane ponownie: inventory oraz
 rzeczywiste odczyty selektora mają osobne bufory. Suma surowych logicznych
 długości wynosi najwyżej 384 MiB + 64 KiB deklaracji, plus nowe metadane/scratch
 i istniejące obiekty semantyczne. Nie jest to limit capacities całego właściciela,
-szczytu/RSS, OOM ani admission. Actual capacity jest sprawdzana **po** fallible
+szczytu/RSS, OOM ani admission. W ścieżkach bez raw budget actual capacity jest sprawdzana **po** fallible
 reserve, więc chwilowa nadmiarowa alokacja może już wystąpić. Alokacje OS
 enumeracji/nazw/ścieżek, narzut allocatora i amplifikacja JSON/tokenizera są poza
 tym rachunkiem. Nie zadeklarowano poprawy pamięci ani wydajności.
@@ -337,7 +416,7 @@ się zakończyć. Inventory opisuje chroniony przedział capture, nie aktualny s
 ścieżek. Niezależny obowiązek no-writer GGUF trwa przez końcowe odczyty/rehash
 i publikację. Warunkowe świadectwo członkostwa nie daje autentyczności,
 snapshotu, trwałej tożsamości, loadera, admission ani uprawnień publikacji.
-REQ009 pozostaje częściowe: otwarte są utrzymywane admission przed alokacjami,
+REQ009 pozostaje częściowe: poza opcjonalnym admission raw otwarte są utrzymywane admission przed pozostałymi alokacjami,
 rzeczywista trwała tożsamość źródła/numeryki, materializer/upload/completion
 i error retention, owned konsumenci, readout/CLI/runtime. Domyślne zachowanie,
 numeryka, legacy fingerprint i zaakceptowany thinking FAIL pozostają bez zmian;
