@@ -397,14 +397,20 @@ struct Lane {
 }
 
 impl Lane {
-    fn new(name: &str, schedule: Schedule, max_batch_tokens: usize, metrics: Option<LaneMetrics>) -> Self {
+    fn new(
+        name: &str,
+        schedule: Schedule,
+        max_batch_tokens: usize,
+        max_batch: Option<usize>,
+        metrics: Option<LaneMetrics>,
+    ) -> Self {
         Self {
             name: name.into(),
             usage_lane: None,
             metrics,
             schedule,
             max_batch_tokens,
-            max_batch: None,
+            max_batch,
             rate: 3000.0,
             waiting: Vec::new(),
         }
@@ -1368,14 +1374,13 @@ fn serve_inner<B: Backend + Send + 'static>(
                 let mut health: Vec<DeviceHealth> = engine.work_health();
                 let (tx, rx) = mpsc::unbounded_channel();
                 let lane = |kind| {
-                    let mut lane = Lane::new(
+                    Lane::new(
                         &name,
                         schedule,
                         max_batch_tokens,
+                        collection.max_batch(),
                         metrics.as_ref().map(|m| m.lane(&name, kind, index)),
-                    );
-                    lane.max_batch = collection.max_batch();
-                    lane
+                    )
                 };
                 if batches_enabled {
                     if let batches::config::BackgroundQualification::Qualified { composition, max_requests, .. } =
