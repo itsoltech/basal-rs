@@ -1,4 +1,4 @@
-# Deklaracja GGUF i semantyka plików towarzyszących
+# Deklaracja GGUF, companions i inspekcja nagłówka
 
 `basal_core::weights::GgufCompanionSnapshot::read(&Path)` odczytuje lokalną
 deklarację `gguf-source.json` i pięć stałych plików towarzyszących. Zwraca
@@ -305,10 +305,10 @@ zmienią. Kolejne parsowanie musi korzystać z tych bajtów albo osobnego
 zweryfikowanego immutable snapshotu. Ponowne otwarcie ścieżek nie dziedziczy
 tych hashy. Snapshot nie gwarantuje jednoczesnego stanu wszystkich plików.
 
-Dalszy preflight musi zweryfikować sam GGUF: ograniczony nagłówek i inventory,
-metadane, mapowanie, typy i zakresy tensorów, payload i jego finitość, digest
-tego samego pliku, niezmienność źródła oraz jawne budżety pamięci. Osobno musi
-porównać config z GGUF i zachować późniejsze granice ID żądań. API semantyczne
+Opisane niżej API GPU sprawdza nagłówek, metadane oraz inventory i zakresy
+tensorów tego samego otwartego GGUF. Dalszy preflight musi zweryfikować payload
+i jego finitość, digest tego samego pliku, niezmienność źródła oraz jawne budżety
+pamięci. Musi też zachować późniejsze granice ID żądań. API semantyczne
 zamyka wyłącznie opisany etap companions/wybranej kalibracji. Nie definiuje
 fingerprintu całego źródła ani trwałego inventory wszystkich wariantów kalibracji.
 Późniejsza tożsamość musi wiązać również zastąpionego kandydata, wybrany digest,
@@ -321,3 +321,182 @@ i wymaga osobnego dostosowania. Nowa ścieżka nie może otwierać companions pr
 host/device/staging budgets, warianty, materializacja, CLI/runtime i kwalifikacja
 numeryczna pozostają otwarte. Nie potwierdzono dystrybucji modeli, zgodności
 bitowej, wyników FP32, runtime GPU ani nowej akceptacji thinking.
+
+## Inspekcja nagłówka i inventory na hoście
+
+`basal_gpu::gguf::GgufHeaderInspection::inspect(file, companions, lease)`
+przejmuje dokładnie jeden już otwarty `std::fs::File`, istniejący
+`GgufCompanionSemantics` oraz jawny `CallerImmutableLease`. Moduł jest dostępny
+bez feature GPU na 64-bitowym little-endian Linux i macOS. Pozostałe hosty
+otrzymują `GgufInspectionError::UnsupportedHost`; obsługa hosta nie oznacza
+inferencji CPU ani Intel.
+
+Caller wybiera plik i zapewnia zaufane lokalne otwarcie. Inspekcja nie otwiera
+ścieżek, nie szuka `.gguf`, nie pobiera origin, nie odkrywa siblings i nie
+wykonuje fallbacku. Nie parsuje ponownie companions, nie konstruuje ani nie
+uruchamia tokenizera. `companions()` pożycza ten sam zachowany obiekt,
+`tensor_count()` zwraca sprawdzoną liczbę tensorów, a `source_tensor_bytes()`
+sumę bajtów ich gęstych danych źródłowych, bez nagłówka, luk i paddingu.
+Ta suma nie jest rozmiarem pamięci rezydentnej.
+
+Wynik nie jest `Clone`, nie ma publicznych pól ani dostępu do `File` lub map
+Candle. Zachowuje razem plik, sparsowany `Content`, stamp, companions i token
+obowiązku caller’a. Nie ma serializacji, `into_parts`, materializacji ani API
+urządzenia. Błąd odrzuca wszystkich przejętych właścicieli bez częściowego
+wyniku. Kolejne osobno wdrażane fazy muszą przejąć tych samych właścicieli;
+ponowne otwarcie przez `manifest.dir` nie dziedziczy wyniku inspekcji.
+
+### Obowiązek caller’a i obserwacje pliku
+
+`CallerImmutableLease::acknowledge_trusted_local_contract()` jest bezpiecznym,
+jawnym potwierdzeniem: caller przed przekazaniem pliku zapewnił wyłączne
+wykluczenie zapisów do tego inode i utrzyma je przez wszystkie późniejsze
+odczyty oraz publikację wyniku. Caller sam zachowuje ewentualny rzeczywisty
+guard. Token nie uzyskuje blokady, nie dowodzi niezmienności, nie jest guardem
+systemu plików ani warunkiem bezpieczeństwa Rust. Nie ma `Clone`/`Default`,
+a inspekcja nie tworzy go niejawnie. Fałszywe potwierdzenie nie zmienia
+bezpiecznego I/O w operację `unsafe`, lecz unieważnia założenie spójności źródła.
+Przyszła integracja musi spełnić ten kontrakt, zapewnić osobno zweryfikowany
+immutable snapshot albo odmówić. Producent snapshotów nie jest wdrożony.
+
+Plik musi być regularny i mieć od 8 bajtów do 64 GiB. Przed inspekcją i po niej
+ten sam descriptor dostarcza `dev`, `ino`, typ, długość, `mtime` i `ctime`
+z nanosekundami. Błąd metadata jest błędem I/O; wykryta zmiana odmawia wyniku.
+Otwarty descriptor chroni przed podmianą ścieżki, ale nie przed zapisem przez
+inny descriptor, proces, mmap lub hardlink. Równe stampy nie dowodzą braku
+zmian pomiędzy obserwacjami. Nawet przyszłe powtarzane hashe nie dowiodą braku
+wyścigów ani zmian i przywróceń danych. Inspekcja nie oblicza żadnego hasha GGUF.
+Zachowane bajty companions/kalibracji są już własnością wcześniejszego etapu
+i nie wymagają dalszego lease ich ścieżek.
+
+### Kolejność i limity
+
+Najpierw sprawdzane są host, plik i `N = 3 + (bias ? 16 : 9) * layers`,
+z kontrolą przepełnienia i limitem 8195 przed alokacją scratch inventory.
+Następnie inspekcja ustawia pozycję zero i odczytuje dokładnie osiem bajtów:
+literalne `GGUF` oraz little-endian wersję 3. Po ponownym seek do zera wywołuje
+raz `Content::read_with_limits`. Nie wywołuje API odczytu danych tensorów.
+
+| Limit parsera | Wartość |
+|---|---:|
+| Nagłówek / wpisy metadata | 64 MiB / 4096 |
+| Tensory / rank | sprawdzone N / 2 |
+| Jeden / wszystkie surowe stringi | 1 MiB / 32 MiB |
+| Węzły Value / poziomy zagnieżdżenia array | 1 048 576 / 2 |
+| Kumulatywny ledger żądanych alokacji parsera | 256 MiB |
+
+Osobny scratch produktu to `N * size_of::<(u64,u64)>() + 64`, sprawdzany
+przed `try_reserve_exact` z limitem 1 MiB, oraz jeden ponownie używany string
+nazwy z fallible rezerwacją 128 bajtów. Sortowanie zakresów nie alokuje bufora.
+Nie powstaje mapa oczekiwanego inventory ani bufor modelu. Ledger parsera,
+scratch produktu i istniejące alokacje companions są odrębne. Stos, diagnostyka
+błędów, narzut allocatorów i fizyczne RSS pozostają poza tym lokalnym rachunkiem.
+Limity nie zapewniają dostępności RAM ani ochrony przed OOM. Wcześniejsze
+ograniczenia ilościowego rachunku semantyki/tokenizera nadal obowiązują.
+
+### Zamknięte metadane GGUF
+
+Poniższe wartości są wymagane w dokładnych wariantach `Value`; nie ma
+rozszerzania integerów z U8/U16 ani porównania float z tolerancją. Każdy
+integer config musi mieścić się w U32. Epsilon i theta po zaokrągleniu do F32
+muszą pozostać dodatnie i skończone; porównanie dotyczy tej wartości F32,
+bez zmiany autorytatywnych f64 manifestu.
+
+| Wymagany klucz | Dokładna wartość |
+|---|---|
+| `general.architecture` | String `llama` |
+| `llama.block_count`, `llama.embedding_length`, `llama.feed_forward_length`, `llama.vocab_size` | U32: layers, hidden, intermediate, vocab |
+| `llama.context_length`, `llama.attention.head_count`, `llama.attention.head_count_kv` | U32: max_positions, heads, kv_heads |
+| `llama.attention.key_length`, `llama.attention.value_length`, `llama.rope.dimension_count` | U32 head_dim, pełne RoPE |
+| `llama.attention.layer_norm_rms_epsilon`, `llama.rope.freq_base` | F32: zaokrąglone rms_eps, rope_theta |
+| `general.file_type` | U32: 0 dla F32, 1 dla F16, 32 dla BF16 z deklaracji |
+
+| Opcjonalny klucz | Jedyna dopuszczalna wartość, jeśli obecny |
+|---|---|
+| `general.alignment`, `general.type` | U32 32, String `model` |
+| `llama.attention.causal`, `llama.rope.scaling.type` | Bool true, String `none` |
+| `split.no`, `split.count`, `split.tensors.count` | U16 0, U16 1, I32 N; inne klucze split odrzucone |
+| `general.quantization_version` | U32 2, bierne: przypięty konwerter emituje także dla dense; nie dopuszcza kwantyzacji |
+
+Bierne pola nie konfigurują modelu, ścieżek, tożsamości ani pochodzenia:
+
+- String dla dokładnie `general.{name,author,version,organization,finetune,basename,description,quantized_by,size_label,license,url,doi,uuid,repo_url}`, `general.license.{name,link}` i `general.source.{url,doi,uuid,repo_url}`.
+- Array wyłącznie String dla `general.tags` i `general.languages`; puste dozwolone.
+- U32 dla `general.base_model.count` i `general.dataset.count`; String dla `general.base_model.<id>.<suffix>` i `general.dataset.<id>.<suffix>`. ID to kanoniczny nieujemny dziesiętny U32 bez zer wiodących poza `0`; suffix to dokładnie `name|author|version|organization|description|url|doi|uuid|repo_url`. Count nie jest wymiarem ani wymogiem pobrania danych.
+- `tokenizer.*` przyjmuje dowolne wartości w limitach parsera, całkowicie nieużywane. Nie porównuje się tego tokenizera z companions.
+- Wszystkie pozostałe klucze są odrzucane, w tym inne `llama.*`, inne architektury, nieznane `general.*`, `general.sampling.*` i `general.tensor_extra.*`.
+
+Wymagane i opcjonalne kontrole mają stałą kolejność. Spośród wielu nieznanych
+kluczy wybierany jest leksykograficznie pierwszy pożyczony klucz. Bierne wartości
+o złym typie również są oceniane deterministycznie. Parser może wcześniej
+odrzucić wadliwą strukturę lub przekroczenie limitu.
+
+Surowe klucze i nazwy tensorów muszą być UTF-8 bez NUL; duplikaty są odrzucane
+przez ograniczony parser. Wartości string zachowują semantykę Candle:
+usunięcie końcowych NUL i lossy decoding niepoprawnego UTF-8. Równość
+strukturalnych String dotyczy dokładnie wartości **po dekodowaniu**, a nie
+kanonicznego kodowania na dysku. Na przykład `llama` z końcowym NUL może
+zostać zdekodowane do `llama`. Wstępne osiem bajtów magic/version sprawdza się
+surowo, przed Candle; nie powstaje drugi parser GGUF.
+
+### Dokładne inventory i zakresy
+
+Zachowany config nadal wymaga zwykłej Llama, domyślnego pełnego RoPE, GQA,
+osobnej głowicy i jednolitej polityki bias. Matryce mają jednolity typ M
+z deklaracji: F16, BF16 albo F32. Każdy wektor normy i bias ma F32.
+Wymiary są już raz odwrócone przez Candle do kolejności logicznej;
+inspekcja nie odwraca ich ponownie i nie transponuje danych.
+
+Niech H=hidden, I=intermediate, V=vocab, K=kv_heads*head_dim, L=layers.
+
+| Wymagana rola GGUF | Dodatni dokładny shape logiczny / typ |
+|---|---|
+| `token_embd.weight`, `output.weight` | [V,H] / M |
+| `output_norm.weight` | [H] / F32 |
+| `blk.<b>.attn_norm.weight`, `blk.<b>.ffn_norm.weight` | [H] / F32 |
+| `blk.<b>.attn_q.weight`, `blk.<b>.attn_output.weight` | [H,H] / M |
+| `blk.<b>.attn_k.weight`, `blk.<b>.attn_v.weight` | [K,H] / M |
+| `blk.<b>.ffn_gate.weight`, `blk.<b>.ffn_up.weight` | [I,H] / M |
+| `blk.<b>.ffn_down.weight` | [H,I] / M |
+| Przy bias: `attn_q.bias`, `attn_output.bias`, `ffn_down.bias` pod `blk.<b>.` | [H] / F32 |
+| Przy bias: `attn_k.bias`, `attn_v.bias` pod `blk.<b>.` | [K] / F32 |
+| Przy bias: `ffn_gate.bias`, `ffn_up.bias` pod `blk.<b>.` | [I] / F32 |
+
+Dla każdego b z [0,L) wymagane jest dziewięć wag i wszystkie siedem bias iff
+config.bias. Dokładna liczebność N i obecność każdej stałej roli dowodzą
+braku dodatkowych tensorów. Nie ma tied fallbacku, `rope_freqs.weight`,
+fused QKV, evidence, wyjść pomocniczych ani dowolnych mieszanek typów.
+Mapowanie payloadu Q/K i konwersja typów nie są wykonywane.
+
+Iloczyny wymiarów, szerokości, dodawanie offsetów i sumy używają checked u64;
+konwersje do usize przed rezerwacjami także są sprawdzane. Każdy tensor ma
+najwyżej 8 GiB. Baza danych musi być równa checked round_up(header_end,32)
+i mieścić się w początkowej długości. Offset względny i start są podzielne
+przez 32; każdy zakres spełnia `base <= start < end <= initial_EOF`.
+Posortowane numerycznie pary zakresów nie mogą się nakładać ani aliasować.
+Luki, padding i bajty po ostatnim tensorze są dozwolone: nie wymagamy
+`last_end == EOF` ani zerowego paddingu.
+
+Suma rzeczywistych bajtów jest porównywana z zamkniętym wzorem, z kontrolą
+każdej operacji (w(M)=2 dla F16/BF16, 4 dla F32):
+
+```text
+matrix_elements = 2*V*H + L*(2*H*H + 2*H*K + 3*H*I)
+bias_per_layer = 3*H + 2*K + 2*I
+source_bytes = w(M)*matrix_elements
+             + 4*((2*L+1)*H + (bias ? L*bias_per_layer : 0))
+```
+
+`GgufInspectionError` rozróżnia host/plik/zmianę źródła, I/O, magic/version,
+parser, limity i arytmetykę, alokację, reprezentację config, brak/typ/wartość
+metadata, niedozwolone metadata/split, count/rolę/typ/shape tensorów, alignment,
+bazę/zakresy/overlap oraz niezgodność sumy bajtów. `source()` zachowuje
+Candle/I/O/TryReserveError; nie klasyfikuje błędów parsera po tekście.
+Top-level Display/Debug ma ograniczony tekst kluczy/nazw/wartości i pomija
+bufory, pełny JSON, origin oraz ścieżki. Zagnieżdżone przyczyny są niezaufane.
+
+REQ009 pozostaje częściowe. To API nie potwierdza digestu GGUF, finitości
+payloadu ani konwersji, autentyczności źródła, wymuszonego lease, budżetu
+host/device/staging, trwałego fingerprintu czy gotowości do alokacji. Nie jest
+loaderem i nie dodaje CLI, Engine, RequestPlanner ani runtime. Nie dostarcza
+dowodu zgodności bitowej, FP32, jakości, pamięci ani wydajności modelu.

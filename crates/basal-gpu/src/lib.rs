@@ -43,6 +43,7 @@ pub use gemma::PlePlacement;
 mod gemma_encoders;
 #[cfg(feature = "cuda")]
 mod gemma_ops;
+pub mod gguf;
 mod inference;
 #[cfg(all(feature = "intel", not(target_os = "macos")))]
 pub mod intel;
