@@ -109,6 +109,12 @@ procesach na badanym korpusie. Pełne HTTP dało 13/19 odpowiedzi w progu 1e-4,
 4/9 zgodnych notatek i 7/9 argmax względem rzeczywistego upstream. To nadal
 FAIL parytetu; tryb pozostaje diagnostyczny, bez zmiany ustawień domyślnych.
 
+[Decyzja z 2026-10-29](../reports/upstream-api-241-gemm-diagnostic-2026-10-29/ACCEPTANCE.md)
+akceptuje obecne thinking Rust/CUDA z tymi różnicami i zamyka próbę J1–J4.
+Dokładne odtworzenie notatek i prawdopodobieństw upstream nie jest warunkiem
+zamknięcia tej próby. Wyniki FAIL parytetu pozostają udokumentowane;
+domyślny `inherit` i opcjonalne diagnostyki thinking pozostają bez zmian.
+
 ## Żądanie i odpowiedź
 
 Oba dialekty HTTP oraz narzędzia MCP przyjmują requestowe `think`:
