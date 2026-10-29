@@ -5,8 +5,8 @@ or GPU requirement.
 This package is versioned independently. Release tag: `sdk-csharp-vX.Y.Z`.
 [Changelog](https://github.com/itsoltech/basal-rs/blob/main/sdk/csharp/CHANGELOG.md).
 
-SDK 0.6.0 removes API-key configuration. Remove `api_key`/`apiKey` from client initialization.
-Batch/Files require server 0.1.13+; all callers use its shared storage namespace.
+SDK 0.6.0 removed API-key configuration; local 0.7.0 restores the optional `apiKey`
+constructor parameter for servers with API keys enabled ([API keys](#api-keys)).
 
 Local 0.7.0 adds init properties `DecisionOptions.Think` (`off`/`auto`/`force`),
 `ThinkText` (nullable bool) and `EarlyExit` (open string), also on `DecisionRequest`.
@@ -189,7 +189,7 @@ For a completely native request, use the `DecideAsync(JsonObject)` overload. It 
 JSON null fields, including `instructions: null`; null DTO properties are omitted.
 
 `ModelsAsync()` reads `/v1/models`. All methods accept a `CancellationToken`.
-The configurable timeout (default 120 seconds) includes response-body reading. API keys are not supported. Use the server root (possibly with a proxy prefix), without `/v1`.
+The configurable timeout (default 120 seconds) includes response-body reading. The optional `apiKey` is described in [API keys](#api-keys). Use the server root (possibly with a proxy prefix), without `/v1`.
 
 The default constructor owns its HTTP connection pool; dispose the SDK client when finished. The constructor
 accepting an existing `HttpClient` leaves ownership to its caller and supports `IHttpClientFactory`. Configure
@@ -216,13 +216,34 @@ map without generic annotations. The object factory retains exact field types in
 `response.Raw` retains native DTOs/extensions. Add `DecisionOptions(Model: ..., Facts: ...)`
 and a cancellation token to either the dictionary or object-factory overload; the raw DTO/JsonObject overloads remain.
 
+## API keys
+
+Optional, SDK 0.7.0+. A server started with `auth.enabled: true` requires a key on every route
+except `/health` and `/health/batches` (and `/metrics` by default). Create the key with
+`basal keys create` and pass it by name as `apiKey` (the last optional parameter of both
+constructors); the client then sends `Authorization: Bearer <key>` on every inference and
+Batch/Files request. With an injected `HttpClient` the header is set per request, not in its
+`DefaultRequestHeaders`. The key is an opaque string: the SDK only rejects an empty or multi-line
+value. The SDK does not read environment variables; the example below reads `BASAL_API_KEY`
+explicitly. Without `apiKey` no header is sent, as before. A server without `auth.enabled`
+ignores the header.
+
+```csharp
+using var client = new BasalClient("https://basal.example.com",
+    apiKey: Environment.GetEnvironmentVariable("BASAL_API_KEY"));
+```
+
+A missing, unknown, revoked or expired key raises `BasalHttpException` with `StatusCode == 401`
+(`Body["error"]["code"]` is `invalid_api_key`); a key without the route's scope gives 403
+(`insufficient_scope`). An unreachable key database gives 503. The key is not part of exception
+messages or `ToString()`.
 
 ## Batch API
 
 Resource helpers (`create`, `wait`, `results`) require SDK 0.5.0+.
 
 Requires server 0.1.13+ with the Batch API enabled ([docs/BATCHES.md](https://github.com/itsoltech/basal-rs/blob/main/docs/BATCHES.md)). The same client,
-proxy prefix, HTTPS rule, redirect refusal, timeout, cancellation and error types apply.
+optional API key, proxy prefix, HTTPS rule, redirect refusal, timeout, cancellation and error types apply.
 Batches run native `/v1/basal` records only; each JSONL line is one `BatchInputLine`.
 
 ```csharp

@@ -34,7 +34,7 @@ from .questions import (
 _CONTENT_HEADERS = {"Accept": "application/jsonl, application/json"}
 
 
-def _options(base_url: str, timeout: float) -> dict[str, Any]:
+def _options(base_url: str, api_key: str | None, timeout: float) -> dict[str, Any]:
     url = urlsplit(base_url)
     if (
         url.scheme not in ("http", "https")
@@ -56,6 +56,10 @@ def _options(base_url: str, timeout: float) -> dict[str, Any]:
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("timeout must be finite and positive (seconds)")
     headers = {"Accept": "application/json", "Accept-Encoding": "identity", "User-Agent": "basal-client-python"}
+    if api_key is not None:
+        if not api_key or "\r" in api_key or "\n" in api_key:
+            raise ValueError("api_key must be a nonempty, single-line token")
+        headers["Authorization"] = f"Bearer {api_key}"
     return dict(base_url=base_url.rstrip("/") + "/", headers=headers, timeout=timeout,
                 follow_redirects=False)
 
@@ -157,15 +161,16 @@ class BasalClient:
     """Sync client. Reuse one instance; close it or use a with block.
 
     base_url is the server root (optionally a proxy prefix), without /v1.
+    api_key, when given, is sent as Authorization: Bearer on every request.
     timeout applies to each HTTPX network phase, not the whole request.
     No automatic retries: the caller decides whether to repeat inference.
     """
 
     def __init__(self, base_url: str = "http://127.0.0.1:8000", *,
-                 timeout: float = 120.0,
+                 api_key: str | None = None, timeout: float = 120.0,
                  max_response_bytes: int = 8 * 1024 * 1024, trust_env: bool = False):
         self._max_response_bytes = _validate_limit(max_response_bytes)
-        self._options = _options(base_url, timeout)
+        self._options = _options(base_url, api_key, timeout)
         self._trust_env = trust_env
         self._http = httpx.Client(**self._options, trust_env=trust_env)
 
@@ -294,10 +299,10 @@ class AsyncBasalClient:
     """Native async HTTPX client; use async with or await aclose()."""
 
     def __init__(self, base_url: str = "http://127.0.0.1:8000", *,
-                 timeout: float = 120.0,
+                 api_key: str | None = None, timeout: float = 120.0,
                  max_response_bytes: int = 8 * 1024 * 1024, trust_env: bool = False):
         self._max_response_bytes = _validate_limit(max_response_bytes)
-        self._http = httpx.AsyncClient(**_options(base_url, timeout), trust_env=trust_env)
+        self._http = httpx.AsyncClient(**_options(base_url, api_key, timeout), trust_env=trust_env)
 
     @classmethod
     def _with(cls, http: httpx.AsyncClient, max_response_bytes: int) -> Self:

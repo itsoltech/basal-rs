@@ -188,10 +188,11 @@ konwersje typów. W C# `CreateAsync` ma przeciążenia dla `CreateBatchRequest` 
 
 Obsługa wymaga serwera basal-rs **0.1.12+** z włączonymi batchami oraz SDK:
 Python, TypeScript/JavaScript i C# **0.4.0+**, Rust **0.5.0+**.
-Od serwera **0.1.13** API nie wymaga kluczy. SDK Python/npm/C# **0.6.0+** i Rust
-**0.7.0+** usuwają parametry `api_key`/`apiKey`; usuń je z inicjalizacji klienta.
-Te wersje SDK nie obsługują Batch/Files starszego serwera wymagającego tokenu.
-Wszyscy klienci korzystają z tej samej przestrzeni plików i batchy serwera.
+SDK Python/npm/C# **0.6.0** i Rust **0.7.0** usunęły parametry `api_key`/`apiKey`
+i nie obsługują Batch/Files starszego serwera wymagającego tokenu w starym formacie.
+Lokalne SDK Python/npm/C# **0.7.0** i Rust **0.8.0** przywracają opcjonalny klucz
+dla serwera z `auth.enabled` ([Klucze API](#klucze-api)). Bez `auth.enabled` klienci
+korzystają z tej samej przestrzeni plików i batchy serwera bez klucza.
 
 Przepływ aplikacji jest taki sam w każdym języku:
 
@@ -207,7 +208,7 @@ Przepływ aplikacji jest taki sam w każdym języku:
 SDK udostępniają upload, listowanie, odczyt metadanych, usuwanie i pobieranie
 plików oraz tworzenie, listowanie, odczyt i anulowanie batchy. DTO obejmują
 statusy, liczniki, metadane, błędy walidacji i opcje retencji. Python ma
-wariant synchroniczny i asynchroniczny. Transport zachowuje prefiks
+wariant synchroniczny i asynchroniczny. Transport zachowuje opcjonalny klucz API, prefiks
 proxy, limity odpowiedzi, timeouty, status HTTP i `Retry-After`; dotychczasowe metody nie
 ponawiają żądań ani nie odpytują statusu automatycznie. Nowe `wait` jawnie uruchamia
 odpytywanie ograniczone czasowo.
@@ -368,7 +369,7 @@ Transport można wstrzyknąć przez `fetch: adapter`, zachowując kontrakt Web F
 `credentials: "omit"` i weryfikację TLS. SDK nie instaluje dodatkowego klienta HTTP.
 Przykład: [README npm](../sdk/typescript/README.md).
 Bezpośrednie wywołanie z przeglądarki wymaga CORS w reverse proxy; basal-rs
-domyślnie nie włącza CORS. Klucze prywatne trzymaj po stronie serwera aplikacji.
+domyślnie nie włącza CORS. Klucze API trzymaj po stronie serwera aplikacji.
 
 ## C#
 
@@ -524,6 +525,41 @@ Klas pytań nie należy modyfikować podczas oczekiwania na odpowiedź. Nie doda
 Pełny request: `decide(request)` w Python/TS, `DecideAsync(request)` w C#,
 `decide_request(&request)` w Rust. Namespace C#: `ITSOL.Basal`.
 
+## Klucze API
+
+Klucze API są opcjonalne i domyślnie wyłączone po stronie serwera. Serwer z
+`auth.enabled: true` wymaga nagłówka `Authorization: Bearer <klucz>` na każdej
+trasie poza `/health` i `/health/batches` (oraz domyślnie `/metrics`). Klucz tworzy
+`basal keys create`. Bez `auth.enabled` serwer ignoruje ten nagłówek, więc klient
+bez klucza działa jak dotychczas.
+
+Lokalne SDK Python/npm/C# **0.7.0** i Rust **0.8.0** przyjmują klucz jawnie:
+`api_key` w Pythonie (`BasalClient` i `AsyncBasalClient`), `apiKey` w
+`BasalClientOptions` TypeScriptu, nazwany parametr `apiKey` obu konstruktorów C#
+oraz `ClientOptions::api_key` w Rust. Ustawiony klucz trafia do każdego żądania
+inferencji i Batch/Files. SDK traktują klucz jako nieprzezroczysty napis: odrzucają
+tylko pustą wartość lub znaki nowej linii (Rust także bajty niedozwolone w nagłówku)
+i nie sprawdzają formatu. SDK nie czytają zmiennych środowiskowych; przykłady w
+README pobierają klucz jawnie z `BASAL_API_KEY`:
+
+```python
+import os
+from basal_client import BasalClient
+
+client = BasalClient("https://basal.example.com", api_key=os.environ.get("BASAL_API_KEY"))
+```
+
+Brakujący, nieznany, odwołany lub wygasły klucz daje 401 z kodem `invalid_api_key`
+i nagłówkiem `WWW-Authenticate: Bearer`; klucz bez uprawnienia do trasy daje 403 z
+kodem `insufficient_scope`. Niedostępna baza kluczy daje 503. SDK zgłaszają te
+odpowiedzi istniejącymi typami błędów HTTP (`BasalHTTPError`, `BasalHttpException`,
+`Error::Http`) z komunikatem wskazującym brak klucza lub uprawnienia. Klucz nie trafia
+do komunikatów błędów ani reprezentacji tekstowej klienta. Kontrakt Batch OpenAPI
+**0.3.0** opisuje schemat `bearerAuth` jako opcjonalny oraz odpowiedzi 401 i 403.
+
+Obsługa została sprawdzona kompilacją i lintami klientów. Zachowanie z serwerem z
+włączonymi kluczami nie zostało zmierzone w ramach tej zmiany SDK.
+
 ## Kontrakt i zachowanie klientów
 
 [contracts/basal/openapi.json](../contracts/basal/openapi.json) opisuje natywny
@@ -568,8 +604,8 @@ Te odpowiedzi mają body `{error:string}`. Durable Internal pozostaje retry z ko
 `execution_failed`, a nie online 503. Limit body HTTP nadal daje 413.
 Brak połączenia, timeout i niepoprawna odpowiedź JSON są oddzielone od błędów
 HTTP. Nie ma automatycznych retry: ponowienie może uruchomić kolejną inferencję.
-Domyślne transporty nie podążają za przekierowaniami. Serwer i SDK nie obsługują
-uwierzytelniania kluczem API; dotyczy to zarówno inferencji online, jak i Batch/Files.
+Domyślne transporty nie podążają za przekierowaniami. Opcjonalny klucz API opisuje
+sekcja [Klucze API](#klucze-api); 401 i 403 są zwykłymi błędami HTTP z zachowanym body.
 
 Domyślny limit odpowiedzi wynosi 8 MiB i obejmuje również body błędów. Klienty
 liczą rzeczywiste bajty strumienia; parametr limitu opisują README paczek.

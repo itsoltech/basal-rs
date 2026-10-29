@@ -6,8 +6,8 @@ Node.js 22+ or modern browsers with `fetch` and `AbortController`. No runtime de
 This package is versioned independently. Release tag: `sdk-typescript-vX.Y.Z`.
 [Changelog](https://github.com/itsoltech/basal-rs/blob/main/sdk/typescript/CHANGELOG.md).
 
-SDK 0.6.0 removes API-key configuration. Remove `api_key`/`apiKey` from client initialization.
-Batch/Files require server 0.1.13+; all callers use its shared storage namespace.
+SDK 0.6.0 removed API-key configuration; local 0.7.0 restores the optional `apiKey`
+option for servers with API keys enabled ([API keys](#api-keys)).
 
 Local 0.7.0 adds `think: "off" | "auto" | "force"`, `think_text: boolean` and
 `early_exit: string | null` to `DecisionRequest`, `DecisionOptions` and `buildRequest`.
@@ -67,7 +67,7 @@ rejects before dispatch; the SDK deadline rejects even if an adapter fails to ho
 but such an adapter may continue its own network I/O.
 
 `models()` reads `/v1/models`. Each method optionally takes an `AbortSignal`.
-`timeoutMs` includes response-body reading. API keys are not supported.
+`timeoutMs` includes response-body reading. The optional `apiKey` is described in [API keys](#api-keys).
 Use the server root (possibly with a proxy prefix), without `/v1`. HTTPS is required except for loopback
 HTTP (localhost, 127.0.0.1, ::1), suitable for a local server or SSH tunnel. URL credentials/query/fragment
 are rejected. Requests omit cookies and use `cache: "no-store"`.
@@ -86,7 +86,7 @@ so use textual keys (e.g. `low`, `high`) or an ordered score array. Evidence off
 points; use the returned text, or `Array.from(state).slice(start, end).join("")` for textual states.
 
 In browsers, the server/proxy must support your origin through CORS. Basal-rs does not enable CORS by default.
-The SDK does not configure API-key authentication.
+Keep API keys in server-side code; do not ship them to browsers.
 
 Factories and concrete classes cover `choice`, `noul`, `score`, `multi`, `act`. The two-argument
 `decide(state, questions, {model, facts, signal})` infers exact question IDs, answer types, choice keys
@@ -97,13 +97,35 @@ a key, not a question object (changed before the initial release). Required fiel
 validated before the promise resolves. Typed evidence defaults to an empty array; `response.raw`
 retains the native JSON without those defaults. The one-argument raw `decide(request, signal)` remains available.
 
+## API keys
+
+Optional, SDK 0.7.0+. A server started with `auth.enabled: true` requires a key on every route
+except `/health` and `/health/batches` (and `/metrics` by default). Create the key with
+`basal keys create` and pass it as `apiKey`; the client then sends `Authorization: Bearer <key>`
+on every inference and Batch/Files request. The key is an opaque string: the SDK only rejects an
+empty or multi-line value. The SDK does not read environment variables; the Node.js example below reads
+`BASAL_API_KEY` explicitly. Without `apiKey` no header is sent, as before. A server without
+`auth.enabled` ignores the header.
+
+```typescript
+import { BasalClient } from "@itsoltech/basal-client";
+
+const apiKey = process.env.BASAL_API_KEY;
+const client = new BasalClient({ baseUrl: "https://basal.example.com", ...(apiKey ? { apiKey } : {}) });
+```
+
+A missing, unknown, revoked or expired key rejects with `BasalHTTPError` and `statusCode === 401`
+(`body.error.code === "invalid_api_key"`); a key without the route's scope gives 403
+(`"insufficient_scope"`). An unreachable key database gives 503. The key is not part of error
+messages, and the client's header map is non-enumerable, so default Node inspection does not print it.
 
 ## Batch API
 
 Resource helpers (`create`, `wait`, `results`) require SDK 0.5.0+.
 
 Requires a Basal server with the Batch API enabled ([docs/BATCHES.md](https://github.com/itsoltech/basal-rs/blob/main/docs/BATCHES.md)).
-Requires server 0.1.13+; every caller shares its configured Batch/Files storage namespace without authentication. Records are native `/v1/basal` requests; the SDK only transfers files and controls batches.
+Requires server 0.1.13+; every caller shares its configured Batch/Files storage namespace. If the server has
+`auth.enabled`, set `apiKey` ([API keys](#api-keys)). Records are native `/v1/basal` requests; the SDK only transfers files and controls batches.
 `client.files` and `client.batches` follow the OpenAI resource names and workflow (upload, create, retrieve, download).
 That compatibility is in naming and workflow only: records are native Basal requests, not OpenAI chat payloads.
 

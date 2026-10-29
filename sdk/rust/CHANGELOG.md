@@ -4,6 +4,12 @@
 
 ### 0.8.0 (local, unpublished)
 
+- Restore optional `ClientOptions::api_key`. When set, every inference and Batch/Files request
+  sends `Authorization: Bearer <key>` (a sensitive header value); the key is opaque, explicit-only
+  (no environment default) and absent from `Debug`/`Display`. Without it no header is sent, as in
+  0.7.0. `Error::Http` Display names the missing/invalid key (401) or missing scope (403). Requires
+  a server with `auth.enabled` and a key from `basal keys create`. The new public field can break
+  exhaustive `ClientOptions` struct literals; use `..Default::default()`.
 - Add ergonomic ThinkMode and DecisionOptions think/think_text/early_exit; omit unset
   options. DecisionRequest.extra retains raw fields, including explicit null early_exit.
 - Add optional Usage lane/truncated/think_questions and ModelMetadata layout/

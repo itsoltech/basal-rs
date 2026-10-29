@@ -6,8 +6,8 @@ required on the client.
 This package is versioned independently. Release tag: `sdk-python-vX.Y.Z`.
 [Changelog](https://github.com/itsoltech/basal-rs/blob/main/sdk/python/CHANGELOG.md).
 
-SDK 0.6.0 removes API-key configuration. Remove `api_key`/`apiKey` from client initialization.
-Batch/Files require server 0.1.13+; all callers use its shared storage namespace.
+SDK 0.6.0 removed API-key configuration; local 0.7.0 restores the optional `api_key`
+argument for servers with API keys enabled ([API keys](#api-keys)).
 
 Local 0.7.0 adds `think="off"|"auto"|"force"`, `think_text=bool` and
 `early_exit=str` keyword options to every sync/async dictionary/schema call.
@@ -90,7 +90,7 @@ async def decide():
         return response.answers.urgent.noul
 ```
 
-`models()` reads `/v1/models`. API keys are not supported. The server root URL may include a proxy prefix; do not append `/v1`.
+`models()` reads `/v1/models`. The optional `api_key` is described in [API keys](#api-keys). The server root URL may include a proxy prefix; do not append `/v1`.
 HTTPS is required except for loopback HTTP, suitable for local servers and SSH tunnels.
 URL credentials/query/fragment are rejected. `trust_env=False` is the default: environment proxies and
 certificate overrides are ignored. Set `trust_env=True` only when you intend to trust that configuration.
@@ -136,6 +136,29 @@ classes, `ClassVar` attributes or dataclasses; outside `Questions` they remain q
 Runtime uses HTTPX with seven dependencies in the audited Python 3.11 graph. Building requires only the
 hash-locked Flit Core backend; consumers of the wheel do not install the build backend.
 
+
+## API keys
+
+Optional, SDK 0.7.0+. A server started with `auth.enabled: true` requires a key on every route
+except `/health` and `/health/batches` (and `/metrics` by default). Create the key with
+`basal keys create` and pass it as `api_key`; both clients then send `Authorization: Bearer <key>`
+on every inference and Batch/Files request. The key is an opaque string: the SDK only rejects an
+empty or multi-line value. The SDK does not read environment variables; the example below reads
+`BASAL_API_KEY` explicitly. Without `api_key` no header is sent, as before. A server without
+`auth.enabled` ignores the header.
+
+```python
+import os
+from basal_client import BasalClient
+
+with BasalClient("https://basal.example.com", api_key=os.environ.get("BASAL_API_KEY")) as client:
+    print(client.models())
+```
+
+A missing, unknown, revoked or expired key raises `BasalHTTPError` with `status_code == 401`
+(`body["error"]["code"] == "invalid_api_key"`); a key without the route's scope gives 403
+(`"insufficient_scope"`). An unreachable key database gives 503. The key is not part of error
+messages or the client `repr`.
 
 ## Basal 2.0 and Omni
 
@@ -186,7 +209,8 @@ without changing the supplied tool definitions.
 Resource helpers (`create`, `wait`, `results`) require SDK 0.5.0+.
 
 Requires basal-rs 0.1.13+ started with batches enabled. All callers share the server's
-configured Batch/Files storage namespace without authentication. Both `BasalClient` and
+configured Batch/Files storage namespace. If the server has `auth.enabled`, pass `api_key`
+([API keys](#api-keys)). Both `BasalClient` and
 `AsyncBasalClient` provide the same methods:
 
 ```python

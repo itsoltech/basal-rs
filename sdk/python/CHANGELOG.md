@@ -4,6 +4,11 @@
 
 ### 0.7.0 (local, unpublished)
 
+- Restore optional `api_key` on `BasalClient` and `AsyncBasalClient`. When set, every inference
+  and Batch/Files request sends `Authorization: Bearer <key>`; the key is opaque, explicit-only
+  (no environment default) and kept out of messages. Without it no header is sent, as in 0.6.0.
+  401/403 `BasalHTTPError` messages name the missing/invalid key or missing scope. Requires a
+  server with `auth.enabled` and a key from `basal keys create`.
 - Add think/think_text/early_exit to raw requests and every sync/async ergonomic overload.
   Omitted options remain absent; raw JSON can express explicit null early_exit.
 - Add optional lane/truncated/think_questions usage and layout/calibration_warning/think/

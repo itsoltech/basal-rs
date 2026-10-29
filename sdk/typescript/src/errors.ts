@@ -1,10 +1,15 @@
 import type { Batch, FileObject } from "./batches.js";
 
 export class BasalError extends Error {}
+const authHints: Partial<Record<number, string>> = {
+  401: "missing or invalid API key; pass apiKey when the server has auth.enabled",
+  403: "the API key has no scope for this route",
+};
 /** Non-2xx response. Server body and Retry-After are available without logging them. */
 export class BasalHTTPError extends BasalError {
   constructor(readonly statusCode: number, readonly body: unknown, readonly retryAfter: string | null) {
-    super(`Basal HTTP ${statusCode}`);
+    const hint = authHints[statusCode];
+    super(hint === undefined ? `Basal HTTP ${statusCode}` : `Basal HTTP ${statusCode}: ${hint}`);
     this.name = "BasalHTTPError";
     // Node's default inspection and JSON.stringify must not print reflected state or credentials.
     Object.defineProperty(this, "body", { enumerable: false });

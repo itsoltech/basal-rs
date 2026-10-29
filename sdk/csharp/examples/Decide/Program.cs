@@ -1,13 +1,15 @@
 using ITSOL.Basal;
 
+// Optional: a key from `basal keys create`, needed only when the server has auth.enabled.
+var apiKey = Environment.GetEnvironmentVariable("BASAL_API_KEY");
 if (args is ["batch", ..])
 {
-    using var batchClient = new BasalClient();
+    using var batchClient = new BasalClient(apiKey: apiKey);
     await BatchFlows.RunAsync(batchClient);
     return;
 }
 
-using var client = new BasalClient();
+using var client = new BasalClient(apiKey: apiKey);
 // These criteria may be loaded asynchronously from a database before preparation.
 var criteria = new Dictionary<string, string> { ["returns"] = "Zwroty", ["support"] = "Wsparcie techniczne" };
 var questions = QuestionBuilder.Prepare(q => new
