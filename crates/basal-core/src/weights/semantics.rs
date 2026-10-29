@@ -3,7 +3,7 @@
 use std::fmt;
 use std::path::Path;
 
-use anyhow::Context;
+use anyhow::{bail, ensure, Context};
 use serde_json::Value;
 
 use super::{read_path, CompanionRole, GgufCompanionSnapshot, Sha256Digest, WeightSourceError};
@@ -407,6 +407,7 @@ impl GgufCompanionSemantics {
         };
         let original = json(&snapshot, CompanionRole::Tokenizer, Stage::Tokenizer)?;
         let added = BasalTokenizer::audit_raw_ids(&original, llama.vocab)?;
+        audit_bpe_merges(&original).map_err(|e| GgufSemanticError::semantic(Stage::Tokenizer, e))?;
         let tokenizer =
             BasalTokenizer::from_json_value(original, &directory.join("tokenizer.json"), style).map_err(|error| {
                 match error {
@@ -442,6 +443,51 @@ impl GgufCompanionSemantics {
     pub fn identity_state(&self) -> CalibrationIdentityState {
         self.identity_state
     }
+}
+
+/// Guard the pinned tokenizers 0.23.2 BPE builder's unchecked scratch writes and UTF-8 suffix.
+/// Only the captured G1 route calls this; the shared constructor and legacy route stay unchanged.
+fn audit_bpe_merges(original: &Value) -> anyhow::Result<()> {
+    let Some(model) = original.get("model").filter(|m| m.get("type").and_then(Value::as_str) == Some("BPE")) else {
+        return Ok(());
+    };
+    let vocab = model.get("vocab").and_then(Value::as_object).context("BPE vocab must be an object")?;
+    let merges = model.get("merges").and_then(Value::as_array).context("BPE merges must be an array")?;
+    let prefix_len = match model.get("continuing_subword_prefix") {
+        None | Some(Value::Null) => 0,
+        Some(Value::String(prefix)) => prefix.len(),
+        _ => bail!("BPE continuing_subword_prefix must be a string or null"),
+    };
+    let capacity = vocab.keys().map(String::len).max().unwrap_or(0);
+    for merge in merges {
+        // Deserialization accepts a whole array of pairs or legacy strings. Checking their
+        // union here is sufficient: mixed forms fail deserialization before the builder runs.
+        let (left, right) = match merge {
+            Value::Array(pair) if pair.len() == 2 => (
+                pair[0].as_str().context("BPE merge component must be a string")?,
+                pair[1].as_str().context("BPE merge component must be a string")?,
+            ),
+            Value::String(line) => {
+                if line.starts_with("#version") {
+                    continue;
+                }
+                let (left, right) = line.split_once(' ').context("BPE legacy merge must contain two parts")?;
+                ensure!(!right.contains(' '), "BPE legacy merge must contain two parts");
+                (left, right)
+            }
+            _ => bail!("BPE merge must be a string pair or legacy string"),
+        };
+        if !vocab.contains_key(left) || !vocab.contains_key(right) {
+            // The builder returns an error for missing components before touching its buffer.
+            continue;
+        }
+        // The dependency cuts by prefix byte length, without checking the prefix contents.
+        let suffix =
+            right.get(prefix_len..).context("BPE merge prefix must end at a UTF-8 boundary within the token")?;
+        let length = left.len().checked_add(suffix.len()).context("BPE merge byte length overflows")?;
+        ensure!(length <= capacity, "BPE merge exceeds the tokenizer builder's scratch capacity");
+    }
+    Ok(())
 }
 
 fn text(snapshot: &GgufCompanionSnapshot, role: CompanionRole) -> Result<&str, GgufSemanticError> {

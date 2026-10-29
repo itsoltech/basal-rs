@@ -64,6 +64,13 @@ Luki w ID i niewykorzystane wiersze embeddingów są dozwolone; liczebność
 słownika nie musi być równa vocab i nie wymagamy gęstego słownika. Konstrukcja
 nie wykonuje encode ani nie zapełnia cache kodów.
 
+Przed konstrukcją BPE ścieżka captured sprawdza też warunki bezpieczeństwa
+merge w przypiętym tokenizers 0.23.2: długość prefiksu w bajtach musi wyznaczać
+granicę UTF-8 w drugim tokenie, a łączna długość musi mieścić się w buforze
+konstruktora. Kontrola obejmuje pary tokenów i starszy zapis tekstowy merges,
+bez przepisywania poprawnych danych i bez zmiany ścieżki legacy. Nie jest to
+ogólny dowód bezpieczeństwa zależności ani zachowania tokenizera podczas encode.
+
 To nie dowodzi poprawności kodów w kontekście odpowiedzi. Przyszłe planowanie
 żądań musi zachować kontrolę pełnego prefiksu, jednego nowego tokena i unikalności
 kodów, a przed backendem ograniczyć każde ID wejściowe, kodu/readout, po ponownym
