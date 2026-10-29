@@ -1301,23 +1301,34 @@ impl fmt::Debug for ApiScopes {
     }
 }
 
-/// Longest API key name in bytes.
-pub(crate) const MAX_API_KEY_NAME: usize = 128;
+/// Longest API user or key name in bytes.
+pub(crate) const MAX_API_NAME: usize = 128;
 
-/// Check an operator-chosen key name: 1–128 bytes without control characters.
-pub(crate) fn check_api_key_name(name: &str) -> Result<(), InvalidValue> {
-    check_len("name", name, MAX_API_KEY_NAME)?;
+/// Check an operator-chosen user or key name: 1–128 bytes without control characters.
+pub(crate) fn check_api_name(name: &str) -> Result<(), InvalidValue> {
+    check_len("name", name, MAX_API_NAME)?;
     if name.chars().any(char::is_control) {
         return Err(InvalidValue::new("name", "contains a control character"));
     }
     Ok(())
 }
 
-/// A key to insert. `token_sha256` is the SHA-256 of the whole bearer value; the token itself never reaches the store.
+/// A user of the API keys. Its id is the Batch storage namespace ([`OwnerId`]) shared by all its keys.
+#[derive(Clone, Debug)]
+pub(crate) struct ApiUserRecord {
+    pub id: OwnerId,
+    pub name: String,
+    pub created_at: UnixMillis,
+    /// Set while the user is disabled: none of its keys is accepted.
+    pub disabled_at: Option<UnixMillis>,
+}
+
+/// A key to insert for an existing, enabled user. `token_sha256` is the SHA-256 of the whole bearer value; the token
+/// itself never reaches the store.
 #[derive(Clone, Debug)]
 pub(crate) struct NewApiKey {
     pub id: ApiKeyId,
-    pub owner: OwnerId,
+    pub user: OwnerId,
     pub name: String,
     pub token_sha256: Sha256Digest,
     pub scopes: ApiScopes,
@@ -1329,7 +1340,7 @@ pub(crate) struct NewApiKey {
 #[derive(Clone, Debug)]
 pub(crate) struct ApiKeyRecord {
     pub id: ApiKeyId,
-    pub owner: OwnerId,
+    pub user: OwnerId,
     pub name: String,
     pub token_sha256: Sha256Digest,
     pub scopes: ApiScopes,
@@ -1346,9 +1357,10 @@ impl ApiKeyRecord {
     }
 }
 
-/// A key read for authentication, with the database time of the read.
+/// A key read for authentication with the state of its user and the database time of the read.
 #[derive(Clone, Debug)]
 pub(crate) struct ApiKeyLookup {
     pub record: ApiKeyRecord,
+    pub user_disabled: bool,
     pub now: UnixMillis,
 }

@@ -8,16 +8,17 @@
 //!
 //! With `enabled`, every route except `/health`, `/health/batches` and (by default) `/metrics` needs
 //! `Authorization: Bearer bsk_<key_id>_<secret>`, also on a loopback listener; the listener address, forwarding
-//! headers and request fields never authenticate. A key carries scopes (route groups, [`ApiScopes`]) and an owner:
-//! the Batch/Files routes use the key's owner as their storage namespace instead of `batches.owner`. A missing,
-//! malformed, unknown, revoked or expired key is the same 401; a valid key without the route's scope is a 403.
+//! headers and request fields never authenticate. A key carries scopes (route groups, [`ApiScopes`]) and belongs to
+//! a user: the Batch/Files routes use the user's id as their storage namespace instead of `batches.owner`, so all keys
+//! of one user share its files and batches. A missing, malformed, unknown, revoked or expired key, or a key of a
+//! disabled user, is the same 401; a valid key without the route's scope is a 403.
 //!
-//! Keys are created, listed, rotated and revoked with `basal keys` (`crate::keys`); the server only reads them.
+//! Users and keys are managed with `basal users` and `basal keys` (`crate::keys`); the server only reads them.
 //! The token is shown once at creation and never stored: the database keeps the SHA-256 of the whole bearer value,
 //! compared in constant time. The secret has 256 random bits, so a plain digest needs no password hashing.
 //!
-//! Each key is read from the database at most once per [`CACHE_TTL`] per process, so a revocation or expiry takes
-//! effect within that time, and when the database is unreachable after it requests are refused (503), never let
+//! Each key and its user are read from the database at most once per [`CACHE_TTL`] per process, so a revocation,
+//! expiry or disabled user takes effect within that time, and when the database is unreachable after it requests are refused (503), never let
 //! through. Uses are recorded in `last_used_at` at most once per [`TOUCH_INTERVAL`] per key, in the background.
 
 use std::collections::HashMap;
@@ -124,7 +125,7 @@ fn need(path: &str, protect_metrics: bool) -> Need {
 }
 
 struct Cached {
-    /// `None`: no key with this id.
+    /// `None`: no key with this id, or its user is disabled.
     record: Option<ApiKeyRecord>,
     /// Database time of the read and the local instant it corresponds to.
     db_now: UnixMillis,
@@ -223,7 +224,10 @@ impl Authenticator {
                     crate::warn!("auth: reading key {}: {e}", id.as_str());
                     Refusal::Unavailable
                 })?;
-                let (record, db_now) = lookup.map_or((None, UnixMillis(0)), |l| (Some(l.record), l.now));
+                let (record, db_now) = match lookup {
+                    Some(l) => ((!l.user_disabled).then_some(l.record), l.now),
+                    None => (None, UnixMillis(0)),
+                };
                 let entry = Cached { record, db_now, fetched: Instant::now(), touched: None };
                 let hit = (entry.record.clone(), entry.now());
                 self.with_cache(|cache| {
@@ -298,7 +302,7 @@ pub(crate) async fn require_key(State(auth): State<Arc<Authenticator>>, mut requ
             return Refusal::Forbidden.into_response();
         }
     }
-    request.extensions_mut().insert::<OwnerId>(record.owner);
+    request.extensions_mut().insert::<OwnerId>(record.user);
     next.run(request).await
 }
 

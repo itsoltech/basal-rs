@@ -1,13 +1,20 @@
-# Klucze API
+# Użytkownicy i klucze API
 
-Klucze API są domyślnie wyłączone. Bez sekcji `auth:` serwer działa jak dotąd:
-nie sprawdza nagłówka `Authorization` i nie otwiera bazy z powodu kluczy.
+Moduł jest opcjonalny i domyślnie wyłączony. Bez sekcji `auth:` serwer działa
+jak dotąd: nie wymaga bazy danych, nie sprawdza nagłówka `Authorization` i nie
+otwiera bazy z powodu kluczy. Operator decyduje przy wdrożeniu, czy włącza bazę
+(`database:`) i klucze (`auth:`).
 
 Po włączeniu każda trasa poza `/health` i `/health/batches` wymaga nagłówka
 `Authorization: Bearer <token>`, także na adresie loopback. Klucze są
 przechowywane w bazie z sekcji [`database:`](DATABASE.md) (SQLite, PostgreSQL,
-SQL Server albo MongoDB). Operator zarządza nimi poleceniem `basal keys`;
-serwer klucze tylko odczytuje.
+SQL Server albo MongoDB). Operator zarządza nimi poleceniami `basal users`
+i `basal keys`; serwer tylko je odczytuje.
+
+Użytkownik to klient API, np. firma albo zespół. Ma dowolnie wiele kluczy,
+np. osobny dla każdej aplikacji lub hosta. Wszystkie klucze jednego użytkownika
+widzą te same pliki i batche. Identyfikator użytkownika jest jego przestrzenią
+danych Batch API (owner) i nazwą jego limitów w `batches.quota.owners`.
 
 ## Konfiguracja
 
@@ -30,19 +37,30 @@ odmawia startu. Nie ma trybu awaryjnego, który przepuszczałby żądania bez kl
 
 ## Przygotowanie i zarządzanie
 
-1. Przygotuj schemat bazy (wersja 3 zawiera tabelę `api_keys`):
+1. Przygotuj schemat bazy (wersja 3 zawiera tabele `api_users` i `api_keys`):
 
    ```sh
    basal database migrate --config serve.yml
    ```
 
    SQLite z `auto_migrate: true` (domyślnie) tworzy schemat automatycznie.
-   Konto runtime potrzebuje uprawnień `SELECT`, `INSERT` i `UPDATE` do `api_keys`.
+   Konto runtime potrzebuje uprawnień `SELECT`, `INSERT` i `UPDATE` do `api_users`
+   i `api_keys`.
 
-2. Utwórz klucz dla klienta:
+2. Utwórz użytkownika i dodaj mu limity Batch API, jeśli ma korzystać z batchy:
 
    ```sh
-   basal keys create --config serve.yml --owner acme --name "Zespół A" \
+   basal users create --config serve.yml acme --name "Acme sp. z o.o."
+   ```
+
+   Limity dopisz w `batches.quota.owners.acme` i zainstaluj przez
+   `basal batches install`. Bez nich żądania Batch/Files tego użytkownika dostają
+   403 `quota_not_configured`. `basal users create` ostrzega o braku limitów.
+
+3. Utwórz klucz użytkownika (może mieć ich wiele):
+
+   ```sh
+   basal keys create --config serve.yml --user acme --name "aplikacja CRM" \
      --scopes inference,batches --expires-in 90d
    ```
 
@@ -50,23 +68,30 @@ odmawia startu. Nie ma trybu awaryjnego, który przepuszczałby żądania bez kl
    w menedżerze sekretów klienta. Baza przechowuje wyłącznie SHA-256 tokenu.
    `--json` wypisuje jeden obiekt JSON z tokenem i metadanymi.
 
-3. Pozostałe operacje:
+4. Pozostałe operacje:
 
    | Polecenie | Działanie |
    |---|---|
-   | `basal keys list [--owner O] [--all] [--json]` | lista kluczy bez tokenów; `--all` dodaje odwołane |
+   | `basal users list [--all] [--json]` | lista użytkowników; `--all` dodaje wyłączonych |
+   | `basal users disable USER` | wszystkie klucze użytkownika przestają działać; dane zostają |
+   | `basal users enable USER` | nieodwołane i niewygasłe klucze znów działają |
+   | `basal keys list [--user U] [--all] [--json]` | lista kluczy bez tokenów; `--all` dodaje odwołane |
    | `basal keys revoke KEY_ID` | odwołanie; ponowne odwołanie zachowuje pierwszy czas |
-   | `basal keys rotate KEY_ID [--expire-old-in 24h] [--expires-in 90d]` | nowy klucz z tym samym ownerem, nazwą i zakresami |
+   | `basal keys rotate KEY_ID [--expire-old-in 24h] [--expires-in 90d]` | nowy klucz z tym samym użytkownikiem, nazwą i zakresami |
+
+   Użytkowników nie usuwa się. Dane wyłączonego użytkownika wygasają według
+   retencji Batch API. Klucza nie da się utworzyć dla nieistniejącego ani
+   wyłączonego użytkownika.
 
    `KEY_ID` to 16 znaków szesnastkowych po prefiksie `bsk_`. Rotacja nie odwołuje
    starego klucza. Z `--expire-old-in` stary klucz wygasa po podanym czasie.
    Bez tej opcji pozostaje ważny do `basal keys revoke`.
 
-`basal keys` wybiera bazę tak jak `basal batches`: sekcja `database:` z `--config`,
+`basal users` i `basal keys` wybierają bazę tak jak `basal batches`: sekcja `database:` z `--config`,
 `BASAL_CONFIG` albo `basal-serve.yml`, a bez niej lokalny plik SQLite Batch API.
-Polecenie nie ładuje modelu ani GPU.
+Polecenia nie ładują modelu ani GPU.
 
-## Token, zakresy i owner
+## Token, zakresy i przestrzeń danych
 
 Token ma postać `bsk_<key_id>_<secret>`: 16 znaków szesnastkowych identyfikatora
 i 43 znaki base64url z 256 losowych bitów. Prefiks pozwala skanerom sekretów
@@ -82,26 +107,26 @@ rozpoznać wyciek. Serwer porównuje SHA-256 całego tokenu w stałym czasie.
 Domyślne zakresy nowego klucza to `inference,batches`. Inne ścieżki wymagają
 dowolnego ważnego klucza, więc bez klucza nie da się sprawdzić, które trasy istnieją.
 
-`--owner` wskazuje przestrzeń danych Batch API: pliki, batche i quota. Klucz
-zastępuje `batches.owner`, więc klienci z różnymi ownerami nie widzą swoich
-zasobów. Owner musi mieć limity w `batches.quota.owners`; w przeciwnym razie
-jego żądania Batch/Files są odrzucane z powodu braku quota. `basal keys create`
-ostrzega, gdy zainstalowana polityka quota nie zawiera ownera.
+Żądanie z kluczem używa przestrzeni danych Batch API jego użytkownika zamiast
+`batches.owner`. Klucze jednego użytkownika współdzielą pliki, batche i quota;
+różni użytkownicy nie widzą swoich zasobów (cudzy zasób to 404).
 
 ## Odpowiedzi
 
 | Sytuacja | Odpowiedź |
 |---|---|
-| brak, zły format, nieznany, odwołany lub wygasły klucz | 401, `invalid_api_key`, `WWW-Authenticate: Bearer` |
+| brak, zły format, nieznany, odwołany lub wygasły klucz albo wyłączony użytkownik | 401, `invalid_api_key`, `WWW-Authenticate: Bearer` |
 | ważny klucz bez zakresu trasy | 403, `insufficient_scope` |
+| Batch/Files użytkownika bez limitów w polityce quota | 403, `quota_not_configured` |
 | baza kluczy niedostępna | 503 z `Retry-After` |
 
 Wszystkie przyczyny 401 dają tę samą odpowiedź, więc nie ujawniają stanu klucza.
 
 ## Opóźnienia i obciążenie bazy
 
-- Proces odczytuje dany klucz z bazy najwyżej raz na 30 s. Odwołanie lub wygaśnięcie
-  działa więc na każdym serwerze najpóźniej po 30 s.
+- Proces odczytuje dany klucz i jego użytkownika z bazy najwyżej raz na 30 s.
+  Odwołanie, wygaśnięcie, wyłączenie i włączenie użytkownika działają więc na
+  każdym serwerze najpóźniej po 30 s.
 - Gdy baza jest niedostępna dłużej niż ten czas, żądania kończą się kodem 503.
   Serwer nie przepuszcza ich bez sprawdzenia klucza.
 - Czas wygaśnięcia jest liczony zegarem bazy.
@@ -123,7 +148,8 @@ Wszystkie przyczyny 401 dają tę samą odpowiedź, więc nie ujawniają stanu k
 
 ## Ograniczenia
 
-- Brak HTTP API do zarządzania kluczami; tylko `basal keys` z dostępem do bazy.
+- Brak HTTP API do zarządzania; tylko `basal users` i `basal keys` z dostępem do bazy.
+- Brak usuwania użytkowników i ich danych.
 - Brak limitów liczby żądań na klucz i limitu nieudanych prób z jednego adresu.
 - `/health/batches` pozostaje publiczne i pokazuje stan magazynu batchy.
 - Rotacja nie jest atomowa: gdy ustawienie wygaśnięcia starego klucza się nie powiedzie,

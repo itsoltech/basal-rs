@@ -96,6 +96,9 @@ pub(crate) enum StoreError {
     QuotaExceeded(QuotaResource),
     #[error("owner has no quota in the active policy")]
     OwnerNotProvisioned,
+    /// An API key for a disabled user.
+    #[error("the API user is disabled")]
+    UserDisabled,
     #[error("no quota policy is installed")]
     PolicyMissing,
     #[error("no model catalog is installed")]

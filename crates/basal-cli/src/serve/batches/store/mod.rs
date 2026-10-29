@@ -420,10 +420,44 @@ impl Store {
     }
 
     // -----------------------------------------------------------------------------------------------------------
-    // API keys (see `serve::auth`); independent of every batch table and lock
+    // API users and keys (see `serve::auth`); independent of every batch table and lock
     // -----------------------------------------------------------------------------------------------------------
 
-    /// Insert a new key; its expiry counts from the database clock.
+    /// Insert a user; `None` when the id is taken.
+    pub(crate) async fn create_api_user(&self, id: &OwnerId, name: &str) -> Result<Option<ApiUserRecord>, StoreError> {
+        match &self.db {
+            Db::Mongodb(mongo) => mongo.create_api_user(id, name).await,
+            Db::Sql(sql) => in_tx!(sql, tx => ops::keys::create_user(tx, id, name)),
+        }
+    }
+
+    /// At most `limit` users ordered by id, disabled ones only with `include_disabled`.
+    pub(crate) async fn list_api_users(
+        &self,
+        include_disabled: bool,
+        limit: u32,
+    ) -> Result<Vec<ApiUserRecord>, StoreError> {
+        match &self.db {
+            Db::Mongodb(mongo) => mongo.list_api_users(include_disabled, limit).await,
+            Db::Sql(sql) => in_tx!(sql, tx => ops::keys::list_users(tx, include_disabled, limit)),
+        }
+    }
+
+    /// Disable (keeping the first time) or enable a user; `NotFound` for an unknown id. A disabled user's keys are
+    /// refused, its data stays.
+    pub(crate) async fn set_api_user_disabled(
+        &self,
+        id: &OwnerId,
+        disabled: bool,
+    ) -> Result<ApiUserRecord, StoreError> {
+        match &self.db {
+            Db::Mongodb(mongo) => mongo.set_api_user_disabled(id, disabled).await,
+            Db::Sql(sql) => in_tx!(sql, tx => ops::keys::set_user_disabled(tx, id, disabled)),
+        }
+    }
+
+    /// Insert a new key of an existing, enabled user (`NotFound`, `UserDisabled`); its expiry counts from the
+    /// database clock.
     pub(crate) async fn create_api_key(&self, key: &NewApiKey) -> Result<ApiKeyRecord, StoreError> {
         match &self.db {
             Db::Mongodb(mongo) => mongo.create_api_key(key).await,
@@ -431,16 +465,16 @@ impl Store {
         }
     }
 
-    /// At most `limit` keys in creation order, optionally of one owner, revoked ones only with `include_revoked`.
+    /// At most `limit` keys in creation order, optionally of one user, revoked ones only with `include_revoked`.
     pub(crate) async fn list_api_keys(
         &self,
-        owner: Option<&OwnerId>,
+        user: Option<&OwnerId>,
         include_revoked: bool,
         limit: u32,
     ) -> Result<Vec<ApiKeyRecord>, StoreError> {
         match &self.db {
-            Db::Mongodb(mongo) => mongo.list_api_keys(owner, include_revoked, limit).await,
-            Db::Sql(sql) => in_tx!(sql, tx => ops::keys::list(tx, owner, include_revoked, limit)),
+            Db::Mongodb(mongo) => mongo.list_api_keys(user, include_revoked, limit).await,
+            Db::Sql(sql) => in_tx!(sql, tx => ops::keys::list(tx, user, include_revoked, limit)),
         }
     }
 

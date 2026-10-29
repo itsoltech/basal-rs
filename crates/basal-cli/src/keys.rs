@@ -1,11 +1,17 @@
-//! `basal keys`: API keys of the server (`auth:`, `serve::auth`) in the configured database, without a model or a GPU.
+//! `basal users` and `basal keys`: users and API keys of the server (`auth:`, `serve::auth`) in the configured
+//! database, without a model or a GPU.
 //!
-//! - `create`: a new key of an owner with scopes and an optional lifetime. The token goes to stdout once (the
-//!   database keeps only its SHA-256); everything else goes to stderr.
-//! - `list`: keys without their tokens (`--all` also revoked ones, `--json` one JSON array).
-//! - `revoke`: the key stops working on every server within `serve::auth::CACHE_TTL`.
-//! - `rotate`: a new key with the owner, name and scopes of an old one; the old one stays valid until it is revoked
-//!   or, with `--expire-old-in`, until that time.
+//! A user's id is the Batch storage namespace (owner) of all its keys: every key of a user sees the same files and
+//! batches; the user's Batch limits stay in `batches.quota.owners`. Users are disabled and enabled, never deleted.
+//!
+//! - `users create|list|disable|enable`: a disabled user's keys are refused by every server within
+//!   `serve::auth::CACHE_TTL`; its data stays and expires by the Batch retention.
+//! - `keys create`: a new key of an enabled user with scopes and an optional lifetime. The token goes to stdout once
+//!   (the database keeps only its SHA-256); everything else goes to stderr.
+//! - `keys list`: keys without their tokens (`--all` also revoked ones, `--json` one JSON array).
+//! - `keys revoke`: the key stops working on every server within `serve::auth::CACHE_TTL`.
+//! - `keys rotate`: a new key with the user, name and scopes of an old one; the old one stays valid until it is
+//!   revoked or, with `--expire-old-in`, until that time.
 //!
 //! The database is the root `database:` section of the serve configuration (`--config FILE`, `BASAL_CONFIG` or
 //! `basal-serve.yml`), else the local SQLite default of `basal serve --batches`. Records are written with the runtime
@@ -22,28 +28,74 @@ use crate::batches::Source;
 use crate::database::{Database, DatabaseConfig, DatabaseSection, DatabaseSettings};
 use crate::serve::auth::generate_token;
 use crate::serve::batches::store::{
-    check_api_key_name, ApiKeyId, ApiKeyRecord, ApiScopes, NewApiKey, OwnerId, Store, StoreError, UnixMillis,
+    check_api_name, ApiKeyId, ApiKeyRecord, ApiScopes, ApiUserRecord, NewApiKey, OwnerId, Store, StoreError, UnixMillis,
 };
 
-/// Most keys `list` prints.
+/// Most users or keys `list` prints.
 const MAX_LIST: u32 = 10_000;
 
 #[derive(clap::Args)]
-pub(crate) struct Args {
+pub(crate) struct UsersArgs {
     #[command(subcommand)]
-    command: Command,
+    command: UsersCommand,
 }
 
 #[derive(clap::Subcommand)]
-enum Command {
-    /// Create a key and print its token once (stdout)
+enum UsersCommand {
+    /// Create a user (its id is the Batch storage namespace of all its keys)
     Create {
         #[command(flatten)]
         source: Source,
-        /// Batch storage namespace of the key's requests (an owner of batches.quota.owners)
-        #[arg(long, value_parser = parse_owner)]
-        owner: OwnerId,
+        /// User id: 1-128 of A-Z, a-z, 0-9, `._:@-`; also its owner in batches.quota.owners
+        #[arg(value_parser = parse_user)]
+        user: OwnerId,
         /// Label for operators, e.g. the client or team (1-128 bytes, no control characters)
+        #[arg(long, value_parser = parse_name)]
+        name: String,
+    },
+    /// List users
+    List {
+        #[command(flatten)]
+        source: Source,
+        /// Include disabled users
+        #[arg(long)]
+        all: bool,
+        /// Print one JSON array
+        #[arg(long)]
+        json: bool,
+    },
+    /// Disable a user: servers refuse all its keys within 30 s; its data stays
+    Disable {
+        #[command(flatten)]
+        source: Source,
+        #[arg(value_parser = parse_user)]
+        user: OwnerId,
+    },
+    /// Enable a disabled user again (its unrevoked, unexpired keys work again)
+    Enable {
+        #[command(flatten)]
+        source: Source,
+        #[arg(value_parser = parse_user)]
+        user: OwnerId,
+    },
+}
+
+#[derive(clap::Args)]
+pub(crate) struct KeysArgs {
+    #[command(subcommand)]
+    command: KeysCommand,
+}
+
+#[derive(clap::Subcommand)]
+enum KeysCommand {
+    /// Create a key of a user and print its token once (stdout)
+    Create {
+        #[command(flatten)]
+        source: Source,
+        /// User of the key (`basal users create`)
+        #[arg(long, value_parser = parse_user)]
+        user: OwnerId,
+        /// Label for operators, e.g. the application or host (1-128 bytes, no control characters)
         #[arg(long, value_parser = parse_name)]
         name: String,
         /// Comma list of inference, batches, mcp, metrics
@@ -60,9 +112,9 @@ enum Command {
     List {
         #[command(flatten)]
         source: Source,
-        /// Only keys of this owner
-        #[arg(long, value_parser = parse_owner)]
-        owner: Option<OwnerId>,
+        /// Only keys of this user
+        #[arg(long, value_parser = parse_user)]
+        user: Option<OwnerId>,
         /// Include revoked keys
         #[arg(long)]
         all: bool,
@@ -78,7 +130,7 @@ enum Command {
         #[arg(value_parser = parse_key_id)]
         key_id: ApiKeyId,
     },
-    /// Create a successor of a key (same owner, name and scopes) and print its token once
+    /// Create a successor of a key (same user, name and scopes) and print its token once
     Rotate {
         #[command(flatten)]
         source: Source,
@@ -97,30 +149,88 @@ enum Command {
     },
 }
 
-pub(crate) fn run(args: Args) -> Result<()> {
+pub(crate) fn run_users(args: UsersArgs) -> Result<()> {
     let source = match &args.command {
-        Command::Create { source, .. }
-        | Command::List { source, .. }
-        | Command::Revoke { source, .. }
-        | Command::Rotate { source, .. } => source,
+        UsersCommand::Create { source, .. }
+        | UsersCommand::List { source, .. }
+        | UsersCommand::Disable { source, .. }
+        | UsersCommand::Enable { source, .. } => source,
     };
     let database = database(source)?;
+    with_store(database, async |store: &Store| users(store, args.command).await)
+}
+
+pub(crate) fn run_keys(args: KeysArgs) -> Result<()> {
+    let source = match &args.command {
+        KeysCommand::Create { source, .. }
+        | KeysCommand::List { source, .. }
+        | KeysCommand::Revoke { source, .. }
+        | KeysCommand::Rotate { source, .. } => source,
+    };
+    let database = database(source)?;
+    with_store(database, async |store: &Store| keys(store, args.command).await)
+}
+
+/// Run `f` with the store of `database` and close the store afterwards.
+fn with_store(database: DatabaseSettings, f: impl AsyncFnOnce(&Store) -> Result<()>) -> Result<()> {
     crate::batches::runtime()?.block_on(async {
         let store = crate::serve::auth::connect(&Database::new(database)).await?;
-        let result = command(&store, args.command).await;
+        let result = f(&store).await;
         store.close().await;
         result
     })
 }
 
-async fn command(store: &Store, command: Command) -> Result<()> {
+async fn users(store: &Store, command: UsersCommand) -> Result<()> {
     match command {
-        Command::Create { owner, name, scopes, expires_in, json, .. } => {
-            check_quota_owner(store, &owner).await?;
-            create(store, owner, name, scopes, expires_in, json).await
+        UsersCommand::Create { user, name, .. } => {
+            let record = store.create_api_user(&user, &name).await?.with_context(|| format!("user {user} exists"))?;
+            crate::done!("created user {} ({}); add keys with `basal keys create --user {}`", user, record.name, user);
+            check_quota(store, &user).await;
+            Ok(())
         }
-        Command::List { owner, all, json, .. } => {
-            let keys = store.list_api_keys(owner.as_ref(), all, MAX_LIST).await?;
+        UsersCommand::List { all, json, .. } => {
+            let users = store.list_api_users(all, MAX_LIST).await?;
+            if json {
+                let rows = users.iter().map(|u| {
+                    json!({
+                        "user": u.id.as_str(),
+                        "name": u.name,
+                        "created_at": utc(u.created_at),
+                        "disabled_at": u.disabled_at.map(utc),
+                        "status": user_status(u),
+                    })
+                });
+                println!("{}", serde_json::Value::Array(rows.collect()));
+            } else {
+                println!("{:<24}  {:<32}  {:<20}  STATUS", "USER", "NAME", "CREATED");
+                for u in &users {
+                    let name = u.name.escape_debug().to_string();
+                    println!("{:<24}  {name:<32}  {:<20}  {}", u.id.as_str(), utc(u.created_at), user_status(u));
+                }
+            }
+            Ok(())
+        }
+        UsersCommand::Disable { user, .. } => {
+            store.set_api_user_disabled(&user, true).await.map_err(|e| user_not_found(e, &user))?;
+            crate::done!("disabled user {user}; servers refuse its keys within 30 s, its data stays");
+            Ok(())
+        }
+        UsersCommand::Enable { user, .. } => {
+            store.set_api_user_disabled(&user, false).await.map_err(|e| user_not_found(e, &user))?;
+            crate::done!("enabled user {user}; its active keys work again within 30 s");
+            Ok(())
+        }
+    }
+}
+
+async fn keys(store: &Store, command: KeysCommand) -> Result<()> {
+    match command {
+        KeysCommand::Create { user, name, scopes, expires_in, json, .. } => {
+            create(store, user, name, scopes, expires_in, json).await
+        }
+        KeysCommand::List { user, all, json, .. } => {
+            let keys = store.list_api_keys(user.as_ref(), all, MAX_LIST).await?;
             if json {
                 println!("{}", serde_json::Value::Array(keys.iter().map(describe).collect()));
             } else {
@@ -128,17 +238,17 @@ async fn command(store: &Store, command: Command) -> Result<()> {
             }
             Ok(())
         }
-        Command::Revoke { key_id: id, .. } => {
-            let key = store.revoke_api_key(&id).await.map_err(|e| not_found(e, &id))?;
-            crate::done!("revoked key {} ({}, owner {}); servers refuse it within 30 s", id, key.name, key.owner);
+        KeysCommand::Revoke { key_id: id, .. } => {
+            let key = store.revoke_api_key(&id).await.map_err(|e| key_not_found(e, &id))?;
+            crate::done!("revoked key {} ({}, user {}); servers refuse it within 30 s", id, key.name, key.user);
             Ok(())
         }
-        Command::Rotate { key_id: id, expire_old_in, expires_in, json, .. } => {
-            let old = store.lookup_api_key(&id).await?.ok_or_else(|| not_found(StoreError::NotFound, &id))?.record;
+        KeysCommand::Rotate { key_id: id, expire_old_in, expires_in, json, .. } => {
+            let old = store.lookup_api_key(&id).await?.ok_or_else(|| key_not_found(StoreError::NotFound, &id))?.record;
             if old.revoked_at.is_some() {
                 bail!("key {id} is revoked; create a new key instead");
             }
-            create(store, old.owner, old.name, old.scopes, expires_in, json).await?;
+            create(store, old.user, old.name, old.scopes, expires_in, json).await?;
             match expire_old_in {
                 Some(within) => {
                     let old = store.expire_api_key(&id, within).await?;
@@ -153,19 +263,23 @@ async fn command(store: &Store, command: Command) -> Result<()> {
 
 async fn create(
     store: &Store,
-    owner: OwnerId,
+    user: OwnerId,
     name: String,
     scopes: ApiScopes,
     expires_in: Option<Duration>,
     json: bool,
 ) -> Result<()> {
     let token = generate_token().context("reading system randomness")?;
-    let key = NewApiKey { id: token.id, owner, name, token_sha256: token.sha256, scopes, expires_in };
-    let record = store.create_api_key(&key).await?;
+    let key = NewApiKey { id: token.id, user: user.clone(), name, token_sha256: token.sha256, scopes, expires_in };
+    let record = store.create_api_key(&key).await.map_err(|e| match e {
+        StoreError::NotFound => anyhow::anyhow!("no user {user}; create it with `basal users create {user}`"),
+        StoreError::UserDisabled => anyhow::anyhow!("user {user} is disabled; `basal users enable {user}` first"),
+        other => other.into(),
+    })?;
     crate::done!(
-        "created key {} for owner {} (scopes {}, expires {}); the token is shown only now",
+        "created key {} for user {} (scopes {}, expires {}); the token is shown only now",
         record.id,
-        record.owner,
+        record.user,
         record.scopes.to_text(),
         record.expires_at.map_or_else(|| "never".into(), utc)
     );
@@ -181,20 +295,20 @@ async fn create(
         .with_context(|| format!("writing the token of key {}; revoke it with `basal keys revoke`", record.id))
 }
 
-/// Warn when an installed quota policy has no limits for `owner`: its Batch/Files requests would be refused.
-async fn check_quota_owner(store: &Store, owner: &OwnerId) -> Result<()> {
-    if let Some(policy) = store.active_quota_policy().await? {
-        if !policy.spec.owners.iter().any(|(o, _)| o == owner) {
-            crate::warn!(
-                "owner {owner} has no limits in the installed quota policy: its Batch/Files requests are refused \
-                 until batches.quota.owners lists it (`basal batches install`)"
-            );
-        }
+/// Warn when an installed quota policy has no limits for `user`: its Batch/Files requests would be refused. Runs
+/// after the user is created, so a failed read is only a warning.
+async fn check_quota(store: &Store, user: &OwnerId) {
+    match store.active_quota_policy().await {
+        Ok(Some(policy)) if !policy.spec.owners.iter().any(|(o, _)| o == user) => crate::warn!(
+            "user {user} has no limits in the installed quota policy: its Batch/Files requests are refused \
+             (403) until batches.quota.owners lists it (`basal batches install`)"
+        ),
+        Ok(_) => {}
+        Err(e) => crate::warn!("user {user} is created, but reading the quota policy failed: {e}"),
     }
-    Ok(())
 }
 
-/// The database of the keys: the root `database:` section, else the local default of `basal serve --batches`.
+/// The database of users and keys: the root `database:` section, else the local default of `basal serve --batches`.
 fn database(source: &Source) -> Result<DatabaseSettings> {
     if let Some(path) = source.config.clone().or_else(crate::paths::config_file) {
         let config = crate::config::ServeConfig::load_admin(&path)?;
@@ -207,14 +321,30 @@ fn database(source: &Source) -> Result<DatabaseSettings> {
     Ok(crate::batches::settings(source)?.1)
 }
 
-fn not_found(error: StoreError, id: &ApiKeyId) -> anyhow::Error {
+fn key_not_found(error: StoreError, id: &ApiKeyId) -> anyhow::Error {
     match error {
         StoreError::NotFound => anyhow::anyhow!("no key {id}"),
         other => other.into(),
     }
 }
 
-/// Status for display, by this host's clock (servers decide by the database clock).
+fn user_not_found(error: StoreError, user: &OwnerId) -> anyhow::Error {
+    match error {
+        StoreError::NotFound => anyhow::anyhow!("no user {user}"),
+        other => other.into(),
+    }
+}
+
+fn user_status(user: &ApiUserRecord) -> &'static str {
+    if user.disabled_at.is_some() {
+        "disabled"
+    } else {
+        "active"
+    }
+}
+
+/// Status for display, by this host's clock (servers decide by the database clock). A disabled user is not shown
+/// here; see `basal users list`.
 fn status(key: &ApiKeyRecord) -> &'static str {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -232,7 +362,7 @@ fn describe(key: &ApiKeyRecord) -> serde_json::Value {
     let time = |t: Option<UnixMillis>| t.map(utc);
     json!({
         "key_id": key.id.as_str(),
-        "owner": key.owner.as_str(),
+        "user": key.user.as_str(),
         "name": key.name,
         "scopes": key.scopes.to_text(),
         "created_at": utc(key.created_at),
@@ -247,13 +377,13 @@ fn print_table(keys: &[ApiKeyRecord]) {
     let dash = |t: Option<UnixMillis>| t.map_or_else(|| "-".to_string(), utc);
     println!(
         "{:<16}  {:<20}  {:<24}  {:<28}  {:<20}  {:<20}  {:<20}  STATUS",
-        "KEY_ID", "OWNER", "NAME", "SCOPES", "CREATED", "EXPIRES", "LAST_USED"
+        "KEY_ID", "USER", "NAME", "SCOPES", "CREATED", "EXPIRES", "LAST_USED"
     );
     for key in keys {
         println!(
             "{:<16}  {:<20}  {:<24}  {:<28}  {:<20}  {:<20}  {:<20}  {}",
             key.id.as_str(),
-            key.owner.as_str(),
+            key.user.as_str(),
             key.name.escape_debug().to_string(),
             key.scopes.to_text(),
             utc(key.created_at),
@@ -281,12 +411,12 @@ fn utc(t: UnixMillis) -> String {
     format!("{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z", rem / 3600, rem % 3600 / 60, rem % 60)
 }
 
-fn parse_owner(text: &str) -> Result<OwnerId, String> {
+fn parse_user(text: &str) -> Result<OwnerId, String> {
     OwnerId::parse(text).map_err(|e| e.to_string())
 }
 
 fn parse_name(text: &str) -> Result<String, String> {
-    check_api_key_name(text).map(|()| text.to_owned()).map_err(|e| e.to_string())
+    check_api_name(text).map(|()| text.to_owned()).map_err(|e| e.to_string())
 }
 
 fn parse_scopes(text: &str) -> Result<ApiScopes, String> {

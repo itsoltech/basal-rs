@@ -267,8 +267,10 @@ Nie używaj `TrustServerCertificate` jako obejścia konfiguracji certyfikatów.
 
 `batches.owner` wybiera jedną przestrzeń przechowywania dla wszystkich żądań tego serwera;
 domyślnie `local`. To nazwa w bazie i polityce quota, nie tożsamość klienta ani uprawnienie.
-Z [kluczami API](AUTH.md) (`auth.enabled`) przestrzeń wyznacza owner klucza zamiast
-`batches.owner`; klienci z różnymi ownerami nie widzą swoich plików ani batchy.
+Z [kluczami API](AUTH.md) (`auth.enabled`) przestrzeń wyznacza użytkownik klucza zamiast
+`batches.owner`. Wszystkie klucze użytkownika współdzielą jego pliki i batche; różni
+użytkownicy nie widzą swoich zasobów. Limity użytkownika są w `batches.quota.owners`
+pod jego identyfikatorem; bez nich jego żądania Batch/Files dostają 403.
 Musi występować w `batches.quota.owners`; lokalne limity powstają automatycznie dla wybranej nazwy.
 Repliki obsługujące ten sam zestaw zasobów powinny mieć tę samą wartość.
 Klient nie może zmienić tej przestrzeni nagłówkiem ani polem żądania.

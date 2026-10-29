@@ -25,9 +25,10 @@ gemm_cache: .cache/gemm            # tables of `gemm_table: auto`
 #   auto_migrate: true             # default: true for sqlite, false for remote databases
 #   # remote: connection_string_env, migration_connection_string_env, tls: {mode: verify_full}, pool
 #
-# API keys (docs/AUTH.md), off by default: every route except /health and /health/batches then needs
-# `Authorization: Bearer bsk_...`; keys live in the database above (or the local Batch SQLite default) and are managed
-# with `basal keys create|list|revoke|rotate`. A key's owner replaces batches.owner for its Batch/Files requests.
+# API users and keys (docs/AUTH.md), off by default (no database or key is needed without it): every route except
+# /health and /health/batches then needs `Authorization: Bearer bsk_...`. Users and keys live in the database above
+# (or the local Batch SQLite default), managed with `basal users ...` and `basal keys ...`. All keys of a user share
+# its Batch/Files data (its id replaces batches.owner; its limits are batches.quota.owners.<user id>).
 # auth:
 #   enabled: true
 #   protect_metrics: false         # true: /metrics needs a key with scope `metrics`

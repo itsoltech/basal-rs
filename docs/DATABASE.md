@@ -103,7 +103,7 @@ backup.
 Moduł `crates/basal-cli/src/database/` posiada konfigurację, walidację, opcje
 połączeń (TLS, pula, timeouty), wybór konta oraz moment i sposób migracji.
 Jedynym zarejestrowanym schematem jest schemat magazynu batchy; od wersji 3
-zawiera też tabelę (kolekcję MongoDB) `api_keys`. Jego tabele, ledger wersji,
+zawiera też tabele (kolekcje MongoDB) `api_users` i `api_keys`. Jego tabele, ledger wersji,
 sumy kontrolne i natywne migratory pozostają w adapterach `serve/batches/store`,
 podobnie jak wszystkie zapytania domenowe. Starsza binarka odrzuca schemat 3 jako nowszy. Każdy konsument
 otwiera własną, ograniczoną pulę z tych samych ustawień; serwer nie ma jednej

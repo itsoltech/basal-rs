@@ -251,8 +251,10 @@ enum Cmd {
     Batches(batches::Args),
     /// Manage the configured database (`database:`) without loading a model or a GPU.
     Database(database::cli::Args),
-    /// Manage API keys (`auth:`) in the configured database without loading a model or a GPU.
-    Keys(keys::Args),
+    /// Manage API users (`auth:`) in the configured database without loading a model or a GPU.
+    Users(keys::UsersArgs),
+    /// Manage API keys of the users (`auth:`) without loading a model or a GPU.
+    Keys(keys::KeysArgs),
     /// Use decisions in pipes and scripts: HTTP by default, --local loads a model once
     Client(Box<client::ClientArgs>),
     /// Measure sequential and mixed concurrent HTTP traffic on this hardware
@@ -1003,7 +1005,8 @@ fn run() -> Result<()> {
         Cmd::Mcp(args) => mcp::run(args)?,
         Cmd::Batches(args) => batches::run(args)?,
         Cmd::Database(args) => database::cli::run(args)?,
-        Cmd::Keys(args) => keys::run(args)?,
+        Cmd::Users(args) => keys::run_users(args)?,
+        Cmd::Keys(args) => keys::run_keys(args)?,
         Cmd::Client(args) => {
             let code = match client::run(*args) {
                 Ok(code) => code,

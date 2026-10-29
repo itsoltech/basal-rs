@@ -713,8 +713,8 @@ wyłączona; wykonywanie GPU wymaga osobnej kwalifikacji profilu. Lokalny start,
 magazyny SQLite/PostgreSQL/SQL Server/MongoDB, przestrzenie danych oraz bieżące ograniczenia:
 [Batch API](docs/BATCHES.md). Baza (backend, poświadczenia, TLS, pula, migracje)
 ma osobną, opcjonalną sekcję `database:` i polecenie `basal database migrate`:
-[Baza danych](docs/DATABASE.md). Opcjonalne klucze API w tej bazie (`auth:`, `basal keys`)
-z zakresami, wygasaniem i ownerem Batch API: [Klucze API](docs/AUTH.md). Zgodność numeryczna i obciążenie mieszane batch/online
+[Baza danych](docs/DATABASE.md). Opcjonalni użytkownicy i ich klucze API w tej bazie (`auth:`, `basal users`, `basal keys`)
+z zakresami, wygasaniem i wspólnymi danymi Batch API użytkownika: [Klucze API](docs/AUTH.md). Zgodność numeryczna i obciążenie mieszane batch/online
 pozostają do potwierdzenia na GPU; sama dostępność endpointu ich nie potwierdza.
 
 ```sh

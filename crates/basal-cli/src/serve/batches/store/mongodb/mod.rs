@@ -290,7 +290,29 @@ impl MongoStore {
         self.run(|core| async move { admin::active_quota_policy(&core).await }).await
     }
 
-    // API keys
+    // API users and keys
+
+    pub(super) async fn create_api_user(&self, id: &OwnerId, name: &str) -> Result<Option<ApiUserRecord>, StoreError> {
+        let (id, name) = (id.clone(), name.to_owned());
+        self.run(move |core| async move { keys::create_user(&core, &id, &name).await }).await
+    }
+
+    pub(super) async fn list_api_users(
+        &self,
+        include_disabled: bool,
+        limit: u32,
+    ) -> Result<Vec<ApiUserRecord>, StoreError> {
+        self.run(move |core| async move { keys::list_users(&core, include_disabled, limit).await }).await
+    }
+
+    pub(super) async fn set_api_user_disabled(
+        &self,
+        id: &OwnerId,
+        disabled: bool,
+    ) -> Result<ApiUserRecord, StoreError> {
+        let id = id.clone();
+        self.run(move |core| async move { keys::set_user_disabled(&core, &id, disabled).await }).await
+    }
 
     pub(super) async fn create_api_key(&self, key: &NewApiKey) -> Result<ApiKeyRecord, StoreError> {
         let key = key.clone();
@@ -299,12 +321,12 @@ impl MongoStore {
 
     pub(super) async fn list_api_keys(
         &self,
-        owner: Option<&OwnerId>,
+        user: Option<&OwnerId>,
         include_revoked: bool,
         limit: u32,
     ) -> Result<Vec<ApiKeyRecord>, StoreError> {
-        let owner = owner.cloned();
-        self.run(move |core| async move { keys::list(&core, owner.as_ref(), include_revoked, limit).await }).await
+        let user = user.cloned();
+        self.run(move |core| async move { keys::list(&core, user.as_ref(), include_revoked, limit).await }).await
     }
 
     pub(super) async fn lookup_api_key(&self, id: &ApiKeyId) -> Result<Option<ApiKeyLookup>, StoreError> {
