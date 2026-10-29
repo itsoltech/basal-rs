@@ -473,6 +473,8 @@ struct Candidate {
     branch: Option<basal_core::engine::ReadyBranch>,
     tokens: usize,
     prompt: Option<usize>,
+    /// Effective backlog only: unknown or above the threshold. Shared by ordering and admission.
+    long: bool,
 }
 
 struct LaneBatch {
@@ -597,9 +599,10 @@ impl Lane {
                     bound.max(ready_max.unwrap_or(0))
                 })
             });
+            let long = threshold.is_some_and(|threshold| prompt.is_none_or(|n| n > threshold));
             match &waiting.work {
                 WaitingWork::Atomic(_) => {
-                    candidates.push(Candidate { owner, branch: None, tokens: waiting.tokens, prompt })
+                    candidates.push(Candidate { owner, branch: None, tokens: waiting.tokens, prompt, long })
                 }
                 WaitingWork::Primitive(request) => {
                     candidates.extend(request.ready().map(|(branch, p)| Candidate {
@@ -608,21 +611,20 @@ impl Lane {
                         tokens: p.packed.ids.len(),
                         // Charge the whole original owner bound to EACH primitive, including later rounds.
                         prompt,
+                        long,
                     }));
                 }
             }
         }
-        if let Some(threshold) = threshold {
+        if threshold.is_some() {
             // Restore arrival order after partial owners rejoin the vector. Stable ties retain branch order.
             candidates.sort_by_key(|c| self.waiting[c.owner].job.arrived);
             let ratio = |c: &Candidate| {
                 (start - self.waiting[c.owner].job.arrived).as_secs_f64() / c.prompt.unwrap_or(usize::MAX).max(1) as f64
             };
             candidates.sort_by(|a, b| {
-                let long_a = a.prompt.is_none_or(|n| n > threshold);
-                let long_b = b.prompt.is_none_or(|n| n > threshold);
-                long_a.cmp(&long_b).then_with(|| {
-                    if long_a {
+                a.long.cmp(&b.long).then_with(|| {
+                    if a.long {
                         ratio(b).total_cmp(&ratio(a))
                     } else {
                         std::cmp::Ordering::Equal
@@ -644,7 +646,7 @@ impl Lane {
         let primitive = candidates.first().is_some_and(|c| c.branch.is_some());
         let mut long_admitted = false;
         let mut long_remaining = backlog::LONG_CALL_TOKENS;
-        for Candidate { owner, branch, tokens, prompt } in candidates {
+        for Candidate { owner, branch, tokens, prompt, long } in candidates {
             if self.max_batch.is_some_and(|cap| entries.len() >= cap) {
                 full = true;
                 break;
@@ -655,7 +657,6 @@ impl Lane {
                 full = true;
                 continue;
             }
-            let long = threshold.is_some_and(|threshold| prompt.is_none_or(|n| n > threshold));
             if long && long_admitted && prompt.is_none_or(|n| n > long_remaining) {
                 full = true;
                 continue;
