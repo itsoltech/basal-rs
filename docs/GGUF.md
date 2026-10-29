@@ -29,8 +29,9 @@ kalibracji, następnie wykonuje wspólny odczyt semantyki, cross-binding, kontro
 pierwotnego stampu katalogu i instalację inwentarza. Nie ma operacji nadawania
 tego trybu wcześniej skonstruowanemu właścicielowi ani znacznika gotowości.
 
-Ta ścieżka oraz opisany niżej `read_with_raw_source_budget` sprawdzają oryginalne zachowane bajty JSON przed ich
-pierwszym parsowaniem przez serde. Obejmuje `gguf-source.json`, `config.json`,
+Ta ścieżka oraz opisane niżej `read_with_raw_source_budget` i
+`read_with_declaration_source_budget` sprawdzają oryginalne zachowane bajty JSON
+przed pierwszym parserem semantycznym. Obejmuje `gguf-source.json`, `config.json`,
 `basal.json`, `tokenizer.json`, `tokenizer_config.json` i najwyżej dwa faktyczne
 odczyty kalibracji: kandydata i zamiennik albo plik jawny, także zewnętrzny.
 Zamiennik jest sprawdzany przed konstrukcją jego Value, gdy Value kandydata
@@ -166,6 +167,77 @@ brak admission całego heapu, owned Engine/Planner, trwałej tożsamości, końc
 same-fd rehash przed publikacją i materializacji/upload/completion/error retention.
 Nie uzyskano dowodu runtime, zgodności bitowej/FP32, jakości ani pomiaru pamięci
 lub wydajności. Zaakceptowany thinking FAIL pozostaje bez zmian.
+
+## Opcjonalne admission konstrukcji deklaracji
+
+`GgufCompanionSemantics::read_with_declaration_source_budget(directory, options, lease, &budget)`
+zwraca `Result<Self, GgufInventoryReadError>`. Aplikacja tworzy jeden
+`GgufDeclarationSourceBudget::new(limit_bytes: usize)` przed loadami i współdzieli
+go albo jego klony pomiędzy równoległymi loadami/reloadami. Prywatny uchwyt
+raw używa **tego samego ledgera** dla wszystkich opisanych wyżej oryginalnych
+buforów oraz końcowego heapu deklaracji. Osobne `new` oznacza osobny allowance;
+bootstrap pozostaje poza rachunkiem. Nie ma publicznego raw handle, kosztu,
+permitu, release/reset ani nadania budżetu istniejącemu właścicielowi.
+
+Wyłącznie ten konstruktor zastępuje serde DTO deklaracji. Po pełnym inventory,
+odczycie i hashu oryginalnej deklaracji oraz Envelope powstaje pożyczony plan
+zamkniętego schematu. Stałe flagi pól, spany i dekoder scalarów nie alokują.
+Plan liczy N rekordów i zdekodowane długości UTF-8 model_id, revision oraz
+każdej nazwy, także duplikatów. Przed pierwszą alokacją semantyki deklaracji
+sprawdza layouty i sumę z kontrolą przepełnienia:
+
+```text
+S = Layout::array::<OriginSafetensor>(N).size()
+    + model_id_bytes + revision_bytes + suma_name_bytes
+```
+
+Używa rzeczywistego layoutu/alignment rekordu na danym targecie, bez zmiany
+rekordu, mnożnika raw bytes ani capacity zmierzonego po reserve. Całe S jest
+pozyskiwane raz, all-or-none, na istniejącym ledgerze. Następnie globalne alloc
+i natychmiastowe przejęcie tworzą wyłącznie końcowe Stringi (capacity równe
+zdekodowanym bajtom) oraz typowany Vec rekordów (capacity N, początkowo len=0).
+Null jest typowanym błędem. Dopisywanie poprawnych scalarów UTF-8 i całych
+rekordów sprawdza pojemność przed zapisem, bez reserve/realloc/shrink. Nie ma
+Value, DTO, pomocniczego owned decode ani drugiego bufora tekstu.
+
+S obejmuje także nazwę w budowie przed wstawieniem do Vec. Prywatne ostatnie
+pole deklaracji utrzymuje całą rezerwację aż po zniszczeniu Stringów, rekordów
+i ich nazw. Lokalne częściowe obiekty również giną przed charge: przy błędzie
+schematu/walidacji, null, duplikacie, późniejszym błędzie companions/backendu
+i unwind. Cały właściciel może być przenoszony lub współdzielony przez Arc;
+nie ma niezależnego owned extractora deklaracji. Kopie wykonane przez caller’a
+z pożyczonych getterów pozostają poza zakresem. Nie ma wcześniejszego refundu.
+
+W ramach istniejącego Envelope zachowany jest język poprawnych deklaracji:
+arbitralna kolejność pól, escaped klucze i wartości, Unicode i pary surogatów,
+wymagane rozróżnienie null/brak dla metadata_repair, map-only obiekty,
+odmowa nieznanych/zdublowanych pól, stałe, false flags, trzy outtypes,
+wielkie/małe litery hex oraz dotychczasowe predykaty origin i nazw. Zapisany
+tekst i kolejność inventory pochodzenia nie są normalizowane ani sortowane.
+
+Nowy `GgufDeclarationConstructionError` zawiera wyłącznie stałe pola:
+Schema { offset, field, reason }, Arithmetic, Layout { storage, count },
+Admission { source: GgufRawSourceError } i Allocation { storage, bytes }.
+Łańcuch przyczyn prowadzi przez
+`GgufInventoryReadError::Semantic` → `GgufSemanticError::Capture` →
+`WeightSourceError::DeclarationConstruction` do tego błędu i ewentualnie
+przyczyny ledgera. Dodany wariant WeightSourceError wymaga aktualizacji
+wyczerpujących matchów downstream także dla starych entrypointów.
+Nowa ścieżka może odmówić admission przed konstrukcją deklaracji; błędy
+niepoprawnego schematu i ich pierwszeństwo mogą różnić się od serde.
+Wszystkie stare konstruktory zachowują DTO, błędy i kolejność odczytów,
+alokacji oraz hashy; istniejący raw-only budget nadal obejmuje tylko raw.
+Hash companion nadal poprzedza Envelope, a actual-read/probe binding, końcowy
+stamp, atomowa instalacja i obowiązek trusted-local/no-writer nie zmieniają się.
+
+To dodatkowa pokryta klasa heapu, **nadal częściowe REQ-009**. Poza nią pozostają
+inne serde/Value/helper/manifest/normalizacja, native/tokenizer/cache (w tym TLS),
+bootstrap/control i obiekty zawierające, nazwy/rekordy inventory, ścieżki/błędy,
+scratch GGUF, staging/device oraz allocator internals/rounding, OS/page cache,
+RSS i fizyczne OOM. CLI/Engine/Planner nie współdzielą automatycznie allowance.
+Nie uzyskano potwierdzenia runtime, bitwise/FP32, jakości, pomiaru pamięci ani
+wydajności. Legacy fingerprint, defaults/numerics i accepted thinking FAIL
+pozostają bez zmian; nie dodano źródła vLLM.
 
 ## Zamknięty zakres semantyki G1
 

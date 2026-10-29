@@ -13,8 +13,8 @@ use super::calibration_inventory::{
 };
 use super::raw_source::RawCharge;
 use super::{
-    read_path, CompanionRole, GgufCompanionSnapshot, GgufRawSourceBudget, JsonEnvelopeError, JsonReadMode,
-    Sha256Digest, WeightSourceError,
+    read_path, CompanionRole, GgufCompanionSnapshot, GgufDeclarationSourceBudget, GgufRawSourceBudget,
+    JsonEnvelopeError, JsonReadMode, Sha256Digest, SourceBudget, WeightSourceError,
 };
 use crate::architecture::Architecture;
 use crate::calibration::{CalibrationIdentityError, CalibrationSource, ServedIdentity};
@@ -678,7 +678,7 @@ impl GgufCompanionSemantics {
         options: ModelLoadOptions<'_>,
         lease: CallerCalibrationDirectoryLease,
     ) -> Result<Self, GgufInventoryReadError> {
-        Self::read_inventory_mode(directory, options, lease, JsonReadMode::Legacy, None)
+        Self::read_inventory_mode(directory, options, lease, JsonReadMode::Legacy, SourceBudget::None)
     }
 
     /// Capture the full calibration inventory and preflight each original JSON
@@ -699,7 +699,7 @@ impl GgufCompanionSemantics {
         options: ModelLoadOptions<'_>,
         lease: CallerCalibrationDirectoryLease,
     ) -> Result<Self, GgufInventoryReadError> {
-        Self::read_inventory_mode(directory, options, lease, JsonReadMode::Envelope, None)
+        Self::read_inventory_mode(directory, options, lease, JsonReadMode::Envelope, SourceBudget::None)
     }
 
     /// Capture full inventory and envelope-checked semantics while admitting each
@@ -724,7 +724,31 @@ impl GgufCompanionSemantics {
         lease: CallerCalibrationDirectoryLease,
         budget: &GgufRawSourceBudget,
     ) -> Result<Self, GgufInventoryReadError> {
-        Self::read_inventory_mode(directory, options, lease, JsonReadMode::Envelope, Some(budget))
+        Self::read_inventory_mode(directory, options, lease, JsonReadMode::Envelope, SourceBudget::Raw(budget))
+    }
+
+    /// Admit original raw blocks AND final declaration String/record backing
+    /// before allocating them, on one shared application allowance.
+    ///
+    /// Uses full inventory and JSON Envelope in the existing hash/read/binding
+    /// order. Only this route replaces the declaration DTO with a borrowed
+    /// schema plan and exact fallible materializer. The private semantic charge
+    /// follows the declaration through errors, unwind, whole-owner moves and Arc
+    /// sharing, until all its backing dies. Share one budget (or its clones)
+    /// across concurrent loads/reloads; this route never makes another ledger.
+    ///
+    /// The caller lease/no-writer obligation remains. New schema/admission
+    /// diagnostics and invalid-input precedence can differ from older routes.
+    /// Other semantic/native/tokenizer/cache storage, inventory names/records,
+    /// objects/paths/errors, GGUF scratch and staging/device remain unadmitted.
+    /// This is not RSS/OOM protection, loader readiness or CLI/Engine wiring.
+    pub fn read_with_declaration_source_budget(
+        directory: &Path,
+        options: ModelLoadOptions<'_>,
+        lease: CallerCalibrationDirectoryLease,
+        budget: &GgufDeclarationSourceBudget,
+    ) -> Result<Self, GgufInventoryReadError> {
+        Self::read_inventory_mode(directory, options, lease, JsonReadMode::Envelope, SourceBudget::Declaration(budget))
     }
 
     fn read_inventory_mode(
@@ -732,9 +756,9 @@ impl GgufCompanionSemantics {
         options: ModelLoadOptions<'_>,
         lease: CallerCalibrationDirectoryLease,
         mode: JsonReadMode,
-        budget: Option<&GgufRawSourceBudget>,
+        budget: SourceBudget<'_>,
     ) -> Result<Self, GgufInventoryReadError> {
-        let (mut inventory, handle) = GgufCalibrationInventory::capture(directory, lease, budget)?;
+        let (mut inventory, handle) = GgufCalibrationInventory::capture(directory, lease, budget.raw())?;
         let mut semantics = Self::read_mode(directory, options, mode, budget)
             .map_err(|source| GgufInventoryReadError::Semantic { source })?;
         semantics.calibration.bind_inventory(&mut inventory, &semantics.manifest)?;
@@ -752,14 +776,14 @@ impl GgufCompanionSemantics {
     /// Capture once, then parse those bytes. Only selected calibration opens extra files.
     /// No GGUF file, device, model execution or companion path reload is involved.
     pub fn read(directory: &Path, options: ModelLoadOptions<'_>) -> Result<Self, GgufSemanticError> {
-        Self::read_mode(directory, options, JsonReadMode::Legacy, None)
+        Self::read_mode(directory, options, JsonReadMode::Legacy, SourceBudget::None)
     }
 
     fn read_mode(
         directory: &Path,
         options: ModelLoadOptions<'_>,
         mode: JsonReadMode,
-        budget: Option<&GgufRawSourceBudget>,
+        budget: SourceBudget<'_>,
     ) -> Result<Self, GgufSemanticError> {
         let snapshot = GgufCompanionSnapshot::read_mode(directory, mode, budget).map_err(|source| match &source {
             WeightSourceError::Io { role: "config.json", operation: "open", source: io }
@@ -769,7 +793,7 @@ impl GgufCompanionSemantics {
             }
             _ => GgufSemanticError::Capture { source },
         })?;
-        Self::from_snapshot(snapshot, directory, options, mode, budget)
+        Self::from_snapshot(snapshot, directory, options, mode, budget.raw())
     }
 
     fn from_snapshot(

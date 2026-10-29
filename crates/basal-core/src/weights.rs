@@ -16,6 +16,7 @@ use serde::{Deserialize, Deserializer};
 use sha2::{Digest, Sha256};
 
 mod calibration_inventory;
+mod declaration_construction;
 mod json_envelope;
 mod raw_source;
 mod semantics;
@@ -24,6 +25,8 @@ pub use calibration_inventory::{
     GgufInventoryReadError, InventoryNameReason, InventoryOperation, InventoryPhase, InventoryReadMismatch,
     InventoryResource, InventoryStampField,
 };
+use declaration_construction::{DeclarationCharge, SourceBudget};
+pub use declaration_construction::{GgufDeclarationConstructionError, GgufDeclarationSourceBudget};
 use json_envelope::JsonReadMode;
 pub use json_envelope::{JsonEnvelopeError, JsonEnvelopeResource};
 use raw_source::RawCharge;
@@ -155,6 +158,8 @@ pub struct GgufDeclaration {
     revision: String,
     safetensors: Vec<OriginSafetensor>,
     metadata_repair: Option<MetadataRepair>,
+    // Last: semantic backing (including every name) dies before its charge.
+    _declaration_charge: Option<DeclarationCharge>,
 }
 
 struct OriginSafetensor {
@@ -288,6 +293,7 @@ impl GgufDeclaration {
             revision: origin.revision,
             safetensors,
             metadata_repair: data.metadata_repair.map(|_| MetadataRepair::TokenizerOnly),
+            _declaration_charge: None,
         })
     }
 }
@@ -319,16 +325,12 @@ impl GgufCompanionSnapshot {
     /// Future parsers must consume these bytes, not reopen the original paths
     /// while claiming the captured hashes still apply.
     pub fn read(directory: &Path) -> Result<Self, WeightSourceError> {
-        Self::read_mode(directory, JsonReadMode::Legacy, None)
+        Self::read_mode(directory, JsonReadMode::Legacy, SourceBudget::None)
     }
 
-    fn read_mode(
-        directory: &Path,
-        mode: JsonReadMode,
-        budget: Option<&GgufRawSourceBudget>,
-    ) -> Result<Self, WeightSourceError> {
+    fn read_mode(directory: &Path, mode: JsonReadMode, budget: SourceBudget<'_>) -> Result<Self, WeightSourceError> {
         // Locals drop in reverse order, so the charge must precede raw locals.
-        let mut raw_charge = budget.map(GgufRawSourceBudget::charge);
+        let mut raw_charge = budget.raw().map(GgufRawSourceBudget::charge);
         let mut declaration_total = 0;
         let declaration_bytes = read_file(
             directory,
@@ -341,7 +343,7 @@ impl GgufCompanionSnapshot {
         let declaration_sha256 = Sha256Digest::of(&declaration_bytes);
         mode.check(&declaration_bytes)
             .map_err(|source| WeightSourceError::JsonEnvelope { role: DECLARATION, source })?;
-        let declaration = GgufDeclaration::parse(&declaration_bytes)?;
+        let declaration = budget.declaration(&declaration_bytes)?;
         let mut companions = std::array::from_fn(|_| Vec::new());
         let mut total = 0;
         for role in CompanionRole::ALL {
@@ -396,6 +398,11 @@ impl GgufCompanionSnapshot {
 /// callers must treat that detailed diagnostic as untrusted declaration data.
 #[derive(thiserror::Error)]
 pub enum WeightSourceError {
+    #[error("gguf-source.json declaration construction failed")]
+    DeclarationConstruction {
+        #[source]
+        source: GgufDeclarationConstructionError,
+    },
     #[error("{role} raw source admission failed")]
     RawSource {
         role: &'static str,
