@@ -10,6 +10,8 @@
 //! checks the file's recorded length and SHA-256 at the end. Every line is planned on the planning threads like an
 //! execution (slot `R`, native planner, the same budgets, numbers and semantics as online) and appended in bounded
 //! chunks: byte range, line hash, cost, `result_bound` and `host_bound`. The seal follows only after every record.
+//! The local profile also claims its profiles without a host staging bound (no other host could) and fails their
+//! batches with `unbounded_feature` before reading the input.
 //! Data errors (up to the issue limit, with line numbers) fail the batch; a lost lease or an unavailable store
 //! stops the attempt without failing it, so another lease continues. Records are never fetched from URLs.
 
@@ -204,6 +206,11 @@ async fn validate(shared: &Arc<Shared>, store: &Store, lease: ValidationLease, s
         // The store only offers declared fingerprints; a profile removed meanwhile lets the lease lapse.
         return Err(Abort::Planning("the batch's profile is not served here".into()));
     };
+    if profile.host_staging.is_none() {
+        // Only the local profile claims such a target (`Shared::targets`); no host can plan its records.
+        let message = format!("model {} has no host staging bound; this server cannot plan its batches", profile.name);
+        return fail(store, &lease.token, &[issue(codes::UNBOUNDED_FEATURE, &message, None)], false).await;
+    }
     let leases = &shared.settings.leases;
     let keeper = LeaseKeeper::start(
         store.clone(),

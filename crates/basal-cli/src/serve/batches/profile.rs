@@ -341,12 +341,14 @@ pub(crate) struct ResolvedProfile {
 }
 
 impl ResolvedProfile {
-    /// The validation and claim target of this profile, when it can plan bounded records.
+    /// The validation target of this profile, when it can plan bounded records (health `validates`).
     pub(crate) fn target(&self) -> Option<WorkerTarget> {
-        self.host_staging.is_some().then(|| WorkerTarget {
-            fingerprint: self.fingerprint.clone(),
-            planner_version: self.planner_version.clone(),
-        })
+        self.host_staging.is_some().then(|| self.claim_target())
+    }
+
+    /// The claim target of this profile whether or not it can plan; validation refuses an unbounded profile.
+    pub(crate) fn claim_target(&self) -> WorkerTarget {
+        WorkerTarget { fingerprint: self.fingerprint.clone(), planner_version: self.planner_version.clone() }
     }
 }
 

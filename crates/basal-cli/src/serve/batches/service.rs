@@ -108,9 +108,14 @@ impl Shared {
         self.profiles.read().unwrap_or_else(PoisonError::into_inner).clone()
     }
 
-    /// Validation targets: profiles that plan bounded records.
+    /// Validation targets: profiles that plan bounded records. The local profile also claims the others, because no
+    /// other host can validate their batches; validation then fails them with `unbounded_feature`.
     pub(super) fn targets(&self) -> Vec<WorkerTarget> {
-        self.profiles().iter().filter_map(|p| p.target()).collect()
+        let profiles = self.profiles();
+        match self.settings.profile {
+            Profile::Local => profiles.iter().map(|p| p.claim_target()).collect(),
+            Profile::Production => profiles.iter().filter_map(|p| p.target()).collect(),
+        }
     }
 
     pub(super) fn profile_for(&self, fingerprint: &store::Fingerprint) -> Option<Arc<ResolvedProfile>> {
@@ -560,8 +565,8 @@ pub(super) fn local_catalog(profiles: &[Arc<ResolvedProfile>], default_model: &s
     Ok(CatalogSpec { default_model: default, entries })
 }
 
-/// Local profile: install the catalog of this host's profiles and the local policy once (existing revisions are
-/// kept, so an earlier queue is never re-targeted). Production: nothing is installed at runtime.
+/// Local profile: install the catalog of this host's profiles when the latest revision does not list them, and the
+/// local policy once (accepted batches keep their pinned revision). Production: nothing is installed at runtime.
 async fn prepare(shared: &Shared, store: &Store) -> Result<(), StoreError> {
     if shared.settings.profile != Profile::Local {
         return Ok(());

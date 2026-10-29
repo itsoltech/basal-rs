@@ -416,16 +416,18 @@ impl Store {
         }
     }
 
-    /// Local profile: install the catalog and policy once when none exist; existing revisions are kept so an earlier
-    /// queue is never re-targeted. Returns the active revisions.
+    /// Local profile: keep the latest catalog revision while it lists every entry of `catalog` (name, fingerprint and
+    /// planner version; a superset installed by the operator stays), otherwise install `catalog` as a new revision for
+    /// new batches. Accepted batches keep their pinned revision. The quota policy is installed once when none exists.
+    /// Returns the active revisions.
     pub(crate) async fn bootstrap_local(
         &self,
         catalog: &CatalogSpec,
         policy: &QuotaPolicySpec,
     ) -> Result<(Revision, Revision), StoreError> {
         let catalog = match self.latest_catalog().await? {
-            Some(existing) => existing.revision,
-            None => match self.install_catalog(catalog).await? {
+            Some(existing) if catalog.entries.iter().all(|e| existing.spec.entries.contains(e)) => existing.revision,
+            _ => match self.install_catalog(catalog).await? {
                 InstallOutcome::Installed(r) | InstallOutcome::Unchanged(r) => r,
             },
         };

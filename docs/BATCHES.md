@@ -23,9 +23,13 @@ Implementacja jest w trakcie kwalifikacji. Włączenie API nie włącza wykonywa
 GPU: model wymaga osobnego `batch_profile` popartego pomiarami. Bez niego można
 obsługiwać pliki i lifecycle, ale żądania nie uzyskają wyników inferencji w tle.
 Model z `validates=false` i `background_supported=false` w `/health/batches`
-(obecnie Pico) przyjmuje upload i zlecenie, ale poprawny batch pozostaje
-w `validating` do anulowania albo wygaśnięcia. [Pomiar Pico](../reports/upstream-api-241-remediation-2026-10-28/README.md)
-potwierdził start i anulowanie; nie kwalifikuje walidacji ani inferencji Batch.
+(obecnie Pico) przyjmuje upload i zlecenie. W profilu `local` żaden inny host
+nie zwaliduje takiego batcha, więc walidacja od razu kończy go statusem `failed`
+z kodem `unbounded_feature`, bez czytania rekordów. W profilu `production`
+batch pozostaje w `validating`, aż obsłuży go inny host z tym fingerprintem,
+albo do anulowania lub wygaśnięcia. [Pomiar Pico](../reports/upstream-api-241-remediation-2026-10-28/README.md)
+potwierdził start i anulowanie na wcześniejszej wersji, w której lokalny batch
+pozostawał w `validating`; nie kwalifikuje walidacji ani inferencji Batch.
 Kompilacja, próby magazynu i syntetyczne wyniki nie potwierdzają zgodności numerycznej
 ani opóźnień na GPU. Aktualne dowody magazynów:
 [PostgreSQL](../reports/batches-postgresql-store-2026-10-19/README.md),
@@ -65,6 +69,13 @@ basal serve --model mini --batches --batch-data-dir ./batch-data
 Profil `local` używa SQLite i plików w prywatnym katalogu. Serwer domyślnie nasłuchuje
 na loopback. Nie tworzy ani nie odczytuje tokenów. Nie dodawaj bazy ani artefaktów do Gita.
 Nie zmieniaj katalogu danych pomiędzy restartami, jeżeli chcesz zachować kolejkę i wyniki.
+
+Przy starcie profil `local` sprawdza ostatnią rewizję katalogu. Jeżeli nie zawiera
+nazwy, fingerprintu i wersji planera każdego obsługiwanego modelu (np. po zmianie
+wersji planera, opcji modelu, tabeli GEMM lub `batch_profile`), serwer instaluje
+nową rewizję dla nowych batchy. Rewizja, która obejmuje te modele, także szersza,
+pozostaje aktualna. Przyjęte batche zachowują swoją rewizję i fingerprint. Bez
+zgodnego workera czekają na anulowanie albo wygaśnięcie.
 
 Bez sekcji głównej `database:` profil `local` używa dotychczasowego pliku
 `<katalog danych>/batches.sqlite3` z automatyczną migracją. Jawna sekcja
