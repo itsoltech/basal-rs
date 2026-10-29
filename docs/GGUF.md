@@ -1,4 +1,4 @@
-# Deklaracja GGUF i snapshot plików towarzyszących
+# Deklaracja GGUF i semantyka plików towarzyszących
 
 `basal_core::weights::GgufCompanionSnapshot::read(&Path)` odczytuje lokalną
 deklarację `gguf-source.json` i pięć stałych plików towarzyszących. Zwraca
@@ -9,11 +9,119 @@ To ograniczony etap przygotowania źródła. Nie otwiera ani nie parsuje GGUF,
 nie wybiera źródła wag w CLI lub runtime i nie dopuszcza modelu do wykonania.
 `declared_gguf_sha256()` jest jawnie **niezweryfikowaną deklaracją**.
 
+`basal_core::weights::GgufCompanionSemantics::read(directory, options)` dodatkowo
+buduje wspólny `ModelManifest` i `BasalTokenizer` z zachowanych bajtów oraz
+zachowuje pliki faktycznie odczytane przez dotychczasowy wybór kalibracji.
+`options` ma typ `ModelLoadOptions<'_>`. Wynik posiada snapshot, manifest,
+tokenizer i kalibrację; gettery `snapshot()`, `manifest()`, `tokenizer()` oraz
+`calibration()` pożyczają rzeczywiste obiekty. Nie klonują całych buforów ani
+nie otwierają companions ponownie. Cache tokenizera może być później używany
+przez dotychczasowe metody. API nadal nie jest loaderem GGUF ani planem gotowym
+do alokacji na urządzeniu.
+
+## Zamknięty zakres semantyki G1
+
+Nowe API wymaga zwykłej architektury Llama: `LlamaForCausalLM`, `silu`, osobnej
+głowicy (`tie_word_embeddings: false`), jednakowego jawnego `attention_bias`
+i `mlp_bias`, pełnego domyślnego RoPE i wymiarów sprawdzanych wspólnym parserem.
+Dotychczasowe loadery zachowują własny zakres wejść i kolejność błędów.
+G1 odrzuca każde nieznane pole config, nawet o wartości `false`, `0` lub `null`.
+Poniższa tabela jest pełną polityką dodatkowych pól; wymagane pola podstawowe
+są wymienione w pierwszym wierszu.
+
+| Pola config | Polityka G1 |
+|---|---|
+| `model_type`, `architectures`, `hidden_act`, `tie_word_embeddings`, `attention_bias`, `mlp_bias`, `num_hidden_layers`, `hidden_size`, `intermediate_size`, `num_attention_heads`, `num_key_value_heads`, `head_dim`, `vocab_size`, `rms_norm_eps`, `max_position_embeddings` | Wymagane, według wspólnego parsera Llama: dodatnie wymiary, skończone dodatnie epsilon/theta, sprawdzone iloczyny, GQA i parzysty head_dim |
+| `pretraining_tp` | Brak albo całkowite 1 |
+| `rope_parameters` | Wymagany obiekt: wymagane dodatnie skończone `rope_theta`; opcjonalne `rope_type` i alias `type` wyłącznie string `default`; opcjonalne `partial_rotary_factor`, `factor`, `attention_factor` wyłącznie skończone liczby dokładnie 1; żadnych innych kluczy |
+| `rope_theta`, `partial_rotary_factor` na poziomie głównym | Brak albo odpowiednio dodatnia skończona liczba równa zagnieżdżonej theta i liczba dokładnie 1; null odrzucone |
+| `rope_scaling`, `quantization_config`, `sliding_window`, `layer_types`, `per_layer_config`, `text_config`, `vision_config`, `audio_config` | Brak lub null; także pusty obiekt/array są odrzucane |
+| `is_causal`, `is_decoder` | Brak albo boolean true |
+| `is_encoder_decoder`, `add_cross_attention`, `use_bidirectional_attention` | Brak albo boolean false |
+| `_attn_implementation`, `attn_implementation` | Brak, null albo string `eager` |
+| `attention_dropout` | Brak albo skończona liczba 0 |
+| `bos_token_id`, `pad_token_id` | Brak/null albo nieujemne u32 mniejsze od vocab; jawny BOS musi odpowiadać tokenowi BOS manifestu |
+| `eos_token_id` | Brak/null, pojedyncze ograniczone u32 albo array takich ID |
+| `_name_or_path`, `transformers_version` | Brak albo string; bierne dane pochodzenia, bez otwierania lub uruchamiania wskazanego kodu |
+| `torch_dtype`, `dtype` | Brak/null albo string `float16`, `bfloat16`, `float32`; wskazówka nie ustala rzeczywistego typu wag |
+| `initializer_range` | Brak albo skończona liczba w [0,1] |
+| `use_cache` | Brak albo boolean; polityka cache pozostaje własnością runtime |
+
+Wspólna semantyka `basal.json` zachowuje formaty 1/2, layout, orders, dokładne
+template i BOS. Cały tokenizer pozostaje autorytatywny: vocab, merges, scores,
+added tokens i ich właściwości, decoder oraz pre-tokenizer. Wspólny konstruktor
+zachowuje kontrolę Llama Metaspace i rewrite `always|first` do `first`, wymaga
+braku/null normalizera oraz wyłącza truncation i padding. Nie powstaje tokenizer
+z samych tokenów GGUF ani drugi równoległy tokenizer.
+
+Surowe ID modelu i added tokens są sprawdzane przed normalizacją i konstrukcją
+zależności. Następnie sprawdzane są osobno efektywny model vocabulary, added
+vocabulary i decoder map, zgodność deklarowanych added ID z rekonstrukcją
+zależności oraz obecność i zgodność BOS. Każde rzeczywiste ID musi mieścić się
+w u32 i być mniejsze od `config.vocab`. Dotyczy to też liczbowych BOS/EOS/PAD
+w config i tokenizer_config. Unigram ma indeksowane ID i ograniczony unk_id.
+Luki w ID i niewykorzystane wiersze embeddingów są dozwolone; liczebność
+słownika nie musi być równa vocab i nie wymagamy gęstego słownika. Konstrukcja
+nie wykonuje encode ani nie zapełnia cache kodów.
+
+To nie dowodzi poprawności kodów w kontekście odpowiedzi. Przyszłe planowanie
+żądań musi zachować kontrolę pełnego prefiksu, jednego nowego tokena i unikalności
+kodów, a przed backendem ograniczyć każde ID wejściowe, kodu/readout, po ponownym
+kodowaniu lub skróceniu, evidence i thinking P2. Dotyczy to również ID podanych
+bezpośrednio oraz przyszłych ID generowanych przed decode/embedding.
+
+`GgufSemanticError` zachowuje przyczyny capture, UTF-8, JSON, wspólnych walidacji,
+tokenizers i kalibracji. `MissingConfigG3` dotyczy wyłącznie błędu open NotFound
+dla `config.json` i zachowuje ten błąd: zestawy bez config wymagają G3. Nie ma
+syntezy config z GGUF. Błędy uprawnień, hashy i parserów nie otrzymują tej etykiety.
+Top-level Display/Debug pomija bufory, pochodzenie i pełny JSON; szczegółowe
+przyczyny mogą zawierać niezaufane dane i ścieżki.
+
+## Zachowana kalibracja i tożsamość
+
+`CalibrationCapture::files()` pożycza najwyżej dwa `CapturedCalibrationFile`:
+początkowy Candidate i ewentualny OrdersVariant albo jeden Explicit. Każdy ma
+`bytes()`, `sha256()` i `role()`. Zastąpiony kandydat pozostaje zachowany, bo jego
+fitted fields wpływają na wybór. `selected()` wskazuje faktycznie wybrane bajty;
+ich hash jest równy `manifest.calibration_provenance.content_sha256`. Obie
+wartości są puste tylko wtedy, gdy żaden plik nie został wybrany/odczytany.
+
+Wybór współdzieli algorytm legacy. Automatic preferuje istniejący plik layout,
+potem sprawdza kandydata; brak daje pustą kalibrację. Najpierw sprawdzany jest
+layout. Tylko brak mismatch i różne jawne fitted orders pozwalają automatic
+sprawdzić jeden wariant `.o<orders>.json`; wybrany wariant zastępuje kandydata
+także przy niezgodnym layout, bez powrotu. Explicit czyta dokładnie podaną
+ścieżkę, także poza katalogiem; brak i błędny plik są błędami bez fallbacku.
+Off nie czyta plików, ale dla niekanonicznego layout może wykonać dotychczasowy
+probe preferowanego pliku. Nie ma skanowania ani hashowania wszystkich wariantów.
+
+`decision()` pożycza `CalibrationDecision`: mode, efektywny layout/orders/prompt,
+strict, rzeczywiście osiągnięte initial/selected layout/orders checks, decyzję
+wariantu i najwyżej trzy faktycznie wykonane probes. Nie zawiera ścieżek.
+`NotEvaluated`, `Absent` i `Match` mają różne znaczenia. `Path::exists` może
+zwrócić false także przy braku dostępu; wynik nie jest dowodem trwałej nieobecności.
+Zniknięcie preferowanego pliku między probes zachowuje dotychczasową pustą
+kalibrację; błąd open po ostatnim true przerywa operację.
+
+Mismatch layout/orders zachowuje temperatury i buckets, odrzucając certyfikaty
+i multi przed walidacją ich map. Wybrany prompt, temperatury i buckets nadal
+podlegają dotychczasowej walidacji; brak temperatury typu daje 1.0. Kandydat
+zastąpiony wariantem nie jest przedwcześnie walidowany pod tym kątem.
+Jawny mismatch tożsamości ostrzega bez usuwania certyfikatów/temperatur;
+strict zwraca istniejący błąd. Pooled format-1 certificates pozostają bez zmian.
+
+`identity_state()` zwraca `CalibrationIdentityState`: NotRequired dla Automatic
+i Off, Checked dla Explicit z podaną rzeczywistą served identity oraz Deferred
+dla Explicit bez niej, nawet przy braku fitted model. Checked nie jest obietnicą
+braku ostrzeżenia ani uwierzytelnienia pochodzenia. Przyszły runtime musi wykonać
+`calibration_provenance.check_identity(actual_served)` przed publikacją; wywołanie
+nie zapamiętuje sukcesu. Attested origin nie zastępuje served identity.
+
 ## Publiczne API
 
 | Element | Znaczenie |
 |---|---|
-| `GgufCompanionSnapshot::read(directory)` | Jedyna operacja odczytu; sześć stałych nazw, bez przeglądania katalogu i wyszukiwania `.gguf` |
+| `GgufCompanionSnapshot::read(directory)` | Odczyt snapshotu: sześć stałych nazw, bez przeglądania katalogu i wyszukiwania `.gguf` |
 | `declaration()` | Pożyczona, sprawdzona `GgufDeclaration`, z prywatnymi polami |
 | `declaration_bytes()`, `declaration_sha256()` | Dokładne bajty deklaracji i hash wszystkich tych bajtów |
 | `bytes(CompanionRole)` | Pożyczony slice zachowanych bajtów wskazanej roli; bez ponownego otwierania ścieżki |
@@ -151,8 +259,26 @@ deklaracji; należy traktować ją zgodnie z tym charakterem przy logowaniu.
 
 Limity bajtów nie gwarantują fizycznej dostępności RAM ani ochrony przed OOM.
 Nie ograniczają amplifikacji alokacji podczas parsowania JSON deklaracji ani
-późniejszego parsowania konfiguracji lub tokenizera. Deklaracja jest parsowana
-pod limitem wejściowym 64 KiB; duże pliki companion pozostają surowymi bajtami.
+parsowania konfiguracji lub tokenizera. Sam snapshot pozostawia companions
+jako surowe bajty; nowe API semantyczne dodatkowo uruchamia zwykłe parsery
+serde_json i tokenizers na zaufanych lokalnych wejściach. Węzły, mapy, stringi,
+BPE/Unigram, matchery added tokens, regex i wewnętrzne rezerwacje zależności
+mogą powiększać pamięć bez ilościowego limitu. Nie jest to interfejs dowolnego
+uploadu. Przed obietnicą ograniczonego host preflight trzeba uwzględnić żywe
+alokacje parserów/tokenizera w budżecie hosta albo osobno zweryfikować parse
+quotas; mnożnik rozmiaru pliku nie dowodzi takiego ograniczenia.
+
+Każdy rzeczywiście czytany plik kalibracji ma limit 64 MiB, najwyżej dwa odczyty
+i razem 128 MiB. Companions z kalibracją mają wspólny limit 256 MiB, a deklaracja
+osobno 64 KiB. Jeden licznik zaczyna od sprawdzonej sumy rzeczywistych długości
+pięciu companions S; jego granica to `min(S.checked_add(128 MiB)?, 256 MiB)`.
+Kalibracja używa tego samego czytnika i obciąża sumę przed rezerwacją; opłata za
+zastąpionego kandydata nie znika. Łączne zachowane długości raw to najwyżej
+256 MiB + 64 KiB, z możliwym narzutem capacity/allocatora oraz dodatkowymi
+strukturami semantycznymi. Nie ma cichej kopii całych zachowanych buforów.
+Konstrukcja tokenizera przejściowo posiada Value, znormalizowany string i obiekt
+zależności; audyt bazowego vocab tworzy też przejściową kopię mapy z API zależności.
+Na błędzie częściowy wynik jest odrzucany, a bufory zwalniane normalnie.
 
 ## Granica zaufania i dalsza walidacja
 
@@ -175,10 +301,16 @@ tych hashy. Snapshot nie gwarantuje jednoczesnego stanu wszystkich plików.
 Dalszy preflight musi zweryfikować sam GGUF: ograniczony nagłówek i inventory,
 metadane, mapowanie, typy i zakresy tensorów, payload i jego finitość, digest
 tego samego pliku, niezmienność źródła oraz jawne budżety pamięci. Osobno musi
-zastosować dotychczasową semantykę Llama config, `basal.json`, dokładnego
-template, BOS i kodów/token IDs oraz odrzucić nieznane semantyki. Kalibracja
-wymaga zachowania istniejącego wyboru, walidacji i provenance, także dla
-jawnego override. Ta operacja nie wyszukuje kalibracji ani nie rekonstruuje
-`ModelManifest` lub tokenizera. Loader, frozen source identity, plan wykonania,
-ścieżki odczytu głowicy i upload GPU oraz pomiary numeryczne pozostają osobnymi
-warunkami dalszej obsługi GGUF.
+porównać config z GGUF i zachować późniejsze granice ID żądań. API semantyczne
+zamyka wyłącznie opisany etap companions/wybranej kalibracji. Nie definiuje
+fingerprintu całego źródła ani trwałego inventory wszystkich wariantów kalibracji.
+Późniejsza tożsamość musi wiązać również zastąpionego kandydata, wybrany digest,
+tryb/protokół oraz rzeczywiście wykonane decyzje/probes, bez lokalnych ścieżek.
+
+Przyszłe konstruktory Engine i RequestPlanner muszą przejąć zwalidowany tokenizer
+wraz z manifestem. Obecny `Engine::fork` ponownie używa konstruktora ścieżkowego
+i wymaga osobnego dostosowania. Nowa ścieżka nie może otwierać companions przez
+`manifest.dir`, zachowując stare hashe. Ownership workerów, source lease/snapshot,
+host/device/staging budgets, warianty, materializacja, CLI/runtime i kwalifikacja
+numeryczna pozostają otwarte. Nie potwierdzono dystrybucji modeli, zgodności
+bitowej, wyników FP32, runtime GPU ani nowej akceptacji thinking.

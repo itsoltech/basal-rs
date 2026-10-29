@@ -15,6 +15,13 @@ use serde::de::{value::MapAccessDeserializer, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use sha2::{Digest, Sha256};
 
+mod semantics;
+pub use semantics::{
+    CalibrationCapture, CalibrationDecision, CalibrationIdentityState, CalibrationMode, CalibrationProbe,
+    CalibrationProbeRole, CalibrationReadRole, CapturedCalibrationFile, GgufCompanionSemantics, GgufSemanticError,
+    LayoutCheck, OrdersCheck, OrdersVariantDecision, SemanticStage,
+};
+
 const DECLARATION: &str = "gguf-source.json";
 const MAX_DECLARATION_BYTES: u64 = 64 * 1024;
 const MAX_COMPANION_BYTES: u64 = 64 * 1024 * 1024;
@@ -427,8 +434,18 @@ fn read_file(
     total: &mut u64,
     total_limit: u64,
 ) -> Result<Vec<u8>, WeightSourceError> {
+    read_path(&directory.join(role), role, per_file_limit, total, total_limit)
+}
+
+fn read_path(
+    path: &Path,
+    role: &'static str,
+    per_file_limit: u64,
+    total: &mut u64,
+    total_limit: u64,
+) -> Result<Vec<u8>, WeightSourceError> {
     let io_error = |operation, source| WeightSourceError::Io { role, operation, source };
-    let mut file = File::open(directory.join(role)).map_err(|source| io_error("open", source))?;
+    let mut file = File::open(path).map_err(|source| io_error("open", source))?;
     let before = file.metadata().map_err(|source| io_error("metadata before read", source))?;
     if !before.is_file() {
         return Err(WeightSourceError::NonRegular { role });

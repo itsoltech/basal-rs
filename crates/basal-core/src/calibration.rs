@@ -6,7 +6,9 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::manifest::ModelLoadOptions;
 use crate::prompt::{OptionOrders, PromptLayout};
+use crate::weights::{CalibrationCapture, CalibrationProbeRole, CalibrationReadRole, OrdersVariantDecision};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub enum CalibrationSource<'a> {
@@ -127,42 +129,134 @@ pub(crate) fn load(
     strict: bool,
     identity: Option<ServedIdentity<'_>>,
 ) -> Result<(Value, CalibrationProvenance, Option<String>)> {
+    let loaded = load_impl(dir, source, layout, orders, strict, identity, ReadMode::Legacy)?;
+    Ok((loaded.data, loaded.provenance, loaded.unvalidated))
+}
+
+pub(crate) struct LoadedCalibration {
+    pub(crate) data: Value,
+    pub(crate) provenance: CalibrationProvenance,
+    pub(crate) unvalidated: Option<String>,
+}
+
+pub(crate) fn load_captured(
+    dir: &Path,
+    options: ModelLoadOptions<'_>,
+    layout: PromptLayout,
+    orders: OptionOrders,
+    capture: &mut CalibrationCapture,
+) -> Result<LoadedCalibration> {
+    load_impl(
+        dir,
+        options.calibration,
+        layout,
+        orders,
+        options.strict_calibration,
+        options.served_identity,
+        ReadMode::Captured(capture),
+    )
+}
+
+enum ReadMode<'a> {
+    Legacy,
+    Captured(&'a mut CalibrationCapture),
+}
+
+impl ReadMode<'_> {
+    fn exists(&mut self, path: &Path, role: CalibrationProbeRole) -> bool {
+        let exists = path.exists();
+        if let Self::Captured(capture) = self {
+            capture.record_probe(role, exists);
+        }
+        exists
+    }
+
+    fn read(&mut self, path: &Path, role: CalibrationReadRole) -> Result<(Value, String)> {
+        match self {
+            Self::Legacy => read(path),
+            Self::Captured(capture) => capture.read(path, role),
+        }
+    }
+
+    fn layout(&mut self, initial: bool, mismatch: bool) {
+        if let Self::Captured(capture) = self {
+            capture.record_layout(initial, mismatch);
+        }
+    }
+
+    fn orders(&mut self, initial: bool, fitted: Option<OptionOrders>, served: OptionOrders) {
+        if let Self::Captured(capture) = self {
+            capture.record_orders(initial, fitted, served);
+        }
+    }
+
+    fn variant(&mut self, decision: OrdersVariantDecision) {
+        if let Self::Captured(capture) = self {
+            capture.record_variant(decision);
+        }
+    }
+}
+
+fn load_impl(
+    dir: &Path,
+    source: CalibrationSource<'_>,
+    layout: PromptLayout,
+    orders: OptionOrders,
+    strict: bool,
+    identity: Option<ServedIdentity<'_>>,
+    mut mode: ReadMode<'_>,
+) -> Result<LoadedCalibration> {
     let explicit = matches!(source, CalibrationSource::File(_));
     let off = matches!(source, CalibrationSource::Off);
     let mut path = match source {
         CalibrationSource::File(path) => path.to_path_buf(),
         _ => {
             let candidate = dir.join(format!("CALIBRATION.{layout}.json"));
-            if layout != PromptLayout::Canonical && candidate.exists() {
+            if layout != PromptLayout::Canonical && mode.exists(&candidate, CalibrationProbeRole::LayoutPreference) {
                 candidate
             } else {
                 dir.join("CALIBRATION.json")
             }
         }
     };
-    let (mut data, mut hash) = if !off && (explicit || path.exists()) {
-        let (data, hash) = read(&path)?;
+    let (mut data, mut hash) = if !off && (explicit || mode.exists(&path, CalibrationProbeRole::Candidate)) {
+        let role = if explicit { CalibrationReadRole::Explicit } else { CalibrationReadRole::Candidate };
+        let (data, hash) = mode.read(&path, role)?;
         (data, Some(hash))
     } else {
         (serde_json::json!({}), None)
     };
     // Layout is checked before orders: a mismatch must not be rescued by an orders variant.
     let mut unvalidated = layout_mismatch(&data, &path, layout)?;
+    mode.layout(true, unvalidated.is_some());
     if unvalidated.is_none() {
-        if !explicit && !off && fitted_orders(&data)?.is_some_and(|o| o != orders) {
+        let replace = if !explicit && !off {
+            let fitted = fitted_orders(&data)?;
+            mode.orders(true, fitted, orders);
+            fitted.is_some_and(|o| o != orders)
+        } else {
+            false
+        };
+        if replace {
             // Automatic names are CALIBRATION[.<layout>].json; the variant is CALIBRATION[.<layout>].o<orders>.json.
             let alt = path.with_extension(format!("o{orders}.json"));
-            if alt.exists() {
-                let (value, digest) = read(&alt)?;
+            if mode.exists(&alt, CalibrationProbeRole::OrdersVariant) {
+                let (value, digest) = mode.read(&alt, CalibrationReadRole::OrdersVariant)?;
                 // Validate the replacement too, so an incorrectly packaged orders file cannot certify another layout.
                 unvalidated = layout_mismatch(&value, &alt, layout)?;
+                mode.layout(false, unvalidated.is_some());
+                mode.variant(OrdersVariantDecision::Selected);
                 data = value;
                 hash = Some(digest);
                 path = alt;
+            } else {
+                mode.variant(OrdersVariantDecision::ProbeFalse);
             }
         }
         if unvalidated.is_none() {
-            unvalidated = fitted_orders(&data)?
+            let fitted = fitted_orders(&data)?;
+            mode.orders(false, fitted, orders);
+            unvalidated = fitted
                 .filter(|o| *o != orders)
                 .map(|fitted| format!("calibration was fitted on {fitted} option order(s), served with {orders}"));
         }
@@ -180,5 +274,5 @@ pub(crate) fn load(
     if let Some(identity) = identity {
         provenance.identity_warning = provenance.check_identity(identity)?;
     }
-    Ok((data, provenance, unvalidated))
+    Ok(LoadedCalibration { data, provenance, unvalidated })
 }

@@ -1,13 +1,35 @@
 //! Hugging Face tokenizer of the checkpoint and the letter-id check of upstream `prompt.letter_ids`.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::{anyhow, ensure, Context, Result};
 use std::str::FromStr;
 
 use crate::prompt::{ChatStyle, PromptFormat};
+use crate::weights::GgufSemanticError;
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum TokenizerInputError {
+    #[error(transparent)]
+    Semantic(#[from] anyhow::Error),
+    #[error("tokenizer backend construction failed")]
+    Backend {
+        path: PathBuf,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+}
+
+impl TokenizerInputError {
+    fn into_legacy(self) -> anyhow::Error {
+        match self {
+            Self::Semantic(source) => source,
+            Self::Backend { path, source } => anyhow!("{}: {source}", path.display()),
+        }
+    }
+}
 
 type CodeCache = HashMap<(PromptFormat, usize), Option<Vec<u32>>>;
 
@@ -30,7 +52,29 @@ impl BasalTokenizer {
 
     pub fn load_for(path: &Path, style: ChatStyle) -> Result<Self> {
         let raw = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        let mut json: serde_json::Value = serde_json::from_str(&raw)?;
+        Self::from_json_str(&raw, path, style).map_err(TokenizerInputError::into_legacy)
+    }
+
+    pub(crate) fn from_json_str(raw: &str, path: &Path, style: ChatStyle) -> Result<Self, TokenizerInputError> {
+        let json = serde_json::from_str(raw).map_err(anyhow::Error::from)?;
+        Self::from_json_value(json, path, style)
+    }
+
+    pub(crate) fn from_json_value(
+        mut json: serde_json::Value,
+        path: &Path,
+        style: ChatStyle,
+    ) -> Result<Self, TokenizerInputError> {
+        Self::normalize_json(&mut json, style)?;
+        let backend = |source| TokenizerInputError::Backend { path: path.to_path_buf(), source };
+        let mut inner = tokenizers::Tokenizer::from_str(&json.to_string()).map_err(backend)?;
+        // Upstream encodes without truncation, including when the serialized file enables it.
+        inner.with_truncation(None).map_err(backend)?;
+        inner.with_padding(None);
+        Ok(Self { inner, letters: Mutex::new(HashMap::new()) })
+    }
+
+    fn normalize_json(json: &mut serde_json::Value, style: ChatStyle) -> Result<()> {
         if matches!(style, ChatStyle::Gemma4 | ChatStyle::Gemma4Unified) {
             ensure!(
                 json.get("pre_tokenizer")
@@ -69,13 +113,89 @@ impl BasalTokenizer {
             pre["prepend_scheme"] = "first".into();
             ensure!(json.get("normalizer").is_none_or(|n| n.is_null()), "tokenizer.json: unexpected normalizer");
         }
-        let mut inner =
-            tokenizers::Tokenizer::from_str(&json.to_string()).map_err(|e| anyhow!("{}: {e}", path.display()))?;
-        // basal-1.0's tokenizer.json carries truncation at 1536 tokens; upstream encodes without truncation
-        // (transformers disables it for calls without `truncation=`), so prompts are never cut here either.
-        inner.with_truncation(None).map_err(|e| anyhow!("{}: {e}", path.display()))?;
-        inner.with_padding(None);
-        Ok(Self { inner, letters: Mutex::new(HashMap::new()) })
+        Ok(())
+    }
+
+    /// Audit the original ID storage before normalization or dependency deserialization can replace it.
+    pub(crate) fn audit_raw_ids(
+        original: &serde_json::Value,
+        vocab: usize,
+    ) -> Result<Vec<(String, u32)>, GgufSemanticError> {
+        use serde_json::Value;
+        let invalid = |location| GgufSemanticError::TokenId { location, id: None, vocab };
+        let model = original.get("model").ok_or_else(|| invalid("raw model"))?;
+        match model.get("type").and_then(Value::as_str) {
+            Some("BPE" | "WordPiece" | "WordLevel") => {
+                let ids = model.get("vocab").and_then(Value::as_object).ok_or_else(|| invalid("raw model vocab"))?;
+                for id in ids.values() {
+                    GgufSemanticError::parse_id(id, "raw model vocab", vocab)?;
+                }
+            }
+            Some("Unigram") => {
+                let entries =
+                    model.get("vocab").and_then(Value::as_array).ok_or_else(|| invalid("raw Unigram vocab"))?;
+                for (id, _) in entries.iter().enumerate() {
+                    let id = u64::try_from(id).map_err(|_| invalid("raw Unigram index"))?;
+                    GgufSemanticError::check_id(id, "raw Unigram index", vocab)?;
+                }
+                if let Some(id) = model.get("unk_id").filter(|v| !v.is_null()) {
+                    let id = GgufSemanticError::parse_id(id, "raw Unigram unk_id", vocab)?;
+                    if usize::try_from(id).ok().is_none_or(|id| id >= entries.len()) {
+                        return Err(invalid("raw Unigram unk_id outside vocab"));
+                    }
+                }
+            }
+            _ => return Err(invalid("raw model ID representation")),
+        }
+        let mut added = Vec::new();
+        let mut declared_ids = HashMap::new();
+        let mut declared_contents = HashMap::new();
+        if let Some(tokens) = original.get("added_tokens") {
+            for token in tokens.as_array().ok_or_else(|| invalid("raw added_tokens"))? {
+                let id = token.get("id").ok_or_else(|| invalid("raw added token ID"))?;
+                let id = GgufSemanticError::parse_id(id, "raw added token ID", vocab)?;
+                let content =
+                    token.get("content").and_then(Value::as_str).ok_or_else(|| invalid("raw added content"))?;
+                if declared_ids.insert(id, content).is_some_and(|previous| previous != content)
+                    || declared_contents.insert(content, id).is_some_and(|previous| previous != id)
+                {
+                    return Err(invalid("conflicting raw added IDs"));
+                }
+                added.push((content.to_owned(), id));
+            }
+        }
+        Ok(added)
+    }
+
+    pub(crate) fn audit_effective_ids(
+        &self,
+        added: &[(String, u32)],
+        vocab: usize,
+        bos: &str,
+    ) -> Result<u32, GgufSemanticError> {
+        use tokenizers::Model;
+        // Inspect the base map separately: an added-token overlay can hide a base ID.
+        for id in self.inner.get_model().get_vocab().values() {
+            GgufSemanticError::check_id(u64::from(*id), "effective model vocab", vocab)?;
+        }
+        for id in self.inner.get_added_vocabulary().get_vocab().values() {
+            GgufSemanticError::check_id(u64::from(*id), "effective added vocab", vocab)?;
+        }
+        for id in self.inner.get_added_vocabulary().get_added_tokens_decoder().keys() {
+            GgufSemanticError::check_id(u64::from(*id), "effective added decoder", vocab)?;
+        }
+        for (content, id) in added {
+            if self.token_id(content) != Some(*id) {
+                return Err(GgufSemanticError::TokenId {
+                    location: "added ID reconstruction",
+                    id: Some(u64::from(*id)),
+                    vocab,
+                });
+            }
+        }
+        let id =
+            self.token_id(bos).ok_or(GgufSemanticError::TokenId { location: "BOS membership", id: None, vocab })?;
+        GgufSemanticError::check_id(u64::from(id), "BOS", vocab)
     }
 
     /// `tok(text, add_special_tokens=False).input_ids`

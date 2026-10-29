@@ -143,24 +143,26 @@ pub fn parse_config(cfg: &Value) -> Result<LlamaConfig> {
     Ok(c)
 }
 
-impl ModelManifest {
-    pub fn load(dir: &Path) -> Result<Self> {
-        Self::load_with_orders(dir, None)
-    }
+/// Shared semantic stages; filesystem reads remain at the legacy call sites.
+pub(crate) struct ManifestProtocol {
+    config: crate::architecture::Architecture,
+    chat_style: ChatStyle,
+    prompt_format: PromptFormat,
+    layout: PromptLayout,
+    orders: OptionOrders,
+}
 
-    /// Select a trained protocol and calibration matching the served option-order policy.
-    pub fn load_with_orders(dir: &Path, orders: Option<&str>) -> Result<Self> {
-        Self::load_with_options(dir, ModelLoadOptions { orders, ..Default::default() })
-    }
-
-    pub fn load_with_options(dir: &Path, options: ModelLoadOptions<'_>) -> Result<Self> {
-        let config = crate::architecture::Architecture::parse(&read_json(&dir.join("config.json"))?)?;
-        let mut chat_style = match &config {
+impl ManifestProtocol {
+    pub(crate) fn parse(
+        config: crate::architecture::Architecture,
+        basal: &Value,
+        options: ModelLoadOptions<'_>,
+    ) -> Result<Self> {
+        let chat_style = match &config {
             crate::architecture::Architecture::Llama(_) => ChatStyle::Llama,
             crate::architecture::Architecture::Gemma4(_) => ChatStyle::Gemma4,
             crate::architecture::Architecture::Qwen35(_) => ChatStyle::Qwen35,
         };
-        let basal = read_json(&dir.join("basal.json"))?;
         let prompt_format = match basal.get("prompt") {
             None => PromptFormat::One,
             Some(v) => PromptFormat::parse(v.as_u64().context("basal.json: prompt must be an integer")?)?,
@@ -222,7 +224,27 @@ impl ModelManifest {
                 );
             }
         }
-        let tmpl = std::fs::read_to_string(dir.join("chat_template.jinja")).context("chat_template.jinja")?;
+        Ok(Self { config, chat_style, prompt_format, layout, orders })
+    }
+
+    pub(crate) fn chat_style(&self) -> ChatStyle {
+        self.chat_style
+    }
+
+    pub(crate) fn layout(&self) -> PromptLayout {
+        self.layout
+    }
+
+    pub(crate) fn orders(&self) -> OptionOrders {
+        self.orders
+    }
+
+    pub(crate) fn prompt_format(&self) -> PromptFormat {
+        self.prompt_format
+    }
+
+    pub(crate) fn validate_template(&mut self, tmpl: &str) -> Result<()> {
+        let Self { chat_style, prompt_format, .. } = *self;
         match chat_style {
             ChatStyle::Qwen35 => {
                 use sha2::{Digest, Sha256};
@@ -249,7 +271,7 @@ impl ModelManifest {
                 );
                 // Renderer grammar follows the validated template, independently of the decoder architecture.
                 // Ultra uses the same closed thought prefill as Unified; the older E4B template does not.
-                chat_style = if hash == "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4" {
+                self.chat_style = if hash == "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4" {
                     ChatStyle::Gemma4Unified
                 } else {
                     ChatStyle::Gemma4
@@ -257,21 +279,31 @@ impl ModelManifest {
                 ensure!(prompt_format == PromptFormat::Two, "Gemma Basal needs prompt format 2");
             }
         }
-        let tcfg = read_json(&dir.join("tokenizer_config.json"))?;
-        let bos_token = if chat_style == ChatStyle::Qwen35 {
+        Ok(())
+    }
+
+    pub(crate) fn parse_bos(&self, tcfg: &Value) -> Result<String> {
+        Ok(if self.chat_style == ChatStyle::Qwen35 {
             ensure!(tcfg.get("bos_token").is_none_or(Value::is_null), "Qwen3.5 expects no BOS token");
             String::new()
         } else {
             tcfg.get("bos_token").and_then(Value::as_str).context("tokenizer_config.json: bos_token")?.to_string()
-        };
-        let (calibration, calibration_provenance, calibration_unvalidated) = crate::calibration::load(
-            dir,
-            options.calibration,
-            layout,
-            orders,
-            options.strict_calibration,
-            options.served_identity,
-        )?;
+        })
+    }
+
+    pub(crate) fn finish(
+        self,
+        dir: &Path,
+        basal: &Value,
+        bos_token: String,
+        loaded: crate::calibration::LoadedCalibration,
+    ) -> Result<ModelManifest> {
+        let Self { config, chat_style, prompt_format, layout, orders } = self;
+        let crate::calibration::LoadedCalibration {
+            data: calibration,
+            provenance: calibration_provenance,
+            unvalidated: calibration_unvalidated,
+        } = loaded;
         let calibration_prompt = match calibration.get("prompt") {
             None => prompt_format,
             Some(v) => PromptFormat::parse(v.as_u64().context("CALIBRATION.json: prompt must be an integer")?)?,
@@ -326,7 +358,7 @@ impl ModelManifest {
             }
         }
         let multi_calibration = if calibration_unvalidated.is_none() { map("multi")? } else { Default::default() };
-        Ok(Self {
+        Ok(ModelManifest {
             dir: dir.to_path_buf(),
             name: basal.get("name").and_then(Value::as_str).context("basal.json: name")?.to_string(),
             version: basal.get("version").and_then(Value::as_str).unwrap_or("").to_string(),
@@ -345,6 +377,36 @@ impl ModelManifest {
             calibration_unvalidated,
             calibration_prompt,
         })
+    }
+}
+
+impl ModelManifest {
+    pub fn load(dir: &Path) -> Result<Self> {
+        Self::load_with_orders(dir, None)
+    }
+
+    /// Select a trained protocol and calibration matching the served option-order policy.
+    pub fn load_with_orders(dir: &Path, orders: Option<&str>) -> Result<Self> {
+        Self::load_with_options(dir, ModelLoadOptions { orders, ..Default::default() })
+    }
+
+    pub fn load_with_options(dir: &Path, options: ModelLoadOptions<'_>) -> Result<Self> {
+        let config = crate::architecture::Architecture::parse(&read_json(&dir.join("config.json"))?)?;
+        let basal = read_json(&dir.join("basal.json"))?;
+        let mut protocol = ManifestProtocol::parse(config, &basal, options)?;
+        let tmpl = std::fs::read_to_string(dir.join("chat_template.jinja")).context("chat_template.jinja")?;
+        protocol.validate_template(&tmpl)?;
+        let tcfg = read_json(&dir.join("tokenizer_config.json"))?;
+        let bos = protocol.parse_bos(&tcfg)?;
+        let (data, provenance, unvalidated) = crate::calibration::load(
+            dir,
+            options.calibration,
+            protocol.layout(),
+            protocol.orders(),
+            options.strict_calibration,
+            options.served_identity,
+        )?;
+        protocol.finish(dir, &basal, bos, crate::calibration::LoadedCalibration { data, provenance, unvalidated })
     }
 
     pub fn temperature(&self, t: QType) -> f64 {
