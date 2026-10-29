@@ -16,7 +16,7 @@ use serde_json::Value;
 
 use super::App;
 
-const ENDPOINTS: [&str; 2] = ["/v1/systemone", "/v1/basal"];
+const ENDPOINTS: [&str; 3] = ["/v1/systemone", "/v1/basal", "/v1/decisions"];
 const SECONDS: &[f64] = &[
     0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 5.0, 7.5, 10.0,
     15.0, 20.0, 30.0, 45.0, 60.0, 90.0, 120.0, 180.0, 300.0, 600.0,
@@ -368,12 +368,12 @@ impl Drop for HttpObservation<'_> {
     }
 }
 
-/// Installed only on the two inference routes, so scrapes and probes cannot skew latency or request counts.
+/// Installed only on the inference routes, so scrapes and probes cannot skew latency or request counts.
 pub(super) async fn observe(State(app): State<Arc<App>>, mut req: Request, next: Next) -> Response {
     let Some(metrics) = &app.metrics else {
         return next.run(req).await;
     };
-    let endpoint = if req.uri().path() == ENDPOINTS[0] { ENDPOINTS[0] } else { ENDPOINTS[1] };
+    let endpoint = ENDPOINTS.into_iter().find(|e| *e == req.uri().path()).unwrap_or(ENDPOINTS[1]);
     let model = RequestModel::default();
     req.extensions_mut().insert(model.clone());
     let inflight = GaugeGuard::new(metrics.http_inflight.with_label_values(&[endpoint]));

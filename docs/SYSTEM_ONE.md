@@ -23,6 +23,10 @@ Wybór dotyczy online HTTP; zapisany kontrakt rekordów Batch API nie zmienia si
 Tryb `upstream` jest dla klientów natywnych; HTTP `basal client` i SDK TypeSafe
 wymagają serwera w trybie `typesafe`.
 
+`POST /v1/decisions` przyjmuje kontrakt OpenAI Decisions API, tłumaczy go na
+`/v1/systemone` (TypeSafe) i zwraca odpowiedź w kształcie OpenAI. Endpoint działa
+niezależnie od dialektu: [OPENAI_DECISIONS.md](OPENAI_DECISIONS.md).
+
 Opcjonalne MCP (`basal serve --mcp on`) i most `basal mcp` używają
 natywnego kontraktu oraz tego samego domyślnego modelu, niezależnie od
 `systemone_dialect`. Nie wymagają przełączenia TypeSafe. Narzędzia,

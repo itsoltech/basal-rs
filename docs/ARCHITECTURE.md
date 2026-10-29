@@ -91,6 +91,11 @@ wybiera trasę `/v1/systemone`. W trybie upstream jest to kopia trasy `/v1/basal
 z tym samym handlerem i warstwami, bez dekodera TypeSafe; native routing wielu
 modeli i domyślny model pozostają wspólne. Dialekt nie jest zgadywany po body.
 
+`basal-cli/src/serve/openai.rs` obsługuje `POST /v1/decisions` (OpenAI Decisions API).
+Tłumaczy żądanie na ciało TypeSafe i wysyła je przez ten sam `dispatch` z dialektem TypeSafe.
+Potem zamienia odpowiedź na obiekt `Decision`. Log decyzji zapisuje hash przetłumaczonego ciała.
+Kontrakt: [OPENAI_DECISIONS.md](OPENAI_DECISIONS.md).
+
 `basal-cli/src/mcp.rs` dostarcza dwa narzędzia oficjalnego SDK `rmcp 3.8.0`.
 Opcjonalny stateless HTTP `/mcp` wywołuje konkretny dispatcher w `serve.rs`,
 wspólny z oboma adapterami HTTP: wybór modelu, admission, kolejki, health,

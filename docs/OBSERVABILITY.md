@@ -68,7 +68,8 @@ bez względu na wielkość liter albo dokładny fragment `OutOfMemory`; 500 dla
 pozostałych błędów silnika, także `{"error": "engine stopped"}` przy zakończeniu
 workera. To tekstowa reguła upstream: błąd backendu bez pasującego komunikatu
 otrzyma 500, nawet jeśli jego przyczyną jest brak pamięci. Przeciążenie nadal
-daje 529 z `Retry-After: 1`. Kontrakt błędów TypeSafe `/v1/systemone` i trwałych
+daje 529 z `Retry-After: 1`. `/v1/decisions` ma kopertę błędów OpenAI i 503
+przy przeciążeniu ([OPENAI_DECISIONS.md](OPENAI_DECISIONS.md#błędy)). Kontrakt błędów TypeSafe `/v1/systemone` i trwałych
 rekordów batches pozostaje bez zmian. Opis określa reguły implementacji;
 nie stanowi pomiaru ani weryfikacji runtime.
 
@@ -102,7 +103,7 @@ ogranicz dostęp do `/metrics` na reverse proxy do sieci monitoringu.
 | `basal_model_inflight_requests` | gauge | `model` | przyjęte żądania oczekujące na odpowiedź wątku modelu |
 | `basal_max_inflight_requests` | gauge | — | skonfigurowany limit przyjęć dla wszystkich modeli łącznie |
 
-`endpoint` to `/v1/systemone` lub `/v1/basal`. Metryki obejmują również błędne
+`endpoint` to `/v1/systemone`, `/v1/basal` lub `/v1/decisions`. Metryki obejmują również błędne
 metody na tych trasach (405), niepoprawny JSON, przekroczenie limitu body (413),
 błędy walidacji, awarie oraz przeciążenie (529). `/metrics`, `/health`,
 `/v1/models` i nieznane ścieżki nie są liczone.
@@ -148,7 +149,7 @@ handlerów, a nie pomiar zajętości GPU ani dokładnej długości kolejki.
 
 MCP korzysta z tego samego admission, kolejek, liczników `/health` i metryk
 modelu (tokeny, pytania, partie, kolejki, repliki) co native HTTP. Metryki
-`basal_http_*` nadal opisują wyłącznie `/v1/systemone` i `/v1/basal`, bez
+`basal_http_*` nadal opisują wyłącznie trasy decyzji HTTP, bez
 ruchu protokołu `/mcp`. `--access-log` obejmuje także `/mcp`; status HTTP
 200 może przenosić MCP `isError=true`. Most stdio nie eksportuje własnych
 metryk: jego decyzje liczy zdalny `/v1/basal`.
