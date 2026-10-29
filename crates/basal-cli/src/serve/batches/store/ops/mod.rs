@@ -8,4 +8,5 @@ pub(super) mod common;
 pub(super) mod files;
 pub(super) mod finalize;
 pub(super) mod ingest;
+pub(super) mod keys;
 pub(super) mod lifecycle;

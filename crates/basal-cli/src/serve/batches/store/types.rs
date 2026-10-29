@@ -1232,3 +1232,123 @@ pub(crate) struct StoreCapabilities {
     pub skip_locked: bool,
     pub server_clock: bool,
 }
+
+string_id! {
+    /// Public part of an API key: 16 lowercase hex characters (64 random bits), also its primary key.
+    ApiKeyId
+}
+
+impl ApiKeyId {
+    pub(crate) const LEN: usize = 16;
+
+    pub(crate) fn parse(value: &str) -> Result<Self, InvalidValue> {
+        if value.len() != Self::LEN || !value.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+            return Err(InvalidValue::new("key_id", "must be 16 lowercase hex characters"));
+        }
+        Ok(Self(value.to_owned()))
+    }
+}
+
+/// Route groups an API key may use; a non-empty set.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct ApiScopes(u8);
+
+impl ApiScopes {
+    /// `/v1/basal`, `/v1/systemone`, `/v1/models`.
+    pub(crate) const INFERENCE: Self = Self(1);
+    /// `/v1/files*`, `/v1/batches*`.
+    pub(crate) const BATCHES: Self = Self(2);
+    /// `/mcp`.
+    pub(crate) const MCP: Self = Self(4);
+    /// `/metrics` when `auth.protect_metrics` is set.
+    pub(crate) const METRICS: Self = Self(8);
+    const NAMES: [(Self, &'static str); 4] =
+        [(Self::INFERENCE, "inference"), (Self::BATCHES, "batches"), (Self::MCP, "mcp"), (Self::METRICS, "metrics")];
+    /// Longest stored form (`inference,batches,mcp,metrics`).
+    const MAX_TEXT: usize = 64;
+
+    /// Scopes of a comma list of names (`inference,batches`); empty, unknown or repeated names are refused.
+    pub(crate) fn parse(value: &str) -> Result<Self, InvalidValue> {
+        let mut bits = 0u8;
+        for name in value.split(',') {
+            let (scope, _) = Self::NAMES
+                .iter()
+                .find(|(_, n)| *n == name.trim())
+                .ok_or_else(|| InvalidValue::new("scopes", "names must be inference, batches, mcp or metrics"))?;
+            if bits & scope.0 != 0 {
+                return Err(InvalidValue::new("scopes", "repeats a name"));
+            }
+            bits |= scope.0;
+        }
+        Ok(Self(bits))
+    }
+
+    pub(crate) fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// Canonical comma list in fixed order, the stored form.
+    pub(crate) fn to_text(self) -> String {
+        let text = Self::NAMES.iter().filter(|(s, _)| self.contains(*s)).map(|(_, n)| *n).collect::<Vec<_>>().join(",");
+        debug_assert!(text.len() <= Self::MAX_TEXT);
+        text
+    }
+}
+
+impl fmt::Debug for ApiScopes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ApiScopes({})", self.to_text())
+    }
+}
+
+/// Longest API key name in bytes.
+pub(crate) const MAX_API_KEY_NAME: usize = 128;
+
+/// Check an operator-chosen key name: 1–128 bytes without control characters.
+pub(crate) fn check_api_key_name(name: &str) -> Result<(), InvalidValue> {
+    check_len("name", name, MAX_API_KEY_NAME)?;
+    if name.chars().any(char::is_control) {
+        return Err(InvalidValue::new("name", "contains a control character"));
+    }
+    Ok(())
+}
+
+/// A key to insert. `token_sha256` is the SHA-256 of the whole bearer value; the token itself never reaches the store.
+#[derive(Clone, Debug)]
+pub(crate) struct NewApiKey {
+    pub id: ApiKeyId,
+    pub owner: OwnerId,
+    pub name: String,
+    pub token_sha256: Sha256Digest,
+    pub scopes: ApiScopes,
+    /// Lifetime from the database clock at insertion; `None`: no expiry.
+    pub expires_in: Option<Duration>,
+}
+
+/// A stored API key (never the token).
+#[derive(Clone, Debug)]
+pub(crate) struct ApiKeyRecord {
+    pub id: ApiKeyId,
+    pub owner: OwnerId,
+    pub name: String,
+    pub token_sha256: Sha256Digest,
+    pub scopes: ApiScopes,
+    pub created_at: UnixMillis,
+    pub expires_at: Option<UnixMillis>,
+    pub revoked_at: Option<UnixMillis>,
+    pub last_used_at: Option<UnixMillis>,
+}
+
+impl ApiKeyRecord {
+    /// Usable at database time `now`: not revoked and not expired.
+    pub(crate) fn active_at(&self, now: UnixMillis) -> bool {
+        self.revoked_at.is_none() && self.expires_at.is_none_or(|e| now < e)
+    }
+}
+
+/// A key read for authentication, with the database time of the read.
+#[derive(Clone, Debug)]
+pub(crate) struct ApiKeyLookup {
+    pub record: ApiKeyRecord,
+    pub now: UnixMillis,
+}

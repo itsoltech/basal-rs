@@ -65,14 +65,14 @@ enum Command {
 }
 
 #[derive(clap::Args)]
-struct Source {
+pub(crate) struct Source {
     /// Serve configuration with `batches:` and `database:` sections (default: BASAL_CONFIG, else basal-serve.yml
     /// here)
     #[arg(long)]
-    config: Option<PathBuf>,
+    pub(crate) config: Option<PathBuf>,
     /// Local batch data directory (local profile without a configuration file)
     #[arg(long)]
-    batch_data_dir: Option<PathBuf>,
+    pub(crate) batch_data_dir: Option<PathBuf>,
 }
 
 pub(crate) fn run(args: Args) -> Result<()> {
@@ -96,14 +96,14 @@ pub(crate) fn run(args: Args) -> Result<()> {
     }
 }
 
-fn runtime() -> Result<tokio::runtime::Runtime> {
+pub(crate) fn runtime() -> Result<tokio::runtime::Runtime> {
     // Both rustls providers are in the dependency graph; the drivers need one process default.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     tokio::runtime::Builder::new_multi_thread().enable_all().build().context("starting the runtime")
 }
 
 /// The Batch settings (enabled whatever the file says) and the database they use.
-fn settings(source: &Source) -> Result<(BatchSettings, DatabaseSettings)> {
+pub(crate) fn settings(source: &Source) -> Result<(BatchSettings, DatabaseSettings)> {
     let file = source.config.clone().or_else(crate::paths::config_file);
     let mut config = match &file {
         Some(path) => crate::config::ServeConfig::load_admin(path)?,

@@ -42,6 +42,9 @@ pub(crate) struct Args {
     /// Finite positive seconds per HTTP decision request
     #[arg(long, default_value = "60", value_parser = positive_timeout)]
     timeout: Duration,
+    /// Environment variable with the API key (`basal keys`, scope inference); unset or empty sends no key
+    #[arg(long, default_value = "BASAL_API_KEY")]
+    key_env: String,
 }
 
 fn positive_timeout(value: &str) -> std::result::Result<Duration, String> {
@@ -568,7 +571,22 @@ pub(crate) fn run(args: Args) -> Result<()> {
     let result = runtime.block_on(async move {
         let stop = CancellationToken::new();
         let _stop = stop.clone().drop_guard();
-        let client = reqwest::Client::builder().timeout(args.timeout).build().context("basal HTTP client")?;
+        let mut headers = reqwest::header::HeaderMap::new();
+        match std::env::var(&args.key_env) {
+            Ok(key) if !key.is_empty() => {
+                let mut authorization = reqwest::header::HeaderValue::from_str(&format!("Bearer {key}"))
+                    .map_err(|_| anyhow::anyhow!("{} contains an invalid API key", args.key_env))?;
+                authorization.set_sensitive(true);
+                headers.insert(reqwest::header::AUTHORIZATION, authorization);
+            }
+            Ok(_) | Err(std::env::VarError::NotPresent) => {}
+            Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!("{} must contain UTF-8 text", args.key_env),
+        }
+        let client = reqwest::Client::builder()
+            .default_headers(headers)
+            .timeout(args.timeout)
+            .build()
+            .context("basal HTTP client")?;
         let name = tokio::select! {
             name = model_name(&client, &models) => name.unwrap_or_else(|| "basal".into()),
             _ = crate::serve::shutdown_signal() => return Ok(()),

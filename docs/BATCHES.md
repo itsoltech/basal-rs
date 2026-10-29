@@ -267,6 +267,8 @@ Nie używaj `TrustServerCertificate` jako obejścia konfiguracji certyfikatów.
 
 `batches.owner` wybiera jedną przestrzeń przechowywania dla wszystkich żądań tego serwera;
 domyślnie `local`. To nazwa w bazie i polityce quota, nie tożsamość klienta ani uprawnienie.
+Z [kluczami API](AUTH.md) (`auth.enabled`) przestrzeń wyznacza owner klucza zamiast
+`batches.owner`; klienci z różnymi ownerami nie widzą swoich plików ani batchy.
 Musi występować w `batches.quota.owners`; lokalne limity powstają automatycznie dla wybranej nazwy.
 Repliki obsługujące ten sam zestaw zasobów powinny mieć tę samą wartość.
 Klient nie może zmienić tej przestrzeni nagłówkiem ani polem żądania.
@@ -278,7 +280,7 @@ Dla dotychczasowego lokalnego wdrożenia zachowaj `owner: local` (wartość domy
 Dla istniejącej produkcyjnej bazy ustaw `owner` na dotychczasową nazwę właściciela, np. `acme`;
 w ten sposób zachowasz dostęp do jego plików i batchy bez migracji danych.
 Dane pozostałych przestrzeni pozostają w bazie; nie są automatycznie łączone ani usuwane.
-Nagłówek `Authorization` nie jest sprawdzany i nie wybiera zasobów.
+Bez `auth.enabled` nagłówek `Authorization` nie jest sprawdzany i nie wybiera zasobów.
 
 ### Przygotowanie i uruchomienie batchy
 

@@ -217,7 +217,8 @@ HTTP:
 ```bash
 export BASAL_URL='http://127.0.0.1:8000'
 export BASAL_MODEL='basal-1.5-mini'
-# Serwer nie wymaga klucza API; klient nie ma opcji --key-env.
+# Z kluczami API (docs/AUTH.md): BASAL_API_KEY z menedżera sekretów albo --key-env NAZWA_ZMIENNEJ;
+# token nie jest argumentem CLI. Pusta lub nieustawiona zmienna: bez nagłówka Authorization.
 ```
 
 `--url` ma pierwszeństwo nad `BASAL_URL`. `--model` ma pierwszeństwo nad `BASAL_MODEL`, następnie nad modelem

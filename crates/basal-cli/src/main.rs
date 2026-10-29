@@ -28,6 +28,7 @@ mod doctor;
 mod export;
 mod gemm_artifact;
 mod gemm_share;
+mod keys;
 mod large_eval;
 mod mcp;
 mod model_options;
@@ -250,6 +251,8 @@ enum Cmd {
     Batches(batches::Args),
     /// Manage the configured database (`database:`) without loading a model or a GPU.
     Database(database::cli::Args),
+    /// Manage API keys (`auth:`) in the configured database without loading a model or a GPU.
+    Keys(keys::Args),
     /// Use decisions in pipes and scripts: HTTP by default, --local loads a model once
     Client(Box<client::ClientArgs>),
     /// Measure sequential and mixed concurrent HTTP traffic on this hardware
@@ -560,6 +563,10 @@ enum Cmd {
         /// Directory of durable batch data (with --batches or batches.enabled in YAML).
         #[arg(long)]
         batch_data_dir: Option<PathBuf>,
+        /// Require API keys (`basal keys`) on every route except /health (also `auth.enabled` in YAML); needs a
+        /// `database:` section or --batches for the local SQLite default
+        #[arg(long)]
+        auth: bool,
         /// `release_date` reported by GET /v1/models (default: the release date upstream basal v1.5.0 reports)
         #[arg(long, default_value = "2026-10-05")]
         release_date: String,
@@ -996,6 +1003,7 @@ fn run() -> Result<()> {
         Cmd::Mcp(args) => mcp::run(args)?,
         Cmd::Batches(args) => batches::run(args)?,
         Cmd::Database(args) => database::cli::run(args)?,
+        Cmd::Keys(args) => keys::run(args)?,
         Cmd::Client(args) => {
             let code = match client::run(*args) {
                 Ok(code) => code,
@@ -1216,6 +1224,7 @@ fn run() -> Result<()> {
             metrics,
             batches,
             batch_data_dir,
+            auth,
             release_date,
         } => {
             let access_log = access_log || std::env::var("BASAL_ACCESS_LOG").is_ok_and(|v| !v.is_empty() && v != "0");
@@ -1314,6 +1323,14 @@ fn run() -> Result<()> {
                 (None, database::DatabaseSection::Enabled(settings)) => Some(settings),
                 (None, database::DatabaseSection::Absent | database::DatabaseSection::Disabled) => None,
             };
+            // API keys live in the same database; there is no fallback that would serve without them.
+            c.auth.enabled |= auth;
+            if c.auth.enabled && database.is_none() {
+                bail!(
+                    "API keys (auth.enabled or --auth) need a database: add an enabled `database:` section, or \
+                     --batches for the local SQLite default"
+                );
+            }
             let batch_qualifications = c
                 .models
                 .iter()
@@ -1485,6 +1502,7 @@ fn run() -> Result<()> {
                 metrics: metrics || c.metrics,
                 database: database.map(database::Database::new),
                 batches: batch_settings,
+                auth: c.auth.enabled.then_some(c.auth),
             };
             serve::serve(served, opts)?;
         }

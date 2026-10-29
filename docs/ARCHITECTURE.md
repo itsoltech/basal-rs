@@ -129,6 +129,10 @@ do 64 MiB i maskowania z softmax na GPU.
 Opcjonalna sekcja `database:` i moduł `basal-cli/src/database/` posiadają konfigurację
 bazy, opcje połączeń, wybór konta oraz moment migracji schematu
 ([DATABASE.md](DATABASE.md)). Bez tej sekcji i bez konsumenta serwer nie otwiera bazy.
+Opcjonalne klucze API (`basal-cli/src/serve/auth.rs`, [AUTH.md](AUTH.md)) są warstwą całego
+routera: sprawdzają token, zakres trasy i przekazują ownera klucza do tras Batch API.
+Rekordy kluczy są w tabeli `api_keys` tego samego schematu, a `basal keys` (`keys.rs`)
+zarządza nimi bez modelu i GPU.
 Opcjonalna usługa batchy w `basal-cli/src/serve/batches/` ma osobne planowanie CPU,
 trwały magazyn metadanych (w bazie z `database:` albo lokalnym domyślnym SQLite)
 oraz artefakty FS/S3. `store::Store` udostępnia typowane

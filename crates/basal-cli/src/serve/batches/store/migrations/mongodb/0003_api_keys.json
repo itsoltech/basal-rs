@@ -1,0 +1,9 @@
+{
+  "version": 3,
+  "id": "0003_api_keys",
+  "comment": "API keys of the server (auth:): _id is the key id, token_sha256 the SHA-256 of the whole bearer value (never the token), owner_id the Batch storage namespace, scopes a comma list of route groups.",
+  "collections": ["api_keys"],
+  "indexes": [
+    {"collection": "api_keys", "name": "api_keys_owner", "keys": [["owner_id",1],["created_at",1],["_id",1]]}
+  ]
+}

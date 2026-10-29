@@ -16,7 +16,7 @@ access_log: false                  # one log line per request: [POST] 200 /v1/sy
 metrics: false                     # opt in to Prometheus collection and GET /metrics (also --metrics)
 gemm_cache: .cache/gemm            # tables of `gemm_table: auto`
 
-# Database of the durable features (today the Batch API); none is opened without this section and without an
+# Database of the durable features (the Batch API and API keys); none is opened without this section and without an
 # enabled consumer. Backends, credentials, TLS, pool and migrations: docs/DATABASE.md.
 # database:
 #   enabled: true                  # default when the section is written
@@ -24,6 +24,13 @@ gemm_cache: .cache/gemm            # tables of `gemm_table: auto`
 #   path: /var/lib/basal/basal.sqlite3
 #   auto_migrate: true             # default: true for sqlite, false for remote databases
 #   # remote: connection_string_env, migration_connection_string_env, tls: {mode: verify_full}, pool
+#
+# API keys (docs/AUTH.md), off by default: every route except /health and /health/batches then needs
+# `Authorization: Bearer bsk_...`; keys live in the database above (or the local Batch SQLite default) and are managed
+# with `basal keys create|list|revoke|rotate`. A key's owner replaces batches.owner for its Batch/Files requests.
+# auth:
+#   enabled: true
+#   protect_metrics: false         # true: /metrics needs a key with scope `metrics`
 #
 # Durable Batch/Files API is off by default. Local: `basal serve --batches` (without `database:` its SQLite file is
 # <batch data dir>/batches.sqlite3); production quota, tokens and procedures: docs/BATCHES.md. GPU background

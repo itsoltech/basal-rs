@@ -78,7 +78,7 @@ pub(crate) enum Throttle {
 }
 
 impl ApiError {
-    fn new(status: StatusCode, kind: &'static str, message: impl Into<Cow<'static, str>>) -> Self {
+    pub(crate) fn new(status: StatusCode, kind: &'static str, message: impl Into<Cow<'static, str>>) -> Self {
         Self { status, kind, message: message.into(), param: None, code: None, retry_after_s: None }
     }
 

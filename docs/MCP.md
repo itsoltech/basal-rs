@@ -97,7 +97,9 @@ parser; także zadania powiadomień są ograniczone. Przeciążone wywołanie
 narzędzia dostaje błąd narzędzia, inne żądanie błąd protokołu. Zablokowany
 stdout stosuje backpressure, bez nieograniczonej kolejki odpowiedzi.
 
-Endpoint nie ma uwierzytelniania. SDK sprawdza Host oraz obecny Origin
+Bez [kluczy API](AUTH.md) endpoint nie ma uwierzytelniania. Z `auth.enabled: true`
+wymaga klucza z zakresem `mcp`; `basal mcp` wysyła klucz z `BASAL_API_KEY` (`--key-env`).
+SDK sprawdza Host oraz obecny Origin
 przeciw jawnym allowlistom, bez zaufania do `X-Forwarded-*`. Dopuszczone są
 `localhost`, `127.0.0.1`, `[::1]` oraz konkretny adres bind, z faktycznym
 portem nasłuchu. Origin wymaga schematu `http` i dozwolonego hosta/portu;

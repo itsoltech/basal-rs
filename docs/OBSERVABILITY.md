@@ -90,8 +90,10 @@ scrape_configs:
 W osobnych kontenerach zamiast `localhost` użyj nazwy usługi serwera dostępnej
 z kontenera Prometheusa, np. `basal:8000`. Dla wielu procesów serwera dodaj osobne targets
 lub service discovery. Endpoint podlega tym samym regułom dostępu sieciowego co
-API; serwer nie dodaje osobnego uwierzytelniania do metryk. Przy publicznym API
-ogranicz dostęp do `/metrics` na reverse proxy do sieci monitoringu.
+API. Także przy włączonych [kluczach API](AUTH.md) `/metrics` jest domyślnie publiczne;
+`auth.protect_metrics: true` wymaga klucza z zakresem `metrics` (w Prometheusie
+`authorization: {credentials_file: …}`). Przy publicznym API bez tej opcji ogranicz
+dostęp do `/metrics` na reverse proxy do sieci monitoringu.
 
 ## Żądania HTTP
 

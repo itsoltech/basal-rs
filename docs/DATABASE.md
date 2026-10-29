@@ -5,8 +5,8 @@ włączonego konsumenta `basal serve` nie otwiera połączeń, nie tworzy plikó
 i nie uruchamia migracji.
 
 Sekcja główna `database:` opisuje jedną bazę procesu: backend, plik SQLite,
-poświadczenia runtime i migracji, TLS, pulę oraz `auto_migrate`. Obecnie jedynym
-konsumentem jest [Batch i Files API](BATCHES.md). Ustawienia bazy nie należą do
+poświadczenia runtime i migracji, TLS, pulę oraz `auto_migrate`. Konsumentami są
+[Batch i Files API](BATCHES.md) oraz [klucze API](AUTH.md). Ustawienia bazy nie należą do
 sekcji `batches:`. Kolejne moduły serwera mogą korzystać z tej samej sekcji.
 
 ## Konfiguracja
@@ -85,7 +85,9 @@ po błędzie przejściowym (np. niedostępna baza) moduł batchy ponawia próbę
 z backoffem i do tego czasu odpowiada 503. Błąd schematu lub konfiguracji
 pozostawia moduł niedostępnym do naprawy i restartu. Gdy żaden
 konsument nie jest włączony, serwer wykonuje jedną próbę w tle; zwykła
-inferencja na nią nie czeka, a błąd trafia do logu. Przy `auto_migrate: false`
+inferencja na nią nie czeka, a błąd trafia do logu. Klucze API (`auth.enabled`)
+czekają na migrację przy starcie; błąd migracji lub połączenia przerywa start serwera.
+Przy `auto_migrate: false`
 serwer niczego nie tworzy, a połączenie runtime odrzuca brakujący lub nieaktualny
 schemat.
 
@@ -100,9 +102,10 @@ backup.
 
 Moduł `crates/basal-cli/src/database/` posiada konfigurację, walidację, opcje
 połączeń (TLS, pula, timeouty), wybór konta oraz moment i sposób migracji.
-Jedynym zarejestrowanym schematem jest obecnie schemat magazynu batchy. Jego
-tabele, ledger wersji, sumy kontrolne i natywne migratory pozostają w adapterach
-`serve/batches/store`, podobnie jak wszystkie zapytania domenowe. Każdy konsument
+Jedynym zarejestrowanym schematem jest schemat magazynu batchy; od wersji 3
+zawiera też tabelę (kolekcję MongoDB) `api_keys`. Jego tabele, ledger wersji,
+sumy kontrolne i natywne migratory pozostają w adapterach `serve/batches/store`,
+podobnie jak wszystkie zapytania domenowe. Starsza binarka odrzuca schemat 3 jako nowszy. Każdy konsument
 otwiera własną, ograniczoną pulę z tych samych ustawień; serwer nie ma jednej
 wspólnej puli połączeń dla wielu modułów.
 

@@ -42,18 +42,19 @@ const MULTIPART_OVERHEAD: u64 = 64 * 1024;
 
 type ApiResult<T> = Result<T, ApiError>;
 
-pub(super) fn router(shared: Arc<Shared>) -> Router<()> {
+/// With `keyed` (API keys on) the owner of every request is the extension set by `serve::auth` from the verified
+/// key (a request without it fails); otherwise it is the configured `batches.owner`.
+pub(super) fn router(shared: Arc<Shared>, keyed: bool) -> Router<()> {
     let control = DefaultBodyLimit::max(MAX_CONTROL_BODY_BYTES);
-    Router::new()
+    let routes = Router::new()
         .route("/v1/files", get(list_files).post(upload).layer(DefaultBodyLimit::disable()).fallback(unsupported))
         .route("/v1/files/{file_id}", get(get_file).delete(delete_file).fallback(unsupported))
         .route("/v1/files/{file_id}/content", get(download).fallback(unsupported))
         .route("/v1/batches", get(list_batches).post(create_batch).layer(control).fallback(unsupported))
         .route("/v1/batches/{batch_id}", get(get_batch).fallback(unsupported))
-        .route("/v1/batches/{batch_id}/cancel", post(cancel_batch).layer(control).fallback(unsupported))
-        .route_layer(Extension(shared.settings.owner.clone()))
-        .route("/health/batches", get(health_handler))
-        .with_state(shared)
+        .route("/v1/batches/{batch_id}/cancel", post(cancel_batch).layer(control).fallback(unsupported));
+    let routes = if keyed { routes } else { routes.route_layer(Extension(shared.settings.owner.clone())) };
+    routes.route("/health/batches", get(health_handler)).with_state(shared)
 }
 
 async fn unsupported() -> ApiError {
