@@ -32,8 +32,11 @@
 //! after another, each on its GPU. It takes the gate of every GPU it uses, at most one at a time, so engines of other
 //! models on one of those GPUs take turns with the stage there, and its long lane yields on every GPU.
 //!
-//! Timing headers (not part of the System One body): `x-basal-queue-ms` (arrival to the start of its batch),
-//! `x-basal-compute-ms` (planning + forwards of its batch), `x-basal-batch-requests`.
+//! SOAM-off ordinary main-lane text admits ready primitives through `Engine::run_ready`; one owner retains each
+//! complete request across dependency rounds. Long/media/active-exit requests retain atomic execution.
+//! Timing headers (not part of the System One body): `x-basal-queue-ms` (arrival to first admission),
+//! `x-basal-compute-ms` (sum of participating execution wall times and owner finalization),
+//! `x-basal-batch-requests` (distinct request owners in the execution completing this response).
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -423,8 +426,44 @@ pub enum Schedule {
 /// A planned waiting request: its prompts' packed tokens (the estimate of its compute).
 struct Waiting {
     job: Job,
-    plan: RequestPlan,
+    work: WaitingWork,
     tokens: usize,
+    first_admitted: Option<Instant>,
+    compute_ms: f64,
+}
+
+enum WaitingWork {
+    Atomic(Box<RequestPlan>),
+    Primitive(Box<basal_core::engine::RequestExecution>),
+}
+
+impl WaitingWork {
+    fn plan(&self) -> &RequestPlan {
+        match self {
+            Self::Atomic(plan) => plan,
+            Self::Primitive(request) => request.plan(),
+        }
+    }
+}
+
+/// Indices into one synchronous admission snapshot, with no cloned completion owners.
+struct Selection {
+    entries: Vec<(usize, Option<basal_core::engine::ReadyBranch>)>,
+    tokens: usize,
+    full: bool,
+}
+
+struct LaneBatch {
+    requests: Vec<Waiting>,
+    branches: Vec<(usize, basal_core::engine::ReadyBranch)>,
+    entries: usize,
+    tokens: usize,
+}
+
+impl LaneBatch {
+    fn is_empty(&self) -> bool {
+        self.requests.is_empty()
+    }
 }
 
 /// Admission of one lane: order of the waiting requests, budget, packed tokens per second of its recent batches
@@ -466,52 +505,128 @@ impl Lane {
 
     /// Take the next batch: the first waiting request in schedule order always, then every other one that still fits
     /// the budget (Tree shares trie tokens; Budget counts separate packed primitive rows).
-    fn admit(&mut self, start: Instant) -> (Vec<(Job, RequestPlan)>, usize) {
+    fn admit(&mut self, start: Instant) -> LaneBatch {
         self.waiting.retain(|w| !w.job.reply.is_closed()); // clients gone (their handlers were dropped)
-        let (batch, tokens) = self.take(start);
-        if let Some(metrics) = &self.metrics {
-            metrics.waiting(self.waiting.len());
-        }
-        (batch, tokens)
-    }
-
-    fn take(&mut self, start: Instant) -> (Vec<(Job, RequestPlan)>, usize) {
-        if self.schedule == Schedule::Hrrn {
+        if self.schedule == Schedule::Hrrn && self.batching == basal_core::Batching::Tree {
+            // Retain the legacy stable owner order for the default whole-plan path and its deferred backlog.
             let rate = self.rate;
             let ratio = |w: &Waiting| (start - w.job.arrived).as_secs_f64() * rate / w.tokens as f64;
             self.waiting.sort_by(|a, b| ratio(b).total_cmp(&ratio(a)));
         }
-        let mut batch = Vec::new();
-        let mut size = AdmissionCost::new(self.batching);
-        let mut rest = Vec::with_capacity(self.waiting.len());
-        for mut w in self.waiting.drain(..) {
-            if self.max_batch.is_none_or(|cap| batch.len() < cap)
-                && size.try_add(&w.plan, batch.is_empty(), self.max_batch_tokens)
-            {
-                // Both lanes leave queued only on admission, after planning and any long-lane handoff.
-                drop(w.job.queued.take());
-                batch.push((w.job, w.plan));
-            } else {
-                rest.push(w);
+        let selection = self.select(start);
+        let mut positions = vec![None; self.waiting.len()];
+        let mut owner_count = 0;
+        for &(owner, _) in &selection.entries {
+            if positions[owner].is_none() {
+                positions[owner] = Some(owner_count);
+                owner_count += 1;
             }
         }
+        let mut requests: Vec<Option<Waiting>> = (0..owner_count).map(|_| None).collect();
+        let mut rest = Vec::new();
+        // Each selected owner appears once, in first-selection order, even when several branches reference it.
+        for (i, mut waiting) in self.waiting.drain(..).enumerate() {
+            if let Some(position) = positions[i] {
+                drop(waiting.job.queued.take());
+                waiting.first_admitted.get_or_insert(start);
+                requests[position] = Some(waiting);
+            } else {
+                rest.push(waiting);
+            }
+        }
+        let branches = selection
+            .entries
+            .iter()
+            .filter_map(|&(owner, branch)| {
+                branch.map(|branch| (positions[owner].expect("selected owner was retained"), branch))
+            })
+            .collect();
+        let requests = requests.into_iter().map(|w| w.expect("selected owner was retained")).collect();
         self.waiting = rest;
-        (batch, size.tokens())
+        if let Some(metrics) = &self.metrics {
+            metrics.waiting(self.waiting.len());
+        }
+        LaneBatch { requests, branches, entries: selection.entries.len(), tokens: selection.tokens }
+    }
+
+    /// Shared by preview and admission. Candidate growth is bounded by the accepted request count and each
+    /// validated plan/round's branch/option limits. A primitive contributes its complete packed row, all orders.
+    fn select(&self, start: Instant) -> Selection {
+        let mut candidates = Vec::new();
+        for (owner, waiting) in self.waiting.iter().enumerate() {
+            if waiting.job.reply.is_closed() {
+                continue;
+            }
+            match &waiting.work {
+                WaitingWork::Atomic(_) => candidates.push((owner, None, waiting.tokens)),
+                WaitingWork::Primitive(request) => {
+                    candidates.extend(request.ready().map(|(branch, p)| (owner, Some(branch), p.packed.ids.len())));
+                }
+            }
+        }
+        if self.schedule == Schedule::Hrrn {
+            let rate = self.rate;
+            let ratio = |&(owner, _, tokens): &(usize, Option<basal_core::engine::ReadyBranch>, usize)| {
+                (start - self.waiting[owner].job.arrived).as_secs_f64() * rate / tokens.max(1) as f64
+            };
+            candidates.sort_by(|a, b| ratio(b).total_cmp(&ratio(a)));
+        } else if self.batching == basal_core::Batching::Budget {
+            candidates.sort_by_key(|&(owner, _, _)| self.waiting[owner].job.arrived);
+        }
+        let mut entries = Vec::new();
+        let mut size = AdmissionCost::new(self.batching);
+        let mut full = false;
+        let primitive = candidates.first().is_some_and(|(_, branch, _)| branch.is_some());
+        for (owner, branch, tokens) in candidates {
+            if self.max_batch.is_some_and(|cap| entries.len() >= cap) {
+                full = true;
+                break;
+            }
+            // Session-isolated exceptions use a separate whole-request call. Do not let them share a partial
+            // request's backend/generation state. Their position in FIFO/HRRN still decides the next call.
+            if branch.is_some() != primitive {
+                full = true;
+                continue;
+            }
+            let fits = if branch.is_some() {
+                match &mut size {
+                    AdmissionCost::Rows(used) => {
+                        let total = used.checked_add(tokens);
+                        if entries.is_empty() || total.is_some_and(|n| n <= self.max_batch_tokens) {
+                            *used = total.unwrap_or(usize::MAX);
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    AdmissionCost::Tree(_) => false,
+                }
+            } else {
+                size.try_add(self.waiting[owner].work.plan(), entries.is_empty(), self.max_batch_tokens)
+            };
+            if fits {
+                entries.push((owner, branch));
+            } else {
+                full = true;
+            }
+        }
+        full |= size.tokens() > self.max_batch_tokens || self.max_batch.is_some_and(|cap| entries.len() >= cap);
+        Selection { entries, tokens: size.tokens(), full }
     }
 
     /// Run a batch and answer its requests.
-    fn run<B: Backend>(
-        &mut self,
-        engine: &mut Engine<B>,
-        batch: Vec<(Job, RequestPlan)>,
-        tokens: usize,
-        start: Instant,
-    ) {
-        let plans: Vec<&RequestPlan> = batch.iter().map(|(_, p)| p).collect();
+    fn run<B: Backend>(&mut self, engine: &mut Engine<B>, batch: LaneBatch, start: Instant) {
+        if !batch.branches.is_empty() {
+            self.run_branches(engine, batch, start);
+            return;
+        }
+        let tokens = batch.tokens;
+        let batch = batch.requests;
+        let plans: Vec<&RequestPlan> = batch.iter().map(|w| w.work.plan()).collect();
         let result = engine.run_plans(&plans);
         let compute_ms = start.elapsed().as_secs_f64() * 1e3;
         if let Some(metrics) = &self.metrics {
-            metrics.batch(compute_ms / 1e3, result.is_ok(), batch.iter().map(|(job, _)| start - job.arrived));
+            metrics.batch(compute_ms / 1e3, result.is_ok(), batch.iter().map(|w| start - w.job.arrived));
         }
         if compute_ms > 1.0 {
             self.rate = 0.8 * self.rate + 0.2 * (tokens as f64 / (compute_ms / 1e3));
@@ -519,25 +634,90 @@ impl Lane {
         let n = batch.len();
         match result {
             Ok(outs) => {
-                for ((job, plan), out) in batch.into_iter().zip(outs) {
-                    let mut resp = served_response(&self.name, &plan, &out);
+                for (waiting, out) in batch.into_iter().zip(outs) {
+                    let mut resp = served_response(&self.name, waiting.work.plan(), &out);
                     if let (Some(lane), Ok(response)) = (self.usage_lane, &mut resp) {
                         response["usage"]["lane"] = lane.into();
                     }
                     if let (Some(metrics), Ok(v)) = (&self.metrics, &resp) {
                         metrics.usage(v);
                     }
-                    let queue_ms = (start - job.arrived).as_secs_f64() * 1e3;
-                    job.answer((resp, Some(Timing { queue_ms, compute_ms, batch: n })));
+                    let queue_ms = (start - waiting.job.arrived).as_secs_f64() * 1e3;
+                    waiting.job.answer((resp, Some(Timing { queue_ms, compute_ms, batch: n })));
                 }
             }
             Err(e) => {
                 let msg = format!("{e:#}");
                 crate::warn!("batch of {n} failed: {msg}");
-                for (job, _) in batch {
-                    job.answer((Err(DecideError::Internal(anyhow::anyhow!(msg.clone()))), None));
+                for waiting in batch {
+                    waiting.job.answer((Err(DecideError::Internal(anyhow::anyhow!(msg.clone()))), None));
                 }
             }
+        }
+    }
+
+    fn run_branches<B: Backend>(&mut self, engine: &mut Engine<B>, mut batch: LaneBatch, start: Instant) {
+        let n = batch.requests.len();
+        let waits: Vec<_> = batch.requests.iter().map(|w| start - w.job.arrived).collect();
+        let mut owners: Vec<_> = batch
+            .requests
+            .iter_mut()
+            .filter_map(|w| match &mut w.work {
+                WaitingWork::Primitive(request) => Some(request.as_mut()),
+                WaitingWork::Atomic(_) => None,
+            })
+            .collect();
+        let result = engine.run_ready(&mut owners, &batch.branches);
+        let shared_ms = start.elapsed().as_secs_f64() * 1e3;
+        let mut success = result.is_ok();
+        let failure = result.err().map(|error| format!("{error:#}"));
+        let mut completions = Vec::new();
+        for mut waiting in batch.requests {
+            waiting.compute_ms += shared_ms;
+            // All selected readouts have drained. A cancelled owner has no further evidence, thinking, tasks or
+            // sibling branches scheduled; dropping it here releases its state and its single set of permits.
+            if waiting.job.reply.is_closed() {
+                continue;
+            }
+            let advance_start = Instant::now();
+            let output = if let Some(error) = &failure {
+                Err(anyhow::anyhow!(error.clone()))
+            } else if let WaitingWork::Primitive(request) = &mut waiting.work {
+                engine.advance_request(request)
+            } else {
+                Err(anyhow::anyhow!("atomic owner in primitive execution"))
+            };
+            waiting.compute_ms += advance_start.elapsed().as_secs_f64() * 1e3;
+            match output {
+                Ok(Some(output)) => completions.push((waiting, Ok(output))),
+                Ok(None) => self.waiting.push(waiting),
+                Err(error) => {
+                    success = false;
+                    completions.push((waiting, Err(error)));
+                }
+            }
+        }
+        let compute_ms = start.elapsed().as_secs_f64() * 1e3;
+        if let Some(metrics) = &self.metrics {
+            // One sample per admitted execution; its size is distinct whole owners, never primitive count.
+            metrics.batch(compute_ms / 1e3, success, waits.into_iter());
+        }
+        if compute_ms > 1.0 {
+            self.rate = 0.8 * self.rate + 0.2 * (batch.tokens as f64 / (compute_ms / 1e3));
+        }
+        for (waiting, output) in completions {
+            let mut response = match output {
+                Ok(output) => served_response(&self.name, waiting.work.plan(), &output),
+                Err(error) => Err(DecideError::Internal(error)),
+            };
+            if let (Some(lane), Ok(value)) = (self.usage_lane, &mut response) {
+                value["usage"]["lane"] = lane.into();
+            }
+            if let (Some(metrics), Ok(value)) = (&self.metrics, &response) {
+                metrics.usage(value);
+            }
+            let queue_ms = (waiting.first_admitted.unwrap_or(start) - waiting.job.arrived).as_secs_f64() * 1e3;
+            waiting.job.answer((response, Some(Timing { queue_ms, compute_ms: waiting.compute_ms, batch: n })));
         }
     }
 }
@@ -600,10 +780,10 @@ fn scheduler<B: Backend>(
             plan_job(&engine, job, &mut lane, &long);
         }
         let start = Instant::now();
-        let (batch, tokens) = lane.admit(start);
-        last_batch = batch.len().max(1);
+        let batch = lane.admit(start);
+        last_batch = batch.entries.max(1);
         if !batch.is_empty() {
-            lane.run(&mut engine, batch, tokens, start);
+            lane.run(&mut engine, batch, start);
         }
     }
 }
@@ -640,14 +820,31 @@ fn plan_job<B: Backend>(
         Ok(plan) => {
             let mut size = AdmissionCost::new(lane.batching);
             size.try_add(&plan, true, lane.max_batch_tokens);
-            let w = Waiting { job, plan, tokens: size.tokens().max(1) };
-            match long {
-                Some((tx, limit)) if w.tokens > *limit => {
-                    if let Err(e) = tx.send(w) {
-                        lane.waiting.push(e.0); // the long lane stopped: run it here
+            let tokens = size.tokens().max(1);
+            let long_route = long.as_ref().filter(|(_, limit)| tokens > *limit);
+            let split = long_route.is_none()
+                && lane.batching == basal_core::Batching::Budget
+                && !plan.prepared.is_empty()
+                && plan.media.is_none()
+                && plan.early_exit.as_deref().is_none_or(|p| p == "off");
+            let work = if split {
+                match engine.begin_request(plan) {
+                    Ok(request) => WaitingWork::Primitive(Box::new(request)),
+                    Err(error) => {
+                        job.answer((Err(DecideError::Internal(error)), None));
+                        return false;
                     }
                 }
-                _ => lane.waiting.push(w),
+            } else {
+                WaitingWork::Atomic(Box::new(plan))
+            };
+            let w = Waiting { job, work, tokens, first_admitted: None, compute_ms: 0.0 };
+            if let Some((tx, _)) = long_route {
+                if let Err(e) = tx.send(w) {
+                    lane.waiting.push(e.0); // the long lane stopped: retain its atomic entry here
+                }
+            } else {
+                lane.waiting.push(w);
             }
             true
         }
@@ -672,9 +869,9 @@ fn long_lane<B: Backend>(mut engine: Engine<B>, rx: std::sync::mpsc::Receiver<Wa
             lane.waiting.push(w);
         }
         let start = Instant::now();
-        let (batch, tokens) = lane.admit(start);
+        let batch = lane.admit(start);
         if !batch.is_empty() {
-            lane.run(&mut engine, batch, tokens, start);
+            lane.run(&mut engine, batch, start);
         }
     }
 }
@@ -1520,7 +1717,9 @@ fn serve_inner<B: Backend + Send + 'static>(
                     std::thread::Builder::new()
                         .name(label)
                         .spawn(move || {
-                            if collection == collection::CollectionPolicy::default() {
+                            if collection == collection::CollectionPolicy::default()
+                                && batching != basal_core::Batching::Budget
+                            {
                                 scheduler(engine, rx, main_lane, long, scheduling);
                             } else {
                                 collection::scheduler(

@@ -22,6 +22,9 @@ use crate::prompt::{render_model_with_layout, ChatStyle, OptionOrders, PromptFor
 use crate::request::{DecideError, Item};
 use crate::tokenize::BasalTokenizer;
 
+mod rounds;
+pub use rounds::{ReadyBranch, RequestExecution};
+
 /// A forward implementation: packed rows in, letter logits (float32, before softmax) of every readout out.
 pub trait Backend {
     /// Precision, device and kernel choices, recorded in reports.
@@ -884,67 +887,18 @@ impl<B: Backend> Engine<B> {
         let mut continuations = Vec::new();
         let mut owners = Vec::new();
         for (i, plan) in plans.iter().enumerate() {
-            if !outputs[i].context_errors.is_empty() || outputs[i].thinking_error.is_some() {
-                continue;
-            }
-            let Some(mut task) = plan.tasks.clone() else { continue };
-            let raw = plan_response(&self.manifest.name, plan, &outputs[i])?;
-            if let Some(mut body) = task.second_round(&raw, self.manifest.prompt_format.max_options())? {
-                body["model"] = self.manifest.name.clone().into();
-                if let Some(policy) = &plan.early_exit {
-                    body["early_exit"] = policy.clone().into();
-                }
-                if self.thinking.is_some() {
-                    body["think"] = "off".into();
-                }
-                match self.plan_decision_request_as(&body, plan.dialect) {
-                    Ok(next) => {
-                        continuations.push(next);
-                        owners.push((i, task, raw));
-                    }
-                    Err(DecideError::Unsupported(errors))
-                        if errors.iter().any(|e| e.kind == "context_length_exceeded") =>
-                    {
-                        outputs[i].context_errors = errors;
-                    }
-                    Err(error) => outputs[i].task_error = Some(error.to_string()),
-                }
-            } else {
-                let empty = serde_json::Map::new();
-                let thresholds = if plan.media.is_some() { &empty } else { &self.manifest.task_thresholds };
-                outputs[i].task_response = Some(task.finish(raw, None, thresholds)?);
+            if let Some(next) = self.task_continuation(plan, &mut outputs[i])? {
+                continuations.push(next);
+                owners.push(i);
             }
         }
         if !continuations.is_empty() {
             self.check_stop()?;
             // These are primitive plans only: extraction has exactly one dependent continuation, on this engine.
-            let refs: Vec<_> = continuations.iter().collect();
+            let refs: Vec<_> = continuations.iter().map(|c| &c.plan).collect();
             let second = self.run_decision_plans(&refs)?;
-            for ((next, output), (i, task, mut raw)) in continuations.iter().zip(second).zip(owners) {
-                if !output.context_errors.is_empty() {
-                    outputs[i].context_errors = output.context_errors;
-                    continue;
-                }
-                let next = plan_response(&self.manifest.name, next, &output)?;
-                for key in ["input_tokens", "branches", "second_order_branches"] {
-                    if let Some(n) = next["usage"][key].as_u64() {
-                        let old = raw["usage"][key].as_u64().unwrap_or(0);
-                        raw["usage"][key] = old.saturating_add(n).into();
-                    }
-                }
-                if let Some(n) = next["usage"]["longest_prompt_tokens"].as_u64() {
-                    raw["usage"]["longest_prompt_tokens"] =
-                        n.max(raw["usage"]["longest_prompt_tokens"].as_u64().unwrap_or(0)).into();
-                }
-                // Continuations use the original state too. Report the most extensive actual cut of either round.
-                if next["usage"]["truncated"]["dropped_tokens"].as_u64().unwrap_or(0)
-                    > raw["usage"]["truncated"]["dropped_tokens"].as_u64().unwrap_or(0)
-                {
-                    raw["usage"]["truncated"] = next["usage"]["truncated"].clone();
-                }
-                let empty = serde_json::Map::new();
-                let thresholds = if plans[i].media.is_some() { &empty } else { &self.manifest.task_thresholds };
-                outputs[i].task_response = Some(task.finish(raw, Some(&next), thresholds)?);
+            for ((next, output), i) in continuations.into_iter().zip(second).zip(owners) {
+                self.finish_task(plans[i], &mut outputs[i], next, output)?;
             }
         }
         Ok(outputs)
@@ -979,245 +933,15 @@ impl<B: Backend> Engine<B> {
             }
             return Ok(results);
         }
-        let mut offs = Vec::with_capacity(plans.len());
-        let mut all = Vec::new();
-        for p in plans {
-            offs.push(all.len());
-            all.extend(p.prepared.iter().cloned());
-        }
+        let mut rounds = rounds::DecisionRounds::new(plans);
         let policy = plans.first().and_then(|p| p.early_exit.as_deref());
-        let mut results = self.run_with_policy(&all, self.request_batching, policy)?;
-        // A dependent prompt may overflow even after the planner's heuristic probe. Refuse its whole plan,
-        // including sibling grouped questions and task continuations, while keeping other requests in the batch.
-        let mut context_errors = vec![Vec::new(); plans.len()];
-        let mut second_tokens = vec![0usize; all.len()];
-        if self.manifest.orders == OptionOrders::Auto {
-            let mut reverse = Vec::new();
-            let mut owners = Vec::new();
-            for (pi, (plan, &off)) in plans.iter().zip(&offs).enumerate() {
-                let queued = reverse.len();
-                for (i, p) in all.iter().enumerate().skip(off).take(plan.prepared.len()) {
-                    if p.orders.len() != 1 {
-                        continue;
-                    }
-                    let probabilities = &results[i].p_cal;
-                    let uncertain = self.auto_orders.uncertain(p.item.temp_kind(), probabilities);
-                    if uncertain {
-                        let mut redo = prepare_protocol(
-                            &self.tok,
-                            &self.manifest.bos_token,
-                            p.item.clone(),
-                            self.manifest.prompt_format,
-                            self.manifest.chat_style,
-                            self.manifest.layout,
-                            None,
-                            None,
-                        )?;
-                        redo.orders.remove(0);
-                        if let Some(error) = self.prepared_context_error(&redo) {
-                            // Discard the reversed orders already queued for this plan; skip its other questions.
-                            reverse.truncate(queued);
-                            owners.truncate(queued);
-                            context_errors[pi].push(error);
-                            break;
-                        }
-                        redo.packed = pack(&redo.orders.iter().map(|o| o.input_ids.clone()).collect::<Vec<_>>());
-                        if self.mark_state {
-                            redo.state_len = self.state_len(&redo)?;
-                            redo.packed.state_len = redo.state_len.min(redo.packed.prefix_len);
-                        }
-                        owners.push(i);
-                        reverse.push(redo);
-                    }
-                }
-            }
-            self.check_stop()?;
-            let rerun = self.run_with_policy(&reverse, self.request_batching, policy)?;
-            for ((i, p2), r2) in owners.into_iter().zip(&reverse).zip(rerun) {
-                second_tokens[i] = p2.orders[0].input_ids.len();
-                let mut both = all[i].clone();
-                both.orders.extend(p2.orders.clone());
-                let mut logits = results[i].letter_logits.clone();
-                logits.extend(r2.letter_logits);
-                results[i] = self.finish_readout(&both, logits, policy.is_some_and(|s| s != "off"));
-            }
-        }
-        // grouped large choices: further rounds until each has asked its final group; the questions of all plans
-        // share the forwards of a round
-        let strategy = self.large_choice_strategy;
-        let mut large: Vec<Large> = Vec::new();
-        for (pi, (plan, &off)) in plans.iter().zip(&offs).enumerate() {
-            if !context_errors[pi].is_empty() {
-                continue;
-            }
-            for q in &plan.questions {
-                if let QuestionPlan::Groups { item, groups, parts } = q {
-                    large.push(Large {
-                        owner: pi,
-                        item: item.clone(),
-                        groups: groups.clone(),
-                        targets: parts.iter().map(|&i| results[off + i].p_avg.clone()).collect(),
-                        last: (0..groups.len()).collect(),
-                        finalists: None,
-                        final_p: vec![],
-                        tokens: 0,
-                        longest: 0,
-                        prompts: 0,
-                        rounds: 1,
-                        first_round: self.trace_large_choice.then(|| {
-                            let targets: Vec<Vec<f64>> =
-                                parts.iter().map(|&i| results[off + i].p_avg.clone()).collect();
-                            crate::large_choice::fit_joint(item.options.len(), groups, &targets)
-                        }),
-                    });
-                }
-            }
-        }
         loop {
-            let mut prep = Vec::new();
-            let mut owners: Vec<(usize, Vec<usize>, bool)> = Vec::new();
-            for (li, l) in large.iter().enumerate() {
-                if l.finalists.is_some() || !context_errors[l.owner].is_empty() {
-                    continue;
-                }
-                self.check_stop()?;
-                let n = l.item.options.len();
-                let (round, last) =
-                    match crate::large_choice::next_round(&strategy, n, &l.groups, &l.targets, &l.last, l.rounds) {
-                        crate::large_choice::Round::Final(f) => (vec![f], true),
-                        crate::large_choice::Round::Groups(g) => (g, false),
-                    };
-                for g in round {
-                    self.check_stop()?;
-                    let mut sub = l.item.clone();
-                    sub.keys = g.iter().map(|&i| l.item.keys[i].clone()).collect();
-                    sub.options = g.iter().map(|&i| l.item.options[i].clone()).collect();
-                    let p = self.prepare_orders(sub, if last { 2 } else { strategy.screen_orders })?;
-                    if let Some(error) = self.prepared_context_error(&p) {
-                        // `large` is in plan order, so this plan's queued groups (also those of its other grouped
-                        // questions) form the tail. Discard them all, keeping both vectors aligned.
-                        while owners.last().is_some_and(|&(queued, _, _)| large[queued].owner == l.owner) {
-                            owners.pop();
-                            prep.pop();
-                        }
-                        context_errors[l.owner].push(error);
-                        break;
-                    }
-                    prep.push(p);
-                    owners.push((li, g, last));
-                }
-            }
-            if prep.is_empty() {
-                break;
-            }
-            self.check_stop()?;
-            let res = self.run_with_policy(&prep, self.request_batching, policy)?;
-            for l in large.iter_mut() {
-                if l.finalists.is_none() && context_errors[l.owner].is_empty() {
-                    l.last.clear();
-                    l.rounds += 1;
-                }
-            }
-            for (((li, g, last), r), p) in owners.into_iter().zip(res).zip(&prep) {
-                let l = &mut large[li];
-                l.tokens += p.orders.iter().map(|o| o.input_ids.len()).sum::<usize>();
-                l.longest = p.orders.iter().map(|o| o.input_ids.len()).fold(l.longest, usize::max);
-                l.prompts += p.orders.len();
-                l.last.push(l.groups.len());
-                if last {
-                    l.finalists = Some(g.clone());
-                    l.final_p = r.p_cal.clone();
-                }
-                l.groups.push(g);
-                l.targets.push(r.p_avg);
+            let results = self.run_with_policy(rounds.prepared(), self.request_batching, policy)?;
+            rounds.scatter_all(results)?;
+            if let Some(outputs) = rounds.advance(self, plans)? {
+                return Ok(outputs);
             }
         }
-        let mut li = 0;
-        let mut outs = Vec::with_capacity(plans.len());
-        for (pi, (plan, &off)) in plans.iter().zip(&offs).enumerate() {
-            if !context_errors[pi].is_empty() {
-                while large.get(li).is_some_and(|l| l.owner == pi) {
-                    li += 1;
-                }
-                outs.push(PlanOutput { context_errors: std::mem::take(&mut context_errors[pi]), ..Default::default() });
-                continue;
-            }
-            let mut finals = Vec::with_capacity(plan.questions.len());
-            let end = off + plan.prepared.len();
-            let second_order_branches = (self.manifest.orders == OptionOrders::Auto)
-                .then(|| second_tokens[off..end].iter().filter(|n| **n > 0).count());
-            let mut final_round_tokens = second_tokens[off..end].iter().sum();
-            let mut longest_prompt_tokens = plan
-                .prepared
-                .iter()
-                .flat_map(|p| &p.orders)
-                .map(|o| o.input_ids.len())
-                .chain(second_tokens[off..end].iter().copied())
-                .max()
-                .unwrap_or(0);
-            let mut extra_prompts = 0;
-            let mut finalists = Vec::with_capacity(plan.questions.len());
-            let mut first_round = Vec::with_capacity(plan.questions.len());
-            for q in &plan.questions {
-                let mut fin = None;
-                let mut first = None;
-                match q {
-                    QuestionPlan::Direct(i) => {
-                        finals.push((plan.prepared[*i].item.clone(), results[off + *i].p_cal.clone()))
-                    }
-                    QuestionPlan::Fixed(item) => finals.push((item.clone(), vec![1.0])),
-                    QuestionPlan::Multi { item, parts } => {
-                        finals.push((item.clone(), parts.iter().map(|&i| results[off + i].p_cal[0]).collect()))
-                    }
-                    QuestionPlan::Groups { item, .. } => {
-                        let l = &large[li];
-                        li += 1;
-                        final_round_tokens += l.tokens;
-                        longest_prompt_tokens = longest_prompt_tokens.max(l.longest);
-                        extra_prompts += l.prompts;
-                        let f = l.finalists.clone().unwrap_or_default();
-                        let t = self.manifest.temperature(item.temp_kind());
-                        let p = crate::large_choice::answer(
-                            &strategy,
-                            item.options.len(),
-                            &l.groups,
-                            &l.targets,
-                            &f,
-                            &l.final_p,
-                            |x| calibrate(x, t),
-                        );
-                        fin = Some(f);
-                        first = l.first_round.clone();
-                        finals.push((item.clone(), p));
-                    }
-                }
-                finalists.push(fin);
-                first_round.push(first);
-            }
-            let mut evidence = Vec::with_capacity(finals.len());
-            if finals.iter().any(|(item, _)| item.evidence) {
-                self.check_stop()?;
-            }
-            for (item, _) in &finals {
-                evidence.push(if item.evidence { Some(self.evidence_for(item, plan.evidence_limit)?) } else { None });
-            }
-            outs.push(PlanOutput {
-                context_errors: Vec::new(),
-                task_response: None,
-                task_error: None,
-                asset_media_tokens: None,
-                longest_prompt_tokens,
-                finals,
-                final_round_tokens,
-                extra_prompts,
-                finalists,
-                first_round,
-                evidence,
-                second_order_branches,
-                ..Default::default()
-            });
-        }
-        Ok(outs)
     }
 
     fn prepared_context_error(&self, prepared: &Prepared) -> Option<crate::request::FieldError> {

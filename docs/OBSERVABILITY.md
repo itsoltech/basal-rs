@@ -57,9 +57,11 @@ odczytywana razem; `running + queued = 0` oznacza brak aktywnych żądań
 klientów, niekoniecznie bezczynność GPU. Po porzuceniu handlera
 żądanie znika z obu liczników, choć rozpoczęte obliczenia mogą nadal trwać.
 Odrzucenie, błąd planowania i zakończenie workera także zwalniają `queued`.
-Drugi przebieg `orders=auto` pozostaje `running`: nasz silnik wykonuje go
-wewnątrz tego samego wywołania, bez ponownego kolejkowania stosowanego przez
-upstream. Wstrzymanie długiego forwardu na gate także pozostaje `running`.
+Drugi przebieg `orders=auto` pozostaje `running`. Przy SOAM-on silnik wykonuje
+go wewnątrz tego samego wywołania; przy zwykłym tekstowym SOAM-off gałęzie
+następnej rundy wracają do schedulera z tym samym właścicielem. Znacznik queued
+znika przy pierwszej przyjętej gałęzi i nie wraca dla zależnych rund.
+Wstrzymanie długiego forwardu na gate także pozostaje `running`.
 
 `POST /v1/basal` zwraca błędy w postaci `{"error": "komunikat"}`:
 422 dla walidacji, błędnego użycia API i nieobsługiwanych żądań; 503 dla
@@ -223,14 +225,32 @@ Basal podejmuje decyzje, nie generuje tekstu; dlatego output tokens wynoszą 0.
 | `basal_batch_requests` | histogram | `model`, `lane` | liczba żądań w wykonanej partii |
 
 `lane` to `main` lub `long`. Tor `long` pojawia się tylko dla modeli, które go
-mają. `outcome` to `success` lub `error` wyniku `Engine::run_plans`; późniejszy
+mają. `outcome` to `success` lub `error` wykonania silnika (`run_plans` albo
+wybranych gotowych gałęzi wraz z postępem ich rund); późniejszy
 błąd budowania odpowiedzi widać w statusie HTTP. Czas partii obejmuje oczekiwanie
 na gate GPU i przerwy oddające GPU innemu torowi, nie obejmuje wstępnego
 planowania ani budowania odpowiedzi. Nie jest czystym czasem kerneli GPU.
 
 Kolejka ma jedną obserwację na żądanie uruchomionej partii, również w razie błędu
 wykonania partii. Pominięte żądania nie trafiają do tego histogramu. Statystyki
-kolejki i wielkości partii są publikowane po powrocie `run_plans`.
+kolejki i wielkości partii są publikowane po zakończeniu wykonania silnika.
+
+Przy zwykłym tekstowym SOAM-off jedna partia schedulera zawiera gotowe gałęzie
+prymitywne. `max_batch` i adaptacyjne okno liczą te wpisy, natomiast histogramy
+`basal_batch_requests` i `basal_replica_batch_requests` liczą różnych właścicieli
+żądań w danym wykonaniu. To samo żądanie może mieć próbkę w kilku partiach;
+histogram kolejki za każdym razem mierzy czas od jego pierwotnego przyjścia.
+Nie należy interpretować sumy tych próbek jako liczby ukończonych żądań ani
+sumy wyłącznych czasów czekania. Anulowana częściowa praca bez finalnej
+odpowiedzi nie zwiększa liczników usage.
+
+Nagłówek `x-basal-batch-requests` zachowuje jednostkę całych żądań: różnych
+właścicieli w wykonaniu, które kończy daną odpowiedź. `x-basal-queue-ms` mierzy
+czas do pierwszego admission. `x-basal-compute-ms` sumuje czasy wspólnych wykonań
+z udziałem tego żądania oraz jego własne evidence/thinking i postęp tasks;
+pomija oczekiwanie pomiędzy wywołaniami. Może obejmować pracę innych właścicieli,
+więc nie jest czasem GPU przypisanym wyłącznie temu żądaniu ani pełną latencją.
+Długi tor, media i aktywne early-exit pozostają wpisami atomowymi.
 
 Histogramy czasu mają granice od 1 ms do 600 s oraz `+Inf`:
 `0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.5,

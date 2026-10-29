@@ -8,10 +8,11 @@ use anyhow::{ensure, Context, Result};
 use basal_core::{Backend, Engine};
 use tokio::sync::mpsc;
 
-use super::{plan_job, AdmissionCost, Job, Lane, Schedule, Waiting};
+use super::{plan_job, Job, Lane, Waiting};
 use crate::models::SchedulingPolicy;
 
-/// Checked options only; timing absence selects the qualified profile policy. One entry is a whole RequestPlan.
+/// Checked options only; timing absence selects the qualified profile policy. Entry identity follows the lane's
+/// effective packing/session policy: ordinary Budget main work is a ready primitive, exceptions remain atomic.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct CollectionPolicy {
     max_batch: Option<usize>,
@@ -63,27 +64,8 @@ impl Lane {
     /// A token-rejected pending request ends collection: it remains available for the next call.
     fn collection_capacity(&mut self, now: Instant) -> (usize, bool) {
         self.waiting.retain(|w| !w.job.reply.is_closed());
-        let mut waiting: Vec<&Waiting> = self.waiting.iter().collect();
-        if self.schedule == Schedule::Hrrn {
-            let rate = self.rate;
-            let ratio = |w: &Waiting| (now - w.job.arrived).as_secs_f64() * rate / w.tokens as f64;
-            waiting.sort_by(|a, b| ratio(b).total_cmp(&ratio(a)));
-        }
-        let mut count = 0;
-        let mut size = AdmissionCost::new(self.batching);
-        let mut token_full = false;
-        for w in waiting {
-            if self.max_batch.is_some_and(|cap| count >= cap) {
-                return (count, true);
-            }
-            if size.try_add(&w.plan, count == 0, self.max_batch_tokens) {
-                count += 1;
-            } else {
-                token_full = true;
-            }
-        }
-        // At equality, another request can still fit when its prompts add no trie tokens.
-        (count, token_full || size.tokens() > self.max_batch_tokens || self.max_batch.is_some_and(|cap| count >= cap))
+        let selection = self.select(now);
+        (selection.entries.len(), selection.full)
     }
 }
 
@@ -159,13 +141,13 @@ pub(super) fn scheduler<B: Backend>(
             }
         }
         let start = Instant::now();
-        let (batch, tokens) = lane.admit(start);
+        let batch = lane.admit(start);
         // Explicit adaptive history follows engine calls, not empty invalid/cancelled/long-only cycles.
         if !batch.is_empty() || policy.timing.is_none() {
-            last_batch = batch.len().max(1);
+            last_batch = batch.entries.max(1);
         }
         if !batch.is_empty() {
-            lane.run(&mut engine, batch, tokens, start);
+            lane.run(&mut engine, batch, start);
         }
     }
 }

@@ -805,7 +805,7 @@ writer lub błąd zapisu daje 500. Zawartość i lifecycle:
 | `device` | 0 | GPU modelu: indeks urządzenia CUDA widoczny dla procesu; modele z tym samym `device` dzielą GPU, z różnymi liczą jednocześnie; Metal i Intel: tylko 0 |
 | `replica_devices` | | CUDA: repliki modelu pod jedną nazwą, po jednej na każdy podany indeks (różne karty jednego typu); zamiast `device`; kilka wymaga `gemm_table` `auto` albo ścieżki: Llama wspólnej tabeli niezależnej od partii, Omni bez pasującej tabeli używa stałych GEMM per prompt |
 | `layer_split` | | CUDA, Llama oraz Gemma bez współdzielonego KV/PLE: jeden model na kilku kartach jednego typu, lista `{device, layers}` w kolejności warstw (co najmniej dwa etapy na różnych kartach, suma równa liczbie warstw modelu); wymaga `dtype` f16 (`auto` dla Llamy to f16); zamiast `device` i `replica_devices`; Gemma wymaga jawnego f16 i dense `none`; tekst i obrazy z enkoderem na pierwszej karcie; opis wyżej |
-| `soam` | `on` | `on`: dotychczasowy Tree; `off`: osobny spakowany wiersz każdej gałęzi prymitywnej (Budget), kolejka nadal całymi żądaniami |
+| `soam` | `on` | `on`: dotychczasowy Tree; `off`: Budget i gotowe gałęzie prymitywne jako wpisy głównego toru tekstowego |
 | `max_batch_tokens` | 8192 | tokeny jednej partii: trie przy SOAM-on, suma spakowanych wierszy gałęzi przy off |
 | `max_batch` | brak | dodatni limit kompletnych żądań w jednej partii; niezależnie dla głównego i długiego toru |
 | `wait_ms` | brak | skończone nieujemne milisekundy stałego okna zbierania głównego toru |
@@ -822,10 +822,26 @@ wiersza drzewa pomiędzy gałęziami ani żądaniami. Niezależne `state_cache_m
 i cache stałych prefiksów szablonu zachowują swoje ustawienia.
 
 W `off` koszt HRRN, próg `long_tokens`, admission obu torów i podgląd kolekcji
-sumują rzeczywiste `Prepared.packed.ids.len()` bez deduplikacji. Przepełnienie
-nie może zawinąć kosztu do małej liczby ani wpuścić kolejnego żądania. Kolejka,
-`max_batch` i długi tor nadal obejmują całe żądania. Gałęzie nie są osobnymi
-wpisami kolejki, więc harmonogram nie jest dosłownie zgodny z upstream SOAM-off.
+sumują rzeczywiste `Prepared.packed.ids.len()` bez deduplikacji. Próg długiego
+toru dotyczy całego początkowego planu. W głównym torze zwykłego tekstu wpisem
+jest gotowa gałąź `Prepared` ze wszystkimi jej porządkami opcji; `max_batch`
+i historia okna adaptacyjnego liczą takie wpisy. FIFO używa czasu przyjścia
+żądania, HRRN czasu oczekiwania i kosztu danej gotowej gałęzi. Podgląd i admission
+stosują tę samą selekcję. Pierwszy wpis ponad budżetem tokenów wchodzi sam;
+przepełnienie nie może zawinąć kosztu ani wpuścić kolejnego wpisu.
+
+Kolejna runda auto-orders, grouped choice lub tasks staje się gotowa dopiero
+po zakończeniu zależności. Agregacja multi/tools/facts, evidence, thinking,
+usage i dialekt odpowiedzi pozostają własnością jednego żądania. Pierwsza
+przyjęta gałąź zdejmuje queued; odpowiedź i zwolnienie rezerwacji następują
+raz, po wszystkich rundach. Anulowanie usuwa niewykonane gałęzie po zakończeniu
+już przyjętej pracy. Shutdown opróżnia przyjęty stan także po zamknięciu kanału.
+
+Długi tor, media, aktywne early-exit i plany bez odczytów pozostają atomowymi
+wpisami całego żądania. Długi tekst nadal używa Budget wewnątrz żądania;
+media i early-exit zachowują swój izolowany packing. Te wyjątki są wykonywane
+w osobnych wywołaniach względem częściowych żądań. Evidence i generowanie
+thinking są końcową, izolowaną pracą żądania, poza liczbą gotowych wpisów.
 
 Opcja działa we wspólnym konstruktorze CLI, `serve`, `client --local` i plannerze.
 `bench-requests --batching` steruje tymi samymi forwardami; sprzeczne jawne
@@ -847,17 +863,27 @@ Jawne `--max-batch`, `--wait-ms` i `--batch-window-ms` nadpisują odpowiadające
 pola YAML we wszystkich modelach. Wartości są sprawdzane przed pobraniem modelu
 i dostępem do GPU; czasy muszą mieścić się w zegarze monotonicznym i po konwersji
 wynosić zero albo co najmniej 1 ns. Brak `max_batch` nie narzuca limitu 64.
-Wpis kolejki jest obecnie kompletnym `RequestPlan`; `max_inflight` oraz nagłówek
-`x-basal-batch-requests` nadal liczą całe żądania. Limit wpisów jest niezależny
-od kosztu tokenów i forwardu; pierwsze żądanie przekraczające budżet tokenów
-nadal wykonuje się samo.
+Wpisem jest całe żądanie przy SOAM-on oraz dla wyjątków opisanych wyżej,
+a przy zwykłym tekstowym SOAM-off gotowa gałąź. `max_inflight` nadal liczy
+całe żądania. Nagłówek `x-basal-batch-requests` podaje liczbę różnych właścicieli
+żądań w ostatnim przyjętym wykonaniu, które kończy daną odpowiedź; nie sumuje
+gałęzi ani żądań ze wszystkich wcześniejszych wywołań. Limit wpisów jest niezależny
+od kosztu tokenów i forwardu; pierwszy wpis przekraczający budżet tokenów
+nadal wykonuje się sam.
+
+Przy wielu wywołaniach `x-basal-queue-ms` mierzy czas do pierwszego admission,
+a `x-basal-compute-ms` sumuje czasy wspólnych wykonań z udziałem żądania oraz
+jego końcowej pracy evidence/thinking/tasks. Nie obejmuje oczekiwania pomiędzy
+wywołaniami i nie jest wyłącznym czasem GPU. Histogramy partii liczą różnych
+właścicieli w każdym wykonaniu; jedno żądanie może wystąpić w kilku próbkach
+rozmiaru i oczekiwania. Metryki usage powstają raz, po finalnej odpowiedzi.
 
 Bez obu pól czasu pozostaje dotychczasowe zbieranie według kwalifikowanego
 profilu modelu; sam `max_batch` ogranicza partię i kończy zbieranie po jej
 wypełnieniu. Podanie któregokolwiek pola czasu zastępuje politykę profilu;
 brakujące pole czasu oznacza wtedy `0`. Po zebraniu dostępnych żądań główny
 tor ustala jeden termin: teraz + maksimum stałego `wait_ms` i aktywnego okna
-adaptacyjnego. Adaptacja działa dopiero po partii z więcej niż jednym żądaniem
+adaptacyjnego. Adaptacja działa dopiero po partii z więcej niż jednym wpisem
 i zbiera do rozmiaru poprzedniej partii. Dodatni `wait_ms` zbiera dalej do
 limitu lub terminu. Pierwsza partia serwera nie dostaje opóźnienia adaptacyjnego.
 Pełny limit wpisów, pierwsze żądanie ponad budżetem tokenów lub odrzucenie

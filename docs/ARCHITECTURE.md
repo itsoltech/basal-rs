@@ -636,16 +636,43 @@ Przepełnienie blokuje kolejnego kandydata; koszt pierwszego żądania może nas
 się do `usize::MAX` i wejść zgodnie z regułą oversized-first. Minimalny koszt 1
 dla HRRN pozostaje tylko zabezpieczeniem dzielenia przy żądaniu bez promptów.
 
-Opcja zmienia packing i ten rachunek: kolejka, `max_batch`, long lane,
-permit, completion, anulowanie, queued/running i odpowiedź nadal należą do całego
-żądania. Gałęzie nie są osobnymi wpisami kolejki, więc harmonogram nie jest
-dosłownie zgodny z upstream SOAM-off. Algorytm decyzji i stan rund pozostają
-dotychczasowe. Aktywne early-exit nadal izoluje
-żądanie i buduje własne exit units; media zachowują osobne readouty/session,
-thinking i generowanie swoje dotychczasowe sesje. Te ścieżki nie stają się
+W głównym torze online Budget zwykły tekst dostaje rzeczywiste wpisy gotowych
+gałęzi. `engine/rounds.rs` wyodrębnia istniejące fazy decyzji: pierwszy odczyt,
+automatyczne odwrotne porządki, kolejne grupy large choice i finalną agregację.
+Domyślny `run_decision_plans` nadal przekazuje wszystkie plany wspólnie, wykonując
+całe fazy przez dotychczasowy `run_with_policy` i Tree. Stan `RequestExecution`
+posiada oryginalny, niezmienny `RequestPlan`, sloty odczytów i stan kontynuacji.
+Identyfikator gotowej pracy to właściciel żądania, runda i indeks Prepared.
+Wszystkie option orders tego Prepared pozostają atomowe. `run_ready` wykonuje
+wybraną listę przez Budget i efektywną politykę exit, po czym rozrzuca wyniki
+do slotów. `advance_request` udostępnia następną fazę dopiero po wypełnieniu
+wszystkich slotów. Refusal kontekstu obejmuje całe żądanie. Multi/tools/facts
+i grouped choice używają dotychczasowych indeksów i obliczeń, bez sztucznych
+planów na pytanie. Thinking i tasks korzystają ze wspólnej końcowej ścieżki;
+zadania mają swój rzeczywisty drugi plan, dialekt i dotychczasowe sumowanie usage.
+
+`Waiting` pozostaje jedynym właścicielem `Job`, reply, permitów, Reservation
+i OnlineDemand. Wybór gałęzi przechowuje tylko indeksy w synchronicznym wycinku,
+bez nowego kanału i bez klonowania właścicieli. Lista gotowej pracy jest
+ograniczona przez liczbę przyjętych żądań oraz zwalidowane limity gałęzi i opcji.
+Pierwsze admission zdejmuje wspólny queued raz. Niewykonane rodzeństwo wraca
+z tym samym właścicielem; błędy usuwają resztę jego pracy i dają jedną odpowiedź.
+Anulowanie przed kolejnym admission usuwa pozostałe gałęzie; przyjęte synchroniczne
+wykonanie kończy się przed zwolnieniem stanu i permitów. Worker opróżnia backlog
+bez czekania na nowe surowe joby, również podczas shutdown i po rozłączeniu kanału.
+
+Długi tor pozostawia całe żądanie jako wpis, a Budget steruje jego zwykłymi
+tekstowymi odczytami. Początkowy koszt całego planu decyduje o routingu; właściciel
+nie zmienia toru między rundami. Gdy długi worker odrzuci handoff, główny tor
+zachowuje atomowy wpis. Media, aktywne early-exit i plany bez Prepared również
+są atomowe. Media zachowują osobne readouty/session, early-exit własne exit units;
+te wyjątki nie dzielą wywołania z częściowo wykonanymi właścicielami. Thinking
+i evidence wykonują się po zakończeniu P1, poza admission prymitywów;
+generowanie zachowuje dotychczasową izolowaną sesję. Te ścieżki nie stają się
 Budget wskutek samej opcji; tekstowe ordinary/off-exit ścieżki używają Budget.
 Nie przypisujemy Budget dotychczasowej kwalifikacji Tree: background Batch
 z SOAM-off jest odrzucane, choć planner i fingerprint modelu odzwierciedlają Budget.
+Nowe grupowanie nie ma zmierzonej gwarancji bitowej, jakości ani wydajności.
 
 `bench-requests` odrzuca sprzeczne jawne `--batching`/`--soam`. W `export`
 `--batching` dotyczy wyłącznie fazy bench, surowe readouty System One pozostają
@@ -662,12 +689,20 @@ admission pozostaje niezależny. Domyślna wartość budżetów wynosi 8192. Wi�
 użycie pamięci i czas zajęcia GPU; ich ocenę wykonujemy razem z opóźnieniami
 krótkich żądań w ruchu mieszanym.
 
-Opcjonalny `max_batch` / `--max-batch` ogranicza liczbę kompletnych
-`RequestPlan` wybranych przez admission, niezależnie od tokenów. Dotyczy obu
+Opcjonalny `max_batch` / `--max-batch` ogranicza liczbę wpisów wybranych przez
+admission: gotowych Prepared w zwykłym tekstowym głównym torze off, całych
+żądań w Tree oraz wyjątkach atomowych. Jest niezależny od tokenów. Dotyczy obu
 torów i każdej repliki osobno; brak opcji zachowuje brak dodatkowego limitu.
-Pierwsze żądanie ponad budżetem tokenów nadal wchodzi samo. Odrzucone przez
+Pierwszy wpis ponad budżetem tokenów nadal wchodzi sam. Odrzucone przez
 budżet lub limit wpisów pozostają w kolejce. `max_inflight`, rezerwacje,
-liczniki `/health` i `x-basal-batch-requests` nadal dotyczą całych żądań.
+liczniki `/health` nadal dotyczą całych żądań. `x-basal-batch-requests` podaje
+liczbę różnych właścicieli w wykonaniu kończącym odpowiedź, nigdy liczbę gałęzi.
+Przy wielu wywołaniach queue-ms oznacza czas do pierwszego admission,
+compute-ms sumę wspólnych wykonań z udziałem właściciela i jego końcowej pracy
+evidence/thinking/tasks, bez oczekiwania pomiędzy wywołaniami. Nie jest to
+wyłączny czas GPU ani całkowita latencja odpowiedzi. Histogramy partii mają
+próbkę na wykonanie i liczą różnych właścicieli; próbki oczekiwania danego
+żądania mogą się powtarzać. Usage jest rejestrowane dopiero przy zakończeniu.
 
 Bez `wait_ms` i `batch_window_ms` pozostaje ścieżka dotychczasowego scheduler'a:
 natychmiastowy start albo kwalifikowane przez plan okno profilu. Sam limit
