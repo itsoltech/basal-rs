@@ -9,10 +9,12 @@ Apple Silicon porównanie obejmuje także upstream w f16.
 
 [Wytrenowane early-exit](EARLY_EXIT.md) izoluje aktywne żądania przed
 grupowaniem readoutów; zwykłe off zachowuje obecny batching. Sąsiedni klient
-nie może zmienić wybranej głowicy. To odpowiada upstream `--deterministic`,
-bez obietnicy zgodności z jego cross-request groupingiem. Brak pomiarów
-nowej ścieżki 4.5B: nie deklarujemy przyspieszenia, bitowej powtarzalności
-nowego kernela ani utrzymania jakości na podstawie etykiet polityk.
+nie może zmienić wybranej głowicy.
+[Raport 2026-10-29](../reports/upstream-api-241-final-2026-10-29/README.md)
+opisuje skończone sprawdzenie poprawności 4.5B na RTX 6000 Ada, w tym 32/32
+porównania w progu `1e-4` względem zapisanej referencji upstream. Nie wynika
+z niego ogólna gwarancja wydajności lub jakości, powtarzalności między
+maszynami ani bitowej powtarzalności nowego kernela.
 
 ## basal-2.0 — bieżąca kampania NVIDIA
 
