@@ -1,4 +1,4 @@
-# Deklaracja GGUF, companions i inspekcja nagłówka
+# Deklaracja GGUF, companions i częściowa inspekcja źródła
 
 `basal_core::weights::GgufCompanionSnapshot::read(&Path)` odczytuje lokalną
 deklarację `gguf-source.json` i pięć stałych plików towarzyszących. Zwraca
@@ -466,7 +466,7 @@ Dla każdego b z [0,L) wymagane jest dziewięć wag i wszystkie siedem bias iff
 config.bias. Dokładna liczebność N i obecność każdej stałej roli dowodzą
 braku dodatkowych tensorów. Nie ma tied fallbacku, `rope_freqs.weight`,
 fused QKV, evidence, wyjść pomocniczych ani dowolnych mieszanek typów.
-Mapowanie payloadu Q/K i konwersja typów nie są wykonywane.
+Mapowanie payloadu Q/K i materializacja tensorów nie są wykonywane.
 
 Iloczyny wymiarów, szerokości, dodawanie offsetów i sumy używają checked u64;
 konwersje do usize przed rezerwacjami także są sprawdzane. Każdy tensor ma
@@ -495,8 +495,135 @@ Candle/I/O/TryReserveError; nie klasyfikuje błędów parsera po tekście.
 Top-level Display/Debug ma ograniczony tekst kluczy/nazw/wartości i pomija
 bufory, pełny JSON, origin oraz ścieżki. Zagnieżdżone przyczyny są niezaufane.
 
-REQ009 pozostaje częściowe. To API nie potwierdza digestu GGUF, finitości
-payloadu ani konwersji, autentyczności źródła, wymuszonego lease, budżetu
-host/device/staging, trwałego fingerprintu czy gotowości do alokacji. Nie jest
-loaderem i nie dodaje CLI, Engine, RequestPlanner ani runtime. Nie dostarcza
-dowodu zgodności bitowej, FP32, jakości, pamięci ani wydajności modelu.
+## Digest, payload i koszty żądanej polityki
+
+`GgufHeaderInspection::inspect_payload(self, requested, allowances)` konsumuje
+dokładnie zachowanego właściciela nagłówka. `requested` ma typ
+`basal_gpu::Precision`, a `GgufInspectionAllowances` wymaga dwóch publicznych
+pól u64: `remaining_resident_bytes` i `remaining_staging_bytes`. Nie ma Default;
+zero nie oznacza braku limitu. Równość z limitem jest dozwolona. Allowances
+służą porównaniu kosztów, nie utrzymują rezerwacji pamięci.
+
+Wynik `GgufPayloadInspection` zachowuje cały właściciel nagłówka, ten sam
+deskryptor, Content, początkowy stamp, token zobowiązania i rzeczywiste
+companions wraz z kalibracją. Prywatne pola przechowują także żądaną Precision,
+zaobserwowany `[u8;32]` digest i `GgufPolicyCosts`. Gettery to `companions()`,
+`tensor_count()`, `requested_precision()`, `observed_gguf_sha256()` i `costs()`;
+companions, digest i koszty są pożyczane. Wynik nie daje dostępu do File/Content,
+mutowalnego config, serializacji, klonowania, rozkładania ani materializacji.
+Błąd porzuca wszystkich konsumowanych właścicieli; upload jeszcze nie istnieje.
+
+Kolejność odmów i odczytów jest stała:
+
+1. Porównanie same-fd stamp z pierwotnym, checked koszty i zgodność sumy źródła,
+   reprezentowalność rozmiarów w usize, odmowa resident, potem staging.
+2. Fallible rezerwacja dokładnie żądanych 1 048 576 bajtów scratch oraz osobnego
+   stringa nazwy 128 bajtów. Żądana pojemność nie jest gwarancją RSS ani OOM.
+3. Stamp przed hashem, seek tego samego File do zera i SHA-256 dokładnie
+   pierwotnej długości: nagłówek, luki, padding, tensory i końcowe bajty.
+   Krótki odczyt przed EOF odmawia; jednobajtowa próba wzrostu nie jest hashowana
+   ani zachowywana. Po stampie końcowym digest musi zgadzać się z deklaracją.
+4. Stamp przed skanem, następnie odczyt każdego zachowanego zakresu w kolejności
+   trzech globalnych ról, warstw rosnąco, dziewięciu wag i siedmiu bias iff bias.
+   Każdy fragment mieści się w tym samym scratch, jest wyrównany do szerokości
+   skalaru i wypełniany w całości przed dekodowaniem. Wiersz szerszy niż scratch
+   nie powoduje dodatkowej alokacji. Odczyty i próby EOF ponawiają Interrupted.
+5. Zgodność rzeczywistej sumy skanu, próba wzrostu przy pierwotnym EOF,
+   stamp po skanie i stamp bezpośrednio przed sukcesem. Scratch jest zwalniany.
+
+Każdy stamp porównuje się z pierwotnym; nie przyjmuje nowego stanu pliku.
+Błędy wracają bezpośrednio, bez maskowania pierwszej odmowy dodatkowym stampem.
+Skan obejmuje wyłącznie zakresy tensorów; padding nie jest interpretowany jako
+float. Nie powstaje bufor pliku, tensora ani wiersza, mmap ani drugie parsowanie.
+
+### Skończoność i konwersja
+
+Little-endian F16/BF16 dekoduje się przez `from_le_bytes(...).to_f32_const()`,
+a F32 przez `f32::from_le_bytes`. Nie ma rzutowań wskaźników ani unsafe.
+Najpierw odrzuca się NaN/Inf wejścia, potem nieskończony wynik rzeczywistej
+konwersji. Zwracana nazwa i zerowy u64 indeks dotyczą pierwszej wadliwej roli
+i pierwszego skalaru w kolejności płaskiego storage źródła, przed permutacją Q/K.
+
+| Żądana Precision | Role poza głowicą | `output.weight` |
+|---|---|---|
+| F16 | Matryce, normy i obecne bias do F16 przez `half::f16::from_f32_const` | Typ źródłowy M; tylko kontrola skończoności |
+| Bf16 | Matryce, normy i obecne bias do BF16 przez `half::bf16::from_f32_const` | Typ źródłowy M; tylko kontrola skończoności |
+| F32 | Zachowanie typu źródłowego każdej roli: matryce M, wektory F32 | Typ źródłowy M; tylko kontrola skończoności |
+
+To jawna programowa polityka scalar round-to-nearest, ties-to-even. Akceptuje
+skończone zaokrąglenia i underflow, także signed zero i subnormale. Sprawdza
+skończoność faktycznego wyniku half, również overflow wskutek zaokrąglenia.
+Nie przepisuje danych. Nie używa dotychczasowego `Precision::storage()`.
+Przyszły materializer musi konsumować tego właściciela i używać tej samej
+zamrożonej polityki scalar; nie może podmienić Precision, użyć niejawnego bulk
+cast ani zwęzić głowicy. Poszerzanie do obliczeń F32 jest odrębnym zadaniem.
+Syntetyczne bias są zerami w docelowym typie wektorów i nie mają bajtów źródła.
+
+### Koszty i granice rachunku
+
+`GgufPolicyCosts` ma cztery gettery u64: `source_tensor_bytes()`,
+`resident_weight_bytes()`, `max_assembly_group_bytes()` i
+`two_copy_staging_bytes()`. Wszystkie działania add/mul są checked. Przy
+oznaczeniach powyżej i m=w(M):
+
+```text
+Ehead = V*H
+Elayer_matrix = 2*H*H + 2*H*K + 3*H*I
+Ematrix = 2*V*H + L*Elayer_matrix
+Enorm = (2*L+1)*H
+B = 3*H + 2*K + 2*I
+present = bias ? L*B : 0
+zero = bias ? 0 : L*B
+S = m*Ematrix + 4*(Enorm+present)
+Resident(F16/Bf16) = m*Ehead + 2*(V*H+L*Elayer_matrix+Enorm+present+zero)
+Resident(F32) = S + 4*zero
+```
+
+S zgadza się z zachowaną sumą nagłówka przed alokacją scratch i z rzeczywistą
+sumą zakresów po skanie. Resident liczy głowicę źródłową i każdy końcowy bias
+dokładnie raz; nie dubluje projekcji i ich konkatenacji jako trwałych wag.
+Nie obejmuje compute, KV, RoPE, readout, gather scratch ani narzutu urządzenia.
+
+Dla t=2 przy F16/Bf16, inaczej m, oraz u=2 przy F16/Bf16, inaczej 4,
+Amax jest maksimum dokładnych końcowych grup:
+
+| Grupa | Bajty |
+|---|---|
+| Embedding / głowica / każda norma osobno | V*H*t / V*H*m / H*u |
+| QKV / O | (H+2*K)*H*t / H*H*t |
+| gate+up / down | 2*I*H*t / H*I*t |
+| Bias QKV / O / gate+up / down, obecne albo zerowe | (H+2*K)*u / H*u / 2*I*u / H*u |
+
+`two_copy_staging_bytes = 2*Amax + 1 048 576` jest **PROWIZORYCZNYM planem
+inżynierskim dwóch kopii**, sprawdzanym względem
+`min(2 147 483 648, remaining_staging_bytes)`, po sprawdzeniu
+`Resident <= remaining_resident_bytes`. Inspekcja alokuje tylko scratch i lookup,
+nie Amax. Plan nie dowodzi rzeczywistego szczytu materializacji ani admission.
+Rzeczywisty CPU staging może nakładać 3A. Przyszły uploader musi policzyć każdą
+faktyczną kopię, właścicieli pending i zachowanych po błędzie oraz ponownie
+uzyskać utrzymywane allowances przed alokacją modelu. Nie ma gwarancji całego
+host RAM, RSS ani ochrony przed OOM; wcześniejszy heap semantyki/tokenizera
+i nakładające się temporaries pozostają poza tym rachunkiem.
+
+Nowe odmowy to `GgufDigestMismatch` (expected/actual po 32 bajty, drukowane
+wyłącznie jako 64 cyfry hex), `NonFinitePayload` (ograniczona nazwa i indeks),
+`NonFiniteConversion` (także Precision), `ResidentBudget` (required/remaining)
+i `StagingBudget` (required/effective_limit, jawnie plan prowizoryczny).
+Zachowane błędy I/O/alokacji/arytmetyki/źródła utrzymują przyczyny i ograniczone
+Display/Debug, także dla wariantów utworzonych zewnętrznie. Krótki odczyt lub
+wzrost ma osobny statyczny opis fazy w `SourceChanged`.
+
+REQ009 pozostaje częściowe. Zaobserwowany digest nie uwierzytelnia źródła,
+nie wymusza lease ani nie dowodzi niezmienności: racing/restored writes mogą
+ominąć stampy, a hash sprzed skanu nie certyfikuje późniejszych odczytów.
+Zobowiązanie trusted-local no-writer obowiązuje przez każdy późniejszy odczyt
+i publikację. Przyszłe odczyty wymagają własnych stampów i końcowego pełnego
+rehashu tego samego deskryptora przed publikacją.
+
+Brak nadal ilościowego admission całego heap semantycznego, utrzymywanych
+rezerwacji host/resident/staging, trwałej tożsamości źródła i pełnego zbioru
+wariantów kalibracji, sprawdzenia deferred provenance przed publikacją,
+materializera i dowodu kopii/completion/error retention dla uploadu, readout,
+owned Engine/RequestPlanner/fork, CLI i runtime. API nie jest loaderem ani
+gotowością do alokacji. Nie dostarcza dowodu zgodności bitowej, FP32, jakości,
+pamięci, wydajności ani zachowania runtime GPU/Metal modelu.
