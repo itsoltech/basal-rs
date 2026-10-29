@@ -179,7 +179,8 @@ buforów oraz końcowego heapu deklaracji. Osobne `new` oznacza osobny allowance
 bootstrap pozostaje poza rachunkiem. Nie ma publicznego raw handle, kosztu,
 permitu, release/reset ani nadania budżetu istniejącemu właścicielowi.
 
-Wyłącznie ten konstruktor zastępuje serde DTO deklaracji. Po pełnym inventory,
+Ten konstruktor oraz opisana niżej ścieżka niezmienna zastępują serde DTO
+deklaracji. Po pełnym inventory,
 odczycie i hashu oryginalnej deklaracji oraz Envelope powstaje pożyczony plan
 zamkniętego schematu. Stałe flagi pól, spany i dekoder scalarów nie alokują.
 Plan liczy N rekordów i zdekodowane długości UTF-8 model_id, revision oraz
@@ -238,6 +239,90 @@ RSS i fizyczne OOM. CLI/Engine/Planner nie współdzielą automatycznie allowanc
 Nie uzyskano potwierdzenia runtime, bitwise/FP32, jakości, pomiaru pamięci ani
 wydajności. Legacy fingerprint, defaults/numerics i accepted thinking FAIL
 pozostają bez zmian; nie dodano źródła vLLM.
+
+## Opcjonalna niezmienna semantyka companions i kalibracji
+
+`GgufImmutableCompanionSemantics::read(directory, options, lease, &budget)`
+zwraca `Result<Self, GgufImmutableSemanticError>`. Używa istniejącego
+`GgufDeclarationSourceBudget` i **tego samego ledgeru** co raw oraz deklaracja.
+Nie zmienia wcześniejszych konstruktorów ani publicznego `ModelManifest`.
+Nowy `manifest()` zwraca pożyczony `GgufImmutableManifest<'_>`; nie udostępnia
+mutowalnych map, głębokiego Clone ani konwersji do starego manifestu/Value.
+
+Po pełnym inventory i dotychczasowym capture/hash/Envelope konstruktor czyta
+bezpośrednio płaskie dokumenty `config.json`, `basal.json`,
+`tokenizer_config.json` i oba faktycznie odczytane sloty kalibracji. Nie parsuje
+nieużytych członków inventory. Konfiguracja G1, protokół, template, BOS, wybór
+kalibracji i manifest poprzedzają dotychczasowy tokenizer; potem następują
+effective-ID/BOS i special-ID audits, cross-binding inventory i końcowy stamp
+katalogu. Tokenizer nadal używa oryginalnych bajtów i niezmienionego
+Value/audytów/BPE guard/normalizacji/backendu. Cała ta granica pozostaje
+**nieadmitowana**, także native, serializacja, scratch i późniejsze cache TLS.
+
+Dla każdego pokrytego dokumentu wspólny kursor wykonuje dwa przejścia ze
+stałym stosem 64 ramek. Pierwsze liczy wszystkie syntaktyczne wartości N,
+krawędzie E, dokładne zdekodowane bajty tekstu D i znormalizowane bajty liczb P.
+Sprawdza `Layout::array::<Node>(N)`, `::<Edge>(E)`, `::<u8>(D)`, `::<u8>(P)`
+oraz sumę ich rozmiarów. Jedno acquire tej sumy poprzedza cztery dokładne,
+fallible alokacje. Zapisy inicjalizują tylko zaplanowany prefiks, bez reserve
+ani wzrostu Vec. Cztery płaskie bufory giną przed prywatną opłatą, także przy
+błędzie, unwind, przeniesieniu i zniszczeniu ostatniego `Arc` całego właściciela.
+Zewnętrzny uchwyt budżetu można wcześniej porzucić; opłaty zachowują ledger.
+
+Duplikaty zachowują pierwszą pozycję i ostatnią wartość po dekodowaniu kluczy.
+Odrzucone poddrzewa, klucze i krawędzie nadal są zachowane i opłacone.
+Oba arena/raw sloty kalibracji pozostają żywe również po wyborze zamiennika.
+Off/brak pliku używa wirtualnego pustego obiektu bez areny. Lookup jest liniowy
+i może dawać kwadratowy koszt budowy; nie deklarujemy poprawy wydajności.
+Zachowane są UTF-8, escape/surogaty, brak normalizacji Unicode, dowolne
+poddrzewa, arbitrary precision i specjalna klasyfikacja pierwszego klucza
+`$serde_json::private::Number` z przypiętego serde. Liczby zachowują rozróżnienie
+integer/float, kanoniczne `-0` jako `0`, ujemne zero `-0.0` i normalizację
+wykładnika do `e` z jawnym znakiem. Private Number wymaga jednego członka
+i pełnej liczby w zdekodowanym stringu, bez otaczających whitespace.
+
+Widoki `GgufSemanticValue/Object/Array` udostępniają kind, scalar lookups,
+arbitrary subtree get/at oraz ograniczone iteratory pożyczające właściciela.
+Manifest pożycza nazwę, wersję, BOS i fitted identity z aren. Temperatury mają
+sześć inline slotów; bucket iteration nie tworzy Vec i zachowuje kolejność
+oraz pierwszy pasujący zakres. Dostępne są `temperature/temperature_for`,
+`has_calibration`, `certified`, `task_threshold`, `multi_fallback_threshold`
+i surowe niezmienne obiekty thresholds/task/multi. Niezgodny layout/orders
+zachowuje temperatury, ale ukrywa certyfikaty i fitted fallbacks jak wcześniej.
+Provenance pożycza ścieżkę i fitted strings, a digest zwraca jako `Sha256Digest`
+oryginalnych bajtów. Layout jest sprawdzany przed orders; Off także zachowuje
+osiągnięty probe preferowanego niekanonicznego layoutu.
+
+`bind_served_identity(self, ServedIdentity<'_>) -> Result<Self, ...>` konsumuje
+właściciela. Waliduje te same logiczne pola 1..=4096 bajtów, sprawdza dokładne
+layouty model/revision i sumę, następnie acquire przed kopiowaniem. Zachowane
+identity bytes giną przed opłatą. Dopiero po kopiach i istniejącym matcherze
+instaluje binding, warning i stan. Każdy błąd, również strict mismatch, porzuca
+konsumowanego właściciela. Read-time check nie tworzy bindingu; ponowny binding
+odmawia przed kopiami. Widok bindingu pożycza dokładne model/revision/outcome.
+Lowercase Strings, formatowane warning i strict error matchera są jawnie
+nieadmitowaną diagnostyką, zachowującą dotychczasowe dopasowanie Unicode.
+
+Nowy typ błędu rozróżnia Capture, Inventory, Envelope i Construction dla
+rzeczywistej roli JSON, Rule ze stage/oryginalnym offsetem/statyczną przyczyną,
+Tokenizer, Identity matchera, IdentityConstruction z rzeczywistą przyczyną
+layout/sum/acquire/copy, AlreadyBound i InvalidIdentityField. Top-level
+Display/Debug nie wypisuje niezaufanego tekstu; `source()` zachowuje przyczyny.
+Stałe błędy konstrukcji nie przechowują wejścia ani permitu. Na tej nowej
+ścieżce syntax/private-number, admission lub alokacja mogą wyprzedzić późniejszy
+błąd reguł semantycznych; wcześniejsze entrypointy zachowują swoje błędy.
+
+Admission obejmuje tylko opisane żądane layouty raw/deklaracji, czterech buforów
+każdego dokumentu i nowych identity bytes. Nie obejmuje struktur zawierających,
+stosu/control/Arc/Mutex, nazw/rekordów inventory, ścieżek ani diagnostyki.
+Semantyczne teksty i poddrzewa nie są kopiowane pod nazwą diagnostyki.
+Pozostają poza zakresem cały tokenizer/native/cache, GGUF parser/scratch,
+host staging/resident/device i runtime. Nie jest to limit RSS ani ochrona OOM.
+REQ009 pozostaje częściowe: brak wpięcia do GPU header/payload, loadera,
+materializacji/uploadu, Engine/Planner/fork/CLI, trwałej tożsamości i rzeczywistego
+wykluczenia writerów. Nie ma dowodu runtime, bitwise/FP32, jakości, pomiaru
+pamięci, wydajności ani pokrycia pakietów. Legacy/defaults/numerics,
+accepted thinking FAIL i brak vLLM pozostają bez zmian.
 
 ## Zamknięty zakres semantyki G1
 
@@ -637,8 +722,10 @@ deklaracji; należy traktować ją zgodnie z tym charakterem przy logowaniu.
 Limity bajtów nie gwarantują fizycznej dostępności RAM ani ochrony przed OOM.
 Nie ograniczają amplifikacji alokacji podczas parsowania JSON deklaracji ani
 parsowania konfiguracji lub tokenizera. Sam snapshot pozostawia companions
-jako surowe bajty; nowe API semantyczne dodatkowo uruchamia zwykłe parsery
-serde_json i tokenizers na zaufanych lokalnych wejściach. Węzły, mapy, stringi,
+jako surowe bajty; wcześniejsze API semantyczne dodatkowo uruchamiają zwykłe
+parsery serde_json i tokenizers na zaufanych lokalnych wejściach. Nowa niezmienna
+ścieżka obejmuje wyłącznie opisane wyżej layouty companions/kalibracji/identity;
+cały tokenizer nadal pozostaje poza admission. Jego węzły, mapy, stringi,
 BPE/Unigram, matchery added tokens, regex i wewnętrzne rezerwacje zależności
 mogą powiększać pamięć bez ilościowego limitu. Nie jest to interfejs dowolnego
 uploadu. Przed obietnicą ograniczonego host preflight trzeba uwzględnić żywe

@@ -28,6 +28,10 @@ impl GgufDeclarationSourceBudget {
     pub fn new(limit_bytes: usize) -> Self {
         Self { raw: GgufRawSourceBudget::new(limit_bytes) }
     }
+
+    pub(super) fn raw(&self) -> &GgufRawSourceBudget {
+        &self.raw
+    }
 }
 
 /// Fixed construction causes for the new declaration-budget route only.

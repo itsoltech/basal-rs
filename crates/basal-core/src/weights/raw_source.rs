@@ -85,8 +85,9 @@ impl RawCharge {
         Ok(unsafe { Vec::from_raw_parts(pointer, 0, bytes) })
     }
 
-    // Also used once by the private declaration builder for its checked aggregate
-    // semantic layout; the public raw-only route still charges raw backing only.
+    // Also used by private declaration/immutable semantic builders for checked
+    // aggregate layouts and identity bytes on this same ledger. The public
+    // raw-only route still charges raw backing only.
     pub(super) fn acquire(&mut self, requested: usize) -> Result<(), GgufRawSourceError> {
         let bytes = self.bytes.checked_add(requested).ok_or(GgufRawSourceError::Overflow)?;
         let mut state = match self.ledger.try_lock() {

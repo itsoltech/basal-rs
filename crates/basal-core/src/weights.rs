@@ -17,8 +17,10 @@ use sha2::{Digest, Sha256};
 
 mod calibration_inventory;
 mod declaration_construction;
+mod immutable_semantics;
 mod json_envelope;
 mod raw_source;
+mod semantic_json;
 mod semantics;
 pub use calibration_inventory::{
     CallerCalibrationDirectoryLease, GgufCalibrationInventory, GgufCalibrationInventoryError, GgufCalibrationVariant,
@@ -27,10 +29,18 @@ pub use calibration_inventory::{
 };
 use declaration_construction::{DeclarationCharge, SourceBudget};
 pub use declaration_construction::{GgufDeclarationConstructionError, GgufDeclarationSourceBudget};
+pub use immutable_semantics::{
+    GgufImmutableCalibrationProvenance, GgufImmutableCompanionSemantics, GgufImmutableIdentityBinding,
+    GgufImmutableManifest, GgufImmutableSemanticError, ImmutableJsonRole,
+};
 use json_envelope::JsonReadMode;
 pub use json_envelope::{JsonEnvelopeError, JsonEnvelopeResource};
 use raw_source::RawCharge;
 pub use raw_source::{GgufRawSourceBudget, GgufRawSourceError};
+pub use semantic_json::{
+    GgufSemanticArray, GgufSemanticElements, GgufSemanticKind, GgufSemanticMembers, GgufSemanticObject,
+    GgufSemanticValue, SemanticConstructionError,
+};
 pub use semantics::{
     CalibrationCapture, CalibrationDecision, CalibrationIdentityState, CalibrationMode, CalibrationProbe,
     CalibrationProbeRole, CalibrationReadRole, CapturedCalibrationFile, GgufCalibrationBinding,

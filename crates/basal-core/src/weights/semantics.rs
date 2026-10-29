@@ -11,7 +11,9 @@ use super::calibration_inventory::{
     CallerCalibrationDirectoryLease, GgufCalibrationInventory, GgufCalibrationInventoryError, GgufInventoryReadError,
     InventoryPhase, InventoryReadMismatch, InventoryResource,
 };
+use super::immutable_semantics::{GgufImmutableSemanticError, ImmutableJsonRole};
 use super::raw_source::RawCharge;
+use super::semantic_json::{SemanticDocument, SemanticPlan};
 use super::{
     read_path, CompanionRole, GgufCompanionSnapshot, GgufDeclarationSourceBudget, GgufRawSourceBudget,
     JsonEnvelopeError, JsonReadMode, Sha256Digest, SourceBudget, WeightSourceError,
@@ -19,7 +21,7 @@ use super::{
 use crate::architecture::Architecture;
 use crate::calibration::{CalibrationIdentityError, CalibrationSource, ServedIdentity};
 use crate::manifest::{LlamaConfig, ManifestProtocol, ModelLoadOptions, ModelManifest};
-use crate::prompt::{OptionOrders, PromptFormat, PromptLayout};
+use crate::prompt::{ChatStyle, OptionOrders, PromptFormat, PromptLayout};
 use crate::tokenize::{BasalTokenizer, TokenizerInputError};
 
 const MAX_CALIBRATION_BYTES: u64 = 64 * 1024 * 1024;
@@ -261,6 +263,26 @@ impl CalibrationCapture {
         json_mode: JsonReadMode,
         budget: Option<&GgufRawSourceBudget>,
     ) -> Result<Self, WeightSourceError> {
+        Self::new_for_protocol(
+            snapshot,
+            protocol.layout(),
+            protocol.orders(),
+            protocol.prompt_format(),
+            options,
+            json_mode,
+            budget,
+        )
+    }
+
+    pub(super) fn new_for_protocol(
+        snapshot: &GgufCompanionSnapshot,
+        layout: PromptLayout,
+        orders: OptionOrders,
+        prompt: PromptFormat,
+        options: ModelLoadOptions<'_>,
+        json_mode: JsonReadMode,
+        budget: Option<&GgufRawSourceBudget>,
+    ) -> Result<Self, WeightSourceError> {
         let overflow = || WeightSourceError::ResourceLimit {
             role: "calibration",
             limit: MAX_COMBINED_BYTES,
@@ -285,9 +307,9 @@ impl CalibrationCapture {
             total_limit,
             decision: CalibrationDecision {
                 mode,
-                layout: protocol.layout(),
-                orders: protocol.orders(),
-                prompt: protocol.prompt_format(),
+                layout,
+                orders,
+                prompt,
                 strict: options.strict_calibration,
                 initial_layout: LayoutCheck::NotEvaluated,
                 selected_layout: LayoutCheck::NotEvaluated,
@@ -362,12 +384,71 @@ impl CalibrationCapture {
         Ok((data, sha256.to_string()))
     }
 
+    pub(super) fn read_immutable(
+        &mut self,
+        path: &Path,
+        role: CalibrationReadRole,
+        budget: &GgufDeclarationSourceBudget,
+    ) -> Result<(usize, SemanticDocument), GgufImmutableSemanticError> {
+        let slot = self.files.iter().position(Option::is_none).ok_or(GgufImmutableSemanticError::Capture {
+            source: WeightSourceError::ResourceLimit {
+                role: "calibration",
+                limit: 2,
+                reason: "calibration read count exceeds allowance",
+            },
+        })?;
+        let bytes = read_path(
+            path,
+            "calibration",
+            MAX_CALIBRATION_BYTES,
+            &mut self.total,
+            self.total_limit,
+            self.raw_charge.as_mut(),
+        )
+        .map_err(|source| GgufImmutableSemanticError::Capture { source })?;
+        let json_role = ImmutableJsonRole::Calibration(role);
+        self.json_mode
+            .check(&bytes)
+            .map_err(|source| GgufImmutableSemanticError::Envelope { role: json_role, source })?;
+        let document = SemanticPlan::scan(&bytes)
+            .and_then(|plan| plan.materialize(budget))
+            .map_err(|source| GgufImmutableSemanticError::Construction { role: json_role, source })?;
+        // Original bytes, after successful arena construction; install is infallible.
+        let sha256 = document.sha256();
+        self.files[slot] = Some(CapturedCalibrationFile { bytes, sha256, role });
+        self.selected = Some(slot);
+        Ok((slot, document))
+    }
+
     /// Cross-bind only this constructor's actual private slots and observations.
     /// No path reads, matcher calls or parsing of unused inventory members.
     fn bind_inventory(
         &self,
         inventory: &mut GgufCalibrationInventory,
         manifest: &ModelManifest,
+    ) -> Result<(), GgufCalibrationInventoryError> {
+        let provenance = &manifest.calibration_provenance;
+        let digest = provenance
+            .content_sha256
+            .as_deref()
+            .map(str::parse::<Sha256Digest>)
+            .transpose()
+            .map_err(|_| GgufCalibrationInventoryError::SelectedMismatch)?;
+        self.bind_inventory_facts(
+            inventory,
+            CalibrationBindingFacts {
+                digest,
+                explicit: provenance.explicit,
+                off: provenance.off,
+                strict: provenance.strict,
+            },
+        )
+    }
+
+    pub(super) fn bind_inventory_facts(
+        &self,
+        inventory: &mut GgufCalibrationInventory,
+        facts: CalibrationBindingFacts,
     ) -> Result<(), GgufCalibrationInventoryError> {
         use CalibrationProbeRole as Probe;
         use CalibrationReadRole as Role;
@@ -463,17 +544,10 @@ impl CalibrationCapture {
             return Err(Error::SelectedMismatch);
         }
         let selected = self.selected();
-        let provenance = &manifest.calibration_provenance;
-        let digest = provenance
-            .content_sha256
-            .as_deref()
-            .map(str::parse::<Sha256Digest>)
-            .transpose()
-            .map_err(|_| Error::SelectedMismatch)?;
-        if selected.map(|file| file.sha256) != digest
-            || provenance.explicit != (decision.mode == CalibrationMode::Explicit)
-            || provenance.off != (decision.mode == CalibrationMode::Off)
-            || provenance.strict != decision.strict
+        if selected.map(|file| file.sha256) != facts.digest
+            || facts.explicit != (decision.mode == CalibrationMode::Explicit)
+            || facts.off != (decision.mode == CalibrationMode::Off)
+            || facts.strict != decision.strict
         {
             return Err(Error::SelectedMismatch);
         }
@@ -504,6 +578,14 @@ impl CalibrationCapture {
         }
         Ok(probe.map(|probe| probe.exists))
     }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct CalibrationBindingFacts {
+    pub(super) digest: Option<Sha256Digest>,
+    pub(super) explicit: bool,
+    pub(super) off: bool,
+    pub(super) strict: bool,
 }
 
 fn inventory_name_scratch() -> Result<String, GgufCalibrationInventoryError> {
@@ -834,19 +916,7 @@ impl GgufCompanionSemantics {
             .finish(directory, &basal, bos, loaded)
             .map_err(|e| GgufSemanticError::semantic(Stage::CalibrationManifest, e))?;
         drop(basal);
-        let original = json(&snapshot, CompanionRole::Tokenizer, Stage::Tokenizer)?;
-        let added = BasalTokenizer::audit_raw_ids(&original, vocab)?;
-        audit_bpe_merges(&original).map_err(|e| GgufSemanticError::semantic(Stage::Tokenizer, e))?;
-        let tokenizer =
-            BasalTokenizer::from_json_value(original, &directory.join("tokenizer.json"), style).map_err(|error| {
-                match error {
-                    TokenizerInputError::Semantic(source) => GgufSemanticError::semantic(Stage::Tokenizer, source),
-                    TokenizerInputError::Backend { source, .. } => {
-                        GgufSemanticError::TokenizerBackend { stage: Stage::Tokenizer, source }
-                    }
-                }
-            })?;
-        let bos = tokenizer.audit_effective_ids(&added, vocab, &manifest.bos_token)?;
+        let (tokenizer, bos) = build_captured_tokenizer(&snapshot, directory, vocab, style, &manifest.bos_token)?;
         audit_specials(&config, vocab, bos, "config special ID")?;
         audit_specials(&tcfg, vocab, bos, "tokenizer_config special ID")?;
         let identity_state = match options.calibration {
@@ -930,6 +1000,30 @@ impl GgufCompanionSemantics {
     pub fn identity_state(&self) -> CalibrationIdentityState {
         self.identity_state
     }
+}
+
+/// The entire Value/audit/normalization/provider/cache frontier is unadmitted.
+/// Both captured owners call this in the original construction position.
+pub(super) fn build_captured_tokenizer(
+    snapshot: &GgufCompanionSnapshot,
+    directory: &Path,
+    vocab: usize,
+    style: ChatStyle,
+    bos_token: &str,
+) -> Result<(BasalTokenizer, u32), GgufSemanticError> {
+    let original = json(snapshot, CompanionRole::Tokenizer, SemanticStage::Tokenizer)?;
+    let added = BasalTokenizer::audit_raw_ids(&original, vocab)?;
+    audit_bpe_merges(&original).map_err(|e| GgufSemanticError::semantic(SemanticStage::Tokenizer, e))?;
+    let tokenizer = BasalTokenizer::from_json_value(original, &directory.join("tokenizer.json"), style).map_err(
+        |error| match error {
+            TokenizerInputError::Semantic(source) => GgufSemanticError::semantic(SemanticStage::Tokenizer, source),
+            TokenizerInputError::Backend { source, .. } => {
+                GgufSemanticError::TokenizerBackend { stage: SemanticStage::Tokenizer, source }
+            }
+        },
+    )?;
+    let bos = tokenizer.audit_effective_ids(&added, vocab, bos_token)?;
+    Ok((tokenizer, bos))
 }
 
 /// Guard the pinned tokenizers 0.23.2 BPE builder's unchecked scratch writes and UTF-8 suffix.
