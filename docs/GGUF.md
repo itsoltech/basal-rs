@@ -19,6 +19,75 @@ nie otwierają companions ponownie. Cache tokenizera może być później używa
 przez dotychczasowe metody. API nadal nie jest loaderem GGUF ani planem gotowym
 do alokacji na urządzeniu.
 
+## Opcjonalny preflight oryginalnego JSON
+
+`GgufCompanionSemantics::read_with_json_envelope(directory, options, lease)`
+zwraca ten sam typ właściciela przez `Result<Self, GgufInventoryReadError>`.
+`lease` to `CallerCalibrationDirectoryLease` z opisanym niżej obowiązkiem
+wykluczenia zapisów. Konstruktor najpierw zachowuje pełny ograniczony inwentarz
+kalibracji, następnie wykonuje wspólny odczyt semantyki, cross-binding, kontrolę
+pierwotnego stampu katalogu i instalację inwentarza. Nie ma operacji nadawania
+tego trybu wcześniej skonstruowanemu właścicielowi ani znacznika gotowości.
+
+Wyłącznie ta nowa ścieżka sprawdza oryginalne zachowane bajty JSON przed ich
+pierwszym parsowaniem przez serde. Obejmuje `gguf-source.json`, `config.json`,
+`basal.json`, `tokenizer.json`, `tokenizer_config.json` i najwyżej dwa faktyczne
+odczyty kalibracji: kandydata i zamiennik albo plik jawny, także zewnętrzny.
+Zamiennik jest sprawdzany przed konstrukcją jego Value, gdy Value kandydata
+może nadal istnieć. Nie ma ponownego odczytu, normalizacji ani serializacji
+bajtów do tej kontroli. `chat_template.jinja` i nieodczytane przez selektor
+warianty inwentarza pozostają poza skanowaniem JSON.
+
+Stałe limity są liczone osobno dla każdego dokumentu; równość jest dozwolona:
+
+| Zasób | Limit i sposób liczenia |
+|---|---|
+| Otwarte kontenery | 64 obiekty/tablice jednocześnie; kontener główny ma głębokość 1 |
+| Wartości i klucze razem | 1 048 576; każda wartość, w tym kontener, raz, każdy klucz osobno, także duplikaty i później ignorowane pola |
+| Surowy string | 1 MiB na ciało, 32 MiB sumy ciał kluczy i wartości; bez otaczających cudzysłowów, ze wszystkimi bajtami escape |
+| Surowa liczba | 128 bajtów na token, 8 MiB sumy tokenów; ze znakiem, kropką i wykładnikiem, bez konwersji liczbowej |
+
+Dotychczasowe limity surowych plików i sum pozostają bez zmian. Skaner pożycza
+wejście, używa 64 stałych ramek i sprawdzanych liczników, bez heapu, rekurencji,
+AST, kopii tokenów ani serde. Sprawdza UTF-8, JSON whitespace, pełną gramatykę
+liczb, escape i pary surogatów, dopasowanie kontenerów i dokładnie jeden root
+bez niebiałego sufiksu. Root skalarny przechodzi preflight; jego dopuszczalność
+nadal określają serde i schema. Kontrola nie narzuca unikalności kluczy.
+
+To jawnie węższa polityka wejścia, bez pomiaru pokrycia pakietów. Istniejące
+`GgufCompanionSnapshot::read`, `GgufCompanionSemantics::read` oraz
+`read_with_calibration_inventory` wybierają prywatny tryb `Legacy`: nie skanują
+JSON i zachowują dotychczasową kolejność odczytów, parserów i błędów. Dla nowej
+ścieżki preflight deklaracji poprzedza DTO; kontrola każdego stałego companion
+następuje po jego porównaniu digestu, przed odczytem następnego pliku. Może więc
+odmówić przed późniejszym błędem pliku lub walidacji semantycznej. Również błędy
+leksykalne kalibracji mogą wyprzedzić dotychczasowy błąd serde. Poprawne wejścia
+w limitach trafiają jako te same bajty do istniejących parserów, normalizacji,
+tokenizera, selektora, kontroli ról i wiązania kalibracji.
+
+Publiczne `JsonEnvelopeResource` rozróżnia Depth, NodesAndKeys, StringBytes,
+TotalStringBytes, NumberBytes i TotalNumberBytes. `JsonEnvelopeError` ma
+Resource (zasób, zerowy offset bajtowy usize, limit u64), Malformed (offset,
+statyczna przyczyna) i Arithmetic (offset). Nie przechowuje wejścia ani ścieżki.
+Dla deklaracji i companions łańcuch `source()` prowadzi przez
+`GgufInventoryReadError::Semantic`, `GgufSemanticError::Capture` oraz
+`WeightSourceError::JsonEnvelope { role, source }`. Dla rzeczywistych odczytów
+kalibracji prowadzi przez `GgufSemanticError::Semantic` ze stage
+CalibrationSelection i zachowany błąd anyhow do
+`GgufSemanticError::CalibrationJsonEnvelope`, następnie `JsonEnvelopeError`.
+Nie ma zamiany przyczyn na tekst. Mapowanie open NotFound config do
+`MissingConfigG3` pozostaje bez zmian.
+
+**Tylko sam skaner działa bez alokacji.** Surowe odczyty, inwentarz, zwykła
+propagacja błędów, serde, normalizacja i backend nadal nie mają utrzymywanych
+rezerwacji pamięci. Limity leksykalne nie dowodzą rozmiarów capacity, scratch,
+serializacji, helper Content, map, automatów, natywnego regex, głębokości
+destrukcji trie Unigram ani czasu życia cache BPE TLS. Nie ograniczają RSS,
+narzutu allocatorów czy danych ścieżek systemu operacyjnego i nie chronią przed
+OOM. API nie daje permitu, admission ani gotowości loadera. REQ-009 pozostaje
+częściowe; nie ma dowodu runtime, zgodności bitowej/FP32, jakości, pamięci,
+wydajności ani pokrycia pakietów.
+
 ## Zamknięty zakres semantyki G1
 
 Nowe API wymaga zwykłej architektury Llama: `LlamaForCausalLM`, `silu`, osobnej

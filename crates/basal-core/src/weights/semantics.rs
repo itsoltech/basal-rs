@@ -11,7 +11,9 @@ use super::calibration_inventory::{
     CallerCalibrationDirectoryLease, GgufCalibrationInventory, GgufCalibrationInventoryError, GgufInventoryReadError,
     InventoryPhase, InventoryReadMismatch, InventoryResource,
 };
-use super::{read_path, CompanionRole, GgufCompanionSnapshot, Sha256Digest, WeightSourceError};
+use super::{
+    read_path, CompanionRole, GgufCompanionSnapshot, JsonEnvelopeError, JsonReadMode, Sha256Digest, WeightSourceError,
+};
 use crate::architecture::Architecture;
 use crate::calibration::{CalibrationIdentityError, CalibrationSource, ServedIdentity};
 use crate::manifest::{LlamaConfig, ManifestProtocol, ModelLoadOptions, ModelManifest};
@@ -37,6 +39,11 @@ pub enum SemanticStage {
 /// New-source errors preserve their original causes without printing raw inputs.
 #[derive(thiserror::Error)]
 pub enum GgufSemanticError {
+    #[error("GGUF calibration JSON envelope check failed")]
+    CalibrationJsonEnvelope {
+        #[source]
+        source: JsonEnvelopeError,
+    },
     #[error("GGUF companion capture failed")]
     Capture {
         #[source]
@@ -234,6 +241,7 @@ impl CapturedCalibrationFile {
 
 /// Bounded consumed-file set, not an inventory of unread calibration variants.
 pub struct CalibrationCapture {
+    json_mode: JsonReadMode,
     files: [Option<CapturedCalibrationFile>; 2],
     selected: Option<usize>,
     decision: CalibrationDecision,
@@ -246,6 +254,7 @@ impl CalibrationCapture {
         snapshot: &GgufCompanionSnapshot,
         protocol: &ManifestProtocol,
         options: ModelLoadOptions<'_>,
+        json_mode: JsonReadMode,
     ) -> Result<Self, WeightSourceError> {
         let overflow = || WeightSourceError::ResourceLimit {
             role: "calibration",
@@ -264,6 +273,7 @@ impl CalibrationCapture {
             CalibrationSource::Off => CalibrationMode::Off,
         };
         Ok(Self {
+            json_mode,
             files: [None, None],
             selected: None,
             total,
@@ -331,6 +341,7 @@ impl CalibrationCapture {
         })?;
         let bytes = read_path(path, "calibration", MAX_CALIBRATION_BYTES, &mut self.total, self.total_limit)
             .with_context(|| format!("reading {}", path.display()))?;
+        self.json_mode.check(&bytes).map_err(|source| GgufSemanticError::CalibrationJsonEnvelope { source })?;
         let data = serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))?;
         let sha256 = Sha256Digest::of(&bytes);
         self.files[slot] = Some(CapturedCalibrationFile { bytes, sha256, role });
@@ -654,9 +665,39 @@ impl GgufCompanionSemantics {
         options: ModelLoadOptions<'_>,
         lease: CallerCalibrationDirectoryLease,
     ) -> Result<Self, GgufInventoryReadError> {
+        Self::read_inventory_mode(directory, options, lease, JsonReadMode::Legacy)
+    }
+
+    /// Capture the full calibration inventory and preflight each original JSON
+    /// document before its first serde parse, using fixed per-document quotas.
+    ///
+    /// This narrower opt-in route also checks both actual calibration reads,
+    /// including replacements and external explicit files. Chat templates and
+    /// unread inventory members are not JSON-scanned. Fixed companion digest
+    /// comparison precedes preflight. Malformed/over-quota JSON can fail earlier
+    /// than on legacy routes, through typed envelope causes.
+    ///
+    /// The lease obligation and inventory sequence are unchanged. Only preflight
+    /// uses no heap: raw capture, serde, normalization, tokenizer/backend and
+    /// errors remain unadmitted. This does not bound total memory or grant
+    /// loader readiness. Existing entry points retain their legacy parsing.
+    pub fn read_with_json_envelope(
+        directory: &Path,
+        options: ModelLoadOptions<'_>,
+        lease: CallerCalibrationDirectoryLease,
+    ) -> Result<Self, GgufInventoryReadError> {
+        Self::read_inventory_mode(directory, options, lease, JsonReadMode::Envelope)
+    }
+
+    fn read_inventory_mode(
+        directory: &Path,
+        options: ModelLoadOptions<'_>,
+        lease: CallerCalibrationDirectoryLease,
+        mode: JsonReadMode,
+    ) -> Result<Self, GgufInventoryReadError> {
         let (mut inventory, handle) = GgufCalibrationInventory::capture(directory, lease)?;
         let mut semantics =
-            Self::read(directory, options).map_err(|source| GgufInventoryReadError::Semantic { source })?;
+            Self::read_mode(directory, options, mode).map_err(|source| GgufInventoryReadError::Semantic { source })?;
         semantics.calibration.bind_inventory(&mut inventory, &semantics.manifest)?;
         inventory.check_directory(&handle, InventoryPhase::BeforeInstall)?;
         // Atomic install after all fallible work; no retrofit to older owners.
@@ -672,7 +713,15 @@ impl GgufCompanionSemantics {
     /// Capture once, then parse those bytes. Only selected calibration opens extra files.
     /// No GGUF file, device, model execution or companion path reload is involved.
     pub fn read(directory: &Path, options: ModelLoadOptions<'_>) -> Result<Self, GgufSemanticError> {
-        let snapshot = GgufCompanionSnapshot::read(directory).map_err(|source| match &source {
+        Self::read_mode(directory, options, JsonReadMode::Legacy)
+    }
+
+    fn read_mode(
+        directory: &Path,
+        options: ModelLoadOptions<'_>,
+        mode: JsonReadMode,
+    ) -> Result<Self, GgufSemanticError> {
+        let snapshot = GgufCompanionSnapshot::read_mode(directory, mode).map_err(|source| match &source {
             WeightSourceError::Io { role: "config.json", operation: "open", source: io }
                 if io.kind() == std::io::ErrorKind::NotFound =>
             {
@@ -680,13 +729,14 @@ impl GgufCompanionSemantics {
             }
             _ => GgufSemanticError::Capture { source },
         })?;
-        Self::from_snapshot(snapshot, directory, options)
+        Self::from_snapshot(snapshot, directory, options, mode)
     }
 
     fn from_snapshot(
         snapshot: GgufCompanionSnapshot,
         directory: &Path,
         options: ModelLoadOptions<'_>,
+        mode: JsonReadMode,
     ) -> Result<Self, GgufSemanticError> {
         use SemanticStage as Stage;
         let config = json(&snapshot, CompanionRole::Config, Stage::Config)?;
@@ -705,7 +755,7 @@ impl GgufCompanionSemantics {
         let tcfg = json(&snapshot, CompanionRole::TokenizerConfig, Stage::TokenizerConfig)?;
         let bos = protocol.parse_bos(&tcfg).map_err(|e| GgufSemanticError::semantic(Stage::TokenizerConfig, e))?;
         let style = protocol.chat_style();
-        let mut calibration = CalibrationCapture::new(&snapshot, &protocol, options)
+        let mut calibration = CalibrationCapture::new(&snapshot, &protocol, options, mode)
             .map_err(|source| GgufSemanticError::Capture { source })?;
         let loaded = crate::calibration::load_captured(
             directory,

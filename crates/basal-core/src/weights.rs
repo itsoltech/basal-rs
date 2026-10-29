@@ -16,12 +16,15 @@ use serde::{Deserialize, Deserializer};
 use sha2::{Digest, Sha256};
 
 mod calibration_inventory;
+mod json_envelope;
 mod semantics;
 pub use calibration_inventory::{
     CallerCalibrationDirectoryLease, GgufCalibrationInventory, GgufCalibrationInventoryError, GgufCalibrationVariant,
     GgufInventoryReadError, InventoryNameReason, InventoryOperation, InventoryPhase, InventoryReadMismatch,
     InventoryResource, InventoryStampField,
 };
+use json_envelope::JsonReadMode;
+pub use json_envelope::{JsonEnvelopeError, JsonEnvelopeResource};
 pub use semantics::{
     CalibrationCapture, CalibrationDecision, CalibrationIdentityState, CalibrationMode, CalibrationProbe,
     CalibrationProbeRole, CalibrationReadRole, CapturedCalibrationFile, GgufCalibrationBinding,
@@ -311,10 +314,16 @@ impl GgufCompanionSnapshot {
     /// Future parsers must consume these bytes, not reopen the original paths
     /// while claiming the captured hashes still apply.
     pub fn read(directory: &Path) -> Result<Self, WeightSourceError> {
+        Self::read_mode(directory, JsonReadMode::Legacy)
+    }
+
+    fn read_mode(directory: &Path, mode: JsonReadMode) -> Result<Self, WeightSourceError> {
         let mut declaration_total = 0;
         let declaration_bytes =
             read_file(directory, DECLARATION, MAX_DECLARATION_BYTES, &mut declaration_total, MAX_DECLARATION_BYTES)?;
         let declaration_sha256 = Sha256Digest::of(&declaration_bytes);
+        mode.check(&declaration_bytes)
+            .map_err(|source| WeightSourceError::JsonEnvelope { role: DECLARATION, source })?;
         let declaration = GgufDeclaration::parse(&declaration_bytes)?;
         let mut companions = std::array::from_fn(|_| Vec::new());
         let mut total = 0;
@@ -325,6 +334,10 @@ impl GgufCompanionSnapshot {
             let expected = declaration.companion_sha256(role);
             if actual != expected {
                 return Err(WeightSourceError::CompanionDigest { role, expected, actual });
+            }
+            if role != CompanionRole::ChatTemplate {
+                mode.check(&bytes)
+                    .map_err(|source| WeightSourceError::JsonEnvelope { role: role.filename(), source })?;
             }
             companions[role as usize] = bytes;
         }
@@ -360,6 +373,12 @@ impl GgufCompanionSnapshot {
 /// callers must treat that detailed diagnostic as untrusted declaration data.
 #[derive(thiserror::Error)]
 pub enum WeightSourceError {
+    #[error("{role} JSON envelope check failed")]
+    JsonEnvelope {
+        role: &'static str,
+        #[source]
+        source: JsonEnvelopeError,
+    },
     #[error("invalid gguf-source.json JSON/schema at line {line}, column {column}")]
     DeclarationJson {
         line: usize,
