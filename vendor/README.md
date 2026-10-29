@@ -143,8 +143,13 @@ unaligned reads into an owned, correctly aligned `Vec<T>`. Their fields are
 integers, half floats and floats with valid arbitrary bit patterns; the block
 size assertions establish no padding. The public safe `GgmlType` trait alone
 does not authorize byte reinterpretation. CPU storage takes ownership of this
-vector. GPU upload helpers borrow it until they return, retaining their existing
-copy/lifetime contract. No borrowed typed slice is created from the input bytes.
+vector. Metal copies the data before its upload helper returns. CUDA refuses
+active graph capture and capture-status errors before upload, and retains the
+owned vector until an explicit stream synchronization confirms completion,
+including after an upload error. If completion cannot be confirmed, it retains
+the host allocation instead of freeing a possibly live source and returns an
+error; repeated failed uploads can therefore retain additional memory. No
+borrowed typed slice is created from the input bytes.
 
 G0b uses Rust 1.95.0 offline static checks: direct uncapped Candle Clippy via
 `clippy-driver`/`cargo check`, workspace Clippy and formatting pass. Workspace

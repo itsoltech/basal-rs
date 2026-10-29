@@ -125,7 +125,41 @@ fn from_data<T: super::GgmlType + Send + Sync + 'static>(
     let data: QStorage = match device {
         Device::Cpu => QStorage::Cpu(Box::new(data)),
         Device::Metal(metal) => super::metal::load_quantized(metal, &data)?,
-        Device::Cuda(cuda) => super::cuda::load_quantized(cuda, &data)?,
+        Device::Cuda(cuda) => {
+            #[cfg(feature = "cuda")]
+            {
+                use crate::cuda_backend::cudarc::driver::sys::CUstreamCaptureStatus;
+
+                let stream = cuda.cuda_stream();
+                let status = stream
+                    .capture_status()
+                    .context("ggml: checking CUDA tensor upload capture status")?;
+                if status != CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE {
+                    crate::bail!(
+                        "ggml: tensor materialization during CUDA graph capture is unsupported"
+                    )
+                }
+                // The upload helper only borrows this private allocation. Keep it
+                // alive through completion, even if the upload itself returns an
+                // error. Captured copies cannot use this finite source lifetime.
+                let uploaded = super::cuda::load_quantized(cuda, &data);
+                if let Err(error) = stream
+                    .synchronize()
+                    .context("ggml: confirming CUDA tensor upload completion")
+                {
+                    // An unconfirmed copy may still read these bytes. Retain the
+                    // allocation instead of freeing a potentially live source.
+                    std::mem::forget(data);
+                    let context = format!(
+                        "ggml: host tensor buffer retained after unconfirmed CUDA upload ({error})"
+                    );
+                    return Err(uploaded.err().unwrap_or(error)).context(context);
+                }
+                uploaded?
+            }
+            #[cfg(not(feature = "cuda"))]
+            super::cuda::load_quantized(cuda, &data)?
+        }
     };
     super::QTensor::new(data, dims)
 }
