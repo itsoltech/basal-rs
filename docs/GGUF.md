@@ -144,7 +144,8 @@ odrzucana, jeśli zgadza się jej hash; późniejszy parser musi ją ocenić.
 kontraktu, składnię digestu z nazwą pola, niezgodność digestu z rolą,
 nieregularny lub zmieniony plik, limit zasobów, alokację i I/O.
 Przyczyny JSON, digestu, alokacji i I/O zachowują łańcuch `source()`.
-`Display` i `Debug` nie wypisują wartości deklaracji ani zawartości companions.
+`Display` i `Debug` nie wypisują surowych buforów ani tekstu pochodzenia modelu.
+Komunikat niezgodności digestu podaje oczekiwany i obliczony hash.
 Oryginalna szczegółowa przyczyna parsera JSON może zawierać niezaufane dane
 deklaracji; należy traktować ją zgodnie z tym charakterem przy logowaniu.
 

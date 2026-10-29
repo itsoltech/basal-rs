@@ -347,7 +347,8 @@ impl GgufCompanionSnapshot {
 
 /// Failures of declaration validation or companion capture.
 ///
-/// Display/Debug never print declaration values or retained companion contents.
+/// Display/Debug omit raw buffers and origin text; digest mismatches include
+/// expected and captured hashes.
 /// A JSON error's original parser cause remains accessible through `source()`;
 /// callers must treat that detailed diagnostic as untrusted declaration data.
 #[derive(thiserror::Error)]
