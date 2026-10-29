@@ -11,6 +11,7 @@
 
 use ahash::AHashMap;
 use std::{
+    cell::Cell,
     fs::{read_to_string, File},
     io::{prelude::*, BufReader},
     ops::{Deref, DerefMut},
@@ -476,17 +477,28 @@ impl Tokenizer {
         Ok(tokenizer)
     }
     /// Like [`FromStr`](std::str::FromStr), but a BPE model takes its merge
-    /// scratch from `storage`. Refusal returns before any later entry is built.
+    /// scratch from `storage`. After a refusal no later entry is built; the
+    /// remaining JSON is only skipped syntactically, and the refusal is
+    /// returned even if that skip or the trailing input is invalid.
     pub fn from_str_with_merge_storage<S: MergeStorage>(
         s: &str,
         storage: &S,
     ) -> std::result::Result<Self, MergeBuildError<S::Error>> {
         let backend = |error: serde_json::Error| MergeBuildError::Backend(error.into());
+        let refused = Cell::new(None);
         let mut deserializer = serde_json::Deserializer::from_str(s);
         // serde_json passes the derived `Tokenizer` newtype through to its field.
-        let tokenizer = serialization::TokenizerMergeSeed { storage }
-            .deserialize(&mut deserializer)
-            .map_err(backend)??;
+        let seed = serialization::TokenizerMergeSeed {
+            storage,
+            refused: &refused,
+        };
+        let tokenizer = match seed.deserialize(&mut deserializer) {
+            Ok(Ok(tokenizer)) => tokenizer,
+            // Returned before `end`, so trailing input cannot replace it.
+            Ok(Err(refusal)) => return Err(refusal),
+            // Kept by the seed when skipping after the refusal failed.
+            Err(error) => return Err(refused.into_inner().unwrap_or_else(|| backend(error))),
+        };
         deserializer.end().map_err(backend)?;
         Ok(Self(tokenizer))
     }

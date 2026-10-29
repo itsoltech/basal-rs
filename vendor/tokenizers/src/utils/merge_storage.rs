@@ -1,7 +1,9 @@
 //! Explicit, per-call storage for the BPE builder's merge scratch buffer.
 //!
 //! Local basal-rs addition. The legacy `BpeBuilder::build` and `Deserialize`
-//! routes keep their own `vec![0; max_len]` allocation.
+//! routes keep their own `vec![0; max_len]` allocation. Only the typed refusal
+//! moves without new formatting or boxing; JSON parsing, syntax-only skipping
+//! and serde diagnostics keep their own, unaccounted allocations.
 
 /// Supplies the scratch buffer used while a BPE model validates its merges.
 ///

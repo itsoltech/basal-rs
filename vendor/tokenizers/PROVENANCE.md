@@ -50,6 +50,8 @@ preimages in `UPSTREAM-SHA256SUMS` and creates the eighth. Apply it with
   `ModelMergeSeed` follows `ModelWrapper::deserialize`.
 - `src/tokenizer/serialization.rs`: the tokenizer visitor reads `model`
   through an explicit strategy; `TokenizerMergeSeed` uses the merge seed.
+  After a refusal it skips the remaining entries syntactically; if that skip
+  fails, the refusal is kept in the caller's per-call slot.
 - `src/tokenizer/mod.rs`: `Tokenizer::from_str_with_merge_storage`.
 - `src/utils/mod.rs` and new `src/utils/merge_storage.rs`: `MergeStorage`
   and `MergeBuildError`.

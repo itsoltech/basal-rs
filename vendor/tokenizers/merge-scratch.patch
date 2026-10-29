@@ -499,7 +499,14 @@
  impl_enum_from!(BPE, ModelWrapper, BPE);
 --- a/src/tokenizer/mod.rs
 +++ b/src/tokenizer/mod.rs
-@@ -17,10 +17,11 @@
+@@ -11,16 +11,18 @@
+ 
+ use ahash::AHashMap;
+ use std::{
++    cell::Cell,
+     fs::{read_to_string, File},
+     io::{prelude::*, BufReader},
+     ops::{Deref, DerefMut},
      path::{Path, PathBuf},
  };
  
@@ -512,22 +519,33 @@
  use crate::utils::parallelism::*;
  use crate::utils::progress::{ProgressBar, ProgressStyle};
  
-@@ -474,6 +475,21 @@
+@@ -474,6 +476,32 @@
          let tokenizer = serde_json::from_slice(bytes.as_ref())?;
          Ok(tokenizer)
      }
 +    /// Like [`FromStr`](std::str::FromStr), but a BPE model takes its merge
-+    /// scratch from `storage`. Refusal returns before any later entry is built.
++    /// scratch from `storage`. After a refusal no later entry is built; the
++    /// remaining JSON is only skipped syntactically, and the refusal is
++    /// returned even if that skip or the trailing input is invalid.
 +    pub fn from_str_with_merge_storage<S: MergeStorage>(
 +        s: &str,
 +        storage: &S,
 +    ) -> std::result::Result<Self, MergeBuildError<S::Error>> {
 +        let backend = |error: serde_json::Error| MergeBuildError::Backend(error.into());
++        let refused = Cell::new(None);
 +        let mut deserializer = serde_json::Deserializer::from_str(s);
 +        // serde_json passes the derived `Tokenizer` newtype through to its field.
-+        let tokenizer = serialization::TokenizerMergeSeed { storage }
-+            .deserialize(&mut deserializer)
-+            .map_err(backend)??;
++        let seed = serialization::TokenizerMergeSeed {
++            storage,
++            refused: &refused,
++        };
++        let tokenizer = match seed.deserialize(&mut deserializer) {
++            Ok(Ok(tokenizer)) => tokenizer,
++            // Returned before `end`, so trailing input cannot replace it.
++            Ok(Err(refusal)) => return Err(refusal),
++            // Kept by the seed when skipping after the refusal failed.
++            Err(error) => return Err(refused.into_inner().unwrap_or_else(|| backend(error))),
++        };
 +        deserializer.end().map_err(backend)?;
 +        Ok(Self(tokenizer))
 +    }
@@ -536,7 +554,8 @@
      pub fn from_pretrained<S: AsRef<str>>(
 --- a/src/tokenizer/serialization.rs
 +++ b/src/tokenizer/serialization.rs
-@@ -1,14 +1,20 @@
+@@ -1,14 +1,21 @@
++use std::cell::Cell;
 +use std::convert::Infallible;
  use std::marker::PhantomData;
  
@@ -559,7 +578,7 @@
  
  static SERIALIZATION_VERSION: &str = "1.0";
  
-@@ -59,31 +65,96 @@
+@@ -59,31 +66,116 @@
      where
          De: Deserializer<'de>,
      {
@@ -615,9 +634,11 @@
 +>;
 +
 +/// Deserializes a tokenizer whose BPE model takes its merge scratch from
-+/// explicit storage. Storage refusal is the inner `Err`.
-+pub(crate) struct TokenizerMergeSeed<'a, S> {
++/// explicit storage. Storage refusal is the inner `Err`, or is left in
++/// `refused` when a serde error ends the remaining map after the refusal.
++pub(crate) struct TokenizerMergeSeed<'a, S: MergeStorage> {
 +    pub(crate) storage: &'a S,
++    pub(crate) refused: &'a Cell<Option<MergeBuildError<S::Error>>>,
 +}
 +
 +impl<'de, S: MergeStorage> DeserializeSeed<'de> for TokenizerMergeSeed<'_, S> {
@@ -627,8 +648,9 @@
 +    where
 +        De: Deserializer<'de>,
 +    {
-+        let model = ModelMergeSeed {
++        let model = MergeModel {
 +            storage: self.storage,
++            refused: self.refused,
 +        };
 +        deserializer.deserialize_struct("Tokenizer", FIELDS, TokenizerVisitor::new(model))
 +    }
@@ -642,6 +664,9 @@
 +        &self,
 +        map: &mut A,
 +    ) -> Result<Result<M, Self::Failure>, A::Error>;
++
++    /// Keeps a failure that a later serde error would otherwise discard.
++    fn keep(&self, failure: Self::Failure);
 +}
 +
 +/// The original `Deserialize` route.
@@ -656,9 +681,19 @@
 +    ) -> Result<Result<M, Infallible>, A::Error> {
 +        map.next_value().map(Ok)
 +    }
++
++    fn keep(&self, failure: Infallible) {
++        match failure {}
++    }
 +}
 +
-+impl<'de, S: MergeStorage> ModelField<'de, ModelWrapper> for ModelMergeSeed<'_, S> {
++/// The merge storage route, with the caller's per-call refusal slot.
++struct MergeModel<'a, S: MergeStorage> {
++    storage: &'a S,
++    refused: &'a Cell<Option<MergeBuildError<S::Error>>>,
++}
++
++impl<'de, S: MergeStorage> ModelField<'de, ModelWrapper> for MergeModel<'_, S> {
 +    type Failure = MergeBuildError<S::Error>;
 +
 +    fn next_model<A: MapAccess<'de>>(
@@ -668,6 +703,10 @@
 +        map.next_value_seed(ModelMergeSeed {
 +            storage: self.storage,
 +        })
++    }
++
++    fn keep(&self, failure: Self::Failure) {
++        self.refused.set(Some(failure));
      }
  }
  
@@ -677,7 +716,7 @@
      PhantomData<M>,
      PhantomData<N>,
      PhantomData<PT>,
-@@ -91,15 +162,29 @@
+@@ -91,15 +183,29 @@
      PhantomData<D>,
  );
  
@@ -710,7 +749,7 @@
  
      fn expecting(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
          write!(fmt, "struct Tokenizer")
-@@ -134,9 +219,17 @@
+@@ -134,9 +240,21 @@
                  "pre_tokenizer" => {
                      builder = builder.with_pre_tokenizer(map.next_value()?);
                  }
@@ -721,25 +760,39 @@
 +                    Ok(model) => builder = builder.with_model(model),
 +                    Err(failure) => {
 +                        // serde_json requires the closing brace after `visit_map`.
-+                        // Skip the remaining entries without constructing them.
-+                        while map.next_key::<IgnoredAny>()?.is_some() {
-+                            map.next_value::<IgnoredAny>()?;
-+                        }
-+                        return Ok(Err(failure));
++                        // Skip the remaining entries syntactically, constructing
++                        // nothing; a skip error must not discard the failure.
++                        return match skip_entries(&mut map) {
++                            Ok(()) => Ok(Err(failure)),
++                            Err(error) => {
++                                self.0.keep(failure);
++                                Err(error)
++                            }
++                        };
 +                    }
 +                },
                  "decoder" => {
                      builder = builder.with_decoder(map.next_value()?);
                  }
-@@ -166,7 +259,7 @@
+@@ -166,8 +284,17 @@
              .add_tokens(tokens.into_iter().map(|t| t.token))
              .map_err(|e| V::Error::custom(e.to_string()))?;
  
 -        Ok(tokenizer)
 +        Ok(Ok(tokenizer))
++    }
++}
++
++/// Skips every remaining entry with `IgnoredAny`. After `Ok`, the next byte is
++/// the closing brace, so serde_json's map completion succeeds.
++fn skip_entries<'de, A: MapAccess<'de>>(map: &mut A) -> Result<(), A::Error> {
++    while map.next_key::<IgnoredAny>()?.is_some() {
++        map.next_value::<IgnoredAny>()?;
      }
++    Ok(())
  }
  
+ #[cfg(test)]
 --- a/src/utils/mod.rs
 +++ b/src/utils/mod.rs
 @@ -15,6 +15,7 @@
@@ -752,11 +805,13 @@
  pub(crate) mod progress;
 --- /dev/null
 +++ b/src/utils/merge_storage.rs
-@@ -0,0 +1,35 @@
+@@ -0,0 +1,37 @@
 +//! Explicit, per-call storage for the BPE builder's merge scratch buffer.
 +//!
 +//! Local basal-rs addition. The legacy `BpeBuilder::build` and `Deserialize`
-+//! routes keep their own `vec![0; max_len]` allocation.
++//! routes keep their own `vec![0; max_len]` allocation. Only the typed refusal
++//! moves without new formatting or boxing; JSON parsing, syntax-only skipping
++//! and serde diagnostics keep their own, unaccounted allocations.
 +
 +/// Supplies the scratch buffer used while a BPE model validates its merges.
 +///

@@ -356,10 +356,14 @@ zwrotem opłaty, gdy budowa BPE kończy się sukcesem, błędem albo unwind.
 Zwrócony tokenizer nie przechowuje ani bufora, ani opłaty.
 
 Odmowa (busy, poisoned, overflow, limit, layout, brak pamięci) jest stałym
-wariantem, bez formatowania, `Box` ani nowej diagnostyki. Konstrukcja kończy się
-po niej bez budowy kolejnych składników. serde_json wymaga jednak domknięcia
-obiektu tokenizera, więc pozostałe wpisy są pomijane leksykalnie; błąd składni
-w tych bajtach jest wtedy zgłaszany jako dotychczasowy błąd backendu. Próba
+wariantem przenoszonym bez formatowania, `Box` ani downcastu. Konstrukcja
+kończy się po niej bez budowy kolejnych składników i bez próby innego modelu.
+serde_json wymaga jednak domknięcia obiektu tokenizera, więc pozostałe wpisy są
+pomijane wyłącznie składniowo. Odmowa ma pierwszeństwo przed każdym późniejszym
+błędem tego pomijania i przed błędnymi bajtami po obiekcie: jeśli pomijanie
+zawiedzie, odmowa trafia do prywatnego slotu wywołania i to ona jest zwracana.
+Parsowanie, pomijanie i ewentualna diagnostyka składni serde nadal alokują
+pamięć poza admission; ścieżka odmowy nie jest więc wolna od alokacji. Próba
 modelu bez pola `type` nie traktuje odmowy jako niedopasowania wariantu.
 Błędy parsowania i budowy, np. merge spoza słownika, pozostają w kanale
 `Existing` jako błąd `Tokenizer`.

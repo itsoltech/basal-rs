@@ -254,8 +254,13 @@ crates.io.
 - Storage refusal is returned unchanged as `MergeBuildError::Storage`, never
   boxed or formatted; a legacy untagged model trial does not treat it as a
   mismatch. Parsing and model errors keep the existing boxed backend channel.
-  After a refusal the remaining tokenizer JSON entries are only skipped, not
-  constructed, because serde_json requires the closing brace.
+  After a refusal no later entry or fallback model is constructed; the
+  remaining tokenizer JSON is only skipped syntactically, because serde_json
+  requires the closing brace. The refusal wins over any error in that skip or
+  in trailing input: a skip error leaves it in a private per-call slot, and
+  the entry point returns it before checking trailing input. Only the typed
+  refusal moves without new formatting or boxing; serde parsing, skipping and
+  their syntax diagnostics still allocate outside the admitted buffer.
 
 Verify the copied files with:
 

@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::convert::Infallible;
 use std::marker::PhantomData;
 
@@ -97,9 +98,11 @@ type WrappedTokenizer = TokenizerImpl<
 >;
 
 /// Deserializes a tokenizer whose BPE model takes its merge scratch from
-/// explicit storage. Storage refusal is the inner `Err`.
-pub(crate) struct TokenizerMergeSeed<'a, S> {
+/// explicit storage. Storage refusal is the inner `Err`, or is left in
+/// `refused` when a serde error ends the remaining map after the refusal.
+pub(crate) struct TokenizerMergeSeed<'a, S: MergeStorage> {
     pub(crate) storage: &'a S,
+    pub(crate) refused: &'a Cell<Option<MergeBuildError<S::Error>>>,
 }
 
 impl<'de, S: MergeStorage> DeserializeSeed<'de> for TokenizerMergeSeed<'_, S> {
@@ -109,8 +112,9 @@ impl<'de, S: MergeStorage> DeserializeSeed<'de> for TokenizerMergeSeed<'_, S> {
     where
         De: Deserializer<'de>,
     {
-        let model = ModelMergeSeed {
+        let model = MergeModel {
             storage: self.storage,
+            refused: self.refused,
         };
         deserializer.deserialize_struct("Tokenizer", FIELDS, TokenizerVisitor::new(model))
     }
@@ -124,6 +128,9 @@ trait ModelField<'de, M> {
         &self,
         map: &mut A,
     ) -> Result<Result<M, Self::Failure>, A::Error>;
+
+    /// Keeps a failure that a later serde error would otherwise discard.
+    fn keep(&self, failure: Self::Failure);
 }
 
 /// The original `Deserialize` route.
@@ -138,9 +145,19 @@ impl<'de, M: Deserialize<'de>> ModelField<'de, M> for PlainModel {
     ) -> Result<Result<M, Infallible>, A::Error> {
         map.next_value().map(Ok)
     }
+
+    fn keep(&self, failure: Infallible) {
+        match failure {}
+    }
 }
 
-impl<'de, S: MergeStorage> ModelField<'de, ModelWrapper> for ModelMergeSeed<'_, S> {
+/// The merge storage route, with the caller's per-call refusal slot.
+struct MergeModel<'a, S: MergeStorage> {
+    storage: &'a S,
+    refused: &'a Cell<Option<MergeBuildError<S::Error>>>,
+}
+
+impl<'de, S: MergeStorage> ModelField<'de, ModelWrapper> for MergeModel<'_, S> {
     type Failure = MergeBuildError<S::Error>;
 
     fn next_model<A: MapAccess<'de>>(
@@ -150,6 +167,10 @@ impl<'de, S: MergeStorage> ModelField<'de, ModelWrapper> for ModelMergeSeed<'_, 
         map.next_value_seed(ModelMergeSeed {
             storage: self.storage,
         })
+    }
+
+    fn keep(&self, failure: Self::Failure) {
+        self.refused.set(Some(failure));
     }
 }
 
@@ -223,11 +244,15 @@ where
                     Ok(model) => builder = builder.with_model(model),
                     Err(failure) => {
                         // serde_json requires the closing brace after `visit_map`.
-                        // Skip the remaining entries without constructing them.
-                        while map.next_key::<IgnoredAny>()?.is_some() {
-                            map.next_value::<IgnoredAny>()?;
-                        }
-                        return Ok(Err(failure));
+                        // Skip the remaining entries syntactically, constructing
+                        // nothing; a skip error must not discard the failure.
+                        return match skip_entries(&mut map) {
+                            Ok(()) => Ok(Err(failure)),
+                            Err(error) => {
+                                self.0.keep(failure);
+                                Err(error)
+                            }
+                        };
                     }
                 },
                 "decoder" => {
@@ -261,6 +286,15 @@ where
 
         Ok(Ok(tokenizer))
     }
+}
+
+/// Skips every remaining entry with `IgnoredAny`. After `Ok`, the next byte is
+/// the closing brace, so serde_json's map completion succeeds.
+fn skip_entries<'de, A: MapAccess<'de>>(map: &mut A) -> Result<(), A::Error> {
+    while map.next_key::<IgnoredAny>()?.is_some() {
+        map.next_value::<IgnoredAny>()?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
