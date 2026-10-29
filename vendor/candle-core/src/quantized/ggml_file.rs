@@ -131,6 +131,13 @@ fn from_data<T: super::GgmlType + Send + Sync + 'static>(
                 use crate::cuda_backend::cudarc::driver::sys::CUstreamCaptureStatus;
 
                 let stream = cuda.cuda_stream();
+                // An exposed explicit stream can enter and leave capture on
+                // another thread between our status check and synchronization.
+                // The per-thread handle instead addresses this calling thread's
+                // stream, so another thread cannot capture this upload with it.
+                if stream.cu_stream() != stream.context().per_thread_stream().cu_stream() {
+                    crate::bail!("ggml: tensor materialization requires the CUDA per-thread stream")
+                }
                 let status = stream
                     .capture_status()
                     .context("ggml: checking CUDA tensor upload capture status")?;
@@ -193,6 +200,8 @@ fn tensor_size_in_bytes(ggml_dtype: GgmlDType, dims: &[usize]) -> Result<usize> 
 /// Scalars and zero-element shapes are rejected. Only the required byte prefix
 /// is consumed; trailing bytes are ignored. Values retain the existing native
 /// endian interpretation of the GGML block layouts.
+/// CUDA materialization requires the default per-thread stream outside graph
+/// capture; explicit shared streams are unsupported.
 pub fn qtensor_from_ggml(
     ggml_dtype: GgmlDType,
     raw_data: &[u8],

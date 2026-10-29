@@ -143,10 +143,13 @@ unaligned reads into an owned, correctly aligned `Vec<T>`. Their fields are
 integers, half floats and floats with valid arbitrary bit patterns; the block
 size assertions establish no padding. The public safe `GgmlType` trait alone
 does not authorize byte reinterpretation. CPU storage takes ownership of this
-vector. Metal copies the data before its upload helper returns. CUDA refuses
-active graph capture and capture-status errors before upload, and retains the
-owned vector until an explicit stream synchronization confirms completion,
-including after an upload error. If completion cannot be confirmed, it retains
+vector. Metal copies the data before its upload helper returns. CUDA supports
+only the default per-thread stream; explicit shared streams are rejected before
+upload because another thread could capture the copy between a status query
+and synchronization. It also refuses active graph capture and capture-status
+errors before upload, and retains the owned vector until an explicit stream
+synchronization confirms completion, including after an upload error. If
+completion cannot be confirmed, it retains
 the host allocation instead of freeing a possibly live source and returns an
 error; repeated failed uploads can therefore retain additional memory. No
 borrowed typed slice is created from the input bytes.

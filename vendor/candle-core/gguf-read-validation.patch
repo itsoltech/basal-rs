@@ -1,5 +1,5 @@
 diff --git a/src/quantized/ggml_file.rs b/src/quantized/ggml_file.rs
-index ea5ec02..075c3d3 100644
+index ea5ec02..0969419 100644
 --- a/src/quantized/ggml_file.rs
 +++ b/src/quantized/ggml_file.rs
 @@ -1,7 +1,7 @@
@@ -11,7 +11,7 @@ index ea5ec02..075c3d3 100644
  use byteorder::{LittleEndian, ReadBytesExt};
  use std::collections::HashMap;
  
-@@ -117,73 +117,129 @@ impl Vocab {
+@@ -117,73 +117,138 @@ impl Vocab {
      }
  }
  
@@ -38,6 +38,13 @@ index ea5ec02..075c3d3 100644
 +                use crate::cuda_backend::cudarc::driver::sys::CUstreamCaptureStatus;
 +
 +                let stream = cuda.cuda_stream();
++                // An exposed explicit stream can enter and leave capture on
++                // another thread between our status check and synchronization.
++                // The per-thread handle instead addresses this calling thread's
++                // stream, so another thread cannot capture this upload with it.
++                if stream.cu_stream() != stream.context().per_thread_stream().cu_stream() {
++                    crate::bail!("ggml: tensor materialization requires the CUDA per-thread stream")
++                }
 +                let status = stream
 +                    .capture_status()
 +                    .context("ggml: checking CUDA tensor upload capture status")?;
@@ -100,6 +107,8 @@ index ea5ec02..075c3d3 100644
 +/// Scalars and zero-element shapes are rejected. Only the required byte prefix
 +/// is consumed; trailing bytes are ignored. Values retain the existing native
 +/// endian interpretation of the GGML block layouts.
++/// CUDA materialization requires the default per-thread stream outside graph
++/// capture; explicit shared streams are unsupported.
  pub fn qtensor_from_ggml(
      ggml_dtype: GgmlDType,
      raw_data: &[u8],
@@ -190,7 +199,7 @@ index ea5ec02..075c3d3 100644
          _ => crate::bail!("quantized type {ggml_dtype:?} is not supported yet"),
      }
  }
-@@ -211,10 +267,13 @@ fn read_one_tensor<R: std::io::Seek + std::io::Read>(
+@@ -211,10 +276,13 @@ fn read_one_tensor<R: std::io::Seek + std::io::Read>(
          reader.seek(std::io::SeekFrom::Current(((32 - pos % 32) % 32) as i64))?;
      }
      let dims = dims.iter().map(|&u| u as usize).collect::<Vec<_>>();
