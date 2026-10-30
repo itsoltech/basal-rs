@@ -3517,8 +3517,6 @@ impl GpuBackend {
         }
     }
 
-    /// Planned projection weight shapes (N, K) that the loaded GEMM table does not cover on some stage (CUDA with
-    /// cuBLASLt; empty otherwise). Such shapes use algorithms timed at first use, whose results may depend on the batch.
     /// Planned projection shapes for which a background forward of up to `max_m` tokens could reach an M class the
     /// cuBLASLt table does not hold (and so tune at run time). Empty without cuBLASLt (no run-time tuning) and for a
     /// batch-invariant table covering the shape.
@@ -3543,6 +3541,8 @@ impl GpuBackend {
         }
     }
 
+    /// Planned projection weight shapes (N, K) that the loaded GEMM table does not cover on some stage (CUDA with
+    /// cuBLASLt; empty otherwise). Such shapes use algorithms timed at first use, whose results may depend on the batch.
     pub fn gemm_table_missing(&self) -> Vec<(usize, usize)> {
         #[cfg(feature = "cuda")]
         {
