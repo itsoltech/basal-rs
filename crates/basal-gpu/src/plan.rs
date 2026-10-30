@@ -318,8 +318,9 @@ impl DiagnosticOverrides {
 /// and the GPU then repeat results bit for bit is not established by this crate.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeterministicProfile {
-    /// `CUBLAS_WORKSPACE_CONFIG` as the operator set it, read once before any device and compared again when the
-    /// strict handle is configured; never written by this process.
+    /// `CUBLAS_WORKSPACE_CONFIG` as the operator set it, captured when attaching the profile to the plan and
+    /// compared again when the instance's strict handle is configured; never written by this process. Earlier
+    /// preflight probes may already have created their own devices.
     workspace_config: String,
 }
 
@@ -1159,6 +1160,8 @@ impl ResolvedExecutionPlan {
     /// Attach the strict profile to a frozen GPU plan. Refuses every plan outside it: a CPU plan, another family
     /// or backend, more than one stage, a kernel set other than `basal-kernels.1`, a precision, readout or kernels
     /// other than F32/F32/Candle, quantization, balanced mode, host PLE, a GEMM table or a GEMM fallback.
+    /// Library callers must also set `basal_core::engine::RequestIsolation::Whole` on their engine; attaching
+    /// this GPU plan does not set the engine's request isolation. The CLI adapter sets it separately.
     pub fn with_deterministic(mut self, profile: DeterministicProfile) -> Result<Self, PlanError> {
         let refuse = |what: &str| {
             Err(PlanError::Option(format!("deterministic profile {} requires {what}", DeterministicProfile::ID)))

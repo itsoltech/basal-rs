@@ -637,7 +637,9 @@ stan natywny). Dowodem wyłączności jest lokalne utworzenie bez aliasów;
 `Arc::strong_count == 2` to dodatkowa asercja. Ustawiamy
 `CUBLAS_ATOMICS_NOT_ALLOWED` i odczytujemy go z powrotem, sprawdzamy (nigdy nie
 ustawiamy) `CUBLAS_DEFAULT_MATH`, porównujemy `CUBLAS_WORKSPACE_CONFIG` z wartością
-zamrożoną przed pierwszym urządzeniem i sprawdzamy, że globalna flaga Candle
+odczytaną przy dołączeniu profilu do planu, przed utworzeniem urządzenia tej
+instancji (wcześniejsze sondy preflight mogą już mieć własne urządzenia),
+i sprawdzamy, że globalna flaga Candle
 F32 reduced-precision jest wyłączona; tę flagę sprawdza też każdy ścisły forward
 liter i evidence. Proces nigdy nie zapisuje środowiska, nie podłącza własnego
 workspace (`cublasSetWorkspace`) i nie zmienia opublikowanego uchwytu; zmianę
@@ -646,6 +648,9 @@ backend muszą mieć ten sam profil (`apply_plan`); `load_planned_verified`
 (własny checkpoint thinking) i ładowanie z wyjściami odmawiają planu ścisłego
 przed urządzeniem. Tożsamość planu ma klucz `deterministic`, a `describe`
 backendu opis uchwytu, wyłącznie gdy profil jest włączony.
+Użytkownik API biblioteki musi osobno ustawić `RequestIsolation::Whole` na
+silniku; samo dołączenie profilu do planu GPU tego nie robi. Adapter CLI
+ustawia obie części.
 
 Obliczenia profilu: forward liter `forward_padded` Candle (macierze F32 przez
 `gemm_strided_batched_f32`, `CUBLAS_COMPUTE_32F`, `CUBLAS_GEMM_DEFAULT_TENSOR_OP`,
