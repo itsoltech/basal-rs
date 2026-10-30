@@ -1,5 +1,6 @@
 //! Popular tokenizer models.
-// Modified for basal-rs: preserve model selection with caller-provided BPE scratch.
+// Modified for basal-rs: preserve model selection with caller-provided BPE scratch;
+// ordered vocabulary serialization also accepts a charged BPE reverse vocabulary.
 
 pub mod bpe;
 pub mod unigram;
@@ -19,28 +20,46 @@ use crate::models::wordpiece::{WordPiece, WordPieceTrainer};
 use crate::utils::merge_storage::{MergeBuildError, MergeStorage};
 use crate::{AddedToken, Model, Result, Token, Trainer};
 
-/// Wraps a vocab mapping (ID -> token) to a struct that will be serialized in order
-/// of token ID, smallest to largest.
-struct OrderedVocabIter<'a> {
-    vocab_r: &'a AHashMap<u32, String>,
+/// A vocab mapping (ID -> token) that can be serialized in order of token ID.
+trait OrderedVocab {
+    /// The largest ID, if any.
+    fn max_id(&self) -> Option<u32>;
+    /// The token of `id`, if any.
+    fn token(&self, id: u32) -> Option<&String>;
 }
 
-impl<'a> OrderedVocabIter<'a> {
-    fn new(vocab_r: &'a AHashMap<u32, String>) -> Self {
+impl OrderedVocab for AHashMap<u32, String> {
+    fn max_id(&self) -> Option<u32> {
+        self.keys().max().copied()
+    }
+
+    fn token(&self, id: u32) -> Option<&String> {
+        self.get(&id)
+    }
+}
+
+/// Wraps a vocab mapping (ID -> token) to a struct that will be serialized in order
+/// of token ID, smallest to largest.
+struct OrderedVocabIter<'a, V> {
+    vocab_r: &'a V,
+}
+
+impl<'a, V: OrderedVocab> OrderedVocabIter<'a, V> {
+    fn new(vocab_r: &'a V) -> Self {
         Self { vocab_r }
     }
 }
 
-impl Serialize for OrderedVocabIter<'_> {
+impl<V: OrderedVocab> Serialize for OrderedVocabIter<'_, V> {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
         // There could be holes so max + 1 is more correct than vocab_r.len()
         let mut holes = vec![];
-        let result = if let Some(max) = self.vocab_r.keys().max() {
-            let iter = (0..*max + 1).filter_map(|i| {
-                if let Some(token) = self.vocab_r.get(&i) {
+        let result = if let Some(max) = self.vocab_r.max_id() {
+            let iter = (0..max + 1).filter_map(|i| {
+                if let Some(token) = self.vocab_r.token(i) {
                     Some((token, i))
                 } else {
                     holes.push(i);

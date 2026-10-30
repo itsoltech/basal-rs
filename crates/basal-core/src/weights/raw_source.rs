@@ -6,8 +6,9 @@ use std::sync::{Arc, Mutex, PoisonError, TryLockError};
 /// Shared allowance for requested layouts admitted by GGUF source routes.
 ///
 /// Opt-in routes also use this ledger for declaration and immutable semantic
-/// backing, BPE merge scratch, and the built BPE merge table. The table's charge
-/// remains held until its last shared owner drops it.
+/// backing, BPE merge scratch, the built BPE merge and reverse vocabulary tables
+/// and decoder regexes' compiled backing. Each table's or regex's charge remains
+/// held until its last shared owner drops it.
 ///
 /// Create one handle before loads and pass it (or its sharing clones) to every
 /// concurrent load/reload for that allowance. Independent handles have independent
@@ -33,7 +34,8 @@ impl GgufRawSourceBudget {
         RawCharge { ledger: Arc::clone(&self.ledger), bytes: 0 }
     }
 
-    /// The same ledger, for the opt-in BPE merge table's own per-block account.
+    /// The same ledger, for the per-block account of an opt-in BPE merge or
+    /// reverse vocabulary table or decoder regex.
     pub(super) fn table_account(&self) -> Arc<RawLedger> {
         Arc::clone(&self.ledger)
     }
@@ -56,7 +58,7 @@ pub enum GgufRawSourceError {
     Allocation { bytes: usize },
 }
 
-/// Fixed ledger refusal; `RawCharge` and the merge-table account map it 1:1.
+/// Fixed ledger refusal; `RawCharge` and the table account map it 1:1.
 pub(super) enum LedgerRefusal {
     Busy,
     Poisoned,
@@ -75,8 +77,8 @@ impl From<LedgerRefusal> for GgufRawSourceError {
     }
 }
 
-/// The shared state of one allowance. Every charge and merge-table block of
-/// that allowance acquires and releases here.
+/// The shared state of one allowance. Every charge and charged table or regex
+/// block of that allowance acquires and releases here.
 pub(super) struct RawLedger {
     state: Mutex<RawLedgerState>,
 }

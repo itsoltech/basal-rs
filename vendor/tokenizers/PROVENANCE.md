@@ -95,10 +95,29 @@ changes made after construction, unlike legacy clones. The retained native
 allocation boundary and the separate `onig`/`onig_sys` patches are documented
 in the parent `vendor/README.md` and those crates' provenance files.
 
+`reverse-vocab-table.patch` then applies with `patch -p1` to the result of the
+three earlier patches. It changes no further upstream file:
+
+- `src/utils/merge_storage.rs`: a provided `MergeStorage::reverse_vocab_table`
+  returns no account by default. Existing signatures and error messages are
+  unchanged; only documentation is generalized to every charged table.
+- `src/models/bpe/model.rs`: the BPE reverse vocabulary becomes a
+  crate-private `VocabR` enum, global as before or charged in a hashbrown map
+  with the same key, value and hasher, held in one `Arc`. Without an account it
+  is collected exactly as before. With one, the same single
+  `RandomState::new()`, a fallible reservation of the vocabulary length and
+  the same per-entry inserts build it; its single block is admitted on the
+  account through the existing non-`Clone` table allocator, whose code is
+  unchanged, before any token is copied. Lookup, indexing, map equality and
+  trainer collection call sites are textually unchanged; clones share the
+  charged table.
+- `src/models/mod.rs`: the ordered vocabulary serializer takes either reverse
+  vocabulary through a private trait; the legacy map uses the same calls.
+
 `SHA256SUMS` covers every file in this directory except itself.
 
 The eleven modified upstream Rust source files carry an in-file "Modified for
 basal-rs" notice. The new `merge_storage.rs` module is identified above and
 included in the patches and checksum manifest. Serialization, trainer and seed
-files are not changed by `merge-table.patch`; the later decoder patch changes
-the files listed above.
+files are not changed by `merge-table.patch` or `reverse-vocab-table.patch`;
+the decoder patch changes the files listed above.

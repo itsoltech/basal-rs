@@ -496,6 +496,66 @@ wcześniejszych ścieżkach. Nie ma dowodu runtime, równości wyników z inną
 ścieżką, pomiaru pamięci, ochrony OOM, wydajności, bitwise ani pokrycia
 pakietów. REQ009 pozostaje częściowe.
 
+### Opcjonalne admission tablicy odwrotnego słownika BPE
+
+`GgufImmutableCompanionSemantics::read_with_bpe_reverse_vocab_table_budget(directory,
+options, lease, &budget)` przyjmuje te same wejścia i wykonuje tę samą
+chronologię co `read_with_bpe_merge_table_budget`, z tym samym admission
+bufora scratch i tablicy scalań. Dodatkowo blok pamięci tablicy haszującej
+odwrotnego słownika zbudowanego BPE (ID → token) jest opłacany na **tym samym
+ledgerze** przed alokacją. Regexy dekodera nie są na tej ścieżce admitowane;
+`read_with_decoder_regex_budget` pozostaje osobną ścieżką bez zmian, a
+połączenie obu nie jest częścią tej zmiany. Zwraca tego samego właściciela
+albo `GgufReverseVocabTableReadError`: `Existing` i `Scratch` jak
+w `GgufMergeTableReadError`, `MergeTable { source: GgufMergeTableError }`
+oraz `ReverseVocabTable { source: GgufReverseVocabTableError }`.
+`GgufReverseVocabTableError` to `Admission { source: GgufRawSourceError }`
+(busy, poisoned/zamknięty ledger, overflow, limit, brak pamięci) albo
+`CapacityOverflow`, gdy obliczenie pojemności tablicy przepełnia się przed
+żądaniem. `read`, trzy wcześniejsze ścieżki, ich typy błędów, opłaty
+i komunikaty oraz ścieżki CLI/Engine/Legacy nie zmieniają się.
+
+Lokalnie łatany tokenizers dodaje do `MergeStorage` opcjonalne konto
+odwrotnego słownika (`reverse_vocab_table`, domyślnie `None`), pobierane raz
+po koncie tablicy scalań. Bez konta budowa BPE zbiera odwrotny słownik jak
+upstream w `AHashMap` na globalnym alokatorze. Z kontem ten sam strumień
+wypełnia `hashbrown::HashMap` z tym samym kluczem `u32`, wartością `String`
+i `ahash::RandomState`, tworzonym raz w miejscu dotychczasowego `collect`.
+Najpierw `try_reserve` dokładnej liczby wpisów słownika zastępuje
+dotychczasowy `reserve` tej samej wielkości, potem to samo przekształcenie
+każdego wpisu słownika w jego kolejności iteracji wykonuje `insert`. Po tej
+rezerwacji żaden `insert` nie powiększa tablicy, więc tablica ma dokładnie
+jeden blok, opłacany i alokowany przez ten sam prywatny alokator bez `Clone`
+co tablica scalań; pusty słownik nie alokuje ani nie opłaca bloku.
+Duplikat ID nadal zachowuje ostatnią pisownię w kolejności iteracji słownika;
+sam słownik, ziarna haszera, sortowanie i limity nie zmieniają się.
+
+Odmowa odwrotnego słownika następuje przed kopiowaniem tokenów, buforem
+scratch i scalaniami; pusta, niezaalokowana tablica jest wtedy porzucana.
+Odmowa przechodzi przez niezmieniony kanał `MergeBuildError::Storage` jako
+stały wariant, bez formatowania, `Box` ani próby innego modelu, i kończy
+odczyt tokenizera tak jak inne odmowy. Późniejsza odmowa scratch lub tablicy
+scalań albo błąd backendu zwalnia gotową tablicę i zwraca jej opłatę przed
+opuszczeniem budowy. Zbudowany BPE przechowuje opłaconą tablicę we
+współdzielonym `Arc`; klon tokenizera lub modelu współdzieli ją bez alokacji.
+Opłata trwa, dopóki zwrócony właściciel albo dowolny klon tokenizera trzyma
+tablicę, i wraca po zwolnieniu bloku przez ostatniego właściciela na
+dowolnym wątku. Na tym samym ledgerze są jednocześnie opłacone odwrotny
+słownik, scratch w trakcie budowy i bloki tablicy scalań, więc ten sam limit
+może odmówić tutaj, choć ścieżka tablicy scalań go przyjmuje. Rywalizacja
+o ledger daje `Busy`, jak dla pozostałych opłat.
+
+Pokryte są wyłącznie blok tablicy odwrotnego słownika, bloki tablicy scalań
+i bufor scratch. Nieadmitowane pozostają: kopie tekstów tokenów w odwrotnym
+słowniku, cała alokacja `Arc` każdej tablicy, mapa słownika i jej klucze,
+Value/tekst JSON i pomocnicze bufory serde, wejściowa lista scalań, błędy
+backendu, added vocabulary i jej trie, modele Unigram/WordPiece/WordLevel,
+dekodery, procesory, normalizatory, pre-tokenizery, native Oniguruma, cache
+TLS BPE, bufory kodowania i dekodowania oraz cache liter `BasalTokenizer`.
+Nie ma dowodu runtime, równości wyników z inną ścieżką, pomiaru pamięci,
+ochrony OOM, wydajności, bitwise ani pokrycia pakietów. REQ009 pozostaje
+częściowe.
+
 ## Zamknięty zakres semantyki G1
 
 Nowe API wymaga zwykłej architektury Llama: `LlamaForCausalLM`, `silu`, osobnej
