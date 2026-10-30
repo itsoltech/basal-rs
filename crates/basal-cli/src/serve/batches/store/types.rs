@@ -389,6 +389,13 @@ pub(crate) struct QuotaUsage {
     pub version: i64,
 }
 
+impl QuotaUsage {
+    /// No bytes, batches, files or upload sessions are counted.
+    pub(crate) fn is_empty(&self) -> bool {
+        Self { version: 0, ..*self } == Self::default()
+    }
+}
+
 /// Difference between `batch_quota` and the sum of its owner rows (doctor check).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct QuotaDrift {
@@ -1287,9 +1294,18 @@ impl ApiScopes {
         self.0 & other.0 == other.0
     }
 
+    pub(crate) const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// Names in the canonical order.
+    pub(crate) fn names(self) -> Vec<&'static str> {
+        Self::NAMES.iter().filter(|(s, _)| self.contains(*s)).map(|(_, n)| *n).collect()
+    }
+
     /// Canonical comma list in fixed order, the stored form.
     pub(crate) fn to_text(self) -> String {
-        let text = Self::NAMES.iter().filter(|(s, _)| self.contains(*s)).map(|(_, n)| *n).collect::<Vec<_>>().join(",");
+        let text = self.names().join(",");
         debug_assert!(text.len() <= Self::MAX_TEXT);
         text
     }
@@ -1319,8 +1335,91 @@ pub(crate) struct ApiUserRecord {
     pub id: OwnerId,
     pub name: String,
     pub created_at: UnixMillis,
-    /// Set while the user is disabled: none of its keys is accepted.
+    /// Set while the user is disabled: none of its keys or sessions is accepted.
     pub disabled_at: Option<UnixMillis>,
+    pub role: ApiRole,
+    /// Password of the browser UI; `None`: the user cannot log in there (its keys still work).
+    pub password: Option<PasswordHash>,
+}
+
+/// Role of an API user in the browser UI (`serve::ui`). Keys carry scopes, not roles.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ApiRole {
+    /// Manages its own keys, files and batches.
+    #[default]
+    User,
+    /// Also manages every user and key.
+    Admin,
+}
+
+impl ApiRole {
+    pub(crate) fn parse(value: &str) -> Result<Self, InvalidValue> {
+        match value {
+            "user" => Ok(Self::User),
+            "admin" => Ok(Self::Admin),
+            _ => Err(InvalidValue::new("role", "must be user or admin")),
+        }
+    }
+
+    /// The stored form.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Admin => "admin",
+        }
+    }
+}
+
+/// A password hash in the PHC string format (argon2id, `serve::ui::hash_password`); never the password.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct PasswordHash(String);
+
+impl PasswordHash {
+    /// Longest stored form; argon2id PHC strings are about 100 bytes.
+    const MAX_LEN: usize = 256;
+
+    pub(crate) fn parse(value: &str) -> Result<Self, InvalidValue> {
+        if !value.starts_with('$') || value.len() > Self::MAX_LEN || !value.is_ascii() {
+            return Err(InvalidValue::new("password_hash", "must be a PHC string of at most 256 ASCII bytes"));
+        }
+        Ok(Self(value.to_owned()))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for PasswordHash {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("PasswordHash(..)")
+    }
+}
+
+/// A login session to insert for an existing, enabled user. `id` is the SHA-256 of the session token.
+#[derive(Clone, Debug)]
+pub(crate) struct NewApiSession {
+    pub id: Sha256Digest,
+    pub user: OwnerId,
+    /// The hash the login verified; the insert is refused when the user's password changed since.
+    pub password: Option<PasswordHash>,
+    /// Lifetime from the database clock at insertion.
+    pub ttl: Duration,
+}
+
+/// A stored session with its user and the database time of the read.
+#[derive(Clone, Debug)]
+pub(crate) struct ApiSessionLookup {
+    pub user: ApiUserRecord,
+    pub expires_at: UnixMillis,
+    pub now: UnixMillis,
+}
+
+impl ApiSessionLookup {
+    /// Accepted: not expired and the user is enabled.
+    pub(crate) fn active(&self) -> bool {
+        self.now < self.expires_at && self.user.disabled_at.is_none()
+    }
 }
 
 /// A key to insert for an existing, enabled user. `token_sha256` is the SHA-256 of the whole bearer value; the token

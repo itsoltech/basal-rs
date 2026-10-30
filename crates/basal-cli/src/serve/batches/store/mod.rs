@@ -60,18 +60,21 @@ const SQLITE_MIGRATIONS: &[Migration] = &[
     Migration { version: 1, id: "0001_init", sql: include_str!("migrations/sqlite/0001_init.sql") },
     Migration { version: 2, id: "0002_abandonment", sql: include_str!("migrations/sqlite/0002_abandonment.sql") },
     Migration { version: 3, id: "0003_api_keys", sql: include_str!("migrations/sqlite/0003_api_keys.sql") },
+    Migration { version: 4, id: "0004_accounts", sql: include_str!("migrations/sqlite/0004_accounts.sql") },
 ];
 
 const POSTGRESQL_MIGRATIONS: &[Migration] = &[
     Migration { version: 1, id: "0001_init", sql: include_str!("migrations/postgresql/0001_init.sql") },
     Migration { version: 2, id: "0002_abandonment", sql: include_str!("migrations/postgresql/0002_abandonment.sql") },
     Migration { version: 3, id: "0003_api_keys", sql: include_str!("migrations/postgresql/0003_api_keys.sql") },
+    Migration { version: 4, id: "0004_accounts", sql: include_str!("migrations/postgresql/0004_accounts.sql") },
 ];
 
 const MSSQL_MIGRATIONS: &[Migration] = &[
     Migration { version: 1, id: "0001_init", sql: include_str!("migrations/mssql/0001_init.sql") },
     Migration { version: 2, id: "0002_abandonment", sql: include_str!("migrations/mssql/0002_abandonment.sql") },
     Migration { version: 3, id: "0003_api_keys", sql: include_str!("migrations/mssql/0003_api_keys.sql") },
+    Migration { version: 4, id: "0004_accounts", sql: include_str!("migrations/mssql/0004_accounts.sql") },
 ];
 
 /// Retries of a transaction rolled back by a lock timeout, deadlock or busy database.
@@ -424,10 +427,71 @@ impl Store {
     // -----------------------------------------------------------------------------------------------------------
 
     /// Insert a user; `None` when the id is taken.
-    pub(crate) async fn create_api_user(&self, id: &OwnerId, name: &str) -> Result<Option<ApiUserRecord>, StoreError> {
+    pub(crate) async fn create_api_user(
+        &self,
+        id: &OwnerId,
+        name: &str,
+        role: ApiRole,
+        password: Option<&PasswordHash>,
+    ) -> Result<Option<ApiUserRecord>, StoreError> {
         match &self.db {
-            Db::Mongodb(mongo) => mongo.create_api_user(id, name).await,
-            Db::Sql(sql) => in_tx!(sql, tx => ops::keys::create_user(tx, id, name)),
+            Db::Mongodb(mongo) => mongo.create_api_user(id, name, role, password).await,
+            Db::Sql(sql) => in_tx!(sql, tx => ops::keys::create_user(tx, id, name, role, password)),
+        }
+    }
+
+    /// The user `id`, also a disabled one.
+    pub(crate) async fn api_user(&self, id: &OwnerId) -> Result<Option<ApiUserRecord>, StoreError> {
+        match &self.db {
+            Db::Mongodb(mongo) => mongo.api_user(id).await,
+            Db::Sql(sql) => in_tx!(sql, tx => ops::keys::get_user(tx, id)),
+        }
+    }
+
+    /// Set or clear a user's UI password and end its sessions except `keep`; `NotFound` for an unknown id.
+    pub(crate) async fn set_api_user_password(
+        &self,
+        id: &OwnerId,
+        password: Option<&PasswordHash>,
+        keep: Option<&Sha256Digest>,
+    ) -> Result<ApiUserRecord, StoreError> {
+        match &self.db {
+            Db::Mongodb(mongo) => mongo.set_api_user_password(id, password, keep).await,
+            Db::Sql(sql) => in_tx!(sql, tx => ops::keys::set_user_password(tx, id, password, keep)),
+        }
+    }
+
+    /// Delete a user with its keys and sessions: only one disabled at least `disabled_for` ago (`UserNotDisabled`)
+    /// whose Batch quota row is empty (`UserHasData`); `NotFound` for an unknown id.
+    pub(crate) async fn delete_api_user(&self, id: &OwnerId, disabled_for: Duration) -> Result<(), StoreError> {
+        match &self.db {
+            Db::Mongodb(mongo) => mongo.delete_api_user(id, disabled_for).await,
+            Db::Sql(sql) => in_tx!(sql, tx => ops::keys::delete_user(tx, id, disabled_for)),
+        }
+    }
+
+    /// Insert a UI session of an existing, enabled user (`NotFound`, `UserDisabled`); its expiry counts from the
+    /// database clock. The user's expired sessions are deleted.
+    pub(crate) async fn create_api_session(&self, session: &NewApiSession) -> Result<ApiSessionLookup, StoreError> {
+        match &self.db {
+            Db::Mongodb(mongo) => mongo.create_api_session(session).await,
+            Db::Sql(sql) => in_tx!(sql, tx => ops::keys::create_session(tx, session)),
+        }
+    }
+
+    /// The session `id` (also expired) with its user and the database time of the read.
+    pub(crate) async fn lookup_api_session(&self, id: &Sha256Digest) -> Result<Option<ApiSessionLookup>, StoreError> {
+        match &self.db {
+            Db::Mongodb(mongo) => mongo.lookup_api_session(id).await,
+            Db::Sql(sql) => in_tx!(sql, tx => ops::keys::lookup_session(tx, id)),
+        }
+    }
+
+    /// Delete a session (idempotent).
+    pub(crate) async fn delete_api_session(&self, id: &Sha256Digest) -> Result<(), StoreError> {
+        match &self.db {
+            Db::Mongodb(mongo) => mongo.delete_api_session(id).await,
+            Db::Sql(sql) => in_tx!(sql, tx => ops::keys::delete_session(tx, id)),
         }
     }
 
@@ -443,8 +507,8 @@ impl Store {
         }
     }
 
-    /// Disable (keeping the first time) or enable a user; `NotFound` for an unknown id. A disabled user's keys are
-    /// refused, its data stays.
+    /// Disable (keeping the first time, ending its sessions) or enable a user; `NotFound` for an unknown id. A disabled
+    /// user's keys are refused, its data stays.
     pub(crate) async fn set_api_user_disabled(
         &self,
         id: &OwnerId,

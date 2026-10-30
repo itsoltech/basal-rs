@@ -99,6 +99,12 @@ pub(crate) enum StoreError {
     /// An API key for a disabled user.
     #[error("the API user is disabled")]
     UserDisabled,
+    /// Deleting a user that is enabled or was disabled too recently (servers may still accept its cached keys).
+    #[error("the API user is not disabled long enough")]
+    UserNotDisabled,
+    /// Deleting a user whose Batch data (files, batches, upload sessions, reserved bytes) has not expired yet.
+    #[error("the API user still has Batch data")]
+    UserHasData,
     #[error("no quota policy is installed")]
     PolicyMissing,
     #[error("no model catalog is installed")]

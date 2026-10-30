@@ -569,6 +569,10 @@ enum Cmd {
         /// `database:` section or --batches for the local SQLite default
         #[arg(long)]
         auth: bool,
+        /// Serve the browser UI at /ui/ (also `ui.enabled` in YAML): Playground, health, and with --auth logins of
+        /// `basal users` accounts with their keys, files and batches, and admin pages
+        #[arg(long)]
+        ui: bool,
         /// `release_date` reported by GET /v1/models (default: the release date upstream basal v1.5.0 reports)
         #[arg(long, default_value = "2026-10-05")]
         release_date: String,
@@ -1228,6 +1232,7 @@ fn run() -> Result<()> {
             batches,
             batch_data_dir,
             auth,
+            ui,
             release_date,
         } => {
             let access_log = access_log || std::env::var("BASAL_ACCESS_LOG").is_ok_and(|v| !v.is_empty() && v != "0");
@@ -1322,6 +1327,8 @@ fn run() -> Result<()> {
             // enabled root database without an enabled consumer is only migrated at start (with auto_migrate), never
             // otherwise connected. API keys never fall back to serving without a database.
             c.auth.enabled |= auth;
+            c.ui.enabled |= ui;
+            let ui_settings = if c.ui.enabled { Some(c.ui.validate()?) } else { None };
             let database = match (&batch_settings, database_section) {
                 (Some(batches), section) => Some(batches.database(&section)?),
                 (None, database::DatabaseSection::Enabled(settings)) => Some(settings),
@@ -1505,6 +1512,7 @@ fn run() -> Result<()> {
                 database: database.map(database::Database::new),
                 batches: batch_settings,
                 auth: c.auth.enabled.then_some(c.auth),
+                ui: ui_settings,
             };
             serve::serve(served, opts)?;
         }

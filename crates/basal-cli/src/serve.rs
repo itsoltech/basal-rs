@@ -64,6 +64,7 @@ mod http;
 mod metrics;
 mod openai;
 mod systemone;
+pub(crate) mod ui;
 use metrics::{LaneMetrics, Metrics, ReplicaMetrics, RequestModel};
 
 pub(crate) const DEFAULT_MAX_LARGE_INFLIGHT: usize = 4;
@@ -105,6 +106,8 @@ pub struct ServeOptions {
     pub(crate) batches: Option<batches::config::BatchSettings>,
     /// API keys (`auth:` enabled); `None` checks no key. Needs `database`.
     pub(crate) auth: Option<auth::AuthConfig>,
+    /// Browser UI (`ui:` enabled); `None` serves no `/ui` route. Accounts need `auth`.
+    pub(crate) ui: Option<ui::UiSettings>,
 }
 
 /// One instance of a served model.
@@ -1567,10 +1570,18 @@ fn serve_inner<B: Backend + Send + 'static>(
                 Some(service) => router.merge(service.router(opts.auth.is_some())),
                 None => router,
             };
+            let router = match opts.ui {
+                Some(settings) => {
+                    let info =
+                        ui::UiInfo { batches: batch_service.is_some(), metrics: opts.metrics, mcp: mcp_stop.is_some() };
+                    router.merge(ui::router(settings, &info, auth_store.clone()))
+                }
+                None => router,
+            };
             // API keys wrap every route, the Batch routes included; the access log also records their refusals.
             let router = match (&opts.auth, &auth_store) {
                 (Some(config), Some(store)) => router.layer(axum::middleware::from_fn_with_state(
-                    auth::Authenticator::start(store.clone(), config),
+                    auth::Authenticator::start(store.clone(), config, opts.ui.is_some()),
                     auth::require_key,
                 )),
                 _ => router,
@@ -1587,6 +1598,14 @@ fn serve_inner<B: Backend + Send + 'static>(
             );
             if opts.auth.is_some() {
                 crate::note!("API keys required (auth.enabled); manage them with `basal keys`");
+            }
+            match (&opts.ui, &opts.auth) {
+                (Some(_), Some(_)) => crate::note!("browser UI on http://{bound_addr}/ui/ (log in with `basal users`)"),
+                (Some(_), None) => crate::note!(
+                    "browser UI on http://{bound_addr}/ui/ without accounts (auth is off: anyone who reaches the \
+                     server can use it)"
+                ),
+                (None, _) => {}
             }
             let http_grace = batch_service
                 .as_ref()

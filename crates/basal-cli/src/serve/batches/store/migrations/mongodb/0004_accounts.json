@@ -1,0 +1,9 @@
+{
+  "version": 4,
+  "id": "0004_accounts",
+  "comment": "Accounts of the browser UI (ui:). api_users documents gain role (user|admin; missing: user) and password_hash (PHC argon2id string; missing or null: no UI login). api_sessions: _id is the lowercase hex SHA-256 of the session token (never the token), user_id its user, created_at and expires_at database times. Deleting a user deletes its keys and sessions first.",
+  "collections": ["api_sessions"],
+  "indexes": [
+    {"collection": "api_sessions", "name": "api_sessions_user", "keys": [["user_id",1],["expires_at",1]]}
+  ]
+}

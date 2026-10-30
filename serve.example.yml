@@ -34,6 +34,13 @@ gemm_cache: .cache/gemm            # tables of `gemm_table: auto`
 #   enabled: true
 #   protect_metrics: false         # true: /metrics needs a key with scope `metrics`
 #
+# Browser UI at /ui/ (docs/UI.md), off by default; also `basal serve --ui`. With auth it needs a login of a
+# `basal users` account (`basal users create ... --admin --password-stdin` for the first admin).
+# ui:
+#   enabled: true
+#   session_ttl: 12h               # login session lifetime, 5m to 30d
+#   cookie_secure: true            # false only for plain-HTTP access other than localhost
+#
 # Durable Batch/Files API is off by default. Local: `basal serve --batches` (without `database:` it uses the local
 # server database <data dir>/db/basal.sqlite3, docs/DATABASE.md); production quota, tokens and procedures: docs/BATCHES.md. GPU background
 # execution additionally needs a measured models[].batch_profile; do not copy unqualified memory or cost
