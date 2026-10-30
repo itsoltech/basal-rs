@@ -134,12 +134,14 @@ evidence head.
 ### Plan, profil i tabela GEMM
 
 Checkpoint thinking używa zawsze profilu `llama-generic.v1`, nigdy profilu
-katalogu wybranego po nazwie z `basal.json`. Precyzja, kernele, tryb inferencji
-i `readout_layer` (rozwiązany dla konfiguracji thinking) pochodzą z instancji
-bazowej, readout jest FP32. Tabela GEMM jest własna: `think_gemm_table`
-(`none` domyślnie, `auto`, `pinned`, `sha256:<hex>` albo ścieżka) jest
-rozwiązywana dla kształtów checkpointu thinking; tabela bazowa nie jest
-kopiowana. `auto` może uruchomić wyszukiwanie dopiero po całej walidacji
+katalogu wybranego po nazwie z `basal.json`. Precyzja, kernele, tryb inferencji,
+`readout_layer` i `merge_projections` (oba rozwiązane dla konfiguracji thinking)
+pochodzą z instancji bazowej, readout jest FP32. Jawne `merge_projections`
+waliduje konfigurację thinking, w tym wyrównanie jej bloków wierszy dla `off`,
+przed admission i każdym zapytaniem o GPU. Tabela GEMM jest własna:
+`think_gemm_table` (`none` domyślnie, `auto`, `pinned`, `sha256:<hex>` albo
+ścieżka) jest rozwiązywana dla kształtów checkpointu thinking i jego własnej
+polityki projekcji; tabela bazowa nie jest kopiowana. `auto` może uruchomić wyszukiwanie dopiero po całej walidacji
 i admission. Przy layer split liczba warstw thinking musi być pokryta przez
 ten sam split; niezależny split thinking nie istnieje.
 

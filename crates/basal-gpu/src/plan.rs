@@ -61,6 +61,75 @@ impl ReadoutLayer {
     }
 }
 
+/// Whether fused Llama runs its Q/K/V and gate/up projections as one combined GEMM each or as separate GEMMs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeProjections {
+    /// Keep the backend's historical behavior.
+    #[default]
+    Auto,
+    /// One GEMM for Q/K/V and one for gate/up (dense fused CUDA/Metal Llama; the existing execution there).
+    On,
+    /// Five GEMMs, Q, K, V, gate and up, on row views of the combined weights (dense fused CUDA/Metal Llama).
+    Off,
+}
+
+impl std::str::FromStr for MergeProjections {
+    type Err = PlanError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "auto" => Ok(Self::Auto),
+            "on" => Ok(Self::On),
+            "off" => Ok(Self::Off),
+            _ => Err(PlanError::Option(format!("unknown merge-projections mode {value:?} (auto, on, off)"))),
+        }
+    }
+}
+
+impl MergeProjections {
+    /// Validate without querying a device; returns whether Q/K/V and gate/up run as separate GEMMs.
+    pub fn resolve(self, arch: &Architecture, kernels: Kernels, quantization: Quantization) -> Result<bool, PlanError> {
+        if self == Self::Auto {
+            return Ok(false);
+        }
+        let Architecture::Llama(c) = arch else {
+            return Err(Self::unsupported());
+        };
+        if kernels != Kernels::Fused
+            || quantization != Quantization::None
+            || !matches!(BackendKind::llama(), BackendKind::Cuda | BackendKind::Metal)
+        {
+            return Err(Self::unsupported());
+        }
+        if self == Self::Off && !row_blocks_aligned(c) {
+            return Err(PlanError::Option(
+                "merge-projections off needs 256-byte aligned q/k/v and gate/up row blocks; this model's are not"
+                    .into(),
+            ));
+        }
+        Ok(self == Self::Off)
+    }
+
+    fn unsupported() -> PlanError {
+        PlanError::Option(
+            "explicit merge-projections on/off requires dense fused CUDA or Metal Llama (quantization none)".into(),
+        )
+    }
+}
+
+/// Whether every row block of the combined Q/K/V and gate/up weights starts at a 256-byte aligned offset (cuBLASLt's
+/// default operand alignment) in the two-byte resident storage; false on overflow.
+fn row_blocks_aligned(c: &basal_core::manifest::LlamaConfig) -> bool {
+    let offsets = || -> Option<[usize; 3]> {
+        let row = c.hidden.checked_mul(2)?;
+        let q = c.heads.checked_mul(c.head_dim)?;
+        let kv = c.kv_heads.checked_mul(c.head_dim)?;
+        Some([q.checked_mul(row)?, q.checked_add(kv)?.checked_mul(row)?, c.intermediate.checked_mul(row)?])
+    };
+    offsets().is_some_and(|o| o.iter().all(|b| b % 256 == 0))
+}
+
 /// Placement requested for Gemma's per-layer token table. Absence keeps the historical device path.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -963,6 +1032,8 @@ pub struct ResolvedExecutionPlan {
     gpus: Value,
     ple: crate::PlePlacement,
     prune_readout: bool,
+    /// Merge-projections off on the supported route only ([`MergeProjections::resolve`]); false for every other plan.
+    separate_projections: bool,
     /// Some only for a plan frozen by [`ResolvedExecutionPlan::freeze_cpu`].
     cpu: Option<CpuPlan>,
     /// Some only after [`ResolvedExecutionPlan::with_deterministic`].
@@ -1018,7 +1089,42 @@ impl ResolvedExecutionPlan {
         tables_apply: bool,
         readout_layer: ReadoutLayer,
     ) -> Result<Self, PlanError> {
+        Self::freeze_with_layer_controls(
+            profile,
+            kernel_set,
+            rule,
+            arch,
+            devices,
+            options,
+            table,
+            tables_apply,
+            readout_layer,
+            MergeProjections::Auto,
+        )
+    }
+
+    /// Freeze a plan with explicit layer execution controls, validated before any device query. `Auto` for both is
+    /// identical to [`Self::freeze`]; explicit merge-projections is refused with upstream-bf16-pointwise thinking.
+    #[expect(clippy::too_many_arguments, reason = "the existing freeze inputs and opt-in layer execution controls")]
+    pub fn freeze_with_layer_controls(
+        profile: &str,
+        kernel_set: KernelSet,
+        rule: &DispatchRule,
+        arch: &Architecture,
+        devices: &[usize],
+        options: PlanOptions,
+        table: Option<GemmArtifact>,
+        tables_apply: bool,
+        readout_layer: ReadoutLayer,
+        merge_projections: MergeProjections,
+    ) -> Result<Self, PlanError> {
         let prune_readout = readout_layer.resolve(arch, options.kernels)?;
+        let separate_projections = merge_projections.resolve(arch, options.kernels, options.quantization)?;
+        if merge_projections != MergeProjections::Auto && kernel_set == KernelSet::LlamaThinkBf16V1 {
+            return Err(PlanError::Option(
+                "explicit merge-projections on/off is not implemented with upstream-bf16-pointwise".into(),
+            ));
+        }
         let ple = options.ple.resolve(arch, devices.len() != 1)?;
         if options.ple == PleMode::Host && options.mode == InferenceMode::Balanced {
             return Err(PlanError::Inference(InferenceConfigError::UnsupportedBalanced));
@@ -1103,6 +1209,7 @@ impl ResolvedExecutionPlan {
             gpus: gpus.identity(),
             ple,
             prune_readout,
+            separate_projections,
             cpu: None,
             deterministic: None,
         })
@@ -1152,6 +1259,7 @@ impl ResolvedExecutionPlan {
             gpus: Value::Array(Vec::new()),
             ple,
             prune_readout,
+            separate_projections: false,
             cpu: Some(CpuPlan { work_bytes, gemm_threads: candle_core::utils::get_num_threads() }),
             deterministic: None,
         })
@@ -1244,6 +1352,11 @@ impl ResolvedExecutionPlan {
     pub fn prunes_readout_layer(&self) -> bool {
         self.prune_readout
     }
+    /// Whether Q/K/V and gate/up run as separate GEMMs: true only for merge-projections off on dense fused CUDA/Metal
+    /// Llama with ordinary numerics (checked when the plan is frozen).
+    pub fn separates_projections(&self) -> bool {
+        self.separate_projections
+    }
     pub fn quantization(&self) -> Quantization {
         self.options.quantization
     }
@@ -1298,6 +1411,11 @@ impl ResolvedExecutionPlan {
         if matches!(self.policy, ExecutionPolicy::Llama { .. }) && o.kernels == Kernels::Fused && !self.prune_readout {
             identity["last_layer"] =
                 json!({"schema":"basal-llama-last-layer.1", "rows":"full", "gather":"after_final_norm"});
+        }
+        if self.separate_projections {
+            identity["projections"] = json!({"schema":"basal-llama-projections.1", "qkv":"separate",
+                "gate_up":"separate", "source":"row_views_of_combined_weights",
+                "recombination":"concat_outputs_then_fused_bias"});
         }
         if let Some(cpu) = self.cpu {
             identity["cpu"] = json!({"schema":"basal-cpu-execution.1", "work_bytes":cpu.work_bytes.get(),

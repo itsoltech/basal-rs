@@ -93,6 +93,26 @@ pole per model zamiast flagi CLI. Opcja obejmuje też osobny checkpoint thinking
 `off` zmienia rozmiary GEMM i może zmienić wynik numeryczny; zgodność z FP32
 upstream, zużycie pamięci i wydajność tej ścieżki nie zostały zmierzone.
 
+Gęsta Llama (`quantization: none`) z fused kernels na CUDA/Metal udostępnia
+`--merge-projections auto|on|off` (YAML: `models[].merge_projections`),
+odpowiednik `--merge auto|on|off` upstream. Nazwa nie jest gołym `--merge`,
+bo ta pozostaje dla przyszłego scalania LoRA. `auto` zachowuje dotychczasowe
+wykonanie wszędzie; `on` to istniejące połączone GEMM q/k/v i gate/up, z tym
+samym planem co `auto`. `off` liczy q, k, v, gate i up pięcioma osobnymi GEMM
+na widokach wierszy istniejących połączonych wag (bez kopii wag i zmiany
+loadera), skleja wyniki w pierwotnej kolejności kolumn i dodaje bias w tych
+samych kernelach fused. Jawne `on/off` jest odrzucane przed odkrywaniem GPU
+dla Candle (także w profilu deterministycznym), Intel, Gemma, Qwen, CPU,
+kwantyzacji `q8_0`/`q4_k` i thinking `upstream-bf16-pointwise`; `off` wymaga
+też bloków wierszy wag wyrównanych do 256 B. Opcja obejmuje osobny checkpoint
+thinking, walidowany dla jego własnej konfiguracji. `off` zmienia tożsamość
+planu, opis backendu i kształty GEMM, więc także klucz tabeli: `gemm_table:
+auto` wyszuka tabelę dla nowych kształtów, `basal gemm-search
+--merge-projections off` tworzy ją jawnie, a `pinned` bez takiej wbudowanej
+tabeli jest błędem. Ścieżka torch upstream nie jest odtwarzana dosłownie.
+Zgodność z FP32 upstream, równość bitowa z `on`, zużycie pamięci i wydajność
+`off` nie zostały zmierzone.
+
 - **Wspólny stan liczony raz** — drzewo prefiksów współdzieli obliczenia między pytaniami i żądaniami w partii.
 - **Trzy backendy GPU** — własne kernele CUDA, Metal i Intel Vulkan, bez środowiska Pythona w runtime.
 - **Serwowanie istniejących API** — kontrakt TypeSafe System One i konwencje serwera Basal; kilka modeli w jednym procesie.
@@ -468,7 +488,7 @@ models:
 
 Na CPU odrzucane są: `dtype` inne niż `auto`/`f32`, `inference_mode` inne niż
 `auto`, kwantyzacja, `--kernels` inne niż `candle`, `--readout bf16`, jawne
-`readout_layer`, `ple_placement: host`, `state_cache_mb`, `media`, thinking,
+`readout_layer` i `merge_projections`, `ple_placement: host`, `state_cache_mb`, `media`, thinking,
 early-exit, tabele GEMM inne niż `auto`/`none` (obie oznaczają brak tabeli),
 `device`, `replica_devices`, `layer_split`, trwałe batche w tle
 (`batch_profile`), modele Gemma/Omni i Qwen3.5 oraz `bench` i `benchmark`.

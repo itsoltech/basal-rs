@@ -96,6 +96,9 @@ pub struct ResolvedGemm {
     pub table: Option<GemmArtifact>,
     pub tables_apply: bool,
     pub reproducibility: Reproducibility,
+    /// The projection shape policy the table was resolved and checked for ([`basal_gpu::planned_projection_shapes`]);
+    /// false without a table chosen for shapes.
+    pub separate_projections: bool,
 }
 
 impl ResolvedGemm {
@@ -106,7 +109,7 @@ impl ResolvedGemm {
 
     /// No table and nothing to pin.
     pub fn none(tables_apply: bool) -> Self {
-        Self { table: None, tables_apply, reproducibility: Reproducibility::Adaptive }
+        Self { table: None, tables_apply, reproducibility: Reproducibility::Adaptive, separate_projections: false }
     }
 }
 
@@ -453,6 +456,20 @@ pub fn resolve(
     cache: &Path,
     devices: &[usize],
 ) -> Result<ResolvedGemm> {
+    resolve_for_projections(request, manifest, profile, precision, cache, devices, false)
+}
+
+/// [`resolve`] for the projection shape policy `separate` of the plan (merge-projections off,
+/// [`basal_gpu::planned_projection_shapes`]): coverage, pins, the cache binding and a search use those shapes.
+pub fn resolve_for_projections(
+    request: &TableRequest,
+    manifest: &ModelManifest,
+    profile: &'static Profile,
+    precision: Precision,
+    cache: &Path,
+    devices: &[usize],
+    separate: bool,
+) -> Result<ResolvedGemm> {
     let reproducibility = request.reproducibility();
     let pinned = reproducibility == Reproducibility::Pinned;
     let name = &manifest.name;
@@ -462,7 +479,7 @@ pub fn resolve(
             matches!(request, TableRequest::Auto | TableRequest::None),
             "{name}: Qwen3.5 reference GEMMs support gemm_table auto or none only"
         );
-        return Ok(ResolvedGemm { table: None, tables_apply: false, reproducibility });
+        return Ok(ResolvedGemm { table: None, tables_apply: false, reproducibility, separate_projections: false });
     }
     // The algorithm search and the tables support half precision only; FP32 uses the reference matmul path, and
     // Metal / Intel have no cuBLASLt: nothing to choose or pin.
@@ -474,7 +491,7 @@ pub fn resolve(
         if let TableRequest::Path(p) = request {
             bail!("{name}: GEMM table {} needs the CUDA backend with cuBLASLt and f16 or bf16", crate::term::P(&p));
         }
-        return Ok(ResolvedGemm { table: None, tables_apply: false, reproducibility });
+        return Ok(ResolvedGemm { table: None, tables_apply: false, reproducibility, separate_projections: false });
     };
     // algorithms are checked on every GPU for a reproducible plan, for a table several GPUs share and for Gemma
     // (whose backend accepts only an invariant table of entries in its compute dtype; partial coverage stays allowed)
@@ -494,7 +511,12 @@ pub fn resolve(
             }
         }
         preflight(&snapshot.value, version, devices, algorithms).with_context(context)?;
-        Ok(ResolvedGemm { table: Some(snapshot.artifact(stored, provenance)), tables_apply: true, reproducibility })
+        Ok(ResolvedGemm {
+            table: Some(snapshot.artifact(stored, provenance)),
+            tables_apply: true,
+            reproducibility,
+            separate_projections: separate,
+        })
     };
 
     if let TableRequest::Path(p) = request {
@@ -508,7 +530,7 @@ pub fn resolve(
         return found(stored, snapshot, GemmProvenance::Explicit);
     }
     let gpu = basal_gpu::gpu_name(device)?;
-    let shapes = basal_gpu::architecture_projection_shapes(&manifest.config)?;
+    let shapes = basal_gpu::planned_projection_shapes(&manifest.config, separate)?;
     let usable = |v: &Value| crate::config::table_problem(v, version, &gpu, dtype, &shapes);
     let pinnable = |v: &Value| usable(v).or_else(|| pinned_problem(v, dtype, &shapes));
 
@@ -584,13 +606,19 @@ pub fn resolve(
     // the bundled tables are built in for one cuBLASLt version: a pin missing from this build must not pass silently
     let built = bundled_digests().count();
     if pinned {
-        bail!(
+        let error = anyhow::anyhow!(
             "{name}: `gemm_table: pinned` and profile {} has no table of this build for {gpu} (cuBLASLt {version}, \
              {dtype}, the model's weight shapes, search version {}; {built} tables built in); use `gemm_table: \
              sha256:<digest>` of a verified table or `auto`",
             profile.id,
             basal_gpu::gemm_search_version()
         );
+        if separate {
+            return Err(
+                error.context("merge-projections off needs a table covering its separate q/k/v and gate/up shapes")
+            );
+        }
+        return Err(error);
     }
     if matches!(
         manifest.config,
@@ -599,7 +627,7 @@ pub fn resolve(
         crate::note!(
             "{name}: using fixed per-prompt GEMMs; an invariant table for this GPU can be generated with gemm-search"
         );
-        return Ok(ResolvedGemm { table: None, tables_apply: true, reproducibility });
+        return Ok(ResolvedGemm { table: None, tables_apply: true, reproducibility, separate_projections: separate });
     }
     let (stored, snapshot) = search_and_store(cache, &key, manifest, device)?;
     found(Some(stored), snapshot, GemmProvenance::AdaptiveLocal)

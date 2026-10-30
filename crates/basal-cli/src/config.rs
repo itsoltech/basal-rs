@@ -132,6 +132,10 @@ pub struct ModelConfig {
     /// Last-layer row pruning: auto preserves existing behavior; on/off needs fused CUDA/Metal Llama.
     #[serde(default)]
     pub readout_layer: basal_gpu::ReadoutLayer,
+    /// Projection GEMMs: auto preserves existing behavior; on (combined) or off (separate q/k/v and gate/up) needs
+    /// dense fused CUDA/Metal Llama.
+    #[serde(default)]
+    pub merge_projections: basal_gpu::MergeProjections,
     /// GPU of the model: the CUDA device ordinal, an index among the GPUs visible to the process (after
     /// `CUDA_VISIBLE_DEVICES`; `basal doctor` lists them). Models on one device take turns on it; models on different
     /// devices run at the same time. Metal and Intel: 0 only. Not together with `replica_devices`.
@@ -408,6 +412,10 @@ pub(crate) fn cpu_work(model: &ModelConfig, kernels: Option<&str>, readout: &str
     ensure!(model.quantization == "none", unsupported(format!("quantization {}", model.quantization)));
     ensure!(model.ple_placement == basal_gpu::PleMode::Device, unsupported("host ple_placement".into()));
     ensure!(model.readout_layer == basal_gpu::ReadoutLayer::Auto, unsupported("an explicit readout_layer".into()));
+    ensure!(
+        model.merge_projections == basal_gpu::MergeProjections::Auto,
+        unsupported("an explicit merge_projections".into())
+    );
     ensure!(model.state_cache_mb == 0, unsupported("the state cache (state_cache_mb)".into()));
     ensure!(!model.media, unsupported("media".into()));
     ensure!(

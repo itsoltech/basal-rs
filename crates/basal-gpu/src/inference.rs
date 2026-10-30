@@ -2,7 +2,7 @@
 //! lanes exist.
 
 use crate::plan::{ExecutionPolicy, KernelSet, ResolvedExecutionPlan};
-use crate::{GpuBackend, LlamaNumerics};
+use crate::{GpuBackend, Kernels, LlamaNumerics, Quantization};
 
 /// Attention arithmetic selected before any template or state K/V is computed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,6 +81,13 @@ impl GpuBackend {
             KernelSet::LlamaThinkBf16V1 if self.is_cuda() && self.stages.len() == 1 => LlamaNumerics::ThinkBf16,
             _ => return Err(InferenceConfigError::PlanMismatch("Llama kernel set or placement")),
         };
+        if plan.separates_projections()
+            && (numerics != LlamaNumerics::Ordinary
+                || self.kernels != Kernels::Fused
+                || self.quantization != Quantization::None)
+        {
+            return Err(InferenceConfigError::PlanMismatch("separate projections need dense fused ordinary weights"));
+        }
         #[cfg(feature = "cuda")]
         if numerics == LlamaNumerics::ThinkBf16 && self.stages.iter().any(|s| s.w.get().lt.is_none()) {
             return Err(InferenceConfigError::PlanMismatch("thinking requires cuBLASLt"));
@@ -104,6 +111,7 @@ impl GpuBackend {
         }
         self.numerics = numerics;
         self.prune_readout = plan.prunes_readout_layer();
+        self.separate_projections = plan.separates_projections();
         self.attention_override = attention.kernel_override();
         self.attention_defaults.clone_from(default_kernels);
         Ok(())

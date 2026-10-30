@@ -54,6 +54,9 @@ models:
     inference_mode: auto           # balanced for Basal 2.0 text on RTX 6000 Ada; accurate preserves original attention
     # readout_layer: off           # auto (default), on/off: fused CUDA/Metal Llama only, including separate thinking
     # off computes the full last layer before selecting readout rows; changes GEMM shapes, no FP32/runtime proof.
+    # merge_projections: off       # auto (default), on/off: dense fused CUDA/Metal Llama only, including thinking
+    # off runs separate q/k/v and gate/up GEMMs (upstream --merge off); its table shapes differ (gemm_table auto
+    # searches them, `basal gemm-search --merge-projections off` writes one); no FP32/bitwise/memory/runtime proof.
     # Prompt/calibration options apply after model-file download, before GEMM selection and GPU weight loading,
     # to every replica and long/background fork.
     # Explicit shared CLI flags override these fields even with --config. YAML orders wins over --orders.

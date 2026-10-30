@@ -387,21 +387,24 @@ pub(crate) struct CustomSource {
 
 impl CustomSource {
     /// Resolve `think_gemm_table` for the generic Llama profile and the custom checkpoint's own shapes on `devices`
-    /// (never the base table); `auto` may search, so this runs only after custom validation and admission.
+    /// (never the base table) with its own projection shape policy `separate`; `auto` may search, so this runs only
+    /// after custom validation and admission.
     pub(crate) fn resolve_gemm(
         &mut self,
         manifest: &ModelManifest,
         precision: basal_gpu::Precision,
         cache: &Path,
         devices: &[usize],
+        separate: bool,
     ) -> Result<&ResolvedGemm> {
-        let gemm = crate::gemm_artifact::resolve(
+        let gemm = crate::gemm_artifact::resolve_for_projections(
             &self.verified.gemm_request,
             manifest,
             crate::models::generic_llama_profile(),
             precision,
             cache,
             devices,
+            separate,
         )
         .with_context(|| format!("GEMM table of the custom thinking checkpoint {}", manifest.name))?;
         Ok(self.gemm.insert(gemm))
