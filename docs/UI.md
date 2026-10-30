@@ -15,6 +15,14 @@ i moduły JavaScript, bez kroku budowania, zależności npm i zasobów z innych 
 | Users, API keys | administrator | użytkownicy (tworzenie, hasło, blokada, usunięcie, zużycie quota Batch) i klucze wszystkich użytkowników |
 | System health | administrator; bez `auth` każdy | `/health`, `/health/batches`, `/v1/models` i wybrane metryki `/metrics` (z `--metrics`), odświeżane co 5 s |
 
+![Playground](assets/ui/05-playground.png)
+
+Pozostałe widoki: [logowanie](assets/ui/01-login.png), [użytkownicy](assets/ui/02-admin-users.png),
+[klucze API](assets/ui/03-admin-api-keys.png), [stan systemu](assets/ui/04-admin-health.png),
+[kreator pytań](assets/ui/06-playground-question-builder.png),
+[batche i pliki](assets/ui/07-user-batches-files.png), [własne klucze](assets/ui/08-user-my-keys.png),
+[konto](assets/ui/10-user-account.png).
+
 ## Konfiguracja
 
 ```yaml
