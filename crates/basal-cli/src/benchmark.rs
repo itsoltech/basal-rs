@@ -346,24 +346,20 @@ pub(crate) fn run(model: &ModelArgs, gpu_options: &GpuArgs, options: &Options) -
             identity["requested"] = json!(options.scheduler);
             report["scheduler"] = identity;
         }
-        Some((scheduler, routing))
-    } else {
-        None
-    };
-    if !strict && (options.long_lane.is_some() || options.long_token_basis.is_some()) {
-        // Record before execute so resource/model/startup failures retain the comparable policy identity.
-        report["routing"] = options.routing_policy()?.identity();
-    }
-    if !strict {
-        if let Some(identity) = options.scheduler_policy()?.identity() {
-            report["scheduler"] = identity;
-        }
-    }
-    if strict {
         report["deterministic"] = json!({"requested": basal_gpu::DeterministicProfile::ID,
             "effective": {"request_isolation": "whole_request", "max_batch": 1, "wait_ms": 0, "batch_window_ms": 0,
                 "long_lane": "off", "scheduler": "native", "template_prefix_warmup": false}});
-    }
+        Some((scheduler, routing))
+    } else {
+        if options.long_lane.is_some() || options.long_token_basis.is_some() {
+            // Record before execute so resource/model/startup failures retain the comparable policy identity.
+            report["routing"] = options.routing_policy()?.identity();
+        }
+        if let Some(identity) = options.scheduler_policy()?.identity() {
+            report["scheduler"] = identity;
+        }
+        None
+    };
     let result = execute(model, gpu_options, quantization, options, raw, &mut report, strict_policies);
     if let Err(e) = &result {
         report["reason"] = json!(format!("{e:#}"));
