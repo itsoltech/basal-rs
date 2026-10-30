@@ -1,5 +1,8 @@
 # Raporty
 
+[Konta basal-ui na PostgreSQL, SQL Server i MongoDB](basal-ui-backends-2026-10-30/README.md)
+— migracja 3→4 i API kont na trzech bazach z TLS w Dockerze; bez błędów kodu.
+
 [Interfejs w przeglądarce basal-ui](basal-ui-2026-10-30/README.md)
 — `basal serve --ui`: konta z hasłem i sesją, panel administratora i użytkownika,
 Playground; HTTP z modelem na RTX 4060 i SQLite.
