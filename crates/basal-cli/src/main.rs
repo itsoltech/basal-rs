@@ -195,6 +195,11 @@ struct GpuArgs {
     /// With a serve configuration file, set `readout_layer` per model instead.
     #[arg(long)]
     readout_layer: Option<basal_gpu::ReadoutLayer>,
+    /// Projection GEMMs: auto (current behavior), on (combined q/k/v and gate/up) or off (separate q/k/v and gate/up);
+    /// on/off need dense fused CUDA/Metal Llama. With a serve configuration file, set `merge_projections` per model
+    /// instead.
+    #[arg(long)]
+    merge_projections: Option<basal_gpu::MergeProjections>,
     /// Projection weights: none (default; dense weights of --dtype), q8_0 (8-bit GGML Q8_0 blocks) or q4_k (4-bit GGML
     /// Q4_K blocks), dequantized to f16 per projection: less GPU memory, more work per forward, different numerics;
     /// CUDA with --dtype f16 (auto for Llama) and --kernels fused; Llama models only (Omni is refused). `basal serve`:
@@ -252,6 +257,11 @@ impl GpuArgs {
         config::check_ple_source(basal_gpu::PleMode::Host, self.layer_split.is_some(), &model)
     }
 
+    /// Whether `--merge-projections` is on or off (absent and auto keep every default check and its order).
+    fn explicit_merge(&self) -> bool {
+        self.merge_projections.is_some_and(|m| m != basal_gpu::MergeProjections::Auto)
+    }
+
     /// `--kernels`, else candle with `--backend cpu`, else fused.
     fn kernels(&self) -> &str {
         match (&self.kernels, self.backend) {
@@ -271,6 +281,7 @@ impl GpuArgs {
         model.quantization = self.quantization.clone().unwrap_or_else(|| Quantization::None.as_str().into());
         model.ple_placement = self.ple_placement.unwrap_or_default();
         model.readout_layer = self.readout_layer.unwrap_or_default();
+        model.merge_projections = self.merge_projections.unwrap_or_default();
         model.state_cache_mb = self.state_cache_mb;
         model.media = self.media;
         model.model_options = self.model_options.clone();
@@ -303,11 +314,12 @@ impl GpuArgs {
 
     /// `--layer-split` of `model` against this build's backend, --dtype and --kernels, then its GPUs against the
     /// driver (every ordinal visible, one GPU type), before any download, GEMM table or load. With a custom thinking
-    /// source the GPUs are compared after it is validated and admitted ([`admit_custom_thinking`]).
+    /// source the GPUs are compared after it is validated and admitted ([`admit_custom_thinking`]); with explicit
+    /// merge-projections after the model's and its thinking checkpoint's configurations are validated.
     fn check_layer_split(&self, model: &str) -> Result<()> {
         let Some(split) = &self.layer_split else { return Ok(()) };
         config::check_layer_split(model, split, &self.dtype, self.kernels(), cfg!(feature = "cuda"))?;
-        if self.model_options.custom_thinking() {
+        if self.model_options.custom_thinking() || self.explicit_merge() {
             return Ok(());
         }
         config::check_same_gpus(model, &config::Placement::Split(split.clone()))
@@ -724,6 +736,10 @@ enum Cmd {
         /// CUDA device ordinal to search on (the table is valid for GPUs of its name)
         #[arg(long, default_value_t = 0)]
         device: usize,
+        /// Shapes of the projection GEMMs: auto and on (combined q/k/v and gate/up, the default table) or off
+        /// (separate q/k/v and gate/up, for `--merge-projections off`; dense fused Llama)
+        #[arg(long)]
+        merge_projections: Option<basal_gpu::MergeProjections>,
     },
     /// GEMM micro-benchmark on the projection shapes (diagnostic)
     Gemm {
@@ -878,6 +894,7 @@ fn gpu_engine_at(dir: &Path, g: &GpuArgs, source: &str) -> Result<Engine<GpuBack
 /// Reject unsupported opt-in thinking settings before checkpoint digests or GPU weight loading.
 fn check_thinking_gpu_options(g: &GpuArgs) -> Result<()> {
     check_custom_thinking_options(g)?;
+    check_merge_thinking(g.merge_projections.unwrap_or_default(), &g.model_options)?;
     if g.model_options.think_numerics()? == model_options::ThinkNumerics::Inherit {
         return Ok(());
     }
@@ -889,6 +906,35 @@ fn check_thinking_gpu_options(g: &GpuArgs) -> Result<()> {
         g.layer_split.is_some(),
         reproducibility,
     )
+}
+
+/// Explicit merge-projections with upstream-bf16-pointwise thinking is refused before any checkpoint read; nothing
+/// for auto.
+fn check_merge_thinking(merge: basal_gpu::MergeProjections, options: &model_options::ModelOptions) -> Result<()> {
+    if merge == basal_gpu::MergeProjections::Auto {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        options.think_numerics()? != model_options::ThinkNumerics::UpstreamBf16Pointwise,
+        "merge-projections on/off is not implemented with upstream-bf16-pointwise thinking"
+    );
+    Ok(())
+}
+
+/// Whether merge-projections `merge` runs the Q/K/V and gate/up projections of configuration `arch` (of `model`: a
+/// base or thinking checkpoint) as separate GEMMs with `kernels` and `quantization`, validated without any device
+/// query. Auto is false before any parsing, so the default paths keep their checks and their order.
+fn separate_projections(
+    merge: basal_gpu::MergeProjections,
+    arch: &basal_core::architecture::Architecture,
+    kernels: &str,
+    quantization: Quantization,
+    model: &str,
+) -> Result<bool> {
+    if merge == basal_gpu::MergeProjections::Auto {
+        return Ok(false);
+    }
+    merge.resolve(arch, Kernels::parse(kernels)?, quantization).with_context(|| format!("model {model}"))
 }
 
 /// Whether the base plan of `g` is reproducible: its resolved GEMM table, else its `--gemm-table` request.
@@ -951,6 +997,17 @@ fn admit_custom_thinking(
     Ok(())
 }
 
+/// The GPU comparison of a layer split that explicit merge-projections deferred ([`GpuArgs::check_layer_split`]), after
+/// the model's and its thinking checkpoint's configurations were validated; nothing otherwise, and nothing with a
+/// custom thinking source, whose admission compares them ([`admit_custom_thinking`]).
+fn check_merge_split(g: &GpuArgs, thinking: Option<&model_options::LoadedThinking>, model: &str) -> Result<()> {
+    if !g.explicit_merge() || thinking.is_some_and(|t| t.custom.is_some()) {
+        return Ok(());
+    }
+    let Some(split) = &g.layer_split else { return Ok(()) };
+    config::check_same_gpus(model, &config::Placement::Split(split.clone()))
+}
+
 /// Load the model of `dir` with `g`: resolve its profile, freeze the execution plan (precision, kernels, attention,
 /// GEMM table and fallbacks for the instance's GPUs) before any weight is loaded, load the backend from the plan,
 /// then precompute the template prefixes.
@@ -991,6 +1048,9 @@ fn planned_engine_from_manifest(
     let kernels = Kernels::parse(g.kernels())?;
     let readout_layer = g.readout_layer.unwrap_or_default();
     readout_layer.resolve(&manifest.config, kernels)?;
+    let merge_projections = g.merge_projections.unwrap_or_default();
+    let separate =
+        separate_projections(merge_projections, &manifest.config, g.kernels(), quantization, &manifest.name)?;
     // Before precision/device/GEMM work below, heads are validated from the exact published model.
     if g.model_options.exits_enabled() {
         GpuBackend::check_early_exit(
@@ -1008,9 +1068,21 @@ fn planned_engine_from_manifest(
     }
     // A custom thinking source (validated by load_thinking, always Llama, so the readout-layer rule above holds for it
     // too): its split coverage and admission, before the host-PLE device query, the precision rule and any GEMM table.
+    // Explicit merge-projections validates the thinking checkpoint's own configuration first.
+    let think_separate = match &thinking {
+        Some(t) => separate_projections(
+            merge_projections,
+            &t.manifest.config,
+            g.kernels(),
+            quantization,
+            &format!("{} thinking checkpoint", manifest.name),
+        )?,
+        None => false,
+    };
     if let Some(t) = &thinking {
         admit_custom_thinking(t, g.layer_split.as_ref(), g.device(), &format!("model {}", manifest.name))?;
     }
+    check_merge_split(g, thinking.as_ref(), &format!("model {}", manifest.name))?;
     if ple == basal_gpu::PleMode::Host {
         anyhow::ensure!(
             inference_mode != basal_gpu::InferenceMode::Balanced && g.state_cache_mb == 0,
@@ -1039,15 +1111,23 @@ fn planned_engine_from_manifest(
         config::check_split_coverage(&manifest.name, split, manifest.config.num_layers())?;
     }
     let gemm = match (&g.resolved_gemm, &g.gemm_table) {
-        (Some(resolved), _) => resolved.clone(),
+        (Some(resolved), _) => {
+            anyhow::ensure!(
+                resolved.table.is_none() || resolved.separate_projections == separate,
+                "model {}: GEMM table was resolved for other projection shapes",
+                manifest.name
+            );
+            resolved.clone()
+        }
         // `--gemm-table PATH`, or `pinned` / `sha256:<digest>` / `auto` resolved in the user's GEMM cache
-        (None, Some(value)) => gemm_artifact::resolve(
+        (None, Some(value)) => gemm_artifact::resolve_for_projections(
             &gemm_artifact::TableRequest::parse(&value.to_string_lossy())?,
             &manifest,
             profile,
             precision,
             &config::default_gemm_cache(),
             &g.devices(),
+            separate,
         )?,
         (None, None) => gemm_artifact::ResolvedGemm::none(
             basal_gpu::cublaslt_version().is_some() && precision != basal_gpu::Precision::F32,
@@ -1057,8 +1137,13 @@ fn planned_engine_from_manifest(
     // base table; checked on the instance's GPUs.
     if let Some(model_options::LoadedThinking { manifest: think, custom: Some(custom), .. }) = &mut thinking {
         if custom.gemm.is_none() {
-            custom.resolve_gemm(think, precision, &config::default_gemm_cache(), &g.devices())?;
+            custom.resolve_gemm(think, precision, &config::default_gemm_cache(), &g.devices(), think_separate)?;
         }
+        anyhow::ensure!(
+            custom.gemm.as_ref().is_none_or(|r| r.table.is_none() || r.separate_projections == think_separate),
+            "model {}: the custom thinking GEMM table was resolved for other projection shapes",
+            manifest.name
+        );
         let placement = match &g.layer_split {
             None => config::Placement::Single(g.device()),
             Some(split) => config::Placement::Split(split.clone()),
@@ -1074,7 +1159,7 @@ fn planned_engine_from_manifest(
         reproducibility: gemm.reproducibility,
         ple,
     };
-    let plan = basal_gpu::ResolvedExecutionPlan::freeze_with_readout_layer(
+    let plan = basal_gpu::ResolvedExecutionPlan::freeze_with_layer_controls(
         profile.id,
         profile.kernel_set,
         &profile.dispatch,
@@ -1084,6 +1169,7 @@ fn planned_engine_from_manifest(
         gemm.table.clone(),
         gemm.tables_apply,
         readout_layer,
+        merge_projections,
     )
     .with_context(|| format!("model {} (profile {})", manifest.name, profile.id))?;
     let plan = match strict {
@@ -1116,7 +1202,7 @@ fn planned_engine_from_manifest(
             } else {
                 (think_profile.kernel_set, precision, Readout::F32, think_gemm.table.clone(), think_gemm.tables_apply)
             };
-            let think_plan = basal_gpu::ResolvedExecutionPlan::freeze_with_readout_layer(
+            let think_plan = basal_gpu::ResolvedExecutionPlan::freeze_with_layer_controls(
                 think_profile.id,
                 kernel_set,
                 &think_profile.dispatch,
@@ -1134,6 +1220,7 @@ fn planned_engine_from_manifest(
                 table,
                 tables_apply,
                 readout_layer,
+                merge_projections,
             )?;
             if bf16 || custom.is_some() {
                 crate::note!("{}: thinking execution plan {}", manifest.name, plan_summary(&think_plan));
@@ -1704,6 +1791,11 @@ fn run() -> Result<()> {
                     "--readout-layer applies to --model; with a configuration file set `readout_layer` per model in it"
                 );
                 anyhow::ensure!(
+                    g.merge_projections.is_none(),
+                    "--merge-projections applies to --model; with a configuration file set `merge_projections` per \
+                     model in it"
+                );
+                anyhow::ensure!(
                     g.layer_split.is_none(),
                     "--layer-split applies to --model; with a configuration file set `layer_split` per model in it"
                 );
@@ -1725,6 +1817,7 @@ fn run() -> Result<()> {
                     m.quantization = g.quantization.clone().unwrap_or_else(|| Quantization::None.as_str().into());
                     m.ple_placement = g.ple_placement.unwrap_or_default();
                     m.readout_layer = g.readout_layer.unwrap_or_default();
+                    m.merge_projections = g.merge_projections.unwrap_or_default();
                     m.device = g.device;
                     m.replica_devices.clone_from(&replica_devices);
                     m.layer_split.clone_from(&g.layer_split);
@@ -1838,8 +1931,11 @@ fn run() -> Result<()> {
                 })
                 .collect::<Result<_>>()?;
             // with a custom thinking source in any model, the GPUs are compared only after every custom source is
-            // validated and admitted (below)
+            // validated and admitted (below); with explicit merge_projections in any model, after every model's and
+            // thinking checkpoint's configuration is validated
             let custom_thinking = c.models.iter().any(|m| m.model_options.custom_thinking());
+            let defer_gpu_identity =
+                custom_thinking || c.models.iter().any(|m| m.merge_projections != basal_gpu::MergeProjections::Auto);
             for (m, placement) in c.models.iter().zip(&placements) {
                 if matches!(placement, config::Placement::Replicas(d) if d.len() > 1) {
                     anyhow::ensure!(
@@ -1848,7 +1944,7 @@ fn run() -> Result<()> {
                         config::describe(m)
                     );
                 }
-                if !custom_thinking {
+                if !defer_gpu_identity {
                     config::check_same_gpus(&format!("model {}", config::describe(m)), placement)?;
                 }
             }
@@ -1882,6 +1978,7 @@ fn run() -> Result<()> {
                             matches!(placement, config::Placement::Cpu),
                         )?;
                     }
+                    check_merge_thinking(mc.merge_projections, &mc.model_options)?;
                     mc.model_options.check_think_execution(
                         Kernels::parse(g.kernels())?,
                         mc.quantization.parse()?,
@@ -1892,8 +1989,10 @@ fn run() -> Result<()> {
                     mc.model_options.load_thinking(manifest)
                 })
                 .collect::<Result<_>>()?;
-            // Validate architecture-specific placement and exact layer coverage before any GEMM table or load.
-            for ((mc, manifest), placement) in c.models.iter().zip(&manifests).zip(&placements) {
+            // Validate architecture-specific placement and exact layer coverage before any GEMM table or load; the
+            // projection shape policy of every model and of its thinking checkpoint before any device query.
+            let mut projection_policies = Vec::with_capacity(c.models.len());
+            for (((mc, manifest), placement), t) in c.models.iter().zip(&manifests).zip(&placements).zip(&thinking) {
                 let quantization: Quantization =
                     mc.quantization.parse().with_context(|| format!("model {}", manifest.name))?;
                 if matches!(placement, config::Placement::Cpu) {
@@ -1902,6 +2001,24 @@ fn run() -> Result<()> {
                 config::check_architecture(manifest, quantization, placement.split().is_some())?;
                 mc.ple_placement.resolve(&manifest.config, placement.split().is_some())?;
                 mc.readout_layer.resolve(&manifest.config, Kernels::parse(g.kernels())?)?;
+                let base = separate_projections(
+                    mc.merge_projections,
+                    &manifest.config,
+                    g.kernels(),
+                    quantization,
+                    &manifest.name,
+                )?;
+                let think = match t {
+                    Some(t) => separate_projections(
+                        mc.merge_projections,
+                        &t.manifest.config,
+                        g.kernels(),
+                        quantization,
+                        &format!("{} thinking checkpoint", manifest.name),
+                    )?,
+                    None => false,
+                };
+                projection_policies.push((base, think));
                 if mc.model_options.exits_enabled() {
                     let readout = g.readout()?;
                     GpuBackend::check_early_exit(
@@ -1997,6 +2114,8 @@ fn run() -> Result<()> {
                     let host = think_source::server_host(&instances.iter().map(|(r, _)| *r).collect::<Vec<_>>())?;
                     think_source::admit(host, &instances)?;
                 }
+            }
+            if defer_gpu_identity {
                 for (m, placement) in c.models.iter().zip(&placements) {
                     config::check_same_gpus(&format!("model {}", config::describe(m)), placement)?;
                 }
@@ -2005,7 +2124,8 @@ fn run() -> Result<()> {
             // every device of the model before anything loads; none on the host CPU; a custom thinking checkpoint's
             // own table right after its base model's
             let mut tables = Vec::new();
-            for (((mc, manifest), placement), t) in c.models.iter().zip(&manifests).zip(&placements).zip(&mut thinking)
+            for ((((mc, manifest), placement), t), &(separate, think_separate)) in
+                c.models.iter().zip(&manifests).zip(&placements).zip(&mut thinking).zip(&projection_policies)
             {
                 let Some(device) = placement.first_device() else {
                     tables.push(gemm_artifact::ResolvedGemm::none(false));
@@ -2013,20 +2133,21 @@ fn run() -> Result<()> {
                 };
                 let precision = config::model_precision(&mc.dtype, manifest, device)?;
                 let profile = models::profile_for(manifest);
-                let table = gemm_artifact::resolve(
+                let table = gemm_artifact::resolve_for_projections(
                     &gemm_artifact::TableRequest::parse(&mc.gemm_table)?,
                     manifest,
                     profile,
                     precision,
                     &c.gemm_cache,
                     &placement.instances().iter().flat_map(|i| i.gpus().iter().copied()).collect::<Vec<_>>(),
+                    separate,
                 )?;
                 config::check_table_on_devices(manifest, table.table.as_ref(), placement)?;
                 tables.push(table);
                 if let Some(model_options::LoadedThinking { manifest: think, custom: Some(custom), .. }) = t {
                     let devices: Vec<usize> =
                         placement.instances().iter().flat_map(|i| i.gpus().iter().copied()).collect();
-                    custom.resolve_gemm(think, precision, &c.gemm_cache, &devices)?;
+                    custom.resolve_gemm(think, precision, &c.gemm_cache, &devices, think_separate)?;
                     config::check_table_on_devices(
                         think,
                         custom.gemm.as_ref().and_then(|r| r.table.as_ref()),
@@ -2059,6 +2180,7 @@ fn run() -> Result<()> {
                         backend: None,
                         cpu_work_mb: None,
                         readout_layer: Some(mc.readout_layer),
+                        merge_projections: Some(mc.merge_projections),
                         quantization: Some(mc.quantization.clone()),
                         ple_placement: Some(mc.ple_placement),
                         no_prefix_cache: mc.no_prefix_cache,
@@ -2130,7 +2252,7 @@ fn run() -> Result<()> {
             };
             serve::serve(served, opts)?;
         }
-        Cmd::GemmSearch { m, dtype, out, max_m, m_classes, invariant, device } => {
+        Cmd::GemmSearch { m, dtype, out, max_m, m_classes, invariant, device, merge_projections } => {
             #[cfg(feature = "cuda")]
             {
                 let classes: Vec<usize> = if !m_classes.is_empty() {
@@ -2140,13 +2262,17 @@ fn run() -> Result<()> {
                 } else {
                     (16..=512).step_by(16).chain((640..=max_m).step_by(128)).collect()
                 };
-                let shapes = basal_gpu::architecture_projection_shapes(&ModelManifest::load(&m.dir()?)?.config)?;
+                let config = ModelManifest::load(&m.dir()?)?.config;
+                let separate =
+                    merge_projections.unwrap_or_default().resolve(&config, Kernels::Fused, Quantization::None)?;
+                let shapes = basal_gpu::planned_projection_shapes(&config, separate)?;
                 let t = basal_gpu::gemm_search(&classes, &shapes, &dtype, invariant, device)?;
                 write_json(&out, &t)?;
             }
             #[cfg(not(feature = "cuda"))]
             bail!(
-                "gemm-search needs a CUDA build ({}, {dtype}, {}, {max_m}, {m_classes:?}, {invariant}, {device})",
+                "gemm-search needs a CUDA build ({}, {dtype}, {}, {max_m}, {m_classes:?}, {invariant}, {device}, \
+                 {merge_projections:?})",
                 m.model,
                 out.display()
             );

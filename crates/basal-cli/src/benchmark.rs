@@ -443,17 +443,24 @@ fn execute(
             .transpose()?
     };
     // A custom thinking source: the model files and the verified source, then its split coverage and admission,
-    // before the first device query below; both are reused at their usual place.
-    let custom_thinking = if g.model_options.custom_thinking() {
+    // before the first device query below; both are reused at their usual place. Explicit merge-projections also
+    // reads them here and validates the model's and the thinking checkpoint's configurations, then compares the GPUs
+    // of a split that `GpuArgs::check_layer_split` deferred (a custom source: after its admission).
+    let merge = g.merge_projections.unwrap_or_default();
+    let custom_thinking = if g.model_options.custom_thinking() || g.explicit_merge() {
         let files = match split_files.take() {
             Some(files) => files,
             None => model_files(model, g, report)?,
         };
         crate::check_thinking_gpu_options(g)?;
+        crate::separate_projections(merge, &files.2.config, g.kernels(), quantization, &files.2.name)?;
         let thinking = g.model_options.load_thinking(&files.2)?;
         if let Some(t) = &thinking {
+            let think = format!("{} thinking checkpoint", files.2.name);
+            crate::separate_projections(merge, &t.manifest.config, g.kernels(), quantization, &think)?;
             crate::admit_custom_thinking(t, g.layer_split.as_ref(), g.device(), &model.model)?;
         }
+        crate::check_merge_split(g, thinking.as_ref(), &model.model)?;
         split_files = Some(files);
         Some(thinking)
     } else {
@@ -536,6 +543,7 @@ fn execute(
     // quantization exists for Llama only: an Omni (Gemma) model is refused before the preflight
     crate::config::check_architecture(&manifest, quantization, g.layer_split.is_some())?;
     g.readout_layer.unwrap_or_default().resolve(&manifest.config, basal_gpu::Kernels::parse(g.kernels())?)?;
+    let separate = crate::separate_projections(merge, &manifest.config, g.kernels(), quantization, &manifest.name)?;
     let ple_memory = if g.ple_placement == Some(basal_gpu::PleMode::Host) {
         let memory = GpuBackend::host_ple_memory(&dir, &manifest.config)?;
         let workers = options.routing_policy()?.workers(false);
@@ -649,13 +657,14 @@ fn execute(
     }
     let mut gpu_settings = g.clone();
     let precision = crate::config::model_precision(&config.dtype, &manifest, devices[0])?;
-    let resolved = crate::gemm_artifact::resolve(
+    let resolved = crate::gemm_artifact::resolve_for_projections(
         &crate::gemm_artifact::TableRequest::parse(&config.gemm_table)?,
         &manifest,
         crate::models::profile_for(&manifest),
         precision,
         &crate::config::default_gemm_cache(),
         &devices,
+        separate,
     )?;
     if let Some(split) = &g.layer_split {
         crate::config::check_table_on_devices(

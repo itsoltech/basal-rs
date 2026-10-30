@@ -54,8 +54,8 @@ mod memory;
 pub mod plan;
 pub use plan::{
     AttentionProducts, DeterministicProfile, DeviceDefaultRule, DiagnosticOverrides, DispatchRule, ExecutionBackend,
-    ExecutionPolicy, GemmArtifact, GemmFallback, GemmPolicy, GemmProvenance, KernelSet, PlanError, PlanOptions,
-    PleMode, ReadoutLayer, Reproducibility, ResolvedExecutionPlan,
+    ExecutionPolicy, GemmArtifact, GemmFallback, GemmPolicy, GemmProvenance, KernelSet, MergeProjections, PlanError,
+    PlanOptions, PleMode, ReadoutLayer, Reproducibility, ResolvedExecutionPlan,
 };
 mod quant;
 mod qwen35;
@@ -313,6 +313,26 @@ impl PrefixKv {
 pub fn projection_shapes(c: &LlamaConfig) -> Vec<(usize, usize)> {
     let (h, qd, kvd, i) = (c.hidden, c.heads * c.head_dim, c.kv_heads * c.head_dim, c.intermediate);
     vec![(qd + 2 * kvd, h), (h, qd), (2 * i, h), (h, i)]
+}
+
+/// Weight shapes (N, K) of the projection GEMMs with merge-projections off: q, k, v, o, gate, up and down, sorted and
+/// without duplicates (k = v, gate = up, and q = o when the query width equals the hidden size).
+pub fn separate_projection_shapes(c: &LlamaConfig) -> Vec<(usize, usize)> {
+    let (h, qd, kvd, i) = (c.hidden, c.heads * c.head_dim, c.kv_heads * c.head_dim, c.intermediate);
+    let shapes = [(qd, h), (kvd, h), (kvd, h), (h, qd), (i, h), (i, h), (h, i)];
+    shapes.into_iter().collect::<std::collections::BTreeSet<_>>().into_iter().collect()
+}
+
+/// Weight shapes (N, K) the planned execution runs: [`architecture_projection_shapes`] (in its historical order)
+/// unless `separate` ([`ResolvedExecutionPlan::separates_projections`], Llama only).
+pub fn planned_projection_shapes(
+    cfg: &basal_core::architecture::Architecture,
+    separate: bool,
+) -> Result<Vec<(usize, usize)>> {
+    if separate {
+        return Ok(separate_projection_shapes(cfg.llama()?));
+    }
+    architecture_projection_shapes(cfg)
 }
 
 /// Decoder projection shapes (N, K), including Gemma's per-layer embeddings and separate Q/K/V.
@@ -626,6 +646,8 @@ pub struct GpuBackend {
     kernels: Kernels,
     /// Last-layer row selection, frozen before prefix warmup and copied to lanes.
     prune_readout: bool,
+    /// Merge-projections off: Q/K/V and gate/up as separate GEMMs; fixed before prefix warmup and copied to lanes.
+    separate_projections: bool,
     numerics: LlamaNumerics,
     /// Fixed before prefix warmup and copied to every execution lane.
     attention_override: Option<&'static str>,
@@ -2465,6 +2487,7 @@ impl GpuBackend {
             readout,
             kernels,
             prune_readout: true,
+            separate_projections: false,
             attention_override: None,
             attention_defaults: Vec::new(),
             numerics: LlamaNumerics::Ordinary,
@@ -2599,6 +2622,31 @@ impl GpuBackend {
         }
         #[cfg(not(feature = "cuda"))]
         bail!("thinking BF16 projections require CUDA")
+    }
+
+    /// Merge-projections off: one GEMM per row block `rows` of the resident combined weight `w` (row views, no weight
+    /// copy), the outputs concatenated in block order into the combined layout. The bias stays for the fused
+    /// consumer, as in [`Self::project`].
+    fn project_rows<'b>(
+        &self,
+        sw: &StageWeights,
+        x: &Tensor,
+        w: &ProjWeight,
+        b: &'b Tensor,
+        rows: &[usize],
+    ) -> Result<(Tensor, Option<&'b Tensor>)> {
+        ensure!(self.numerics == LlamaNumerics::Ordinary, "separate projections require ordinary numerics");
+        let w = w.dense().context("separate projections require dense weights")?;
+        let total = rows.iter().try_fold(0usize, |s, &n| s.checked_add(n)).context("projection row blocks overflow")?;
+        ensure!(total == w.dim(0)?, "projection row blocks do not cover the weight");
+        let mut outs = Vec::with_capacity(rows.len());
+        let mut start = 0;
+        for &n in rows {
+            outs.push(self.matmul_t(sw, x, &ProjWeight::Dense(w.narrow(0, start, n)?))?);
+            // within `total`, checked above
+            start += n;
+        }
+        Ok((Tensor::cat(&outs, 1)?, Some(b)))
     }
 
     /// f16 values of resident Q8_0 or Q4_K blocks, on the blocks' own candle device (their stage's, checked at load).
@@ -2957,7 +3005,12 @@ impl GpuBackend {
                 None => rms_norm(&x, &self.w(&ly.ln1)?, eps)?,
             };
             self.mark(dev, t, "rms_norm")?;
-            let (qkv, bias) = self.project(sw, &a, &ly.wqkv, &ly.bqkv)?;
+            let (qkv, bias) = if self.separate_projections {
+                let kvd = c.kv_heads * hd;
+                self.project_rows(sw, &a, &ly.wqkv, &ly.bqkv, &[c.heads * hd, kvd, kvd])?
+            } else {
+                self.project(sw, &a, &ly.wqkv, &ly.bqkv)?
+            };
             self.mark(dev, t, "qkv_proj")?;
             let bias = bias.map(|b| self.w(b)).transpose()?;
             // CUDA tensor-core attention: K and V come split into hi / lo planes from the same kernel
@@ -3095,7 +3148,11 @@ impl GpuBackend {
                 (x, a) = self.residual_norm(dev, &x, &y, bias, &ly.ln2, eps)?;
             }
             self.mark(dev, t, "o_proj+bias+residual+rms_norm")?;
-            let (gu, bias) = self.project(sw, &a, &ly.wgu, &ly.bgu)?;
+            let (gu, bias) = if self.separate_projections {
+                self.project_rows(sw, &a, &ly.wgu, &ly.bgu, &[c.intermediate, c.intermediate])?
+            } else {
+                self.project(sw, &a, &ly.wgu, &ly.bgu)?
+            };
             self.mark(dev, t, "gate_up_proj")?;
             let act = {
                 let bias = bias.map(|b| self.w(b)).transpose()?;
@@ -3450,9 +3507,19 @@ impl GpuBackend {
 }
 
 impl GpuBackend {
-    /// Projection weight shapes (N, K) that the loaded GEMM table does not cover on some stage (CUDA with cuBLASLt;
-    /// empty otherwise). Such shapes use algorithms timed at first use, whose results may depend on the batch.
-    /// Projection shapes for which a background forward of up to `max_m` tokens could reach an M class the
+    /// Weight shapes (N, K) of the projection GEMMs this backend runs (separate ones with merge-projections off).
+    #[cfg(feature = "cuda")]
+    fn gemm_shapes(&self) -> Vec<(usize, usize)> {
+        if self.separate_projections {
+            separate_projection_shapes(&self.cfg)
+        } else {
+            projection_shapes(&self.cfg)
+        }
+    }
+
+    /// Planned projection weight shapes (N, K) that the loaded GEMM table does not cover on some stage (CUDA with
+    /// cuBLASLt; empty otherwise). Such shapes use algorithms timed at first use, whose results may depend on the batch.
+    /// Planned projection shapes for which a background forward of up to `max_m` tokens could reach an M class the
     /// cuBLASLt table does not hold (and so tune at run time). Empty without cuBLASLt (no run-time tuning) and for a
     /// batch-invariant table covering the shape.
     pub fn background_gemm_missing(&self, max_m: usize) -> Vec<(usize, usize)> {
@@ -3461,7 +3528,7 @@ impl GpuBackend {
             let dt = self.precision.compute();
             let mut missing = Vec::new();
             for lt in self.stages.iter().filter_map(|s| s.w.get().lt.as_ref()) {
-                for (n, k) in projection_shapes(&self.cfg) {
+                for (n, k) in self.gemm_shapes() {
                     if !lt.covers_classes(n, k, dt, max_m) && !missing.contains(&(n, k)) {
                         missing.push((n, k));
                     }
@@ -3482,7 +3549,7 @@ impl GpuBackend {
             let dt = self.precision.compute();
             let mut missing = Vec::new();
             for lt in self.stages.iter().filter_map(|s| s.w.get().lt.as_ref()) {
-                for (n, k) in projection_shapes(&self.cfg) {
+                for (n, k) in self.gemm_shapes() {
                     if !lt.covers(n, k, dt) && !missing.contains(&(n, k)) {
                         missing.push((n, k));
                     }
@@ -3938,6 +4005,7 @@ impl GpuBackend {
         let e = u(self.precision.compute().size_in_bytes());
         let w = u(self.precision.storage().size_in_bytes());
         let cuda = self.is_cuda();
+        let separate = self.separate_projections;
         let first = s == 0;
         let last = s + 1 == self.stages.len();
         let mut t = Tally::default();
@@ -3958,6 +4026,11 @@ impl GpuBackend {
         // one layer: carried residual stream and norm, the input norm, qkv projection
         t.add_n(3, prod(&[m, h, e]));
         t.add(prod(&[m, q, e]));
+        if separate {
+            // merge-projections off: the q, k and v GEMM outputs concatenated into the qkv projection above
+            t.add(prod(&[m, nh * hd, e]));
+            t.add_n(2, prod(&[m, nkv * hd, e]));
+        }
         // qkv_rope: the f32 q/k/v buffer; CUDA tensor-core attention also K/V hi/lo f16 planes (4 * NKV*M*HD)
         t.add(prod(&[m, q, 4]));
         if cuda && self.tc_attention() {
@@ -3979,6 +4052,10 @@ impl GpuBackend {
             t.add(prod(&[m, h, 4]));
         }
         t.add(prod(&[m, 2, i, e]));
+        if separate {
+            // merge-projections off: the gate and up GEMM outputs concatenated into the gate/up projection above
+            t.add_n(2, prod(&[m, i, e]));
+        }
         t.add(prod(&[m, i, e]));
         t.add(prod(&[m, h, e]));
         if last {
@@ -4251,22 +4328,23 @@ impl Backend for GpuBackend {
         else {
             return DeviceWorkBound::Unknown("the CPU backend bounds each call by its frozen cpu work ceiling".into());
         };
-        DeviceWorkBound::Estimate(DeviceWorkEstimate {
-            devices,
-            basis: format!(
-                "Llama fused {:?} ({}), quantization {:?}, {} stage(s); forward <= {} tokens, {} readouts, {} letters; \
-                 evidence {:?}; later rounds worst case: {}",
-                self.precision,
-                if self.is_cuda() { self.attention_kernel().unwrap_or("cuda") } else { "metal tree attention" },
-                self.quantization,
-                self.stages.len(),
-                shape.forward_tokens,
-                shape.forward_readouts,
-                shape.forward_letters,
-                shape.evidence.map(|e| e.tokens),
-                shape.worst_case_rounds
-            ),
-        })
+        let mut basis = format!(
+            "Llama fused {:?} ({}), quantization {:?}, {} stage(s); forward <= {} tokens, {} readouts, {} letters; \
+             evidence {:?}; later rounds worst case: {}",
+            self.precision,
+            if self.is_cuda() { self.attention_kernel().unwrap_or("cuda") } else { "metal tree attention" },
+            self.quantization,
+            self.stages.len(),
+            shape.forward_tokens,
+            shape.forward_readouts,
+            shape.forward_letters,
+            shape.evidence.map(|e| e.tokens),
+            shape.worst_case_rounds
+        );
+        if self.separate_projections {
+            basis.push_str("; separate q/k/v and gate/up GEMM outputs plus concatenations");
+        }
+        DeviceWorkBound::Estimate(DeviceWorkEstimate { devices, basis })
     }
 
     fn has_evidence(&self) -> bool {
@@ -4312,6 +4390,7 @@ impl Backend for GpuBackend {
             readout: self.readout,
             kernels: self.kernels,
             prune_readout: self.prune_readout,
+            separate_projections: self.separate_projections,
             attention_override: self.attention_override,
             attention_defaults: self.attention_defaults.clone(),
             numerics: self.numerics,
@@ -4494,6 +4573,15 @@ impl Backend for GpuBackend {
                 "o_proj and MLP of the last layer only at the readout positions"
             } else { "full" },
         });
+        // merge-projections off (never with thinking BF16 numerics); auto and on keep the description above unchanged
+        if self.separate_projections {
+            d["projections"] = "q, k, v and gate, up as separate GEMMs on row views of the combined resident weights; \
+                outputs concatenated before the fused bias kernels"
+                .into();
+            d["kernels"] = "fused: q, k, v and gate, up projections as separate GEMMs without bias, outputs \
+                concatenated; bias added in fused kernels (bias+RoPE+head split, bias+SiLU*up, bias+residual)"
+                .into();
+        }
         if self.numerics == LlamaNumerics::ThinkBf16 {
             d["think_numerics"] = "upstream-bf16-pointwise".into();
             d["activations"] = "BF16 layer boundaries and norm/MLP outputs; f32 interior residual through MLP".into();

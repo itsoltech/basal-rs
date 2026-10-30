@@ -62,6 +62,41 @@ po zapisaniu K/V ostatniej warstwy. Szacunek scratch uwzględnia pełną normali
 bez deklaracji ochrony przed całym OOM procesu. Zmiana rozmiaru GEMM może
 zmienić bity wyniku; brak dowodu runtime, FP32, pamięci lub wydajności.
 
+`MergeProjections` (`--merge-projections`, YAML `merge_projections`; upstream
+`--merge`) steruje GEMM projekcji q/k/v i gate/up. `auto` zwraca politykę
+historyczną bez nowych błędów i bez parsowania; `on` i `off` wymagają Llamy,
+`Kernels::Fused`, `Quantization::None` oraz backendu CUDA/Metal, a `off`
+dodatkowo przesunięć bloków wierszy podzielnych przez 256 B (liczonych
+z kontrolą przepełnienia). Wspierane `on` jest istniejącym wykonaniem z tym
+samym JSON planu. `freeze` i `freeze_with_readout_layer` zachowują API i
+delegują do `freeze_with_layer_controls`, który waliduje opcję przed
+`InstanceGpus::query` i odrzuca jawne `on/off` z thinking BF16. Profil
+deterministyczny wymaga Candle, więc jego zbiór i zbiór `on/off` są rozłączne.
+Plan `off` dodaje klucz `projections` (`basal-llama-projections.1`), a
+`describe` opisuje osobne GEMM, więc zmienia się fingerprint Batch; `auto` i
+`on` zachowują oba bajt po bajcie. `apply_plan` ustawia flagę backendu przed
+cache'ami (tylko dla zwykłej numeryki dense fused), `fork` ją kopiuje.
+`stage_layers` wywołuje wtedy `project_rows`: pięć `matmul_t` na widokach
+`narrow` istniejących `wqkv`/`wgu`, `cat` w kolejności wierszy i niezmienione
+konsumenty biasu. Wagi, loader, Resources T1 i natywne kernele nie zmieniają się.
+Polityka kształtów: `planned_projection_shapes` zwraca dla `auto/on` historyczną
+listę i kolejność, dla `off` posortowane, unikalne q/k/v/o/gate/up/down.
+`resolve_for_projections` używa jej w pokryciu, pinach, `BindingKey`
+i wyszukiwaniu; tabela rozwiązana wcześniej musi mieć tę samą politykę, a
+custom thinking rozwiązuje własną tabelę dla własnej konfiguracji. Pokrycie
+tabeli i tła po stronie backendu idą za tą samą listą. `stage_work` dolicza
+wyjścia osobnych GEMM obok połączonych buforów, a podstawa szacunku dostaje
+sufiks; to szacunki źródłowe, nie pomiar pamięci.
+Wywołujące ścieżki dodają nowe kroki tylko dla jawnego `on/off`: statyczna
+odmowa CPU, odroczenie porównania GPU splitu i walidacja obu konfiguracji
+(bazowej i thinking) przed admission, zapytaniem o pamięć i tabelą GEMM.
+W `serve` z kilkoma modelami jawne `on/off` jednego modelu przesuwa porównania
+GPU wszystkich modeli za walidację plików, tak jak źródło custom thinking.
+`lean` upstream nie ma odpowiednika: natywna ścieżka ma stały przebieg warstw,
+bez kompilacji ani przełączania modułów torch, więc flagi `--lean` nie ma.
+Tree attention i szersze tryby scalania (thinking BF16, kwantyzacja, Candle,
+Intel/Gemma/Qwen) pozostają do dalszych etapów.
+
 Opcjonalny alias wdrożenia (`serve --name` dla jednego modelu albo YAML
 `models[].name`) jest oddzielnym polem `ServedModel`, bez zmiany manifestu.
 Router, metadane, MCP, health i metryki używają tej nazwy; `default_model`
