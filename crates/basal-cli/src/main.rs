@@ -2270,9 +2270,10 @@ fn run() -> Result<()> {
                 write_json(&out, &t)?;
             }
             #[cfg(not(feature = "cuda"))]
+            let _ = merge_projections;
+            #[cfg(not(feature = "cuda"))]
             bail!(
-                "gemm-search needs a CUDA build ({}, {dtype}, {}, {max_m}, {m_classes:?}, {invariant}, {device}, \
-                 {merge_projections:?})",
+                "gemm-search needs a CUDA build ({}, {dtype}, {}, {max_m}, {m_classes:?}, {invariant}, {device})",
                 m.model,
                 out.display()
             );
