@@ -509,6 +509,7 @@ fn load_local(args: &ClientArgs, name: &str) -> Result<basal_core::Engine<crate:
         inference_mode: args.inference_mode.clone(),
         readout: "f32".into(),
         kernels: "fused".into(),
+        readout_layer: None,
         quantization: None,
         ple_placement: None,
         no_prefix_cache: false,

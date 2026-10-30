@@ -52,8 +52,8 @@ mod memory;
 pub mod plan;
 pub use plan::{
     AttentionProducts, DeviceDefaultRule, DiagnosticOverrides, DispatchRule, ExecutionPolicy, GemmArtifact,
-    GemmFallback, GemmPolicy, GemmProvenance, KernelSet, PlanError, PlanOptions, PleMode, Reproducibility,
-    ResolvedExecutionPlan,
+    GemmFallback, GemmPolicy, GemmProvenance, KernelSet, PlanError, PlanOptions, PleMode, ReadoutLayer,
+    Reproducibility, ResolvedExecutionPlan,
 };
 mod quant;
 mod qwen35;
@@ -553,6 +553,8 @@ pub struct GpuBackend {
     precision: Precision,
     readout: Readout,
     kernels: Kernels,
+    /// Last-layer row selection, frozen before prefix warmup and copied to lanes.
+    prune_readout: bool,
     numerics: LlamaNumerics,
     /// Fixed before prefix warmup and copied to every execution lane.
     attention_override: Option<&'static str>,
@@ -2151,6 +2153,7 @@ impl GpuBackend {
             precision,
             readout,
             kernels,
+            prune_readout: true,
             attention_override: None,
             attention_defaults: Vec::new(),
             numerics: LlamaNumerics::Ordinary,
@@ -2762,7 +2765,7 @@ impl GpuBackend {
             // the CUDA tree attention returns merged heads [total, NH * HD] in the forward's dtype
             let mut o = if ragged_cuda { o } else { fused::merge_heads(&o, f.dims, dt)? };
             self.mark(dev, t, "attention")?;
-            if let (true, Some(rt)) = (li + 1 == n_layers, &read_t) {
+            if let (true, Some(rt)) = (self.prune_readout && li + 1 == n_layers, &read_t) {
                 // Only the readout positions are needed after the last attention.
                 o = o.index_select(rt, 0)?;
                 x = x.index_select(rt, 0)?;
@@ -2829,6 +2832,10 @@ impl GpuBackend {
         let out = match normed {
             Some(a) => a,
             None => rms_norm(&x, &self.w(&self.head()?.norm)?, eps)?,
+        };
+        let out = match (self.prune_readout, &read_t) {
+            (false, Some(rt)) => out.index_select(rt, 0)?,
+            _ => out,
         };
         self.mark(dev, t, "final_norm")?;
         Ok((StageOut::Final(Some(out)), captured))
@@ -3684,8 +3691,13 @@ impl GpuBackend {
             t.add(prod(&[largest_projection, 2]));
         }
         if last {
-            // final norm when it was not carried
-            t.add(prod(&[r, h, e]));
+            // final norm when it was not carried; full rows when pruning is disabled
+            let norm_rows = if self.prune_readout { r } else { m };
+            t.add(prod(&[norm_rows, h, e]));
+            if !self.prune_readout {
+                // gather normalized readout rows while the full normalized tensor is still live
+                t.add(prod(&[r, h, e]));
+            }
             match f.evidence {
                 Some(k) => {
                     // evidence head: f32 hidden rows, both normalisations, and per side three products and the
@@ -3985,6 +3997,7 @@ impl Backend for GpuBackend {
             precision: self.precision,
             readout: self.readout,
             kernels: self.kernels,
+            prune_readout: self.prune_readout,
             attention_override: self.attention_override,
             attention_defaults: self.attention_defaults.clone(),
             numerics: self.numerics,
@@ -4158,10 +4171,9 @@ impl Backend for GpuBackend {
             "gemm": if cuda { self.gemm_desc() } else { "MLX steel GEMM (candle); 32-row tiles when M mod 64 is in 1..=32 and M <= 600" },
             "prefix_kv": self.prefixes.iter().filter(|p| p.pinned).map(|p| p.ids.len()).collect::<Vec<_>>(),
             "state_cache_bytes": self.state_cache_bytes,
-            "last_layer": match self.kernels {
-                Kernels::Fused => "o_proj and MLP of the last layer only at the readout positions",
-                Kernels::Candle => "full",
-            },
+            "last_layer": if self.kernels == Kernels::Fused && self.prune_readout {
+                "o_proj and MLP of the last layer only at the readout positions"
+            } else { "full" },
         });
         if self.numerics == LlamaNumerics::ThinkBf16 {
             d["think_numerics"] = "upstream-bf16-pointwise".into();

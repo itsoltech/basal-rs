@@ -125,6 +125,9 @@ pub struct ModelConfig {
     /// Per-layer token table: device by default; host needs single-device CUDA Gemma with PLE.
     #[serde(default)]
     pub ple_placement: basal_gpu::PleMode,
+    /// Last-layer row pruning: auto preserves existing behavior; on/off needs fused CUDA/Metal Llama.
+    #[serde(default)]
+    pub readout_layer: basal_gpu::ReadoutLayer,
     /// GPU of the model: the CUDA device ordinal, an index among the GPUs visible to the process (after
     /// `CUDA_VISIBLE_DEVICES`; `basal doctor` lists them). Models on one device take turns on it; models on different
     /// devices run at the same time. Metal and Intel: 0 only. Not together with `replica_devices`.

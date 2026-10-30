@@ -52,6 +52,8 @@ models:
     gemm_table: reports/rust-cuda-1.5-max/gemm-equiv/gemm-algos-f16-invariant-groups.json
     dtype: f16                     # f16 (default), bf16, f32
     inference_mode: auto           # balanced for Basal 2.0 text on RTX 6000 Ada; accurate preserves original attention
+    # readout_layer: off           # auto (default), on/off: fused CUDA/Metal Llama only, including separate thinking
+    # off computes the full last layer before selecting readout rows; changes GEMM shapes, no FP32/runtime proof.
     # Prompt/calibration options apply after model-file download, before GEMM selection and GPU weight loading,
     # to every replica and long/background fork.
     # Explicit shared CLI flags override these fields even with --config. YAML orders wins over --orders.

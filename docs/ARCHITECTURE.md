@@ -45,6 +45,23 @@ GPU. Source/load estimates oraz ich granice: [OMNI.md](OMNI.md#tabela-ple-w-ram-
 `serve` buduje metadane z silnika, a planer batchy z jego sklonowanego manifestu.
 API pokazuje ostrzeżenie kalibracji bez lokalnych ścieżek i tożsamości.
 
+`ReadoutLayer` (`--readout-layer`, YAML `readout_layer`) steruje wyborem wierszy
+ostatniej warstwy fused Llamy na CUDA/Metal. `auto` zachowuje historyczną ścieżkę
+i JSON planu; `on` wybiera tę samą ścieżkę. `off` zachowuje pełne wiersze przez
+o_proj, MLP i końcową normalizację, a potem wybiera pozycje odczytu w ich
+dotychczasowej kolejności. Nowa wersjonowana polityka `last_layer` w planie
+oraz rzeczywisty opis backendu rozróżniają tę ścieżkę w fingerprintach Batch.
+`Readout::F32/Bf16Rounded` nadal steruje wyłącznie zaokrąglaniem odczytu.
+Istniejące `PlanOptions` i `freeze` zachowują API; opt-in używa
+`freeze_with_readout_layer`. Plan i CLI walidują jawne `on/off` przed
+odkrywaniem GPU/GEMM, gdy znana jest architektura; Candle/Intel/Gemma/Qwen
+obsługują wyłącznie `auto`. Opcja obowiązuje też w planie osobnego thinking.
+Efektywna polityka jest stosowana przed cache'ami i kopiowana do forków.
+Split wybiera wiersze na ostatnim stage'u; capture-only zachowuje wyjście
+po zapisaniu K/V. Szacunek scratch uwzględnia pełną normalizację i późny gather,
+bez deklaracji ochrony przed całym OOM procesu. Zmiana rozmiaru GEMM może
+zmienić bity wyniku; brak dowodu runtime, FP32, pamięci lub wydajności.
+
 Opcjonalny alias wdrożenia (`serve --name` dla jednego modelu albo YAML
 `models[].name`) jest oddzielnym polem `ServedModel`, bez zmiany manifestu.
 Router, metadane, MCP, health i metryki używają tej nazwy; `default_model`

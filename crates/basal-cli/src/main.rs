@@ -164,6 +164,10 @@ struct GpuArgs {
     /// Decoder kernels: fused (default) or candle (stock candle ops, first port; for comparison)
     #[arg(long, default_value = "fused")]
     kernels: String,
+    /// Last-layer row pruning: auto (current behavior), on or off (fused CUDA/Metal Llama).
+    /// With a serve configuration file, set `readout_layer` per model instead.
+    #[arg(long)]
+    readout_layer: Option<basal_gpu::ReadoutLayer>,
     /// Projection weights: none (default; dense weights of --dtype), q8_0 (8-bit GGML Q8_0 blocks) or q4_k (4-bit GGML
     /// Q4_K blocks), dequantized to f16 per projection: less GPU memory, more work per forward, different numerics;
     /// CUDA with --dtype f16 (auto for Llama) and --kernels fused; Llama models only (Omni is refused). `basal serve`:
@@ -815,6 +819,8 @@ fn planned_engine_from_manifest(
     let readout = g.readout()?;
     let profile = models::profile_for(&manifest);
     let kernels = Kernels::parse(&g.kernels)?;
+    let readout_layer = g.readout_layer.unwrap_or_default();
+    readout_layer.resolve(&manifest.config, kernels)?;
     // Before precision/device/GEMM work below, heads are validated from the exact published model.
     if g.model_options.exits_enabled() {
         GpuBackend::check_early_exit(
@@ -881,7 +887,7 @@ fn planned_engine_from_manifest(
         reproducibility: gemm.reproducibility,
         ple,
     };
-    let plan = basal_gpu::ResolvedExecutionPlan::freeze(
+    let plan = basal_gpu::ResolvedExecutionPlan::freeze_with_readout_layer(
         profile.id,
         profile.kernel_set,
         &profile.dispatch,
@@ -890,6 +896,7 @@ fn planned_engine_from_manifest(
         options,
         gemm.table.clone(),
         gemm.tables_apply,
+        readout_layer,
     )
     .with_context(|| format!("model {} (profile {})", manifest.name, profile.id))?;
     crate::note!("{}: execution plan {}", manifest.name, plan_summary(&plan));
@@ -907,7 +914,7 @@ fn planned_engine_from_manifest(
             } else {
                 (think_profile.kernel_set, precision, Readout::F32, gemm.table.clone(), gemm.tables_apply)
             };
-            let think_plan = basal_gpu::ResolvedExecutionPlan::freeze(
+            let think_plan = basal_gpu::ResolvedExecutionPlan::freeze_with_readout_layer(
                 think_profile.id,
                 kernel_set,
                 &think_profile.dispatch,
@@ -924,6 +931,7 @@ fn planned_engine_from_manifest(
                 },
                 table,
                 tables_apply,
+                readout_layer,
             )?;
             if bf16 {
                 crate::note!("{}: thinking execution plan {}", manifest.name, plan_summary(&think_plan));
@@ -1387,6 +1395,10 @@ fn run() -> Result<()> {
                     "--ple-placement applies to --model; with a configuration file set `ple_placement` per model in it"
                 );
                 anyhow::ensure!(
+                    g.readout_layer.is_none(),
+                    "--readout-layer applies to --model; with a configuration file set `readout_layer` per model in it"
+                );
+                anyhow::ensure!(
                     g.layer_split.is_none(),
                     "--layer-split applies to --model; with a configuration file set `layer_split` per model in it"
                 );
@@ -1399,6 +1411,7 @@ fn run() -> Result<()> {
                     m.inference_mode = g.inference_mode.clone();
                     m.quantization = g.quantization.clone().unwrap_or_else(|| Quantization::None.as_str().into());
                     m.ple_placement = g.ple_placement.unwrap_or_default();
+                    m.readout_layer = g.readout_layer.unwrap_or_default();
                     m.device = g.device;
                     m.replica_devices.clone_from(&replica_devices);
                     m.layer_split.clone_from(&g.layer_split);
@@ -1514,6 +1527,7 @@ fn run() -> Result<()> {
                     mc.quantization.parse().with_context(|| format!("model {}", manifest.name))?;
                 config::check_architecture(manifest, quantization, placement.split().is_some())?;
                 mc.ple_placement.resolve(&manifest.config, placement.split().is_some())?;
+                mc.readout_layer.resolve(&manifest.config, Kernels::parse(&g.kernels)?)?;
                 if mc.model_options.exits_enabled() {
                     let readout = g.readout()?;
                     GpuBackend::check_early_exit(
@@ -1605,6 +1619,7 @@ fn run() -> Result<()> {
                         inference_mode: mc.inference_mode.clone(),
                         readout: g.readout.clone(),
                         kernels: g.kernels.clone(),
+                        readout_layer: Some(mc.readout_layer),
                         quantization: Some(mc.quantization.clone()),
                         ple_placement: Some(mc.ple_placement),
                         no_prefix_cache: mc.no_prefix_cache,

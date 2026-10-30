@@ -100,6 +100,7 @@ impl GpuBackend {
             self.rope = rope.into();
         }
         self.numerics = numerics;
+        self.prune_readout = plan.prunes_readout_layer();
         self.attention_override = attention.kernel_override();
         self.attention_defaults.clone_from(default_kernels);
         Ok(())

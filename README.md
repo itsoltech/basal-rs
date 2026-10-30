@@ -84,6 +84,15 @@ Gemma z PLE może jawnie trzymać tabelę tokenów w RAM hosta:
 `ple_placement: host`. Domyślnie pozostaje `device`. Warunki, rachunek pamięci
 i brak kwalifikacji runtime tej opcji opisuje [OMNI.md](docs/OMNI.md#tabela-ple-w-ram-hosta-opt-in).
 
+Llama z fused kernels na CUDA/Metal udostępnia `--readout-layer auto|on|off`
+(YAML: `models[].readout_layer`). `auto` zachowuje dotychczasowe wykonanie;
+`on` liczy ostatnie o_proj i MLP tylko dla pozycji odczytu, a `off` liczy pełną
+ostatnią warstwę i wybiera wiersze po końcowej normalizacji. Jawne `on/off`
+jest odrzucane dla Candle, Intel, Gemma i Qwen. Przy pliku konfiguracji ustaw
+pole per model zamiast flagi CLI. Opcja obejmuje też osobny checkpoint thinking.
+`off` zmienia rozmiary GEMM i może zmienić wynik numeryczny; zgodność z FP32
+upstream, zużycie pamięci i wydajność tej ścieżki nie zostały zmierzone.
+
 - **Wspólny stan liczony raz** — drzewo prefiksów współdzieli obliczenia między pytaniami i żądaniami w partii.
 - **Trzy backendy GPU** — własne kernele CUDA, Metal i Intel Vulkan, bez środowiska Pythona w runtime.
 - **Serwowanie istniejących API** — kontrakt TypeSafe System One i konwencje serwera Basal; kilka modeli w jednym procesie.

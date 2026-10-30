@@ -22,6 +22,45 @@ use crate::{InferenceConfigError, InferenceMode, Kernels, Precision, Quantizatio
 /// Schema of [`ResolvedExecutionPlan::identity`].
 pub const PLAN_SCHEMA: &str = "basal-execution-plan.2";
 
+/// Whether fused Llama computes the last projection and MLP only at readout positions.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadoutLayer {
+    /// Keep the backend's historical behavior.
+    #[default]
+    Auto,
+    /// Gather rows before the last output projection and MLP (fused CUDA/Metal Llama).
+    On,
+    /// Compute the full last layer, then gather normalized rows (fused CUDA/Metal Llama).
+    Off,
+}
+
+impl std::str::FromStr for ReadoutLayer {
+    type Err = PlanError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "auto" => Ok(Self::Auto),
+            "on" => Ok(Self::On),
+            "off" => Ok(Self::Off),
+            _ => Err(PlanError::Option(format!("unknown readout-layer mode {value:?} (auto, on, off)"))),
+        }
+    }
+}
+
+impl ReadoutLayer {
+    /// Validate without querying a device; returns the effective last-layer pruning policy.
+    pub fn resolve(self, arch: &Architecture, kernels: Kernels) -> Result<bool, PlanError> {
+        let fused_llama = matches!(arch, Architecture::Llama(_)) && kernels == Kernels::Fused;
+        if self != Self::Auto
+            && !(fused_llama && matches!(BackendKind::llama(), BackendKind::Cuda | BackendKind::Metal))
+        {
+            return Err(PlanError::Option("explicit readout-layer on/off requires fused CUDA or Metal Llama".into()));
+        }
+        Ok(fused_llama && self != Self::Off)
+    }
+}
+
 /// Placement requested for Gemma's per-layer token table. Absence keeps the historical device path.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -807,6 +846,7 @@ pub struct ResolvedExecutionPlan {
     overrides: DiagnosticOverrides,
     gpus: Value,
     ple: crate::PlePlacement,
+    prune_readout: bool,
 }
 
 impl ResolvedExecutionPlan {
@@ -824,6 +864,33 @@ impl ResolvedExecutionPlan {
         table: Option<GemmArtifact>,
         tables_apply: bool,
     ) -> Result<Self, PlanError> {
+        Self::freeze_with_readout_layer(
+            profile,
+            kernel_set,
+            rule,
+            arch,
+            devices,
+            options,
+            table,
+            tables_apply,
+            ReadoutLayer::Auto,
+        )
+    }
+
+    /// Freeze a plan with explicit last-layer row selection. `Auto` is identical to [`Self::freeze`].
+    #[expect(clippy::too_many_arguments, reason = "the existing freeze inputs and an opt-in row-selection policy")]
+    pub fn freeze_with_readout_layer(
+        profile: &str,
+        kernel_set: KernelSet,
+        rule: &DispatchRule,
+        arch: &Architecture,
+        devices: &[usize],
+        options: PlanOptions,
+        table: Option<GemmArtifact>,
+        tables_apply: bool,
+        readout_layer: ReadoutLayer,
+    ) -> Result<Self, PlanError> {
+        let prune_readout = readout_layer.resolve(arch, options.kernels)?;
         let ple = options.ple.resolve(arch, devices.len() != 1)?;
         if options.ple == PleMode::Host && options.mode == InferenceMode::Balanced {
             return Err(PlanError::Inference(InferenceConfigError::UnsupportedBalanced));
@@ -907,6 +974,7 @@ impl ResolvedExecutionPlan {
             overrides: DiagnosticOverrides::process().clone(),
             gpus: gpus.identity(),
             ple,
+            prune_readout,
         })
     }
 
@@ -931,6 +999,10 @@ impl ResolvedExecutionPlan {
     }
     pub fn kernels(&self) -> Kernels {
         self.options.kernels
+    }
+    /// Whether the final output projection and MLP operate only on readout rows.
+    pub fn prunes_readout_layer(&self) -> bool {
+        self.prune_readout
     }
     pub fn quantization(&self) -> Quantization {
         self.options.quantization
@@ -982,6 +1054,10 @@ impl ResolvedExecutionPlan {
         // Keep default plan JSON and all existing fingerprint inputs byte-for-byte unchanged.
         if let crate::PlePlacement::Host { max_staging_bytes } = self.ple {
             identity["ple"] = json!({"placement":"host", "max_staging_bytes_per_call":max_staging_bytes});
+        }
+        if matches!(self.policy, ExecutionPolicy::Llama { .. }) && o.kernels == Kernels::Fused && !self.prune_readout {
+            identity["last_layer"] =
+                json!({"schema":"basal-llama-last-layer.1", "rows":"full", "gather":"after_final_norm"});
         }
         identity
     }
