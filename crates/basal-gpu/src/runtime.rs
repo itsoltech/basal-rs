@@ -214,7 +214,7 @@ impl RuntimeBackend {
         );
         let (precision, readout, kernels, quantization) =
             (plan.precision(), plan.readout(), plan.kernels(), plan.quantization());
-        let mut backend = match placement {
+        let backend = match placement {
             PlannedPlacement::Single(device) => {
                 if let crate::PlePlacement::Host { .. } = plan.ple_placement() {
                     let Architecture::Gemma4(c) = cfg else { unreachable!("validated host PLE family") };
@@ -248,6 +248,63 @@ impl RuntimeBackend {
                 )?))
             }
         };
+        Self::finish_planned(backend, plan)
+    }
+
+    /// Load a custom thinking checkpoint from its operator-verified `inventory` like [`RuntimeBackend::load_planned`]:
+    /// dense Llama on the CUDA or Metal Llama backend, one GPU or a layer split, text only, no evidence head. A CPU
+    /// placement or plan, the Intel backend, host PLE or quantization is refused before any device is touched.
+    pub fn load_planned_verified(
+        inventory: &basal_core::checkpoint::Inventory,
+        cfg: &Architecture,
+        plan: &ResolvedExecutionPlan,
+        placement: PlannedPlacement<'_>,
+    ) -> Result<(Self, Option<usize>)> {
+        let Architecture::Llama(c) = cfg else { anyhow::bail!("custom thinking checkpoints load as Llama only") };
+        anyhow::ensure!(
+            !crate::INTEL_BACKEND && !matches!(placement, PlannedPlacement::Cpu) && plan.cpu_work_bytes().is_none(),
+            "custom thinking needs the CUDA or Metal Llama backend"
+        );
+        anyhow::ensure!(
+            !matches!(plan.ple_placement(), crate::PlePlacement::Host { .. }),
+            "frozen PLE placement does not match the loaded architecture"
+        );
+        anyhow::ensure!(plan.quantization() == Quantization::None, "custom thinking supports quantization none");
+        #[cfg(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos")))]
+        {
+            let _ = (inventory, c);
+            anyhow::bail!("custom thinking needs the CUDA or Metal Llama backend")
+        }
+        #[cfg(not(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos"))))]
+        {
+            let (precision, readout, kernels) = (plan.precision(), plan.readout(), plan.kernels());
+            let backend = match placement {
+                PlannedPlacement::Single(device) => crate::GpuBackend::load_unplanned_verified(
+                    inventory,
+                    c,
+                    precision,
+                    readout,
+                    kernels,
+                    Quantization::None,
+                    device,
+                )?,
+                PlannedPlacement::Split(split) => crate::GpuBackend::load_split_unplanned_verified(
+                    inventory,
+                    c,
+                    precision,
+                    readout,
+                    kernels,
+                    Quantization::None,
+                    split,
+                )?,
+                PlannedPlacement::Cpu => anyhow::bail!("custom thinking needs the CUDA or Metal Llama backend"),
+            };
+            Self::finish_planned(Self::Llama(Box::new(backend)), plan)
+        }
+    }
+
+    /// The common tail of the planned loaders: apply the plan's execution policy, then load its GEMM table.
+    fn finish_planned(mut backend: Self, plan: &ResolvedExecutionPlan) -> Result<(Self, Option<usize>)> {
         backend.apply_plan(plan)?;
         let classes = match &plan.gemm().table {
             Some(table) => Some(backend.load_gemm_table(

@@ -938,7 +938,8 @@ pub fn cached_model_dir(repo: &str, revision: Option<&str>) -> Option<PathBuf> {
 /// missing; a cached snapshot is used when the Hub cannot be reached).
 pub fn model_dir(m: &ModelConfig) -> Result<PathBuf> {
     m.model_options.validate()?;
-    let thinking = m.model_options.thinking_enabled()?;
+    // the published think/ pair only; a custom think_source is read from its own local directory, never fetched
+    let thinking = m.model_options.shipped_thinking()?;
     let exits = m.model_options.exits_enabled();
     if exits && m.repo.is_some() {
         ensure!(

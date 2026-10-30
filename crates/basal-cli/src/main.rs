@@ -38,6 +38,7 @@ mod serve;
 mod setup;
 mod stats;
 mod term;
+mod think_source;
 mod uninstall;
 mod update;
 
@@ -300,10 +301,14 @@ impl GpuArgs {
     }
 
     /// `--layer-split` of `model` against this build's backend, --dtype and --kernels, then its GPUs against the
-    /// driver (every ordinal visible, one GPU type), before any download, GEMM table or load.
+    /// driver (every ordinal visible, one GPU type), before any download, GEMM table or load. With a custom thinking
+    /// source the GPUs are compared after it is validated and admitted ([`admit_custom_thinking`]).
     fn check_layer_split(&self, model: &str) -> Result<()> {
         let Some(split) = &self.layer_split else { return Ok(()) };
         config::check_layer_split(model, split, &self.dtype, self.kernels(), cfg!(feature = "cuda"))?;
+        if self.model_options.custom_thinking() {
+            return Ok(());
+        }
         config::check_same_gpus(model, &config::Placement::Split(split.clone()))
     }
 
@@ -803,6 +808,10 @@ fn planning_engine(
             t.calibration_label,
             t.sources,
         )?);
+        // a custom source's files still have the stamps of their verification
+        if let Some(custom) = &t.custom {
+            custom.verified.fence()?;
+        }
     }
     engine.set_auto_orders(options.auto_orders()?);
     engine.set_context_overflow(options.overflow()?);
@@ -838,16 +847,11 @@ fn gpu_engine_at(dir: &Path, g: &GpuArgs, source: &str) -> Result<Engine<GpuBack
 
 /// Reject unsupported opt-in thinking settings before checkpoint digests or GPU weight loading.
 fn check_thinking_gpu_options(g: &GpuArgs) -> Result<()> {
+    check_custom_thinking_options(g)?;
     if g.model_options.think_numerics()? == model_options::ThinkNumerics::Inherit {
         return Ok(());
     }
-    let reproducibility = match &g.resolved_gemm {
-        Some(gemm) => gemm.reproducibility,
-        None => gemm_artifact::TableRequest::parse(
-            &g.gemm_table.as_ref().map(|p| p.to_string_lossy()).unwrap_or("none".into()),
-        )?
-        .reproducibility(),
-    };
+    let reproducibility = base_reproducibility(g)?;
     g.model_options.check_think_execution(
         Kernels::parse(g.kernels())?,
         g.quantization.as_deref().unwrap_or("none").parse()?,
@@ -855,6 +859,66 @@ fn check_thinking_gpu_options(g: &GpuArgs) -> Result<()> {
         g.layer_split.is_some(),
         reproducibility,
     )
+}
+
+/// Whether the base plan of `g` is reproducible: its resolved GEMM table, else its `--gemm-table` request.
+fn base_reproducibility(g: &GpuArgs) -> Result<basal_gpu::Reproducibility> {
+    Ok(match &g.resolved_gemm {
+        Some(gemm) => gemm.reproducibility,
+        None => gemm_artifact::TableRequest::parse(
+            &g.gemm_table.as_ref().map(|p| p.to_string_lossy()).unwrap_or("none".into()),
+        )?
+        .reproducibility(),
+    })
+}
+
+/// The custom thinking refusals of one instance with `g` (CPU backend, quantization, reproducibility, media) before
+/// its descriptor is read; nothing without `think_source`.
+fn check_custom_thinking_options(g: &GpuArgs) -> Result<()> {
+    if !g.model_options.custom_thinking() {
+        return Ok(());
+    }
+    g.model_options.check_custom_think_execution(
+        g.quantization.as_deref().unwrap_or("none").parse()?,
+        g.media,
+        base_reproducibility(g)?,
+        false,
+        g.backend == Some(basal_gpu::ExecutionBackend::Cpu),
+    )
+}
+
+/// A custom thinking checkpoint whose layer count `layers` the layer split `split` does not cover.
+fn check_custom_split(split: &LayerSplit, layers: usize) -> Result<()> {
+    split.ranges(layers).with_context(|| {
+        format!("custom thinking checkpoint has {layers} layers; layer_split {split} does not cover them")
+    })?;
+    Ok(())
+}
+
+/// Custom thinking of one instance of `model` on `split` or `device`, after its source was validated: coverage of its
+/// own layers by the split, host then device admission (the first device query of the custom path), then the deferred
+/// GPU identity check of a split; before any precision rule, GEMM table or load. Nothing for the published pair.
+fn admit_custom_thinking(
+    t: &model_options::LoadedThinking,
+    split: Option<&LayerSplit>,
+    device: usize,
+    model: &str,
+) -> Result<()> {
+    let Some(custom) = &t.custom else { return Ok(()) };
+    let layers = t.manifest.config.num_layers();
+    let stages = match split {
+        None => vec![(device, 0..layers)],
+        Some(split) => {
+            check_custom_split(split, layers)?;
+            split.devices().into_iter().zip(split.ranges(layers)?).collect()
+        }
+    };
+    let resources = &custom.verified.resources;
+    think_source::admit(resources.host_instance()?, &[(resources, stages)])?;
+    if let Some(split) = split {
+        config::check_same_gpus(model, &config::Placement::Split(split.clone()))?;
+    }
+    Ok(())
 }
 
 /// Load the model of `dir` with `g`: resolve its profile, freeze the execution plan (precision, kernels, attention,
@@ -869,9 +933,10 @@ fn planned_engine_at(dir: &Path, g: &GpuArgs, source: &str) -> Result<PlannedEng
 
 fn planned_engine_from_manifest(
     manifest: ModelManifest,
-    thinking: Option<model_options::LoadedThinking>,
+    mut thinking: Option<model_options::LoadedThinking>,
     g: &GpuArgs,
 ) -> Result<PlannedEngine> {
+    check_custom_thinking_options(g)?;
     if g.backend == Some(basal_gpu::ExecutionBackend::Cpu) {
         return cpu_engine_from_manifest(manifest, thinking, g);
     }
@@ -904,6 +969,14 @@ fn planned_engine_from_manifest(
     let exits = g.model_options.load_exits(&manifest)?;
     if let Some(artifacts) = &exits {
         GpuBackend::early_exit_resident_bytes(artifacts, &manifest.config)?;
+    }
+    // A custom thinking source (validated by load_thinking): its readout-layer rule, split coverage and admission,
+    // before the host-PLE device query, the precision rule and any GEMM table.
+    if let Some(t) = &thinking {
+        if t.custom.is_some() {
+            readout_layer.resolve(&t.manifest.config, kernels)?;
+        }
+        admit_custom_thinking(t, g.layer_split.as_ref(), g.device(), &format!("model {}", manifest.name))?;
     }
     if ple == basal_gpu::PleMode::Host {
         anyhow::ensure!(
@@ -947,6 +1020,18 @@ fn planned_engine_from_manifest(
             basal_gpu::cublaslt_version().is_some() && precision != basal_gpu::Precision::F32,
         ),
     };
+    // A custom thinking checkpoint has its own table for its own shapes (resolved here unless serve did), never the
+    // base table; checked on the instance's GPUs.
+    if let Some(model_options::LoadedThinking { manifest: think, custom: Some(custom), .. }) = &mut thinking {
+        if custom.gemm.is_none() {
+            custom.resolve_gemm(think, precision, &config::default_gemm_cache(), &g.devices())?;
+        }
+        let placement = match &g.layer_split {
+            None => config::Placement::Single(g.device()),
+            Some(split) => config::Placement::Split(split.clone()),
+        };
+        config::check_table_on_devices(think, custom.gemm.as_ref().and_then(|r| r.table.as_ref()), &placement)?;
+    }
     let options = basal_gpu::PlanOptions {
         mode: inference_mode,
         precision,
@@ -975,13 +1060,22 @@ fn planned_engine_from_manifest(
     };
     let thinking = thinking
         .map(|mut t| {
-            let think_profile = models::profile_for(&t.manifest);
+            let custom = t.custom.take();
+            // a custom checkpoint: the generic Llama profile (never a catalog profile by its basal.json name) and its
+            // own GEMM table
+            let (think_profile, think_gemm) = match &custom {
+                None => (models::profile_for(&t.manifest), &gemm),
+                Some(c) => (
+                    models::generic_llama_profile(),
+                    c.gemm.as_ref().context("the custom thinking GEMM table was not resolved")?,
+                ),
+            };
             let bf16 = t.numerics == model_options::ThinkNumerics::UpstreamBf16Pointwise;
             let (kernel_set, precision, readout, table, tables_apply) = if bf16 {
                 let lt = basal_gpu::cublaslt_version().is_some();
                 (basal_gpu::KernelSet::LlamaThinkBf16V1, basal_gpu::Precision::Bf16, Readout::Bf16Rounded, None, lt)
             } else {
-                (think_profile.kernel_set, precision, Readout::F32, gemm.table.clone(), gemm.tables_apply)
+                (think_profile.kernel_set, precision, Readout::F32, think_gemm.table.clone(), think_gemm.tables_apply)
             };
             let think_plan = basal_gpu::ResolvedExecutionPlan::freeze_with_readout_layer(
                 think_profile.id,
@@ -995,17 +1089,44 @@ fn planned_engine_from_manifest(
                     readout,
                     kernels,
                     quantization,
-                    reproducibility: gemm.reproducibility,
+                    reproducibility: think_gemm.reproducibility,
                     ple: basal_gpu::PleMode::Device,
                 },
                 table,
                 tables_apply,
                 readout_layer,
             )?;
-            if bf16 {
+            if bf16 || custom.is_some() {
                 crate::note!("{}: thinking execution plan {}", manifest.name, plan_summary(&think_plan));
             }
             t.sources["execution_plan"] = think_plan.identity();
+            if let Some(custom) = custom {
+                let (backend, _) = GpuBackend::load_planned_verified(
+                    &custom.verified.inventory,
+                    &t.manifest.config,
+                    &think_plan,
+                    placement,
+                )
+                .context("loading the custom think checkpoint for generation and P2")?;
+                if let Some(table) = &think_plan.gemm().table {
+                    config::check_gemm_coverage(&t.manifest.name, &backend.gemm_table_missing(), table)?;
+                }
+                let thinking = basal_core::thinking::Thinking::new(
+                    t.manifest,
+                    backend,
+                    t.settings,
+                    t.eos,
+                    t.calibration_label,
+                    t.sources,
+                )?;
+                custom.verified.fence()?;
+                crate::note!(
+                    "{}: thinking: custom source loaded (model_id {})",
+                    manifest.name,
+                    custom.verified.model_id
+                );
+                return Ok(thinking);
+            }
             let (backend, _) =
                 GpuBackend::load_planned(&t.manifest.dir, &t.manifest.config, &think_plan, placement, false)
                     .context("loading separate think checkpoint for generation and P2")?;
@@ -1627,6 +1748,9 @@ fn run() -> Result<()> {
                     Ok(placement)
                 })
                 .collect::<Result<_>>()?;
+            // with a custom thinking source in any model, the GPUs are compared only after every custom source is
+            // validated and admitted (below)
+            let custom_thinking = c.models.iter().any(|m| m.model_options.custom_thinking());
             for (m, placement) in c.models.iter().zip(&placements) {
                 if matches!(placement, config::Placement::Replicas(d) if d.len() > 1) {
                     anyhow::ensure!(
@@ -1635,7 +1759,9 @@ fn run() -> Result<()> {
                         config::describe(m)
                     );
                 }
-                config::check_same_gpus(&format!("model {}", config::describe(m)), placement)?;
+                if !custom_thinking {
+                    config::check_same_gpus(&format!("model {}", config::describe(m)), placement)?;
+                }
             }
             // model files (local or downloaded), then GEMM tables (a search needs no model weights in GPU memory),
             // then the models
@@ -1647,12 +1773,21 @@ fn run() -> Result<()> {
                 .collect::<Result<_>>()?;
             let served_names = c.model_names(&manifests)?;
             // Validate every second checkpoint and calibration before any model's GEMM search or GPU load.
-            let thinking: Vec<_> = c
+            let mut thinking: Vec<_> = c
                 .models
                 .iter()
                 .zip(&manifests)
                 .zip(&placements)
                 .map(|((mc, manifest), placement)| {
+                    if mc.model_options.custom_thinking() {
+                        mc.model_options.check_custom_think_execution(
+                            mc.quantization.parse()?,
+                            mc.media || g.media,
+                            gemm_artifact::TableRequest::parse(&mc.gemm_table)?.reproducibility(),
+                            matches!(placement, config::Placement::Replicas(d) if d.len() > 1),
+                            matches!(placement, config::Placement::Cpu),
+                        )?;
+                    }
                     mc.model_options.check_think_execution(
                         Kernels::parse(g.kernels())?,
                         mc.quantization.parse()?,
@@ -1743,10 +1878,41 @@ fn run() -> Result<()> {
                     serde_json::to_string(&memory)?
                 );
             }
+            // Custom thinking checkpoints: coverage of their own layers by a split, then host and device admission of
+            // every custom instance together, then the GPU comparisons deferred above; before any precision rule or
+            // GEMM table.
+            if custom_thinking {
+                let mut instances = Vec::new();
+                for (t, placement) in thinking.iter().zip(&placements) {
+                    let Some(model_options::LoadedThinking { manifest: think, custom: Some(custom), .. }) = t else {
+                        continue;
+                    };
+                    let layers = think.config.num_layers();
+                    if let Some(split) = placement.split() {
+                        check_custom_split(split, layers)?;
+                    }
+                    for devices in placement.instances() {
+                        let stages: think_source::Stages = match placement.split() {
+                            None => devices.gpus().iter().map(|&d| (d, 0..layers)).collect(),
+                            Some(split) => devices.gpus().iter().copied().zip(split.ranges(layers)?).collect(),
+                        };
+                        instances.push((&custom.verified.resources, stages));
+                    }
+                }
+                if !instances.is_empty() {
+                    let host = think_source::server_host(&instances.iter().map(|(r, _)| *r).collect::<Vec<_>>())?;
+                    think_source::admit(host, &instances)?;
+                }
+                for (m, placement) in c.models.iter().zip(&placements) {
+                    config::check_same_gpus(&format!("model {}", config::describe(m)), placement)?;
+                }
+            }
             // one table per model, chosen on its first device (first phase of the execution plan) and checked on
-            // every device of the model before anything loads; none on the host CPU
+            // every device of the model before anything loads; none on the host CPU; a custom thinking checkpoint's
+            // own table right after its base model's
             let mut tables = Vec::new();
-            for ((mc, manifest), placement) in c.models.iter().zip(&manifests).zip(&placements) {
+            for (((mc, manifest), placement), t) in c.models.iter().zip(&manifests).zip(&placements).zip(&mut thinking)
+            {
                 let Some(device) = placement.first_device() else {
                     tables.push(gemm_artifact::ResolvedGemm::none(false));
                     continue;
@@ -1763,6 +1929,16 @@ fn run() -> Result<()> {
                 )?;
                 config::check_table_on_devices(manifest, table.table.as_ref(), placement)?;
                 tables.push(table);
+                if let Some(model_options::LoadedThinking { manifest: think, custom: Some(custom), .. }) = t {
+                    let devices: Vec<usize> =
+                        placement.instances().iter().flat_map(|i| i.gpus().iter().copied()).collect();
+                    custom.resolve_gemm(think, precision, &c.gemm_cache, &devices)?;
+                    config::check_table_on_devices(
+                        think,
+                        custom.gemm.as_ref().and_then(|r| r.table.as_ref()),
+                        placement,
+                    )?;
+                }
             }
             let mut served = Vec::new();
             for ((((((mc, table), manifest), thinking), placement), batch_qualification), name) in c
