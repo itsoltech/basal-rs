@@ -51,10 +51,10 @@ impl std::str::FromStr for ReadoutLayer {
 impl ReadoutLayer {
     /// Validate without querying a device; returns the effective last-layer pruning policy.
     pub fn resolve(self, arch: &Architecture, kernels: Kernels) -> Result<bool, PlanError> {
-        let fused_llama = matches!(arch, Architecture::Llama(_)) && kernels == Kernels::Fused;
-        if self != Self::Auto
-            && !(fused_llama && matches!(BackendKind::llama(), BackendKind::Cuda | BackendKind::Metal))
-        {
+        let supported = matches!(arch, Architecture::Llama(_))
+            && kernels == Kernels::Fused
+            && matches!(BackendKind::llama(), BackendKind::Cuda | BackendKind::Metal);
+        if self != Self::Auto && !supported {
             return Err(PlanError::Option("explicit readout-layer on/off requires fused CUDA or Metal Llama".into()));
         }
         Ok(self != Self::Off)
