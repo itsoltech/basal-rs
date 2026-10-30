@@ -14,18 +14,24 @@ use std::sync::{Arc, Mutex, PoisonError, TryLockError};
 /// Allocator rounding, OS/RSS and physical OOM protection are also excluded.
 #[derive(Clone)]
 pub struct GgufRawSourceBudget {
-    ledger: Arc<Mutex<RawLedgerState>>,
+    ledger: Arc<RawLedger>,
 }
 
 impl GgufRawSourceBudget {
     /// Create an independent allowance. Zero admits no nonempty raw buffer;
     /// equality with the limit is accepted. Bootstrap allocation is not fallible.
     pub fn new(limit_bytes: usize) -> Self {
-        Self { ledger: Arc::new(Mutex::new(RawLedgerState { limit: limit_bytes, held: 0, failed_closed: false })) }
+        let state = RawLedgerState { limit: limit_bytes, held: 0, failed_closed: false };
+        Self { ledger: Arc::new(RawLedger { state: Mutex::new(state) }) }
     }
 
     pub(super) fn charge(&self) -> RawCharge {
         RawCharge { ledger: Arc::clone(&self.ledger), bytes: 0 }
+    }
+
+    /// The same ledger, for the opt-in BPE merge table's own per-block account.
+    pub(super) fn table_account(&self) -> Arc<RawLedger> {
+        Arc::clone(&self.ledger)
     }
 }
 
@@ -46,16 +52,74 @@ pub enum GgufRawSourceError {
     Allocation { bytes: usize },
 }
 
+/// Fixed ledger refusal; `RawCharge` and the merge-table account map it 1:1.
+pub(super) enum LedgerRefusal {
+    Busy,
+    Poisoned,
+    Overflow,
+    Limit { requested: usize, held: usize, limit: usize },
+}
+
+impl From<LedgerRefusal> for GgufRawSourceError {
+    fn from(refusal: LedgerRefusal) -> Self {
+        match refusal {
+            LedgerRefusal::Busy => Self::Busy,
+            LedgerRefusal::Poisoned => Self::Poisoned,
+            LedgerRefusal::Overflow => Self::Overflow,
+            LedgerRefusal::Limit { requested, held, limit } => Self::Limit { requested, held, limit },
+        }
+    }
+}
+
+/// The shared state of one allowance. Every charge and merge-table block of
+/// that allowance acquires and releases here.
+pub(super) struct RawLedger {
+    state: Mutex<RawLedgerState>,
+}
+
 struct RawLedgerState {
     limit: usize,
     held: usize,
     failed_closed: bool,
 }
 
+impl RawLedger {
+    /// All-or-none admission of `requested` bytes; a refusal changes nothing.
+    pub(super) fn try_acquire(&self, requested: usize) -> Result<(), LedgerRefusal> {
+        let mut state = match self.state.try_lock() {
+            Ok(state) => state,
+            Err(TryLockError::WouldBlock) => return Err(LedgerRefusal::Busy),
+            Err(TryLockError::Poisoned(_)) => return Err(LedgerRefusal::Poisoned),
+        };
+        if state.failed_closed {
+            return Err(LedgerRefusal::Poisoned);
+        }
+        let held = state.held.checked_add(requested).ok_or(LedgerRefusal::Overflow)?;
+        if held > state.limit {
+            return Err(LedgerRefusal::Limit { requested, held: state.held, limit: state.limit });
+        }
+        // All-or-none arithmetic only: held equals the sum of outstanding charges.
+        // Charge may conservatively exceed live layouts after a failed allocation.
+        state.held = held;
+        Ok(())
+    }
+
+    /// Returns `bytes` acquired earlier, without allocating; underflow fails closed.
+    pub(super) fn release(&self, bytes: usize) {
+        // Cleanup alone recovers poison; admission never clears or recovers it.
+        // This may wait only for another short arithmetic critical section.
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        match state.held.checked_sub(bytes) {
+            Some(held) => state.held = held,
+            None => state.failed_closed = true,
+        }
+    }
+}
+
 /// Non-Clone aggregate. Its owning field must follow every covered buffer, and
 /// construction locals must precede raw locals, so release follows deallocation.
 pub(super) struct RawCharge {
-    ledger: Arc<Mutex<RawLedgerState>>,
+    ledger: Arc<RawLedger>,
     bytes: usize,
 }
 
@@ -92,21 +156,7 @@ impl RawCharge {
     // raw-only route still charges raw backing only.
     pub(super) fn acquire(&mut self, requested: usize) -> Result<(), GgufRawSourceError> {
         let bytes = self.bytes.checked_add(requested).ok_or(GgufRawSourceError::Overflow)?;
-        let mut state = match self.ledger.try_lock() {
-            Ok(state) => state,
-            Err(TryLockError::WouldBlock) => return Err(GgufRawSourceError::Busy),
-            Err(TryLockError::Poisoned(_)) => return Err(GgufRawSourceError::Poisoned),
-        };
-        if state.failed_closed {
-            return Err(GgufRawSourceError::Poisoned);
-        }
-        let held = state.held.checked_add(requested).ok_or(GgufRawSourceError::Overflow)?;
-        if held > state.limit {
-            return Err(GgufRawSourceError::Limit { requested, held: state.held, limit: state.limit });
-        }
-        // All-or-none arithmetic only: held equals the sum of outstanding charges.
-        // Charge may conservatively exceed live layouts after a failed allocation.
-        state.held = held;
+        self.ledger.try_acquire(requested)?;
         self.bytes = bytes;
         Ok(())
     }
@@ -114,12 +164,6 @@ impl RawCharge {
 
 impl Drop for RawCharge {
     fn drop(&mut self) {
-        // Cleanup alone recovers poison; admission never clears or recovers it.
-        // This may wait only for another short arithmetic critical section.
-        let mut state = self.ledger.lock().unwrap_or_else(PoisonError::into_inner);
-        match state.held.checked_sub(self.bytes) {
-            Some(held) => state.held = held,
-            None => state.failed_closed = true,
-        }
+        self.ledger.release(self.bytes);
     }
 }

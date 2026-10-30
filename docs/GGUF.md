@@ -375,6 +375,65 @@ podobnie jak kopia Value modelu na ścieżce bez `type`. Nie ma dowodu runtime,
 pomiaru pamięci, ochrony OOM, wydajności, bitwise ani pokrycia pakietów.
 REQ009 pozostaje częściowe.
 
+### Opcjonalne admission tablicy scalań BPE
+
+`GgufImmutableCompanionSemantics::read_with_bpe_merge_table_budget(directory,
+options, lease, &budget)` przyjmuje te same wejścia i wykonuje tę samą
+chronologię co `read_with_bpe_merge_scratch_budget`, z tym samym admission
+bufora scratch. Dodatkowo każdy blok pamięci tablicy haszującej scalań
+zbudowanego BPE jest opłacany na **tym samym ledgerze** przed alokacją.
+Zwraca tego samego właściciela albo `GgufMergeTableReadError`:
+`Existing { source: GgufImmutableSemanticError }` bez zmian,
+`Scratch { source: GgufMergeScratchError }` jak na ścieżce scratch oraz
+`Table { source: GgufMergeTableError }`. `GgufMergeTableError` to
+`Admission { source: GgufRawSourceError }` (busy, poisoned/zamknięty ledger,
+overflow, limit, brak pamięci) albo `CapacityOverflow`, gdy obliczenie
+pojemności tablicy przepełnia się przed żądaniem. `read`,
+`read_with_bpe_merge_scratch_budget`, ich typy błędów, publiczne API
+`GgufRawSourceBudget` oraz ścieżki CLI/Engine/Legacy nie zmieniają się.
+
+Lokalnie łatany tokenizers dodaje do `MergeStorage` opcjonalne konto tablicy
+(`merge_table`, domyślnie `None`) oraz zależności `hashbrown 0.16.1`
+i `allocator-api2 0.2.21`, już obecne w `Cargo.lock` w tych wersjach.
+Bez konta budowa BPE, także dotychczasowa ścieżka scratch, zbiera tablicę jak
+upstream w `AHashMap` na globalnym alokatorze. Z kontem ta sama walidacja
+scalań wypełnia `hashbrown::HashMap` z tym samym kluczem, wartością
+i `ahash::RandomState`, tworzonym raz w tym samym miejscu. Prywatny alokator
+tej jednej tablicy, bez `Clone`, pobiera opłatę dokładnego żądanego rozmiaru
+bloku przed alokacją globalnym alokatorem i zwraca blok dokładnie tej długości,
+więc zwolnienie używa identycznego layoutu. Opłata wraca dopiero po zwolnieniu
+bloku albo po nieudanej alokacji. Przy wzroście tablicy stary i nowy blok są
+opłacone jednocześnie, dopóki stary nie zostanie zwolniony. Każde scalenie
+wykonuje najpierw dotychczasową walidację, potem `try_reserve(1)` i `insert`;
+duplikat pary nadal zastępuje wartość. Ranga pozostaje `i as u32`, bez nowego
+limitu liczby scalań, więc rangi mogą się zawijać i powtarzać. Serializacja
+i `save` sortują wtedy niestabilnie po randze, a remisy zależą od kolejności
+iteracji tablicy. Ta kolejność jest równa kolejności tablicy globalnej tylko
+przy tych samych kluczach haszera, tym samym algorytmie i layoutcie hashbrown
+w std oraz tym samym targecie; nie twierdzimy tego ogólnie. Ziarna haszera
+pozostają losowe jak dotąd.
+
+Odmowa jest zapisywana w slocie należącym tylko do alokatora tej tablicy,
+zamieniana na stały wariant i zwracana bez formatowania ani `Box`. Istniejący
+komunikat `MergeBuildError::Storage` w tokenizers pozostaje bez zmian; jego
+źródło odróżnia odmowę scratch od odmowy tablicy. Częściowa tablica jest
+zwalniana, a opłata zwracana przed opuszczeniem budowy; nie ma przejścia do
+nieopłaconej tablicy. Zbudowany BPE przechowuje opłaconą tablicę we
+współdzielonym `Arc`; klon tokenizera lub modelu współdzieli ją bez alokacji.
+Opłata trwa, dopóki zwrócony właściciel albo dowolny klon tokenizera trzyma
+tablicę, i wraca przy zwolnieniu przez ostatniego właściciela na dowolnym
+wątku. Rywalizacja o ledger daje `Busy`, jak dla pozostałych opłat.
+
+Pokryte są wyłącznie bloki tablicy scalań i dotychczasowy bufor scratch.
+Nieadmitowane pozostają: Value/tekst JSON i pomocnicze bufory serde, blok
+kontrolny `Arc` tablicy, wejściowa lista scalań, mapy słownika i odwrotnego
+słownika z ich tekstami, błędy backendu, added vocabulary i jej trie, modele
+Unigram/WordPiece/WordLevel, dekodery, procesory, normalizatory,
+pre-tokenizery, native Oniguruma, cache TLS BPE i bufory kodowania oraz cache
+liter `BasalTokenizer`. Nie ma dowodu runtime, równości wyników z inną
+ścieżką, pomiaru pamięci, ochrony OOM, wydajności, bitwise ani pokrycia
+pakietów. REQ009 pozostaje częściowe.
+
 ## Zamknięty zakres semantyki G1
 
 Nowe API wymaga zwykłej architektury Llama: `LlamaForCausalLM`, `silu`, osobnej

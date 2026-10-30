@@ -233,14 +233,16 @@ crates.io.
 
 - Source, archive SHA-256, upstream commit and the exact omissions are in
   `tokenizers/PROVENANCE.md`. `tokenizers/UPSTREAM-SHA256SUMS` lists the 77
-  copied release files before the change. Of the 73 copied source files, 67
-  remain byte for byte identical; `LICENSE`, `README.md` and `Cargo.toml.orig`
-  are unchanged.
+  copied release files before the change. Of the 73 copied source files, 66
+  remain byte for byte identical after both patches; `LICENSE`, `README.md`
+  and `Cargo.toml.orig` are unchanged.
 - The normalized release manifest omits only the upstream test and benchmark
   targets, their dev dependencies and the profiles that Cargo ignores outside
-  the workspace root. Runtime dependencies, features and edition are unchanged.
+  the workspace root. Features and edition are unchanged; the merge-table
+  patch below adds two already-locked runtime dependencies.
   `Cargo.lock` changes only the `tokenizers 0.23.2` entry, which loses its
-  registry source and checksum. No dependency version changes.
+  registry source and checksum and gains those two dependency names. No
+  dependency version changes.
 - `BpeBuilder::build` and the new `build_with_merge_storage` share one build
   body. The legacy build still allocates `vec![0; max_len]` at the same point;
   the new one takes the buffer from a caller's `MergeStorage`, requires the
@@ -292,3 +294,43 @@ the exact approved list. The exception's dependents, versions and expiry are
 unchanged; new dependents or changed versions still fail the check. No
 test, tokenizer execution, model comparison, memory measurement or GPU check
 was performed. REQ-009 remains partial.
+
+### Charged BPE merge table
+
+A second local patch, `tokenizers/merge-table.patch`, lets a second opt-in core
+route, `read_with_bpe_merge_table_budget` in [GGUF.md](../docs/GGUF.md), admit
+the actual backing blocks of the built BPE's merge hash table on the same GGUF
+source ledger. It applies with `patch -p1` after `merge-scratch.patch` and also
+changes the pinned upstream `src/models/bpe/word.rs`.
+
+- The vendored manifest adds direct dependencies on `hashbrown =0.16.1`
+  (`allocator-api2` feature, no defaults) and `allocator-api2 =0.2.21`
+  (`alloc`, no defaults). Both were already in `Cargo.lock` at those versions;
+  the resolved graph still has one `allocator-api2` and no hashbrown `nightly`
+  feature. The basal-core graph now includes hashbrown 0.16.1.
+- `MergeStorage` gains a provided `merge_table` method returning `None`, so the
+  existing scratch-only storage and every legacy route still collect the merge
+  table into the upstream `AHashMap`. With an account, the same validation
+  builds a hashbrown map with the same key, value and `ahash::RandomState`. A
+  private, non-`Clone` allocator admits each block's exact size before the
+  global allocation, returns exactly that length, frees before releasing, and
+  keeps its first refusal for the build, which returns it through the
+  unchanged `MergeBuildError::Storage` channel and message. Model clones share
+  the charged table through an `Arc`.
+- Ranks keep upstream's `as u32` cast and serialization keeps its unstable sort,
+  so wrapped equal ranks follow the table's iteration order. That order equals
+  the global table's only under equal hasher keys, an identical hashbrown
+  algorithm and layout in the standard library and the same target; this is
+  not otherwise claimed. Serialization, trainer and seed files are unchanged.
+
+Static validation with Rust 1.95.0, offline and locked: workspace formatting,
+release Clippy and private Rustdoc with warnings denied pass for default,
+Intel and CUDA all-features builds. The changed tokenizers files keep
+rustfmt's 100-column upstream style. Direct uncapped Clippy of the vendored
+crate reports no diagnostics; its direct private Rustdoc reports only the same
+six upstream diagnostics listed above. `cargo deny --offline` passes with the
+same 22 duplicate warnings and the cached advisory database only; the paste
+exception check passes. Both patches reproduce all nine changed or new files
+from the pinned preimages, and all 82 vendored checksums pass. No test,
+tokenizer execution, output comparison, memory measurement or GPU check was
+performed. REQ-009 remains partial.

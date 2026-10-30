@@ -1,0 +1,395 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,0 +2 @@
++# Also adds the locked hashbrown 0.16.1 and allocator-api2 0.2.21 for the charged BPE merge table.
+@@ -79,0 +81,5 @@
++[dependencies.allocator-api2]
++version = "=0.2.21"
++features = ["alloc"]
++default-features = false
++
+@@ -104,0 +111,5 @@
++
++[dependencies.hashbrown]
++version = "=0.16.1"
++features = ["allocator-api2"]
++default-features = false
+--- a/src/models/bpe/model.rs
++++ b/src/models/bpe/model.rs
+@@ -1 +1,2 @@
+-// Modified for basal-rs: support caller-provided BPE merge scratch storage.
++// Modified for basal-rs: support caller-provided BPE merge scratch storage
++// and an optional charged merge table.
+@@ -6 +7 @@
+-use crate::utils::merge_storage::{MergeBuildError, MergeStorage};
++use crate::utils::merge_storage::{MergeBuildError, MergeStorage, TableAccount, TableRefusal};
+@@ -7,0 +9,2 @@
++use allocator_api2::alloc::{AllocError, Allocator};
++use hashbrown::TryReserveError;
+@@ -8,0 +12 @@
++use std::alloc::Layout;
+@@ -10,0 +15,2 @@
++use std::iter::FromIterator;
++use std::ptr::NonNull;
+@@ -11,0 +18 @@
++use std::sync::{Arc, OnceLock};
+@@ -25,0 +33,181 @@
++/// A merge table whose every backing block is admitted on a [`TableAccount`].
++///
++/// hashbrown 0.16.1 is the table implementation of the pinned standard
++/// library. The key, value and hasher types equal [`MergeMap`]'s.
++pub(crate) type ChargedMergeMap =
++    hashbrown::HashMap<Pair, (u32, u32), ahash::RandomState, TableAlloc>;
++
++/// Charged allocator of exactly one merge table.
++///
++/// Not `Clone`, so hashbrown's infallible `HashMap::clone`/`clone_from` are
++/// unavailable: the table grows only through `try_reserve` during its build.
++/// The refusal slot belongs to this table alone and keeps its first refusal.
++pub(crate) struct TableAlloc {
++    account: Arc<dyn TableAccount>,
++    refusal: OnceLock<TableRefusal>,
++}
++
++impl TableAlloc {
++    fn new(account: Arc<dyn TableAccount>) -> Self {
++        Self {
++            account,
++            refusal: OnceLock::new(),
++        }
++    }
++
++    /// Records `refusal` (a later one is ignored) before reporting failure.
++    fn refuse(&self, refusal: TableRefusal) -> AllocError {
++        let _ = self.refusal.set(refusal);
++        AllocError
++    }
++}
++
++// SAFETY: Every nonzero block comes from the global allocator with `layout`
++// and is returned with length exactly `layout.size()`; it stays valid until
++// `deallocate`, independent of moves of this allocator, and the account `Arc`
++// lives in the allocator, so it outlives every block. hashbrown frees with the
++// layout it allocated with, which the exact length keeps identical. Zero-size
++// requests get an aligned dangling pointer and no charge. Every `Err` records
++// its refusal first. No lock is held across `alloc`/`dealloc`; the account
++// synchronizes itself (`Send + Sync`).
++unsafe impl Allocator for TableAlloc {
++    fn allocate(&self, layout: Layout) -> std::result::Result<NonNull<[u8]>, AllocError> {
++        let bytes = layout.size();
++        if bytes == 0 {
++            // hashbrown never requests an empty table block; nothing is charged.
++            return match NonNull::new(std::ptr::without_provenance_mut::<u8>(layout.align())) {
++                Some(pointer) => Ok(NonNull::slice_from_raw_parts(pointer, 0)),
++                None => Err(self.refuse(TableRefusal::Allocation { bytes })),
++            };
++        }
++        self.account
++            .try_acquire(bytes)
++            .map_err(|refusal| self.refuse(refusal))?;
++        // SAFETY: `layout` has a nonzero size. Null is checked below.
++        let pointer = unsafe { std::alloc::alloc(layout) };
++        match NonNull::new(pointer) {
++            Some(pointer) => Ok(NonNull::slice_from_raw_parts(pointer, bytes)),
++            None => {
++                self.account.release(bytes);
++                Err(self.refuse(TableRefusal::Allocation { bytes }))
++            }
++        }
++    }
++
++    unsafe fn deallocate(&self, pointer: NonNull<u8>, layout: Layout) {
++        let bytes = layout.size();
++        if bytes != 0 {
++            // SAFETY: The caller passes a block this allocator returned for
++            // `layout`; nonzero blocks come from `std::alloc::alloc(layout)`.
++            unsafe { std::alloc::dealloc(pointer.as_ptr(), layout) };
++            // Released only after the block is freed.
++            self.account.release(bytes);
++        }
++    }
++}
++
++/// The merge table of a [`BPE`]: on the global allocator, as upstream, or
++/// charged and shared by the model and its clones through one `Arc`.
++#[derive(Clone)]
++pub(crate) enum MergeTable {
++    Global(MergeMap),
++    Charged(Arc<ChargedMergeMap>),
++}
++
++/// Iterator over either table, in that table's own iteration order.
++pub(crate) enum MergeIter<'a> {
++    Global(std::collections::hash_map::Iter<'a, Pair, (u32, u32)>),
++    Charged(hashbrown::hash_map::Iter<'a, Pair, (u32, u32)>),
++}
++
++impl<'a> Iterator for MergeIter<'a> {
++    type Item = (&'a Pair, &'a (u32, u32));
++
++    fn next(&mut self) -> Option<Self::Item> {
++        match self {
++            Self::Global(iter) => iter.next(),
++            Self::Charged(iter) => iter.next(),
++        }
++    }
++
++    fn size_hint(&self) -> (usize, Option<usize>) {
++        match self {
++            Self::Global(iter) => iter.size_hint(),
++            Self::Charged(iter) => iter.size_hint(),
++        }
++    }
++}
++
++impl MergeTable {
++    pub(crate) fn get(&self, pair: &Pair) -> Option<&(u32, u32)> {
++        match self {
++            Self::Global(map) => map.get(pair),
++            Self::Charged(map) => map.get(pair),
++        }
++    }
++
++    pub(crate) fn len(&self) -> usize {
++        match self {
++            Self::Global(map) => map.len(),
++            Self::Charged(map) => map.len(),
++        }
++    }
++
++    /// Each table's unchanged iteration order. Ranks wrap at `u32`, so sorting
++    /// by rank can tie and then keeps part of this order.
++    pub(crate) fn iter(&self) -> MergeIter<'_> {
++        match self {
++            Self::Global(map) => MergeIter::Global(map.iter()),
++            Self::Charged(map) => MergeIter::Charged(map.iter()),
++        }
++    }
++
++    /// Map equality: same length and every entry found with an equal value.
++    fn same_entries<'o>(&self, len: usize, get: impl Fn(&Pair) -> Option<&'o (u32, u32)>) -> bool {
++        self.len() == len && self.iter().all(|(pair, value)| get(pair) == Some(value))
++    }
++}
++
++impl PartialEq for MergeTable {
++    fn eq(&self, other: &Self) -> bool {
++        match (self, other) {
++            (Self::Global(left), Self::Global(right)) => left == right,
++            _ => self.same_entries(other.len(), |pair| other.get(pair)),
++        }
++    }
++}
++
++impl PartialEq<MergeMap> for MergeTable {
++    fn eq(&self, other: &MergeMap) -> bool {
++        match self {
++            Self::Global(map) => map == other,
++            Self::Charged(_) => self.same_entries(other.len(), |pair| other.get(pair)),
++        }
++    }
++}
++
++impl std::fmt::Debug for MergeTable {
++    fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
++        fmt.debug_map().entries(self.iter()).finish()
++    }
++}
++
++impl FromIterator<(Pair, (u32, u32))> for MergeTable {
++    /// Collects a global table, exactly as upstream collects its `MergeMap`.
++    fn from_iter<I: IntoIterator<Item = (Pair, (u32, u32))>>(iter: I) -> Self {
++        Self::Global(iter.into_iter().collect())
++    }
++}
++
++/// The table's own refusal for a failed `try_reserve`.
++fn table_refusal(map: &ChargedMergeMap, error: TryReserveError) -> TableRefusal {
++    match error {
++        TryReserveError::CapacityOverflow => TableRefusal::CapacityOverflow,
++        TryReserveError::AllocError { .. } => *map
++            .allocator()
++            .refusal
++            .get()
++            .expect("TableAlloc records its refusal before every allocation error"),
++    }
++}
++
+@@ -218,0 +407 @@
++            None::<(Arc<dyn TableAccount>, fn(TableRefusal) -> crate::Error)>,
+@@ -223 +412,3 @@
+-    /// `storage` instead of allocating it. Refusal stops the build.
++    /// `storage` instead of allocating it and, if `storage` supplies a
++    /// [`MergeStorage::merge_table`] account, admits the merge table on it.
++    /// Refusal stops the build.
+@@ -244,0 +436,6 @@
++            storage.merge_table().map(|table| {
++                let refused = table.refused;
++                (table.account, move |refusal| {
++                    MergeBuildError::Storage(refused(refusal))
++                })
++            }),
+@@ -249,0 +447 @@
++    /// `table`, if any, charges the merge table and converts its refusals.
+@@ -253,0 +452 @@
++        table: Option<(Arc<dyn TableAccount>, impl FnOnce(TableRefusal) -> E)>,
+@@ -295,6 +494,2 @@
+-        let merge_map: MergeMap = self
+-            .config
+-            .merges
+-            .into_iter()
+-            .enumerate()
+-            .map(|(i, (a, b))| -> Result<(Pair, (u32, u32))> {
++        let merges = self.config.merges.into_iter().enumerate().map(
++            |(i, (a, b))| -> Result<(Pair, (u32, u32))> {
+@@ -318,2 +513,28 @@
+-            })
+-            .collect::<Result<MergeMap>>()?;
++            },
++        );
++        let merge_map = match table {
++            None => MergeTable::Global(merges.collect::<Result<MergeMap>>()?),
++            // The same stream as the global collect: one `RandomState::new()`
++            // before the first merge, then per merge its validation and one
++            // insert, last duplicate winning. `try_reserve(1)` makes exactly
++            // the `reserve(1)` of that insert fallible. Ranks keep the `as u32`
++            // cast, so they can wrap and tie; their rank-sorted serialization
++            // then depends on iteration order, which equals the global table's
++            // only for equal hasher keys, an identical hashbrown algorithm and
++            // layout in std, and the same target. Not otherwise claimed.
++            // A refusal drops the partial table before returning.
++            Some((account, refused)) => {
++                let mut map = ChargedMergeMap::with_hasher_in(
++                    ahash::RandomState::new(),
++                    TableAlloc::new(account),
++                );
++                for merge in merges {
++                    let (pair, value) = merge?;
++                    if let Err(error) = map.try_reserve(1) {
++                        return Err(refused(table_refusal(&map, error)));
++                    }
++                    map.insert(pair, value);
++                }
++                MergeTable::Charged(Arc::new(map))
++            }
++        };
+@@ -356 +577 @@
+-    pub(crate) merges: MergeMap,
++    pub(crate) merges: MergeTable,
+@@ -600 +821,4 @@
+-        word.merge_all(&self.merges, self.dropout);
++        match &self.merges {
++            MergeTable::Global(merges) => word.merge_all(|pair| merges.get(pair), self.dropout),
++            MergeTable::Charged(merges) => word.merge_all(|pair| merges.get(pair), self.dropout),
++        }
+--- a/src/models/bpe/word.rs
++++ b/src/models/bpe/word.rs
+@@ -0,0 +1 @@
++// Modified for basal-rs: merge lookups go through a caller-supplied function.
+@@ -2 +2,0 @@
+-use ahash::AHashMap;
+@@ -162 +162,6 @@
+-    pub(super) fn merge_all(&mut self, merges: &AHashMap<Pair, (u32, u32)>, dropout: Option<f32>) {
++    /// `merges` looks up a pair's `(rank, new_id)` in the model's merge table.
++    pub(super) fn merge_all<'m>(
++        &mut self,
++        merges: impl Fn(&Pair) -> Option<&'m (u32, u32)>,
++        dropout: Option<f32>,
++    ) {
+@@ -172 +177 @@
+-                    merges.get(&pair).map(|m| Merge {
++                    merges(&pair).map(|m| Merge {
+@@ -200,4 +205 @@
+-                if merges
+-                    .get(&target_new_pair)
+-                    .is_none_or(|(_, new_id)| *new_id != top.new_id)
+-                {
++                if merges(&target_new_pair).is_none_or(|(_, new_id)| *new_id != top.new_id) {
+@@ -223 +225 @@
+-                    if let Some((rank, new_id)) = merges.get(&new_pair) {
++                    if let Some((rank, new_id)) = merges(&new_pair) {
+@@ -237 +239 @@
+-                    if let Some((rank, new_id)) = merges.get(&new_pair) {
++                    if let Some((rank, new_id)) = merges(&new_pair) {
+--- a/src/utils/merge_storage.rs
++++ b/src/utils/merge_storage.rs
+@@ -1 +1,2 @@
+-//! Explicit, per-call storage for the BPE builder's merge scratch buffer.
++//! Explicit, per-call storage for the BPE builder's merge scratch buffer and,
++//! optionally, an account for the built model's merge table backing.
+@@ -4,3 +5,6 @@
+-//! routes keep their own `vec![0; max_len]` allocation. Only the typed refusal
+-//! moves without new formatting or boxing; JSON parsing, syntax-only skipping
+-//! and serde diagnostics keep their own, unaccounted allocations.
++//! routes keep their own `vec![0; max_len]` allocation and global merge table.
++//! Only the typed refusal moves without new formatting or boxing; JSON parsing,
++//! syntax-only skipping and serde diagnostics keep their own, unaccounted
++//! allocations.
++
++use std::sync::Arc;
+@@ -22,0 +27,60 @@
++
++    /// The account that admits the built BPE's merge hash-table backing.
++    ///
++    /// `None` (the default) keeps the merge table on the global allocator, as
++    /// the legacy build does. With `Some`, the build is asked once, after the
++    /// scratch buffer; every table block is then admitted before allocation
++    /// and released after deallocation, while the returned model or any of its
++    /// clones holds the table.
++    fn merge_table(&self) -> Option<MergeTableAccount<Self::Error>> {
++        None
++    }
++}
++
++/// Account charged for each merge-table backing block.
++pub trait TableAccount: Send + Sync {
++    /// Admits `bytes` before their allocation. A refusal leaves the account
++    /// unchanged.
++    fn try_acquire(&self, bytes: usize) -> Result<(), TableRefusal>;
++
++    /// Returns `bytes` admitted earlier, after their block was freed or its
++    /// allocation failed. It may run on any thread that drops the last owner.
++    /// It must not panic, nor allocate through a charged merge table.
++    fn release(&self, bytes: usize);
++}
++
++/// Fixed refusal of one merge-table backing block; it retains no input.
++#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
++pub enum TableRefusal {
++    /// The account is in use by another admission.
++    #[error("merge table account is busy")]
++    Busy,
++    /// The account is poisoned or closed.
++    #[error("merge table account is poisoned or closed")]
++    Closed,
++    /// The account's charge arithmetic overflows.
++    #[error("merge table charge arithmetic overflows")]
++    Overflow,
++    /// The block exceeds the account's remaining allowance.
++    #[error(
++        "merge table block of {requested} bytes exceeds allowance (held {held}, limit {limit})"
++    )]
++    Limit {
++        requested: usize,
++        held: usize,
++        limit: usize,
++    },
++    /// The admitted block could not be allocated; its charge was released.
++    #[error("merge table allocation of {bytes} bytes failed")]
++    Allocation { bytes: usize },
++    /// The table's capacity computation overflows before any request.
++    #[error("merge table capacity overflows")]
++    CapacityOverflow,
++}
++
++/// The caller's account for one build's merge table.
++pub struct MergeTableAccount<E> {
++    /// Charged for every table block; retained by the table until it is freed.
++    pub account: Arc<dyn TableAccount>,
++    /// Converts a table refusal into the storage's typed refusal.
++    pub refused: fn(TableRefusal) -> E,
+@@ -28 +92,3 @@
+-    /// The storage refused the scratch buffer.
++    /// The storage refused the scratch buffer or, when it supplies a
++    /// [`MergeStorage::merge_table`] account, a merge-table block. The
++    /// message is unchanged; the source tells the two apart.

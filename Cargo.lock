@@ -5547,12 +5547,14 @@ name = "tokenizers"
 version = "0.23.2"
 dependencies = [
  "ahash",
+ "allocator-api2",
  "compact_str",
  "daachorse",
  "dary_heap",
  "derive_builder",
  "esaxx-rs",
  "getrandom 0.3.4",
+ "hashbrown 0.16.1",
  "itertools 0.14.0",
  "log",
  "macro_rules_attribute",

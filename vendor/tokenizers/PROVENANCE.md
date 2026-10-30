@@ -56,8 +56,26 @@ preimages in `UPSTREAM-SHA256SUMS` and creates the eighth. Apply it with
 - `src/utils/mod.rs` and new `src/utils/merge_storage.rs`: `MergeStorage`
   and `MergeBuildError`.
 
+`merge-table.patch` then applies, also with `patch -p1`, to the result of
+`merge-scratch.patch` and to the pinned upstream `src/models/bpe/word.rs`:
+
+- `Cargo.toml`: direct dependencies `hashbrown = "=0.16.1"` (no default
+  features, `allocator-api2`) and `allocator-api2 = "=0.2.21"` (no default
+  features, `alloc`). Both versions were already locked; no version changes.
+- `src/utils/merge_storage.rs`: `TableAccount`, `TableRefusal`,
+  `MergeTableAccount` and the provided `MergeStorage::merge_table` (default
+  `None`). The `MergeBuildError::Storage` message is unchanged.
+- `src/models/bpe/model.rs`: a crate-private, non-`Clone` charged allocator
+  and `MergeTable`. Without an account the table is collected exactly as
+  before; with one it is built in a hashbrown map whose every block is
+  admitted on the account before allocation and released after it is freed.
+  Clones share the charged table through one `Arc`.
+- `src/models/bpe/word.rs`: `Word::merge_all` takes a lookup function instead
+  of the map type.
+
 `SHA256SUMS` covers every file in this directory except itself.
 
-The six modified upstream Rust source files carry an in-file "Modified for
+The seven modified upstream Rust source files carry an in-file "Modified for
 basal-rs" notice. The new `merge_storage.rs` module is identified above and
-included in the patch and checksum manifest.
+included in the patches and checksum manifest. Serialization, trainer and seed
+files are not changed by `merge-table.patch`.

@@ -1,5 +1,5 @@
+// Modified for basal-rs: merge lookups go through a caller-supplied function.
 use super::Pair;
-use ahash::AHashMap;
 use dary_heap::QuaternaryHeap;
 use rand::{rng, Rng};
 use std::cmp::Ordering;
@@ -159,7 +159,12 @@ impl Word {
         changes
     }
 
-    pub(super) fn merge_all(&mut self, merges: &AHashMap<Pair, (u32, u32)>, dropout: Option<f32>) {
+    /// `merges` looks up a pair's `(rank, new_id)` in the model's merge table.
+    pub(super) fn merge_all<'m>(
+        &mut self,
+        merges: impl Fn(&Pair) -> Option<&'m (u32, u32)>,
+        dropout: Option<f32>,
+    ) {
         let mut queue = QuaternaryHeap::with_capacity(self.symbols.len());
         let mut skip = Vec::with_capacity(queue.len());
 
@@ -169,7 +174,7 @@ impl Word {
                 .enumerate()
                 .filter_map(|(index, window)| {
                     let pair = (window[0].c, window[1].c);
-                    merges.get(&pair).map(|m| Merge {
+                    merges(&pair).map(|m| Merge {
                         pos: index,
                         rank: m.0,
                         new_id: m.1,
@@ -197,10 +202,7 @@ impl Word {
 
                 // Make sure we are not processing an expired queue entry
                 let target_new_pair = (self.symbols[top.pos].c, right.c);
-                if merges
-                    .get(&target_new_pair)
-                    .is_none_or(|(_, new_id)| *new_id != top.new_id)
-                {
+                if merges(&target_new_pair).is_none_or(|(_, new_id)| *new_id != top.new_id) {
                     continue;
                 }
 
@@ -220,7 +222,7 @@ impl Word {
                     let prev = current.prev as usize;
                     let prev_symbol = self.symbols[prev];
                     let new_pair = (prev_symbol.c, current.c);
-                    if let Some((rank, new_id)) = merges.get(&new_pair) {
+                    if let Some((rank, new_id)) = merges(&new_pair) {
                         queue.push(Merge {
                             pos: current.prev as usize,
                             rank: *rank,
@@ -234,7 +236,7 @@ impl Word {
                 if next < self.symbols.len() {
                     let next_symbol = self.symbols[next];
                     let new_pair = (current.c, next_symbol.c);
-                    if let Some((rank, new_id)) = merges.get(&new_pair) {
+                    if let Some((rank, new_id)) = merges(&new_pair) {
                         queue.push(Merge {
                             pos: top.pos,
                             rank: *rank,

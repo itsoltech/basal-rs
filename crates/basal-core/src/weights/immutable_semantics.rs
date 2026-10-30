@@ -1,5 +1,6 @@
 //! Direct immutable companion/calibration consumers. Tokenizer storage is excluded,
-//! except the BPE merge scratch buffer on `read_with_bpe_merge_scratch_budget`.
+//! except the BPE merge scratch buffer on `read_with_bpe_merge_scratch_budget` and,
+//! on `read_with_bpe_merge_table_budget`, that buffer and the BPE merge table backing.
 
 use std::alloc::{alloc, Layout};
 use std::fmt;
@@ -8,7 +9,10 @@ use std::path::{Path, PathBuf};
 use super::calibration_inventory::{
     CallerCalibrationDirectoryLease, GgufCalibrationInventory, GgufCalibrationInventoryError, InventoryPhase,
 };
-use super::provider_construction::{build_captured_tokenizer_with_merge_scratch, GgufMergeScratchReadError};
+use super::provider_construction::{
+    build_captured_tokenizer_with_merge_scratch, build_captured_tokenizer_with_merge_table, GgufMergeScratchReadError,
+    GgufMergeTableReadError,
+};
 use super::raw_source::RawCharge;
 use super::semantic_json::{
     GgufSemanticMembers, GgufSemanticObject, NodeId, SemanticConstructionError, SemanticDocument, SemanticPlan,
@@ -198,7 +202,8 @@ struct AdmittedIdentity {
 ///
 /// Only named requested layouts share the declaration budget's existing ledger.
 /// Tokenizer Value/provider/native/cache (except opt-in BPE merge scratch, held
-/// only during the BPE build), diagnostics, paths/control/inventory
+/// only during the BPE build, and the opt-in BPE merge table backing, held
+/// while the tokenizer or a clone holds it), diagnostics, paths/control/inventory
 /// records, GGUF parsing, staging/device and allocator overhead remain unadmitted.
 /// No Clone, mutable manifest or owned subtree conversion is provided.
 pub struct GgufImmutableCompanionSemantics {
@@ -243,6 +248,23 @@ impl GgufImmutableCompanionSemantics {
     ) -> Result<Self, GgufMergeScratchReadError> {
         Self::read_with(directory, options, lease, budget, |snapshot, directory, vocab, style, bos| {
             build_captured_tokenizer_with_merge_scratch(snapshot, directory, vocab, style, bos, budget.raw())
+        })
+    }
+
+    /// [`read_with_bpe_merge_scratch_budget`](Self::read_with_bpe_merge_scratch_budget),
+    /// and every backing block of the built BPE's merge hash table is admitted on
+    /// the same ledger before allocation and released after it is freed, which is
+    /// when the returned owner's tokenizer and any clone of it are gone. Every
+    /// other tokenizer heap, including the table's `Arc` control block, remains
+    /// unadmitted.
+    pub fn read_with_bpe_merge_table_budget(
+        directory: &Path,
+        options: ModelLoadOptions<'_>,
+        lease: CallerCalibrationDirectoryLease,
+        budget: &GgufDeclarationSourceBudget,
+    ) -> Result<Self, GgufMergeTableReadError> {
+        Self::read_with(directory, options, lease, budget, |snapshot, directory, vocab, style, bos| {
+            build_captured_tokenizer_with_merge_table(snapshot, directory, vocab, style, bos, budget.raw())
         })
     }
 
@@ -330,7 +352,8 @@ impl GgufImmutableCompanionSemantics {
     pub fn manifest(&self) -> GgufImmutableManifest<'_> {
         GgufImmutableManifest { owner: self }
     }
-    /// The entire tokenizer and its caches remain outside semantic admission.
+    /// The tokenizer and its caches remain outside semantic admission, except the
+    /// BPE merge table backing on `read_with_bpe_merge_table_budget`.
     pub fn tokenizer(&self) -> &BasalTokenizer {
         &self.tokenizer
     }
