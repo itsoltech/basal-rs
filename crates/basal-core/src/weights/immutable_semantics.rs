@@ -1,6 +1,7 @@
 //! Direct immutable companion/calibration consumers. Tokenizer storage is excluded,
-//! except the BPE merge scratch buffer on `read_with_bpe_merge_scratch_budget` and,
-//! on `read_with_bpe_merge_table_budget`, that buffer and the BPE merge table backing.
+//! except the BPE merge scratch buffer on `read_with_bpe_merge_scratch_budget`,
+//! on `read_with_bpe_merge_table_budget` that buffer and the BPE merge table backing,
+//! and on `read_with_decoder_regex_budget` both plus the decoder regexes' compiled backing.
 
 use std::alloc::{alloc, Layout};
 use std::fmt;
@@ -10,7 +11,8 @@ use super::calibration_inventory::{
     CallerCalibrationDirectoryLease, GgufCalibrationInventory, GgufCalibrationInventoryError, InventoryPhase,
 };
 use super::provider_construction::{
-    build_captured_tokenizer_with_merge_scratch, build_captured_tokenizer_with_merge_table, GgufMergeScratchReadError,
+    build_captured_tokenizer_with_decoder_regex, build_captured_tokenizer_with_merge_scratch,
+    build_captured_tokenizer_with_merge_table, GgufDecoderRegexReadError, GgufMergeScratchReadError,
     GgufMergeTableReadError,
 };
 use super::raw_source::RawCharge;
@@ -202,8 +204,8 @@ struct AdmittedIdentity {
 ///
 /// Only named requested layouts share the declaration budget's existing ledger.
 /// Tokenizer Value/provider/native/cache (except opt-in BPE merge scratch, held
-/// only during the BPE build, and the opt-in BPE merge table backing, held
-/// while the tokenizer or a clone holds it), diagnostics, paths/control/inventory
+/// only during the BPE build, and the opt-in BPE merge table and decoder-regex
+/// compiled backing, held while the tokenizer or a clone holds it), diagnostics, paths/control/inventory
 /// records, GGUF parsing, staging/device and allocator overhead remain unadmitted.
 /// No Clone, mutable manifest or owned subtree conversion is provided.
 pub struct GgufImmutableCompanionSemantics {
@@ -265,6 +267,26 @@ impl GgufImmutableCompanionSemantics {
     ) -> Result<Self, GgufMergeTableReadError> {
         Self::read_with(directory, options, lease, budget, |snapshot, directory, vocab, style, bos| {
             build_captured_tokenizer_with_merge_table(snapshot, directory, vocab, style, bos, budget.raw())
+        })
+    }
+
+    /// [`read_with_bpe_merge_table_budget`](Self::read_with_bpe_merge_table_budget),
+    /// and every retained compiled Oniguruma backing block of each `Replace`
+    /// regex in the tokenizer's decoder tree (`regex_t`, program, operands,
+    /// string pool, repeat ranges, optimizer string) is admitted on the same
+    /// ledger before allocation and released after it is freed, which is when
+    /// the returned owner's tokenizer and any clone of it are gone. Regex parse
+    /// temporaries, name and callout tables, the process-wide Oniguruma
+    /// registries, match-time state and every other tokenizer heap remain
+    /// unadmitted.
+    pub fn read_with_decoder_regex_budget(
+        directory: &Path,
+        options: ModelLoadOptions<'_>,
+        lease: CallerCalibrationDirectoryLease,
+        budget: &GgufDeclarationSourceBudget,
+    ) -> Result<Self, GgufDecoderRegexReadError> {
+        Self::read_with(directory, options, lease, budget, |snapshot, directory, vocab, style, bos| {
+            build_captured_tokenizer_with_decoder_regex(snapshot, directory, vocab, style, bos, budget.raw())
         })
     }
 
@@ -353,7 +375,8 @@ impl GgufImmutableCompanionSemantics {
         GgufImmutableManifest { owner: self }
     }
     /// The tokenizer and its caches remain outside semantic admission, except the
-    /// BPE merge table backing on `read_with_bpe_merge_table_budget`.
+    /// BPE merge table backing on `read_with_bpe_merge_table_budget` and, on
+    /// `read_with_decoder_regex_budget`, also the decoder regexes' compiled backing.
     pub fn tokenizer(&self) -> &BasalTokenizer {
         &self.tokenizer
     }

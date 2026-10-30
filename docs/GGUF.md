@@ -435,6 +435,64 @@ liter `BasalTokenizer`. Nie ma dowodu runtime, równości wyników z inną
 ścieżką, pomiaru pamięci, ochrony OOM, wydajności, bitwise ani pokrycia
 pakietów. REQ009 pozostaje częściowe.
 
+### Opcjonalne admission skompilowanych regexów dekodera
+
+`GgufImmutableCompanionSemantics::read_with_decoder_regex_budget(directory,
+options, lease, &budget)` przyjmuje te same wejścia i wykonuje tę samą
+chronologię co `read_with_bpe_merge_table_budget`, z tym samym admission
+bufora scratch i tablicy scalań. Dodatkowo każdy blok zachowanego,
+skompilowanego programu Oniguruma każdego regexu `Replace` w drzewie
+`decoder` tokenizera jest opłacany na **tym samym ledgerze** przed alokacją.
+Zwraca tego samego właściciela albo `GgufDecoderRegexReadError`:
+`Existing`, `Scratch` i `Table` jak w `GgufMergeTableReadError` oraz
+`DecoderRegex { source: GgufDecoderRegexError }`. `GgufDecoderRegexError` to
+`Admission { source: GgufRawSourceError }` (busy, poisoned/zamknięty ledger,
+overflow, limit, brak pamięci) albo `CapacityOverflow`, gdy obliczenie
+rozmiaru bloku przepełnia się. `read`, obie wcześniejsze ścieżki, ich typy
+błędów oraz ścieżki CLI/Engine/Legacy nie zmieniają się.
+
+Zakres to `regex_t` (w jednym kontenerze z kontem), tablice ops/ocs,
+operandy napisów i klas, numery backref, string pool, zakresy powtórzeń
+i napis optymalizatora. Każdy blok to jedna alokacja globalnego alokatora
+z nagłówkiem rozmiaru; opłata obejmuje cały blok i wraca dopiero po jego
+zwolnieniu. Przy wzroście tablicy nowy blok jest opłacony, zanim stary
+zostanie zwolniony. Kompilacja używa tego samego `Syntax::default()`, opcji,
+kodowania UTF-8, blokady kompilacji i niezmienionego kodu natywnego co
+`Regex::new`, a wyszukiwanie tego samego kodu co dotąd. Globalne ustawienia
+Oniguruma (składnia, callouty, właściwości użytkownika, limity) są więc
+odczytywane w tych samych miejscach; nic nie jest kopiowane ani zamrażane.
+Klon `Replace` współdzieli opłacony regex; opłata trwa, dopóki zwrócony
+właściciel albo dowolny klon tokenizera trzyma regex, i wraca przy
+zwolnieniu przez ostatniego właściciela na dowolnym wątku.
+
+Pierwsza odmowa, błąd alokacji, przepełnienie rozmiaru albo panika konta
+w jednej kompilacji jest zapamiętywana; kolejne są pomijane. Odmowa wraca
+stałym wariantem bez formatowania ani `Box`, kończy odczyt tokenizera tak
+samo jak odmowa modelu i ma pierwszeństwo przed błędem pomijania pozostałych
+wpisów. W dekoderze bez pola `type` odmowa nie jest niedopasowaniem wariantu.
+Panika `try_acquire` jest wznawiana dopiero po sprzątaniu natywnym,
+zwolnieniu blokady i konta; panika `release` albo zwalniania konta kończy
+proces. Żaden unwind Rusta nie przechodzi przez C. Błędy kompilacji wzorca
+pozostają w kanale `Existing` jako błąd `Tokenizer` z dotychczasowym tekstem.
+
+Lokalne kopie `onig 6.5.3` i `onig_sys 69.9.3` (zob.
+[vendor/README.md](../vendor/README.md)) obejmują cały proces: każdy
+dotychczasowy `regex_t`, także z tokenizers 0.22.2, jest większy o jeden
+wskaźnik, a dotychczasowy `SysRegex` o dyskryminant. Algorytmy, wyniki,
+akceptowane wzorce, błędy i tekst `Debug` dotychczasowych ścieżek się nie
+zmieniają; rozmiarów obiektów nie mierzono. Z systemową biblioteką
+(`RUSTONIG_SYSTEM_LIBONIG`, `RUSTONIG_DYNAMIC_LIBONIG`) binarka z tą ścieżką
+nie zlinkuje się; wynika to z build scriptu, nie z próby linkowania.
+
+Nieadmitowane pozostają: tymczasowe struktury parsowania i kompilacji regexu,
+tablica nazw i dane calloutów, globalne rejestry Oniguruma tworzone przy
+pierwszej kompilacji w procesie, stan wyszukiwania, `Arc` i napisy wokół
+regexu, wartości JSON, regexy normalizatora i pre-tokenizera (na tej ścieżce
+Llama są one niedostępne) oraz wszystko, co pozostawało nieadmitowane na
+wcześniejszych ścieżkach. Nie ma dowodu runtime, równości wyników z inną
+ścieżką, pomiaru pamięci, ochrony OOM, wydajności, bitwise ani pokrycia
+pakietów. REQ009 pozostaje częściowe.
+
 ## Zamknięty zakres semantyki G1
 
 Nowe API wymaga zwykłej architektury Llama: `LlamaForCausalLM`, `silu`, osobnej

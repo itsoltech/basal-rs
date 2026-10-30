@@ -1,7 +1,9 @@
-// Modified for basal-rs: retain typed BPE refusals through JSON completion.
+// Modified for basal-rs: retain typed BPE and decoder-regex refusals through JSON completion.
 use std::cell::Cell;
 use std::convert::Infallible;
 use std::marker::PhantomData;
+#[cfg(feature = "onig")]
+use std::sync::Arc;
 
 use serde::{
     self,
@@ -11,7 +13,11 @@ use serde::{
 };
 
 use super::{added_vocabulary::AddedTokenWithId, TokenizerImpl};
+#[cfg(feature = "onig")]
+use crate::decoders::DecoderRegexSeed;
 use crate::models::ModelMergeSeed;
+#[cfg(feature = "onig")]
+use crate::utils::merge_storage::RegexCharge;
 use crate::utils::merge_storage::{MergeBuildError, MergeStorage};
 use crate::{
     Decoder, DecoderWrapper, Model, ModelWrapper, Normalizer, NormalizerWrapper, PostProcessor,
@@ -121,14 +127,20 @@ impl<'de, S: MergeStorage> DeserializeSeed<'de> for TokenizerMergeSeed<'_, S> {
     }
 }
 
-/// Reads one `model` value. `Failure` is a typed refusal outside serde errors.
-trait ModelField<'de, M> {
+/// Reads one `model` value and the optional `decoder` value. `Failure` is a
+/// typed refusal outside serde errors.
+trait ModelField<'de, M, D> {
     type Failure;
 
     fn next_model<A: MapAccess<'de>>(
         &self,
         map: &mut A,
     ) -> Result<Result<M, Self::Failure>, A::Error>;
+
+    fn next_decoder<A: MapAccess<'de>>(
+        &self,
+        map: &mut A,
+    ) -> Result<Result<Option<D>, Self::Failure>, A::Error>;
 
     /// Keeps a failure that a later serde error would otherwise discard.
     fn keep(&self, failure: Self::Failure);
@@ -137,13 +149,20 @@ trait ModelField<'de, M> {
 /// The original `Deserialize` route.
 struct PlainModel;
 
-impl<'de, M: Deserialize<'de>> ModelField<'de, M> for PlainModel {
+impl<'de, M: Deserialize<'de>, D: Deserialize<'de>> ModelField<'de, M, D> for PlainModel {
     type Failure = Infallible;
 
     fn next_model<A: MapAccess<'de>>(
         &self,
         map: &mut A,
     ) -> Result<Result<M, Infallible>, A::Error> {
+        map.next_value().map(Ok)
+    }
+
+    fn next_decoder<A: MapAccess<'de>>(
+        &self,
+        map: &mut A,
+    ) -> Result<Result<Option<D>, Infallible>, A::Error> {
         map.next_value().map(Ok)
     }
 
@@ -158,7 +177,7 @@ struct MergeModel<'a, S: MergeStorage> {
     refused: &'a Cell<Option<MergeBuildError<S::Error>>>,
 }
 
-impl<'de, S: MergeStorage> ModelField<'de, ModelWrapper> for MergeModel<'_, S> {
+impl<'de, S: MergeStorage> ModelField<'de, ModelWrapper, DecoderWrapper> for MergeModel<'_, S> {
     type Failure = MergeBuildError<S::Error>;
 
     fn next_model<A: MapAccess<'de>>(
@@ -168,6 +187,23 @@ impl<'de, S: MergeStorage> ModelField<'de, ModelWrapper> for MergeModel<'_, S> {
         map.next_value_seed(ModelMergeSeed {
             storage: self.storage,
         })
+    }
+
+    /// With a [`MergeStorage::decoder_regex`] account, every decoder-tree
+    /// `Replace` regex backing is admitted on it; otherwise the legacy read.
+    fn next_decoder<A: MapAccess<'de>>(
+        &self,
+        map: &mut A,
+    ) -> Result<Result<Option<DecoderWrapper>, Self::Failure>, A::Error> {
+        #[cfg(feature = "onig")]
+        if let Some(account) = self.storage.decoder_regex() {
+            let seed = DecoderRegexSeed {
+                account: Arc::new(RegexCharge(account.account)),
+                refused: account.refused,
+            };
+            return Ok(map.next_value_seed(seed)?.map_err(MergeBuildError::Storage));
+        }
+        map.next_value().map(Ok)
     }
 
     fn keep(&self, failure: Self::Failure) {
@@ -195,6 +231,28 @@ impl<M, N, PT, PP, D, F> TokenizerVisitor<M, N, PT, PP, D, F> {
             PhantomData,
         )
     }
+
+    /// Ends the map after a typed refusal of `model` or `decoder`. serde_json
+    /// requires the closing brace after `visit_map`, so the remaining entries
+    /// are skipped syntactically, constructing nothing; a skip error must not
+    /// discard the failure.
+    fn refuse<'de, A, T>(
+        &self,
+        map: &mut A,
+        failure: F::Failure,
+    ) -> Result<Result<T, F::Failure>, A::Error>
+    where
+        A: MapAccess<'de>,
+        F: ModelField<'de, M, D>,
+    {
+        match skip_entries(map) {
+            Ok(()) => Ok(Err(failure)),
+            Err(error) => {
+                self.0.keep(failure);
+                Err(error)
+            }
+        }
+    }
 }
 
 impl<'de, M, N, PT, PP, D, F> Visitor<'de> for TokenizerVisitor<M, N, PT, PP, D, F>
@@ -204,7 +262,7 @@ where
     PT: Deserialize<'de> + PreTokenizer,
     PP: Deserialize<'de> + PostProcessor,
     D: Deserialize<'de> + Decoder,
-    F: ModelField<'de, M>,
+    F: ModelField<'de, M, D>,
 {
     type Value = Result<TokenizerImpl<M, N, PT, PP, D>, F::Failure>;
 
@@ -243,22 +301,12 @@ where
                 }
                 "model" => match self.0.next_model(&mut map)? {
                     Ok(model) => builder = builder.with_model(model),
-                    Err(failure) => {
-                        // serde_json requires the closing brace after `visit_map`.
-                        // Skip the remaining entries syntactically, constructing
-                        // nothing; a skip error must not discard the failure.
-                        return match skip_entries(&mut map) {
-                            Ok(()) => Ok(Err(failure)),
-                            Err(error) => {
-                                self.0.keep(failure);
-                                Err(error)
-                            }
-                        };
-                    }
+                    Err(failure) => return self.refuse(&mut map, failure),
                 },
-                "decoder" => {
-                    builder = builder.with_decoder(map.next_value()?);
-                }
+                "decoder" => match self.0.next_decoder(&mut map)? {
+                    Ok(decoder) => builder = builder.with_decoder(decoder),
+                    Err(failure) => return self.refuse(&mut map, failure),
+                },
                 "post_processor" => {
                     builder = builder.with_post_processor(map.next_value()?);
                 }

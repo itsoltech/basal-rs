@@ -1,5 +1,6 @@
 //! Explicit, per-call storage for the BPE builder's merge scratch buffer and,
-//! optionally, an account for the built model's merge table backing.
+//! optionally, accounts for the built model's merge table backing and for the
+//! compiled backing of decoder-tree regexes.
 //!
 //! Local basal-rs addition. The legacy `BpeBuilder::build` and `Deserialize`
 //! routes keep their own `vec![0; max_len]` allocation and global merge table.
@@ -33,6 +34,19 @@ pub trait MergeStorage {
     /// and released after deallocation, while the returned model or any of its
     /// clones holds the table.
     fn merge_table(&self) -> Option<MergeTableAccount<Self::Error>> {
+        None
+    }
+
+    /// The account that admits the compiled backing of decoder-tree regexes.
+    ///
+    /// Requested when the tokenizer's `decoder` entry is reached. `None` (the
+    /// default) builds the decoder exactly as the legacy route does. With
+    /// `Some`, the retained compiled Oniguruma backing of every `Replace` in
+    /// the decoder tree is admitted before allocation and released after it is
+    /// freed, while the decoder or any of its clones holds the regex. Normalizer
+    /// and pre-tokenizer regexes stay unadmitted. Without the `onig` feature
+    /// the account is not requested.
+    fn decoder_regex(&self) -> Option<MergeTableAccount<Self::Error>> {
         None
     }
 }
@@ -86,12 +100,40 @@ pub struct MergeTableAccount<E> {
     pub refused: fn(TableRefusal) -> E,
 }
 
+/// The [`MergeStorage::decoder_regex`] account as an Oniguruma regex account.
+/// Every admitted regex retains it until its last owner drops the regex.
+#[cfg(feature = "onig")]
+pub(crate) struct RegexCharge(pub(crate) Arc<dyn TableAccount>);
+
+#[cfg(feature = "onig")]
+impl onig::RegexAccount for RegexCharge {
+    type Refusal = TableRefusal;
+
+    fn try_acquire(&self, bytes: usize) -> Result<(), TableRefusal> {
+        self.0.try_acquire(bytes)
+    }
+
+    fn release(&self, bytes: usize) {
+        self.0.release(bytes);
+    }
+}
+
+/// Failure of an admitted decoder regex.
+#[cfg(feature = "onig")]
+pub(crate) enum AdmittedRegexError {
+    /// Typed refusal of a compiled-backing block, never boxed or formatted.
+    Refused(TableRefusal),
+    /// The legacy compile error, boxed as the legacy constructor boxes it.
+    Backend(Box<dyn std::error::Error + Send + Sync>),
+}
+
 /// Failure of a build that uses explicit [`MergeStorage`].
 #[derive(Debug, thiserror::Error)]
 pub enum MergeBuildError<E> {
     /// The storage refused the scratch buffer or, when it supplies a
-    /// [`MergeStorage::merge_table`] account, a merge-table block. The
-    /// message is unchanged; the source tells the two apart.
+    /// [`MergeStorage::merge_table`] or [`MergeStorage::decoder_regex`]
+    /// account, a merge-table or decoder-regex block. The message is
+    /// unchanged; the source tells them apart.
     #[error("BPE merge scratch storage was refused")]
     Storage(#[source] E),
     /// The storage returned a slice of another length.

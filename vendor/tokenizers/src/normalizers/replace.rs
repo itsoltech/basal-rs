@@ -1,8 +1,13 @@
+// Modified for basal-rs: construct a decoder `Replace` with an admitted regex backing.
 use crate::tokenizer::pattern::Pattern;
 use crate::tokenizer::Decoder;
 use crate::tokenizer::{NormalizedString, Normalizer, Result};
+#[cfg(feature = "onig")]
+use crate::utils::merge_storage::{AdmittedRegexError, RegexCharge};
 use crate::utils::SysRegex;
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "onig")]
+use std::sync::Arc;
 
 /// Represents the different patterns that `Replace` can use
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Eq)]
@@ -27,9 +32,9 @@ impl From<&str> for ReplacePattern {
 #[doc(hidden)]
 #[derive(Deserialize)]
 #[serde(tag = "type")]
-struct ReplaceDeserializer {
-    pattern: ReplacePattern,
-    content: String,
+pub(crate) struct ReplaceDeserializer {
+    pub(crate) pattern: ReplacePattern,
+    pub(crate) content: String,
 }
 
 impl std::convert::TryFrom<ReplaceDeserializer> for Replace {
@@ -52,7 +57,17 @@ pub struct Replace {
 }
 
 impl Clone for Replace {
+    /// An admitted regex is shared, keeping its one charged backing; a legacy
+    /// regex is recompiled as before.
     fn clone(&self) -> Self {
+        #[cfg(feature = "onig")]
+        if let Some(regex) = self.regex.share() {
+            return Self {
+                pattern: self.pattern.clone(),
+                content: self.content.clone(),
+                regex,
+            };
+        }
         Self::new(self.pattern.clone(), &self.content).unwrap()
     }
 }
@@ -74,6 +89,25 @@ impl Replace {
         Ok(Self {
             pattern,
             content: content.into(),
+            regex,
+        })
+    }
+
+    /// [`Replace::new`] whose regex backing is admitted on `account`.
+    #[cfg(feature = "onig")]
+    pub(crate) fn new_admitted(
+        pattern: ReplacePattern,
+        content: String,
+        account: &Arc<RegexCharge>,
+    ) -> std::result::Result<Self, AdmittedRegexError> {
+        let regex = match &pattern {
+            ReplacePattern::String(s) => SysRegex::new_admitted(&regex::escape(s), account)?,
+            ReplacePattern::Regex(r) => SysRegex::new_admitted(r, account)?,
+        };
+
+        Ok(Self {
+            pattern,
+            content,
             regex,
         })
     }

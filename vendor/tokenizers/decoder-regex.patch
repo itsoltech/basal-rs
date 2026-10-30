@@ -1,0 +1,852 @@
+--- a/src/decoders/mod.rs
++++ b/src/decoders/mod.rs
+@@ -1,3 +1,4 @@
++// Modified for basal-rs: read the decoder tree with admitted `Replace` regex backings.
+ pub mod bpe;
+ pub mod byte_fallback;
+ pub mod ctc;
+@@ -10,7 +11,13 @@
+ pub use super::pre_tokenizers::byte_level;
+ pub use super::pre_tokenizers::metaspace;
+ 
++#[cfg(feature = "onig")]
++use serde::de::{DeserializeSeed, Visitor};
+ use serde::{Deserialize, Deserializer, Serialize};
++#[cfg(feature = "onig")]
++use std::fmt;
++#[cfg(feature = "onig")]
++use std::sync::Arc;
+ 
+ use crate::decoders::bpe::BPEDecoder;
+ use crate::decoders::byte_fallback::ByteFallback;
+@@ -20,8 +27,12 @@
+ use crate::decoders::strip::Strip;
+ use crate::decoders::wordpiece::WordPiece;
+ use crate::normalizers::replace::Replace;
++#[cfg(feature = "onig")]
++use crate::normalizers::replace::ReplaceDeserializer;
+ use crate::pre_tokenizers::byte_level::ByteLevel;
+ use crate::pre_tokenizers::metaspace::Metaspace;
++#[cfg(feature = "onig")]
++use crate::utils::merge_storage::{AdmittedRegexError, RegexCharge, TableRefusal};
+ use crate::{Decoder, Result};
+ 
+ #[derive(Serialize, Clone, Debug)]
+@@ -39,96 +50,110 @@
+     ByteFallback(ByteFallback),
+ }
+ 
++#[derive(Deserialize)]
++struct Tagged {
++    #[serde(rename = "type")]
++    variant: EnumType,
++    #[serde(flatten)]
++    rest: serde_json::Value,
++}
++#[derive(Serialize, Deserialize)]
++enum EnumType {
++    BPEDecoder,
++    ByteLevel,
++    WordPiece,
++    Metaspace,
++    CTC,
++    Sequence,
++    Replace,
++    Fuse,
++    Strip,
++    ByteFallback,
++}
++
++#[derive(Deserialize)]
++#[serde(untagged)]
++enum DecoderHelper {
++    Tagged(Tagged),
++    Legacy(serde_json::Value),
++}
++
++#[derive(Deserialize)]
++#[serde(untagged)]
++enum DecoderUntagged {
++    BPE(BPEDecoder),
++    ByteLevel(ByteLevel),
++    WordPiece(WordPiece),
++    Metaspace(Metaspace),
++    CTC(CTC),
++    Sequence(Sequence),
++    Replace(Replace),
++    Fuse(Fuse),
++    Strip(Strip),
++    ByteFallback(ByteFallback),
++}
++
++/// The tagged object with its `type` restored, as the decoder variants read it.
++fn tagged_values<E: serde::de::Error>(
++    model: Tagged,
++) -> std::result::Result<(EnumType, serde_json::Value), E> {
++    let mut values: serde_json::Map<String, serde_json::Value> =
++        serde_json::from_value(model.rest).map_err(serde::de::Error::custom)?;
++    values.insert(
++        "type".to_string(),
++        serde_json::to_value(&model.variant).map_err(serde::de::Error::custom)?,
++    );
++    Ok((model.variant, serde_json::Value::Object(values)))
++}
++
++fn tagged<E: serde::de::Error>(
++    variant: EnumType,
++    values: serde_json::Value,
++) -> std::result::Result<DecoderWrapper, E> {
++    Ok(match variant {
++        EnumType::BPEDecoder => {
++            DecoderWrapper::BPE(serde_json::from_value(values).map_err(serde::de::Error::custom)?)
++        }
++        EnumType::ByteLevel => DecoderWrapper::ByteLevel(
++            serde_json::from_value(values).map_err(serde::de::Error::custom)?,
++        ),
++        EnumType::WordPiece => DecoderWrapper::WordPiece(
++            serde_json::from_value(values).map_err(serde::de::Error::custom)?,
++        ),
++        EnumType::Metaspace => DecoderWrapper::Metaspace(
++            serde_json::from_value(values).map_err(serde::de::Error::custom)?,
++        ),
++        EnumType::CTC => {
++            DecoderWrapper::CTC(serde_json::from_value(values).map_err(serde::de::Error::custom)?)
++        }
++        EnumType::Sequence => DecoderWrapper::Sequence(
++            serde_json::from_value(values).map_err(serde::de::Error::custom)?,
++        ),
++        EnumType::Replace => DecoderWrapper::Replace(
++            serde_json::from_value(values).map_err(serde::de::Error::custom)?,
++        ),
++        EnumType::Fuse => {
++            DecoderWrapper::Fuse(serde_json::from_value(values).map_err(serde::de::Error::custom)?)
++        }
++        EnumType::Strip => {
++            DecoderWrapper::Strip(serde_json::from_value(values).map_err(serde::de::Error::custom)?)
++        }
++        EnumType::ByteFallback => DecoderWrapper::ByteFallback(
++            serde_json::from_value(values).map_err(serde::de::Error::custom)?,
++        ),
++    })
++}
++
+ impl<'de> Deserialize<'de> for DecoderWrapper {
+     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+     where
+         D: Deserializer<'de>,
+     {
+-        #[derive(Deserialize)]
+-        pub struct Tagged {
+-            #[serde(rename = "type")]
+-            variant: EnumType,
+-            #[serde(flatten)]
+-            rest: serde_json::Value,
+-        }
+-        #[derive(Serialize, Deserialize)]
+-        pub enum EnumType {
+-            BPEDecoder,
+-            ByteLevel,
+-            WordPiece,
+-            Metaspace,
+-            CTC,
+-            Sequence,
+-            Replace,
+-            Fuse,
+-            Strip,
+-            ByteFallback,
+-        }
+-
+-        #[derive(Deserialize)]
+-        #[serde(untagged)]
+-        pub enum DecoderHelper {
+-            Tagged(Tagged),
+-            Legacy(serde_json::Value),
+-        }
+-
+-        #[derive(Deserialize)]
+-        #[serde(untagged)]
+-        pub enum DecoderUntagged {
+-            BPE(BPEDecoder),
+-            ByteLevel(ByteLevel),
+-            WordPiece(WordPiece),
+-            Metaspace(Metaspace),
+-            CTC(CTC),
+-            Sequence(Sequence),
+-            Replace(Replace),
+-            Fuse(Fuse),
+-            Strip(Strip),
+-            ByteFallback(ByteFallback),
+-        }
+-
+         let helper = DecoderHelper::deserialize(deserializer).expect("Helper");
+         Ok(match helper {
+             DecoderHelper::Tagged(model) => {
+-                let mut values: serde_json::Map<String, serde_json::Value> =
+-                    serde_json::from_value(model.rest).map_err(serde::de::Error::custom)?;
+-                values.insert(
+-                    "type".to_string(),
+-                    serde_json::to_value(&model.variant).map_err(serde::de::Error::custom)?,
+-                );
+-                let values = serde_json::Value::Object(values);
+-                match model.variant {
+-                    EnumType::BPEDecoder => DecoderWrapper::BPE(
+-                        serde_json::from_value(values).map_err(serde::de::Error::custom)?,
+-                    ),
+-                    EnumType::ByteLevel => DecoderWrapper::ByteLevel(
+-                        serde_json::from_value(values).map_err(serde::de::Error::custom)?,
+-                    ),
+-                    EnumType::WordPiece => DecoderWrapper::WordPiece(
+-                        serde_json::from_value(values).map_err(serde::de::Error::custom)?,
+-                    ),
+-                    EnumType::Metaspace => DecoderWrapper::Metaspace(
+-                        serde_json::from_value(values).map_err(serde::de::Error::custom)?,
+-                    ),
+-                    EnumType::CTC => DecoderWrapper::CTC(
+-                        serde_json::from_value(values).map_err(serde::de::Error::custom)?,
+-                    ),
+-                    EnumType::Sequence => DecoderWrapper::Sequence(
+-                        serde_json::from_value(values).map_err(serde::de::Error::custom)?,
+-                    ),
+-                    EnumType::Replace => DecoderWrapper::Replace(
+-                        serde_json::from_value(values).map_err(serde::de::Error::custom)?,
+-                    ),
+-                    EnumType::Fuse => DecoderWrapper::Fuse(
+-                        serde_json::from_value(values).map_err(serde::de::Error::custom)?,
+-                    ),
+-                    EnumType::Strip => DecoderWrapper::Strip(
+-                        serde_json::from_value(values).map_err(serde::de::Error::custom)?,
+-                    ),
+-                    EnumType::ByteFallback => DecoderWrapper::ByteFallback(
+-                        serde_json::from_value(values).map_err(serde::de::Error::custom)?,
+-                    ),
+-                }
++                let (variant, values) = tagged_values::<D::Error>(model)?;
++                tagged::<D::Error>(variant, values)?
+             }
+             DecoderHelper::Legacy(value) => {
+                 let untagged = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+@@ -149,6 +174,188 @@
+     }
+ }
+ 
++/// Reads the tokenizer's optional `decoder` like `Option<DecoderWrapper>`, but
++/// the regex backing of every `Replace` in the decoder tree is admitted on
++/// `account`. The inner `Err` is the first typed refusal; no later decoder is
++/// constructed after it. Every other variant, error and message follows the
++/// legacy route.
++#[cfg(feature = "onig")]
++pub(crate) struct DecoderRegexSeed<E> {
++    pub(crate) account: Arc<RegexCharge>,
++    pub(crate) refused: fn(TableRefusal) -> E,
++}
++
++#[cfg(feature = "onig")]
++impl<'de, E> DeserializeSeed<'de> for DecoderRegexSeed<E> {
++    type Value = std::result::Result<Option<DecoderWrapper>, E>;
++
++    fn deserialize<D>(self, deserializer: D) -> std::result::Result<Self::Value, D::Error>
++    where
++        D: Deserializer<'de>,
++    {
++        deserializer.deserialize_option(self)
++    }
++}
++
++#[cfg(feature = "onig")]
++impl<'de, E> Visitor<'de> for DecoderRegexSeed<E> {
++    type Value = std::result::Result<Option<DecoderWrapper>, E>;
++
++    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
++        formatter.write_str("option")
++    }
++
++    fn visit_none<Er: serde::de::Error>(self) -> std::result::Result<Self::Value, Er> {
++        Ok(Ok(None))
++    }
++
++    fn visit_unit<Er: serde::de::Error>(self) -> std::result::Result<Self::Value, Er> {
++        Ok(Ok(None))
++    }
++
++    fn visit_some<D>(self, deserializer: D) -> std::result::Result<Self::Value, D::Error>
++    where
++        D: Deserializer<'de>,
++    {
++        Ok(admitted_decoder(deserializer, &self.account)?
++            .map(Some)
++            .map_err(self.refused))
++    }
++}
++
++/// `DecoderWrapper::deserialize` with admitted `Replace` regexes; `Sequence`
++/// elements recurse in order. The outer `Ok(Err)` is a typed refusal.
++#[cfg(feature = "onig")]
++fn admitted_decoder<'de, D>(
++    deserializer: D,
++    account: &Arc<RegexCharge>,
++) -> std::result::Result<std::result::Result<DecoderWrapper, TableRefusal>, D::Error>
++where
++    D: Deserializer<'de>,
++{
++    let helper = DecoderHelper::deserialize(deserializer).expect("Helper");
++    Ok(Ok(match helper {
++        DecoderHelper::Tagged(model) => {
++            let (variant, values) = tagged_values::<D::Error>(model)?;
++            match variant {
++                EnumType::Replace => {
++                    let replace: ReplaceDeserializer =
++                        serde_json::from_value(values).map_err(serde::de::Error::custom)?;
++                    match Replace::new_admitted(replace.pattern, replace.content, account) {
++                        Ok(replace) => DecoderWrapper::Replace(replace),
++                        Err(AdmittedRegexError::Refused(refusal)) => return Ok(Err(refusal)),
++                        // Reported as serde's `try_from` and then the variant read report it.
++                        Err(AdmittedRegexError::Backend(error)) => {
++                            return Err(serde::de::Error::custom(
++                                <serde_json::Error as serde::de::Error>::custom(error),
++                            ))
++                        }
++                    }
++                }
++                EnumType::Sequence => {
++                    let sequence: sequence::shape::Sequence =
++                        serde_json::from_value(values).map_err(serde::de::Error::custom)?;
++                    match admitted_sequence(sequence, account).map_err(serde::de::Error::custom)? {
++                        Ok(sequence) => DecoderWrapper::Sequence(sequence),
++                        Err(refusal) => return Ok(Err(refusal)),
++                    }
++                }
++                variant => tagged::<D::Error>(variant, values)?,
++            }
++        }
++        DecoderHelper::Legacy(value) => match admitted_untagged(&value, account) {
++            Some(Ok(decoder)) => decoder,
++            Some(Err(refusal)) => return Ok(Err(refusal)),
++            None => {
++                return Err(serde::de::Error::custom(
++                    "data did not match any variant of untagged enum DecoderUntagged",
++                ))
++            }
++        },
++    }))
++}
++
++#[cfg(feature = "onig")]
++fn admitted_sequence(
++    sequence: sequence::shape::Sequence,
++    account: &Arc<RegexCharge>,
++) -> std::result::Result<std::result::Result<Sequence, TableRefusal>, serde_json::Error> {
++    let mut decoders = Vec::new();
++    for value in sequence.decoders {
++        match admitted_decoder(value, account)? {
++            Ok(decoder) => decoders.push(decoder),
++            Err(refusal) => return Ok(Err(refusal)),
++        }
++    }
++    Ok(Ok(Sequence::new(decoders)))
++}
++
++/// One variant of an untagged enum, tried as serde tries it: the input is
++/// buffered first, so number and string handling match `DecoderUntagged`.
++#[cfg(feature = "onig")]
++#[derive(Deserialize)]
++#[serde(untagged)]
++enum Trial<T> {
++    Variant(T),
++}
++
++#[cfg(feature = "onig")]
++fn trial<T: serde::de::DeserializeOwned>(value: &serde_json::Value) -> Option<T> {
++    match Trial::<T>::deserialize(value) {
++        Ok(Trial::Variant(variant)) => Some(variant),
++        Err(_) => None,
++    }
++}
++
++/// `DecoderUntagged` in its variant order. A refusal returns at once and is
++/// never a mismatch; a parse or backend error is a mismatch. `None` when no
++/// variant matches.
++#[cfg(feature = "onig")]
++fn admitted_untagged(
++    value: &serde_json::Value,
++    account: &Arc<RegexCharge>,
++) -> Option<std::result::Result<DecoderWrapper, TableRefusal>> {
++    if let Some(decoder) = trial(value) {
++        return Some(Ok(DecoderWrapper::BPE(decoder)));
++    }
++    if let Some(decoder) = trial(value) {
++        return Some(Ok(DecoderWrapper::ByteLevel(decoder)));
++    }
++    if let Some(decoder) = trial(value) {
++        return Some(Ok(DecoderWrapper::WordPiece(decoder)));
++    }
++    if let Some(decoder) = trial(value) {
++        return Some(Ok(DecoderWrapper::Metaspace(decoder)));
++    }
++    if let Some(decoder) = trial(value) {
++        return Some(Ok(DecoderWrapper::CTC(decoder)));
++    }
++    if let Some(sequence) = trial::<sequence::shape::Sequence>(value) {
++        match admitted_sequence(sequence, account) {
++            Ok(Ok(sequence)) => return Some(Ok(DecoderWrapper::Sequence(sequence))),
++            Ok(Err(refusal)) => return Some(Err(refusal)),
++            Err(_) => {}
++        }
++    }
++    if let Some(replace) = trial::<ReplaceDeserializer>(value) {
++        match Replace::new_admitted(replace.pattern, replace.content, account) {
++            Ok(replace) => return Some(Ok(DecoderWrapper::Replace(replace))),
++            Err(AdmittedRegexError::Refused(refusal)) => return Some(Err(refusal)),
++            Err(AdmittedRegexError::Backend(_)) => {}
++        }
++    }
++    if let Some(decoder) = trial(value) {
++        return Some(Ok(DecoderWrapper::Fuse(decoder)));
++    }
++    if let Some(decoder) = trial(value) {
++        return Some(Ok(DecoderWrapper::Strip(decoder)));
++    }
++    if let Some(decoder) = trial(value) {
++        return Some(Ok(DecoderWrapper::ByteFallback(decoder)));
++    }
++    None
++}
++
+ impl Decoder for DecoderWrapper {
+     fn decode_chain(&self, tokens: Vec<String>) -> Result<Vec<String>> {
+         match self {
+--- a/src/decoders/sequence.rs
++++ b/src/decoders/sequence.rs
+@@ -1,8 +1,22 @@
++// Modified for basal-rs: expose the tagged Sequence shape to the admitted decoder seed.
+ use crate::decoders::DecoderWrapper;
+ use crate::tokenizer::{Decoder, Result};
+ use crate::utils::macro_rules_attribute;
+ use serde::{Deserialize, Serialize};
+ 
++/// The `Sequence` JSON shape with its elements left as values, generated by
++/// the same macro, so its tag, helper names and messages are identical.
++#[cfg(feature = "onig")]
++pub(crate) mod shape {
++    use crate::utils::macro_rules_attribute;
++    use serde::{Deserialize, Serialize};
++
++    #[macro_rules_attribute(impl_serde_type!)]
++    pub(crate) struct Sequence {
++        pub(crate) decoders: Vec<serde_json::Value>,
++    }
++}
++
+ #[derive(Clone, Debug)]
+ #[macro_rules_attribute(impl_serde_type!)]
+ pub struct Sequence {
+--- a/src/normalizers/replace.rs
++++ b/src/normalizers/replace.rs
+@@ -1,8 +1,13 @@
++// Modified for basal-rs: construct a decoder `Replace` with an admitted regex backing.
+ use crate::tokenizer::pattern::Pattern;
+ use crate::tokenizer::Decoder;
+ use crate::tokenizer::{NormalizedString, Normalizer, Result};
++#[cfg(feature = "onig")]
++use crate::utils::merge_storage::{AdmittedRegexError, RegexCharge};
+ use crate::utils::SysRegex;
+ use serde::{Deserialize, Serialize};
++#[cfg(feature = "onig")]
++use std::sync::Arc;
+ 
+ /// Represents the different patterns that `Replace` can use
+ #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Eq)]
+@@ -27,9 +32,9 @@
+ #[doc(hidden)]
+ #[derive(Deserialize)]
+ #[serde(tag = "type")]
+-struct ReplaceDeserializer {
+-    pattern: ReplacePattern,
+-    content: String,
++pub(crate) struct ReplaceDeserializer {
++    pub(crate) pattern: ReplacePattern,
++    pub(crate) content: String,
+ }
+ 
+ impl std::convert::TryFrom<ReplaceDeserializer> for Replace {
+@@ -52,7 +57,17 @@
+ }
+ 
+ impl Clone for Replace {
++    /// An admitted regex is shared, keeping its one charged backing; a legacy
++    /// regex is recompiled as before.
+     fn clone(&self) -> Self {
++        #[cfg(feature = "onig")]
++        if let Some(regex) = self.regex.share() {
++            return Self {
++                pattern: self.pattern.clone(),
++                content: self.content.clone(),
++                regex,
++            };
++        }
+         Self::new(self.pattern.clone(), &self.content).unwrap()
+     }
+ }
+@@ -77,6 +92,25 @@
+             regex,
+         })
+     }
++
++    /// [`Replace::new`] whose regex backing is admitted on `account`.
++    #[cfg(feature = "onig")]
++    pub(crate) fn new_admitted(
++        pattern: ReplacePattern,
++        content: String,
++        account: &Arc<RegexCharge>,
++    ) -> std::result::Result<Self, AdmittedRegexError> {
++        let regex = match &pattern {
++            ReplacePattern::String(s) => SysRegex::new_admitted(&regex::escape(s), account)?,
++            ReplacePattern::Regex(r) => SysRegex::new_admitted(r, account)?,
++        };
++
++        Ok(Self {
++            pattern,
++            content,
++            regex,
++        })
++    }
+ }
+ 
+ impl Normalizer for Replace {
+--- a/src/tokenizer/serialization.rs
++++ b/src/tokenizer/serialization.rs
+@@ -1,7 +1,9 @@
+-// Modified for basal-rs: retain typed BPE refusals through JSON completion.
++// Modified for basal-rs: retain typed BPE and decoder-regex refusals through JSON completion.
+ use std::cell::Cell;
+ use std::convert::Infallible;
+ use std::marker::PhantomData;
++#[cfg(feature = "onig")]
++use std::sync::Arc;
+ 
+ use serde::{
+     self,
+@@ -11,7 +13,11 @@
+ };
+ 
+ use super::{added_vocabulary::AddedTokenWithId, TokenizerImpl};
++#[cfg(feature = "onig")]
++use crate::decoders::DecoderRegexSeed;
+ use crate::models::ModelMergeSeed;
++#[cfg(feature = "onig")]
++use crate::utils::merge_storage::RegexCharge;
+ use crate::utils::merge_storage::{MergeBuildError, MergeStorage};
+ use crate::{
+     Decoder, DecoderWrapper, Model, ModelWrapper, Normalizer, NormalizerWrapper, PostProcessor,
+@@ -121,8 +127,9 @@
+     }
+ }
+ 
+-/// Reads one `model` value. `Failure` is a typed refusal outside serde errors.
+-trait ModelField<'de, M> {
++/// Reads one `model` value and the optional `decoder` value. `Failure` is a
++/// typed refusal outside serde errors.
++trait ModelField<'de, M, D> {
+     type Failure;
+ 
+     fn next_model<A: MapAccess<'de>>(
+@@ -130,6 +137,11 @@
+         map: &mut A,
+     ) -> Result<Result<M, Self::Failure>, A::Error>;
+ 
++    fn next_decoder<A: MapAccess<'de>>(
++        &self,
++        map: &mut A,
++    ) -> Result<Result<Option<D>, Self::Failure>, A::Error>;
++
+     /// Keeps a failure that a later serde error would otherwise discard.
+     fn keep(&self, failure: Self::Failure);
+ }
+@@ -137,7 +149,7 @@
+ /// The original `Deserialize` route.
+ struct PlainModel;
+ 
+-impl<'de, M: Deserialize<'de>> ModelField<'de, M> for PlainModel {
++impl<'de, M: Deserialize<'de>, D: Deserialize<'de>> ModelField<'de, M, D> for PlainModel {
+     type Failure = Infallible;
+ 
+     fn next_model<A: MapAccess<'de>>(
+@@ -147,6 +159,13 @@
+         map.next_value().map(Ok)
+     }
+ 
++    fn next_decoder<A: MapAccess<'de>>(
++        &self,
++        map: &mut A,
++    ) -> Result<Result<Option<D>, Infallible>, A::Error> {
++        map.next_value().map(Ok)
++    }
++
+     fn keep(&self, failure: Infallible) {
+         match failure {}
+     }
+@@ -158,7 +177,7 @@
+     refused: &'a Cell<Option<MergeBuildError<S::Error>>>,
+ }
+ 
+-impl<'de, S: MergeStorage> ModelField<'de, ModelWrapper> for MergeModel<'_, S> {
++impl<'de, S: MergeStorage> ModelField<'de, ModelWrapper, DecoderWrapper> for MergeModel<'_, S> {
+     type Failure = MergeBuildError<S::Error>;
+ 
+     fn next_model<A: MapAccess<'de>>(
+@@ -170,6 +189,23 @@
+         })
+     }
+ 
++    /// With a [`MergeStorage::decoder_regex`] account, every decoder-tree
++    /// `Replace` regex backing is admitted on it; otherwise the legacy read.
++    fn next_decoder<A: MapAccess<'de>>(
++        &self,
++        map: &mut A,
++    ) -> Result<Result<Option<DecoderWrapper>, Self::Failure>, A::Error> {
++        #[cfg(feature = "onig")]
++        if let Some(account) = self.storage.decoder_regex() {
++            let seed = DecoderRegexSeed {
++                account: Arc::new(RegexCharge(account.account)),
++                refused: account.refused,
++            };
++            return Ok(map.next_value_seed(seed)?.map_err(MergeBuildError::Storage));
++        }
++        map.next_value().map(Ok)
++    }
++
+     fn keep(&self, failure: Self::Failure) {
+         self.refused.set(Some(failure));
+     }
+@@ -195,6 +231,28 @@
+             PhantomData,
+         )
+     }
++
++    /// Ends the map after a typed refusal of `model` or `decoder`. serde_json
++    /// requires the closing brace after `visit_map`, so the remaining entries
++    /// are skipped syntactically, constructing nothing; a skip error must not
++    /// discard the failure.
++    fn refuse<'de, A, T>(
++        &self,
++        map: &mut A,
++        failure: F::Failure,
++    ) -> Result<Result<T, F::Failure>, A::Error>
++    where
++        A: MapAccess<'de>,
++        F: ModelField<'de, M, D>,
++    {
++        match skip_entries(map) {
++            Ok(()) => Ok(Err(failure)),
++            Err(error) => {
++                self.0.keep(failure);
++                Err(error)
++            }
++        }
++    }
+ }
+ 
+ impl<'de, M, N, PT, PP, D, F> Visitor<'de> for TokenizerVisitor<M, N, PT, PP, D, F>
+@@ -204,7 +262,7 @@
+     PT: Deserialize<'de> + PreTokenizer,
+     PP: Deserialize<'de> + PostProcessor,
+     D: Deserialize<'de> + Decoder,
+-    F: ModelField<'de, M>,
++    F: ModelField<'de, M, D>,
+ {
+     type Value = Result<TokenizerImpl<M, N, PT, PP, D>, F::Failure>;
+ 
+@@ -243,22 +301,12 @@
+                 }
+                 "model" => match self.0.next_model(&mut map)? {
+                     Ok(model) => builder = builder.with_model(model),
+-                    Err(failure) => {
+-                        // serde_json requires the closing brace after `visit_map`.
+-                        // Skip the remaining entries syntactically, constructing
+-                        // nothing; a skip error must not discard the failure.
+-                        return match skip_entries(&mut map) {
+-                            Ok(()) => Ok(Err(failure)),
+-                            Err(error) => {
+-                                self.0.keep(failure);
+-                                Err(error)
+-                            }
+-                        };
+-                    }
++                    Err(failure) => return self.refuse(&mut map, failure),
++                },
++                "decoder" => match self.0.next_decoder(&mut map)? {
++                    Ok(decoder) => builder = builder.with_decoder(decoder),
++                    Err(failure) => return self.refuse(&mut map, failure),
+                 },
+-                "decoder" => {
+-                    builder = builder.with_decoder(map.next_value()?);
+-                }
+                 "post_processor" => {
+                     builder = builder.with_post_processor(map.next_value()?);
+                 }
+--- a/src/utils/merge_storage.rs
++++ b/src/utils/merge_storage.rs
+@@ -1,5 +1,6 @@
+ //! Explicit, per-call storage for the BPE builder's merge scratch buffer and,
+-//! optionally, an account for the built model's merge table backing.
++//! optionally, accounts for the built model's merge table backing and for the
++//! compiled backing of decoder-tree regexes.
+ //!
+ //! Local basal-rs addition. The legacy `BpeBuilder::build` and `Deserialize`
+ //! routes keep their own `vec![0; max_len]` allocation and global merge table.
+@@ -35,6 +36,19 @@
+     fn merge_table(&self) -> Option<MergeTableAccount<Self::Error>> {
+         None
+     }
++
++    /// The account that admits the compiled backing of decoder-tree regexes.
++    ///
++    /// Requested when the tokenizer's `decoder` entry is reached. `None` (the
++    /// default) builds the decoder exactly as the legacy route does. With
++    /// `Some`, the retained compiled Oniguruma backing of every `Replace` in
++    /// the decoder tree is admitted before allocation and released after it is
++    /// freed, while the decoder or any of its clones holds the regex. Normalizer
++    /// and pre-tokenizer regexes stay unadmitted. Without the `onig` feature
++    /// the account is not requested.
++    fn decoder_regex(&self) -> Option<MergeTableAccount<Self::Error>> {
++        None
++    }
+ }
+ 
+ /// Account charged for each merge-table backing block.
+@@ -86,12 +100,40 @@
+     pub refused: fn(TableRefusal) -> E,
+ }
+ 
++/// The [`MergeStorage::decoder_regex`] account as an Oniguruma regex account.
++/// Every admitted regex retains it until its last owner drops the regex.
++#[cfg(feature = "onig")]
++pub(crate) struct RegexCharge(pub(crate) Arc<dyn TableAccount>);
++
++#[cfg(feature = "onig")]
++impl onig::RegexAccount for RegexCharge {
++    type Refusal = TableRefusal;
++
++    fn try_acquire(&self, bytes: usize) -> Result<(), TableRefusal> {
++        self.0.try_acquire(bytes)
++    }
++
++    fn release(&self, bytes: usize) {
++        self.0.release(bytes);
++    }
++}
++
++/// Failure of an admitted decoder regex.
++#[cfg(feature = "onig")]
++pub(crate) enum AdmittedRegexError {
++    /// Typed refusal of a compiled-backing block, never boxed or formatted.
++    Refused(TableRefusal),
++    /// The legacy compile error, boxed as the legacy constructor boxes it.
++    Backend(Box<dyn std::error::Error + Send + Sync>),
++}
++
+ /// Failure of a build that uses explicit [`MergeStorage`].
+ #[derive(Debug, thiserror::Error)]
+ pub enum MergeBuildError<E> {
+     /// The storage refused the scratch buffer or, when it supplies a
+-    /// [`MergeStorage::merge_table`] account, a merge-table block. The
+-    /// message is unchanged; the source tells the two apart.
++    /// [`MergeStorage::merge_table`] or [`MergeStorage::decoder_regex`]
++    /// account, a merge-table or decoder-regex block. The message is
++    /// unchanged; the source tells them apart.
+     #[error("BPE merge scratch storage was refused")]
+     Storage(#[source] E),
+     /// The storage returned a slice of another length.
+--- a/src/utils/onig.rs
++++ b/src/utils/onig.rs
+@@ -1,25 +1,86 @@
++// Modified for basal-rs: optionally share a regex whose compiled backing is admitted.
+ use crate::tokenizer::pattern::Pattern;
++use crate::utils::merge_storage::{AdmittedRegexError, RegexCharge, TableRefusal};
+ use crate::{Offsets, Result};
+-use onig::Regex;
++use onig::{Regex, RegexAdmissionError};
+ use std::error::Error;
++use std::fmt;
++use std::sync::Arc;
+ 
+-#[derive(Debug)]
+ pub struct SysRegex {
+-    regex: Regex,
++    regex: Backing,
++}
++
++/// Legacy regexes are owned. Admitted regexes are shared by clones, so their
++/// charged backing lives until the last owner drops it.
++enum Backing {
++    Owned(Regex),
++    Shared(Arc<Regex>),
+ }
+ 
+ impl SysRegex {
++    fn regex(&self) -> &Regex {
++        match &self.regex {
++            Backing::Owned(regex) => regex,
++            Backing::Shared(regex) => regex,
++        }
++    }
++
+     pub fn find_iter<'r, 't>(&'r self, inside: &'t str) -> onig::FindMatches<'r, 't> {
+-        self.regex.find_iter(inside)
++        self.regex().find_iter(inside)
+     }
+ 
+     pub fn new(
+         regex_str: &str,
+     ) -> std::result::Result<Self, Box<dyn Error + Send + Sync + 'static>> {
+         Ok(Self {
+-            regex: Regex::new(regex_str)?,
++            regex: Backing::Owned(Regex::new(regex_str)?),
+         })
+     }
++
++    /// Compiles like [`SysRegex::new`], admitting the retained compiled
++    /// backing on `account`. Refusals stay typed; compile errors are boxed.
++    pub(crate) fn new_admitted(
++        regex_str: &str,
++        account: &Arc<RegexCharge>,
++    ) -> std::result::Result<Self, AdmittedRegexError> {
++        match Regex::new_with_account(regex_str, Arc::clone(account)) {
++            Ok(regex) => Ok(Self {
++                regex: Backing::Shared(Arc::new(regex)),
++            }),
++            Err(RegexAdmissionError::Refused(refusal)) => Err(AdmittedRegexError::Refused(refusal)),
++            Err(RegexAdmissionError::Allocation { bytes }) => {
++                Err(AdmittedRegexError::Refused(TableRefusal::Allocation {
++                    bytes,
++                }))
++            }
++            Err(RegexAdmissionError::CapacityOverflow) => {
++                Err(AdmittedRegexError::Refused(TableRefusal::CapacityOverflow))
++            }
++            Err(RegexAdmissionError::Compile(error)) => {
++                Err(AdmittedRegexError::Backend(Box::new(error)))
++            }
++        }
++    }
++
++    /// Another owner of an admitted regex's backing; `None` for a legacy regex.
++    pub(crate) fn share(&self) -> Option<Self> {
++        match &self.regex {
++            Backing::Owned(_) => None,
++            Backing::Shared(regex) => Some(Self {
++                regex: Backing::Shared(Arc::clone(regex)),
++            }),
++        }
++    }
++}
++
++/// The derived output of the legacy single-field struct.
++impl fmt::Debug for SysRegex {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.debug_struct("SysRegex")
++            .field("regex", self.regex())
++            .finish()
++    }
+ }
+ 
+ impl Pattern for &Regex {

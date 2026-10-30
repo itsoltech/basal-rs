@@ -1,14 +1,18 @@
 [workspace]
 resolver = "2"
 members = ["crates/basal-core", "crates/basal-gpu", "crates/basal-cli", "sdk/rust"]
-exclude = ["vendor/candle-core", "vendor/tokenizers"]
+exclude = ["vendor/candle-core", "vendor/onig", "vendor/onig_sys", "vendor/tokenizers"]
 
 # Candle 0.11.0 still requires vulnerable zip 8.x. Keep its tensor code unchanged
 # while adapting archive names to patched zip 9; see vendor/README.md.
-# tokenizers 0.23.2 adds explicit BPE merge-scratch and merge-table storage routes;
-# tokenizers 0.22.2 stays on crates.io. See vendor/README.md.
+# tokenizers 0.23.2 adds explicit BPE merge-scratch, merge-table and decoder-regex
+# storage routes; tokenizers 0.22.2 stays on crates.io. See vendor/README.md.
+# onig 6.5.3 and onig_sys 69.9.3 add an admitted regex constructor; every user of
+# the one native Oniguruma in this graph, including tokenizers 0.22.2, links them.
 [patch.crates-io]
 candle-core = { path = "vendor/candle-core" }
+onig = { path = "vendor/onig" }
+onig_sys = { path = "vendor/onig_sys" }
 tokenizers = { path = "vendor/tokenizers" }
 
 [workspace.package]

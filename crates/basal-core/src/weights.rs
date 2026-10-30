@@ -37,7 +37,8 @@ pub use immutable_semantics::{
 use json_envelope::JsonReadMode;
 pub use json_envelope::{JsonEnvelopeError, JsonEnvelopeResource};
 pub use provider_construction::{
-    GgufMergeScratchError, GgufMergeScratchReadError, GgufMergeTableError, GgufMergeTableReadError,
+    GgufDecoderRegexError, GgufDecoderRegexReadError, GgufMergeScratchError, GgufMergeScratchReadError,
+    GgufMergeTableError, GgufMergeTableReadError,
 };
 use raw_source::RawCharge;
 pub use raw_source::{GgufRawSourceBudget, GgufRawSourceError};

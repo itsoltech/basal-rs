@@ -1,4 +1,4 @@
-# Vendored Candle and tokenizers patches
+# Vendored Candle, tokenizers and Oniguruma patches
 
 `candle-core/` is the library from the official crates.io `candle-core 0.11.0`
 release. The workspace patches that package locally because both the published
@@ -236,8 +236,9 @@ crates.io.
 - Source, archive SHA-256, upstream commit and the exact omissions are in
   `tokenizers/PROVENANCE.md`. `tokenizers/UPSTREAM-SHA256SUMS` lists the 77
   copied release files before the change. Of the 73 copied source files, 66
-  remain byte for byte identical after both patches; `LICENSE`, `README.md`
-  and `Cargo.toml.orig` are unchanged.
+  remain byte for byte identical after the first two patches and 62 after the
+  third, `decoder-regex.patch` (see below); `LICENSE`, `README.md` and
+  `Cargo.toml.orig` are unchanged.
 - The normalized release manifest omits only the upstream test and benchmark
   targets, their dev dependencies and the profiles that Cargo ignores outside
   the workspace root. Features and edition are unchanged; the merge-table
@@ -336,3 +337,95 @@ exception check passes. Both patches reproduce all nine changed or new files
 from the pinned preimages, and all 82 vendored checksums pass. No test,
 tokenizer execution, output comparison, memory measurement or GPU check was
 performed. REQ-009 remains partial.
+
+### Charged decoder regex backing (onig 6.5.3, onig_sys 69.9.3)
+
+A third opt-in core route, `read_with_decoder_regex_budget` in
+[GGUF.md](../docs/GGUF.md), also admits the retained compiled Oniguruma
+backing of every `Replace` regex in the tokenizer's decoder tree on the same
+GGUF source ledger. It needs the vendored `onig/` and `onig_sys/` copies of the
+official crates.io releases; their sources, archive checksums, upstream commit,
+omissions and local changes are in `onig/PROVENANCE.md` and
+`onig_sys/PROVENANCE.md`. No advisory motivates this patch. The
+`[patch.crates-io]` entries match the locked versions, so the one native
+Oniguruma of the graph, also used by `tokenizers 0.22.2`, is the patched one.
+`Cargo.lock` changes only the `onig` and `onig_sys` entries, which lose their
+registry source and checksum. No dependency version changes.
+
+- `onig_sys` adds `onig_basal_new` (new `onig_basal.c`/`onig_basal.h`) and its
+  Rust binding. An admitted regex carries a private account pointer in its
+  `regex_t`. Only the retained compiled-program blocks dispatch on it:
+  `regex_t` itself (in one container with the account), ops/ocs, string and
+  class operands, backref numbers, the string pool, repeat ranges and the
+  optimizer string. Each block is one global-allocator allocation of a size
+  header plus payload, charged for its full size before allocation and
+  released after deallocation. Growth charges the new block while the old one
+  lives. Admitted-only guards turn signed `int` size overflow into a typed
+  `CapacityOverflow`. Compilation and search otherwise run the unchanged
+  native code under the same compile lock, so process-wide syntax, callout,
+  user-property, case-fold and limit settings are observed exactly where the
+  legacy constructor observes them.
+- **Legacy effect.** Every legacy `regex_t` in the process, including those of
+  `tokenizers 0.22.2`, grows by one pointer, and the listed legacy compile and
+  free sites evaluate one NULL branch. Every legacy `SysRegex` in tokenizers
+  0.23.2 grows by one enum discriminant. Their algorithms, accepted inputs,
+  outputs, errors and `Debug` text are unchanged, and legacy `Replace` clones
+  still recompile. Earlier wording that legacy routes keep their exact
+  allocation layout no longer holds for these two types. Object sizes were not
+  measured.
+- `onig` adds `Regex::new_with_account` with the `RegexAccount` trait and
+  `RegexAdmissionError` (`Refused`, `Allocation`, `CapacityOverflow`,
+  `Compile`). No Rust unwind crosses C: a panic in `try_acquire` is caught,
+  kept as the first failure and resumed after native cleanup, the lock guard
+  and the account are released; a panic in `release`, in dropping the account
+  or in dropping a later, ignored failure aborts the process. The compile lock
+  is never poisoned by this route.
+- `tokenizers/decoder-regex.patch` applies with `patch -p1` after the two
+  earlier patches and changes `src/utils/onig.rs`, `src/utils/merge_storage.rs`,
+  `src/normalizers/replace.rs`, `src/decoders/mod.rs`,
+  `src/decoders/sequence.rs` and `src/tokenizer/serialization.rs`.
+  `MergeStorage` gains a provided `decoder_regex` method returning `None`.
+  With an account, the tokenizer's `decoder` entry is read by a seed that
+  repeats the legacy decoder body, admits each `Replace` regex and recurses
+  into `Sequence` elements; every other variant is read unchanged. The first
+  refusal is returned through the unchanged `MergeBuildError::Storage`
+  channel, never boxed or formatted, and ends the tokenizer read as for a
+  model refusal. A refusal inside a legacy untagged decoder is never treated
+  as a variant mismatch. Admitted regexes are shared by `Replace` clones, so
+  the charge lasts until the last owner drops it, on any thread.
+  `RegexCharge` and `AdmittedRegexError` are crate-private items in
+  `merge_storage.rs`, because the `utils::onig` module is private.
+- Not admitted: regex parse and compile temporaries, the name table and
+  callout (`RegexExt`) data, the process-wide Oniguruma registries allocated
+  at the first compilation, match-time state, the `Arc`s and `String`s around
+  the regex, JSON values, normalizer and pre-tokenizer regexes and every
+  regex built outside this route. Without the `onig` feature the account is
+  not requested.
+- With `RUSTONIG_SYSTEM_LIBONIG` or `RUSTONIG_DYNAMIC_LIBONIG`, the bundled
+  sources are not compiled; a binary that references `onig_basal_new` then
+  fails to link. This is reasoned from the build script, not linked.
+
+Verify the copied files with `sha256sum --check SHA256SUMS` in `onig/`,
+`onig_sys/` and `tokenizers/`. `onig/regex-account.patch` and
+`onig_sys/regex-account.patch` apply with `patch -p1` to the preimages listed in
+their `UPSTREAM-SHA256SUMS`; the three tokenizers patches apply in order. The
+results are byte for byte equal to the vendored files.
+
+Static validation with Rust 1.95.0, offline and locked: workspace formatting,
+release Clippy and private Rustdoc with warnings denied pass for default,
+Intel and CUDA all-features builds. These logs now show 16 inherited
+`unpredictable_function_pointer_comparisons` warnings from the unchanged
+upstream `onig_sys/src/ffi.rs`, because the local path package is no longer
+lint-capped; they are not suppressed. Direct uncapped Clippy of `onig_sys`,
+`onig` and tokenizers 0.23.2 reports no diagnostic in changed or new code;
+the remaining diagnostics are in unchanged upstream lines and are not
+suppressed. Their direct private Rustdoc adds only the same six upstream
+tokenizers diagnostics listed above. The changed vendored Rust files keep rustfmt's 100-column upstream
+style. C compiler warnings are disabled by the upstream build script and no
+separate C diagnostic was run. `cargo deny --offline` passes with the same 22
+duplicate warnings and the cached advisory database only; the paste exception
+check passes. Locked feature trees for Linux, macOS and the CUDA feature show
+one local `onig_sys` without `generate`/bindgen, used by both tokenizers
+versions through the local `onig`. No test, native execution, tokenizer run,
+output comparison, memory measurement or GPU check was performed. REQ-009
+remains partial.

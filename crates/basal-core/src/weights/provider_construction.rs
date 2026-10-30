@@ -1,11 +1,13 @@
 //! Opt-in admission of the tokenizer BPE builder's merge scratch buffer and,
-//! on a second opt-in route, of the built BPE's merge hash-table backing.
+//! on a second opt-in route, of the built BPE's merge hash-table backing. A
+//! third opt-in route also admits the retained compiled Oniguruma backing of
+//! decoder-tree regexes.
 //!
-//! Only that temporary buffer and that table's backing blocks are admitted.
-//! Tokenizer JSON values, serde helper storage, the table's entire `Arc` allocation
-//! (control block, map header, allocator and hasher),
-//! vocabulary maps and strings, added vocabulary, native regex state and caches
-//! remain unadmitted, as on the original route.
+//! Only that temporary buffer, that table's backing blocks and those regex
+//! backing blocks are admitted. Tokenizer JSON values, serde helper storage,
+//! the table's entire `Arc` allocation (control block, map header, allocator
+//! and hasher), vocabulary maps and strings, added vocabulary, other native
+//! regex state and caches remain unadmitted, as on the original route.
 
 use std::path::Path;
 
@@ -210,31 +212,38 @@ impl MergeStorage for MergeAdmission<'_> {
     }
 }
 
-fn table_error(refusal: TableRefusal) -> GgufMergeTableError {
-    let source = match refusal {
+/// The ledger cause of a table-account refusal; `None` for a capacity overflow.
+fn ledger_cause(refusal: TableRefusal) -> Option<GgufRawSourceError> {
+    Some(match refusal {
         TableRefusal::Busy => GgufRawSourceError::Busy,
         TableRefusal::Closed => GgufRawSourceError::Poisoned,
         TableRefusal::Overflow => GgufRawSourceError::Overflow,
         TableRefusal::Limit { requested, held, limit } => GgufRawSourceError::Limit { requested, held, limit },
         TableRefusal::Allocation { bytes } => GgufRawSourceError::Allocation { bytes },
-        TableRefusal::CapacityOverflow => return GgufMergeTableError::CapacityOverflow,
-    };
-    GgufMergeTableError::Admission { source }
+        TableRefusal::CapacityOverflow => return None,
+    })
 }
 
-/// Private union of the existing semantic channel and the new route's refusals.
-enum TableTokenizerError {
+fn table_error(refusal: TableRefusal) -> GgufMergeTableError {
+    match ledger_cause(refusal) {
+        Some(source) => GgufMergeTableError::Admission { source },
+        None => GgufMergeTableError::CapacityOverflow,
+    }
+}
+
+/// Private union of the existing semantic channel and an opt-in route's refusals.
+enum AdmittedTokenizerError<R> {
     Semantic(GgufSemanticError),
-    Refused(GgufMergeTableReadError),
+    Refused(R),
 }
 
-impl From<GgufSemanticError> for TableTokenizerError {
+impl<R> From<GgufSemanticError> for AdmittedTokenizerError<R> {
     fn from(error: GgufSemanticError) -> Self {
         Self::Semantic(error)
     }
 }
 
-impl From<TokenizerInputError> for TableTokenizerError {
+impl<R> From<TokenizerInputError> for AdmittedTokenizerError<R> {
     fn from(error: TokenizerInputError) -> Self {
         Self::Semantic(tokenizer_input_error(error))
     }
@@ -257,14 +266,14 @@ pub(super) fn build_captured_tokenizer_with_merge_table(
             tokenizers::Tokenizer::from_str_with_merge_storage(text, &storage).map_err(|error| match error {
                 MergeBuildError::Storage(MergeAdmissionError::Scratch(source)) => {
                     let source = GgufMergeScratchError::Admission { source };
-                    TableTokenizerError::Refused(GgufMergeTableReadError::Scratch { source })
+                    AdmittedTokenizerError::Refused(GgufMergeTableReadError::Scratch { source })
                 }
                 MergeBuildError::Storage(MergeAdmissionError::Table(refusal)) => {
-                    TableTokenizerError::Refused(GgufMergeTableReadError::Table { source: table_error(refusal) })
+                    AdmittedTokenizerError::Refused(GgufMergeTableReadError::Table { source: table_error(refusal) })
                 }
                 MergeBuildError::BufferLength { requested, actual } => {
                     let source = GgufMergeScratchError::ProviderLength { requested, actual };
-                    TableTokenizerError::Refused(GgufMergeTableReadError::Scratch { source })
+                    AdmittedTokenizerError::Refused(GgufMergeTableReadError::Scratch { source })
                 }
                 MergeBuildError::Backend(source) => {
                     TokenizerInputError::Backend { path: path.to_path_buf(), source }.into()
@@ -273,9 +282,134 @@ pub(super) fn build_captured_tokenizer_with_merge_table(
         })
     })
     .map_err(|error| match error {
-        TableTokenizerError::Semantic(source) => {
+        AdmittedTokenizerError::Semantic(source) => {
             GgufMergeTableReadError::Existing { source: GgufImmutableSemanticError::Tokenizer { source } }
         }
-        TableTokenizerError::Refused(error) => error,
+        AdmittedTokenizerError::Refused(error) => error,
+    })
+}
+
+/// Typed refusal of a decoder-tree regex backing block. No input text is retained.
+#[derive(Debug, thiserror::Error)]
+pub enum GgufDecoderRegexError {
+    #[error("tokenizer decoder regex admission failed")]
+    Admission {
+        #[source]
+        source: GgufRawSourceError,
+    },
+    #[error("tokenizer decoder regex backing size overflows")]
+    CapacityOverflow,
+}
+
+/// Failure of `GgufImmutableCompanionSemantics::read_with_decoder_regex_budget`.
+#[derive(Debug, thiserror::Error)]
+pub enum GgufDecoderRegexReadError {
+    /// Any failure of the existing immutable read, unchanged.
+    #[error("GGUF immutable companion read failed")]
+    Existing {
+        #[from]
+        source: GgufImmutableSemanticError,
+    },
+    #[error("GGUF tokenizer BPE merge scratch was refused")]
+    Scratch {
+        #[source]
+        source: GgufMergeScratchError,
+    },
+    #[error("GGUF tokenizer BPE merge table was refused")]
+    Table {
+        #[source]
+        source: GgufMergeTableError,
+    },
+    #[error("GGUF tokenizer decoder regex was refused")]
+    DecoderRegex {
+        #[source]
+        source: GgufDecoderRegexError,
+    },
+}
+
+/// Merge scratch, merge table and decoder-regex backing on the declaration
+/// budget's raw ledger.
+struct DecoderRegexAdmission<'a> {
+    merge: MergeAdmission<'a>,
+}
+
+/// Private refusal of any admitted storage of the decoder-regex route.
+#[derive(Debug, thiserror::Error)]
+enum DecoderRegexAdmissionError {
+    #[error(transparent)]
+    Merge(MergeAdmissionError),
+    #[error("tokenizer decoder regex admission failed")]
+    Regex(#[source] TableRefusal),
+}
+
+impl MergeStorage for DecoderRegexAdmission<'_> {
+    type Buffer = MergeScratchBuffer;
+    type Error = DecoderRegexAdmissionError;
+
+    fn try_zeroed(&self, length: usize) -> Result<MergeScratchBuffer, DecoderRegexAdmissionError> {
+        self.merge.try_zeroed(length).map_err(DecoderRegexAdmissionError::Merge)
+    }
+
+    fn merge_table(&self) -> Option<MergeTableAccount<DecoderRegexAdmissionError>> {
+        Some(MergeTableAccount {
+            account: self.merge.raw.table_account(),
+            refused: |refusal| DecoderRegexAdmissionError::Merge(MergeAdmissionError::Table(refusal)),
+        })
+    }
+
+    fn decoder_regex(&self) -> Option<MergeTableAccount<DecoderRegexAdmissionError>> {
+        Some(MergeTableAccount { account: self.merge.raw.table_account(), refused: DecoderRegexAdmissionError::Regex })
+    }
+}
+
+fn decoder_regex_error(refusal: TableRefusal) -> GgufDecoderRegexError {
+    match ledger_cause(refusal) {
+        Some(source) => GgufDecoderRegexError::Admission { source },
+        None => GgufDecoderRegexError::CapacityOverflow,
+    }
+}
+
+/// `build_captured_tokenizer_with_merge_table`, and the retained compiled
+/// Oniguruma backing of every `Replace` regex in the tokenizer's decoder tree
+/// is admitted on `raw` block by block while the returned tokenizer, or any
+/// clone of it, holds that regex.
+pub(super) fn build_captured_tokenizer_with_decoder_regex(
+    snapshot: &GgufCompanionSnapshot,
+    directory: &Path,
+    vocab: usize,
+    style: ChatStyle,
+    bos_token: &str,
+    raw: &GgufRawSourceBudget,
+) -> Result<(BasalTokenizer, u32), GgufDecoderRegexReadError> {
+    let storage = DecoderRegexAdmission { merge: MergeAdmission { raw } };
+    build_captured_tokenizer_with(snapshot, directory, vocab, style, bos_token, |original, path, style| {
+        BasalTokenizer::from_json_value_with(original, path, style, |text| {
+            tokenizers::Tokenizer::from_str_with_merge_storage(text, &storage).map_err(|error| match error {
+                MergeBuildError::Storage(DecoderRegexAdmissionError::Merge(MergeAdmissionError::Scratch(source))) => {
+                    let source = GgufMergeScratchError::Admission { source };
+                    AdmittedTokenizerError::Refused(GgufDecoderRegexReadError::Scratch { source })
+                }
+                MergeBuildError::Storage(DecoderRegexAdmissionError::Merge(MergeAdmissionError::Table(refusal))) => {
+                    AdmittedTokenizerError::Refused(GgufDecoderRegexReadError::Table { source: table_error(refusal) })
+                }
+                MergeBuildError::Storage(DecoderRegexAdmissionError::Regex(refusal)) => {
+                    let source = decoder_regex_error(refusal);
+                    AdmittedTokenizerError::Refused(GgufDecoderRegexReadError::DecoderRegex { source })
+                }
+                MergeBuildError::BufferLength { requested, actual } => {
+                    let source = GgufMergeScratchError::ProviderLength { requested, actual };
+                    AdmittedTokenizerError::Refused(GgufDecoderRegexReadError::Scratch { source })
+                }
+                MergeBuildError::Backend(source) => {
+                    TokenizerInputError::Backend { path: path.to_path_buf(), source }.into()
+                }
+            })
+        })
+    })
+    .map_err(|error| match error {
+        AdmittedTokenizerError::Semantic(source) => {
+            GgufDecoderRegexReadError::Existing { source: GgufImmutableSemanticError::Tokenizer { source } }
+        }
+        AdmittedTokenizerError::Refused(error) => error,
     })
 }
