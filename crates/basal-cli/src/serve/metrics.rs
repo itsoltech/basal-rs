@@ -1,5 +1,5 @@
-//! Process-local Prometheus registry. Only configured model names, replica indices and device ordinals, and fixed
-//! endpoint/lane labels are exported.
+//! Process-local Prometheus registry. Only configured model names, replica indices and device ordinals (`cpu` for the
+//! host CPU instance), and fixed endpoint/lane labels are exported.
 
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -49,9 +49,12 @@ pub(super) struct Metrics {
 const BATCH_SIZES: &[f64] = &[1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0];
 
 impl Metrics {
-    /// Registry of the served models, each with the device ordinals of its replicas (one replica for a single
-    /// instance; a layer-split instance lists the ordinals of its stages).
-    pub fn new(models: &[(String, Vec<Vec<usize>>)], max_inflight: usize) -> prometheus::Result<Self> {
+    /// Registry of the served models, each with the devices of its replicas (one replica for a single instance; a
+    /// layer-split instance lists the ordinals of its stages; the host CPU is `cpu`).
+    pub fn new(
+        models: &[(String, Vec<crate::config::InstanceDevices>)],
+        max_inflight: usize,
+    ) -> prometheus::Result<Self> {
         let registry = Registry::new();
         let counter = |name, help, labels| {
             let c = IntCounterVec::new(Opts::new(name, help), labels)?;
@@ -194,9 +197,9 @@ impl Metrics {
             m.questions.with_label_values(&[name]);
             m.model_replicas.with_label_values(&[name]).set(devices.len() as i64);
             m.model_replicas_available.with_label_values(&[name]);
-            for (index, stages) in devices.iter().enumerate() {
+            for (index, instance) in devices.iter().enumerate() {
                 let replica = index.to_string();
-                let device = stages.iter().map(ToString::to_string).collect::<Vec<_>>().join(",");
+                let device = instance.metric_label();
                 m.replica_info.with_label_values(&[name, &replica, &device]).set(1);
                 m.replica_routed.with_label_values(&[name, &replica]);
                 m.replica_inflight.with_label_values(&[name, &replica]);

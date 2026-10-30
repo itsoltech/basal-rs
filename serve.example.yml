@@ -159,3 +159,13 @@ models:
     # GEMMs), so gemm_table must not be none. One element is the
     # same as device. Also `basal serve --model mini --replica-devices 0,1`.
     # replica_devices: [0, 1]
+
+# Host CPU instead of a GPU (opt-in): a configuration with exactly one model, a dense BF16 Llama checkpoint computed in
+# f32 with the Candle kernels, text only; no GPU is queried. cpu_work_mb is required: the host working set one CPU
+# forward may use by the source bound (longer batches run in sub-batches, a larger row is refused with HTTP 500).
+# Without device, replica_devices, layer_split, quantization, media, thinking, early_exit, state cache, batch_profile
+# or a GEMM table; dtype auto or f32. Also `basal serve --model mini --backend cpu --cpu-work-mb 2048`.
+# models:
+#   - path: .models/basal-1.5-mini
+#     backend: cpu
+#     cpu_work_mb: 2048

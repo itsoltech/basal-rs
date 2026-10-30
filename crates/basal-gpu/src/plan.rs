@@ -99,6 +99,29 @@ impl PleMode {
     }
 }
 
+/// Where a model instance executes. Absence keeps this build's GPU backend.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionBackend {
+    /// The GPU backend of this build (CUDA, Metal or Intel Vulkan).
+    #[default]
+    Gpu,
+    /// The host CPU: dense BF16 Llama computed in F32 by the stock Candle padded decoder, text only.
+    Cpu,
+}
+
+impl std::str::FromStr for ExecutionBackend {
+    type Err = PlanError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "gpu" => Ok(Self::Gpu),
+            "cpu" => Ok(Self::Cpu),
+            _ => Err(PlanError::Option(format!("unknown backend {value:?} (gpu, cpu)"))),
+        }
+    }
+}
+
 /// A versioned set of kernel variants with fixed arithmetic. A profile names the set it was measured with; a
 /// change of arithmetic is a new variant, and existing profiles keep their set until they are moved explicitly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -297,6 +320,9 @@ pub enum BackendKind {
     Intel,
     /// No GPU backend in this build.
     None,
+    /// The host CPU of an explicit `backend: cpu` instance; never returned by [`BackendKind::llama`] or
+    /// [`BackendKind::gemma`].
+    Cpu,
 }
 
 impl BackendKind {
@@ -328,6 +354,7 @@ impl BackendKind {
             Self::Metal => "metal",
             Self::Intel => "intel",
             Self::None => "none",
+            Self::Cpu => "cpu",
         }
     }
 }
@@ -847,6 +874,16 @@ pub struct ResolvedExecutionPlan {
     gpus: Value,
     ple: crate::PlePlacement,
     prune_readout: bool,
+    /// Some only for a plan frozen by [`ResolvedExecutionPlan::freeze_cpu`].
+    cpu: Option<CpuPlan>,
+}
+
+/// The decision inputs of a CPU instance: the per-forward host working-set ceiling (it selects the sub-batch
+/// grouping, so GEMM shapes) and the GEMM thread count Candle uses on the host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CpuPlan {
+    work_bytes: std::num::NonZeroU64,
+    gemm_threads: usize,
 }
 
 impl ResolvedExecutionPlan {
@@ -975,7 +1012,66 @@ impl ResolvedExecutionPlan {
             gpus: gpus.identity(),
             ple,
             prune_readout,
+            cpu: None,
         })
+    }
+
+    /// Freeze the plan of a host CPU instance without querying any GPU: Llama with dispatch rule `llama-dispatch.1`
+    /// and kernel set `basal-kernels.1` only, with the fixed CPU options: auto mode, F32 (BF16 resident), F32
+    /// readout, Candle kernels, no quantization, adaptive, device PLE, no GEMM table, readout-layer auto.
+    /// `work_bytes` is the host working-set ceiling of one CPU forward.
+    pub fn freeze_cpu(
+        profile: &str,
+        kernel_set: KernelSet,
+        rule: &DispatchRule,
+        arch: &Architecture,
+        work_bytes: std::num::NonZeroU64,
+    ) -> Result<Self, PlanError> {
+        rule.check_family(arch)?;
+        if !matches!((arch, rule), (Architecture::Llama(_), DispatchRule::LlamaV1 { .. }))
+            || kernel_set != KernelSet::V1
+        {
+            return Err(PlanError::Option("the CPU backend runs Llama with kernel set basal-kernels.1 only".into()));
+        }
+        let options = PlanOptions {
+            mode: InferenceMode::Auto,
+            precision: Precision::F32,
+            readout: Readout::F32,
+            kernels: Kernels::Candle,
+            quantization: Quantization::None,
+            reproducibility: Reproducibility::Adaptive,
+            ple: PleMode::Device,
+        };
+        let prune_readout = ReadoutLayer::Auto.resolve(arch, options.kernels)?;
+        let ple = options.ple.resolve(arch, false)?;
+        Ok(Self {
+            profile: profile.to_string(),
+            kernel_set,
+            rule: rule.id(),
+            options,
+            policy: ExecutionPolicy::Llama {
+                backend: BackendKind::Cpu,
+                attention: LlamaAttention::DeviceDefault,
+                device_default: DeviceDefaultRule::V1,
+                default_kernels: Vec::new(),
+            },
+            gemm: GemmPolicy { table: None, fallback: GemmFallback::NotApplicable },
+            overrides: DiagnosticOverrides::process().clone(),
+            gpus: Value::Array(Vec::new()),
+            ple,
+            prune_readout,
+            cpu: Some(CpuPlan { work_bytes, gemm_threads: candle_core::utils::get_num_threads() }),
+        })
+    }
+
+    /// The per-forward host working-set ceiling of a CPU plan; None for a GPU plan.
+    pub fn cpu_work_bytes(&self) -> Option<std::num::NonZeroU64> {
+        self.cpu.map(|c| c.work_bytes)
+    }
+
+    /// The Candle host GEMM thread count captured when a CPU plan was frozen; None for a GPU plan.
+    pub fn cpu_gemm_threads(&self) -> Option<usize> {
+        self.cpu.map(|c| c.gemm_threads)
     }
 
     pub fn profile(&self) -> &str {
@@ -1058,6 +1154,10 @@ impl ResolvedExecutionPlan {
         if matches!(self.policy, ExecutionPolicy::Llama { .. }) && o.kernels == Kernels::Fused && !self.prune_readout {
             identity["last_layer"] =
                 json!({"schema":"basal-llama-last-layer.1", "rows":"full", "gather":"after_final_norm"});
+        }
+        if let Some(cpu) = self.cpu {
+            identity["cpu"] = json!({"schema":"basal-cpu-execution.1", "work_bytes":cpu.work_bytes.get(),
+                "gemm_threads":cpu.gemm_threads});
         }
         identity
     }

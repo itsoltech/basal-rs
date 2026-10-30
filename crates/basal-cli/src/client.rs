@@ -119,9 +119,15 @@ pub(super) struct ClientArgs {
     /// Local CUDA GEMM table (default: same automatic table selection as serve)
     #[arg(long, requires = "local")]
     gemm_table: Option<PathBuf>,
-    /// Local GPU: CUDA device ordinal among the visible GPUs (Metal and Intel: 0)
-    #[arg(long, default_value_t = 0, requires = "local")]
-    device: usize,
+    /// Local GPU: CUDA device ordinal among the visible GPUs (Metal and Intel: 0); default 0
+    #[arg(long, requires = "local")]
+    device: Option<usize>,
+    /// Local backend: gpu (default) or cpu (a dense BF16 Llama model on the host CPU in f32, text only)
+    #[arg(long, requires = "local")]
+    backend: Option<basal_gpu::ExecutionBackend>,
+    /// Required with --backend cpu: MiB of host working set one local CPU forward may use
+    #[arg(long, requires = "local")]
+    cpu_work_mb: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -471,6 +477,11 @@ fn run_local(
 }
 
 fn load_local(args: &ClientArgs, name: &str) -> Result<basal_core::Engine<crate::GpuBackend>> {
+    if args.backend == Some(basal_gpu::ExecutionBackend::Cpu) {
+        return load_local_cpu(args, name);
+    }
+    anyhow::ensure!(args.cpu_work_mb.is_none(), "--cpu-work-mb applies to --backend cpu");
+    let device = args.device.unwrap_or(0);
     let mut model = crate::config::model_ref(name)?;
     model.model_options = args.model_options.clone();
     model.dtype = args.dtype.clone();
@@ -491,14 +502,14 @@ fn load_local(args: &ClientArgs, name: &str) -> Result<basal_core::Engine<crate:
         crate::gemm_artifact::TableRequest::parse(&model.gemm_table)?.reproducibility(),
     )?;
     let thinking = args.model_options.load_thinking(&manifest)?;
-    let precision = crate::config::model_precision(&model.dtype, &manifest, args.device)?;
+    let precision = crate::config::model_precision(&model.dtype, &manifest, device)?;
     let table = crate::gemm_artifact::resolve(
         &crate::gemm_artifact::TableRequest::parse(&model.gemm_table)?,
         &manifest,
         crate::models::profile_for(&manifest),
         precision,
         &crate::config::default_gemm_cache(),
-        &[args.device],
+        &[device],
     )?;
     let table_path = table.path().map(std::path::Path::to_path_buf);
     let gpu = crate::GpuArgs {
@@ -508,7 +519,9 @@ fn load_local(args: &ClientArgs, name: &str) -> Result<basal_core::Engine<crate:
         dtype: args.dtype.clone(),
         inference_mode: args.inference_mode.clone(),
         readout: "f32".into(),
-        kernels: "fused".into(),
+        kernels: Some("fused".into()),
+        backend: None,
+        cpu_work_mb: None,
         readout_layer: None,
         quantization: None,
         ple_placement: None,
@@ -517,7 +530,7 @@ fn load_local(args: &ClientArgs, name: &str) -> Result<basal_core::Engine<crate:
         tree_max_tokens: basal_core::engine::TREE_MAX_TOKENS,
         gemm_table: table_path,
         resolved_gemm: Some(table),
-        device: Some(args.device),
+        device: Some(device),
         // `basal client --local` runs a model on one GPU
         layer_split: None,
     };
@@ -526,4 +539,40 @@ fn load_local(args: &ClientArgs, name: &str) -> Result<basal_core::Engine<crate:
         crate::config::check_gemm_coverage(&engine.manifest.name, &engine.backend.gemm_table_missing(), table)?;
     }
     Ok(engine)
+}
+
+/// `--local --backend cpu`: the static CPU refusals before any download, then the CPU engine; no GPU, precision rule
+/// or GEMM table is consulted.
+fn load_local_cpu(args: &ClientArgs, name: &str) -> Result<basal_core::Engine<crate::GpuBackend>> {
+    let gpu = crate::GpuArgs {
+        model_options: args.model_options.clone(),
+        media: args.media,
+        orders: args.orders.clone(),
+        dtype: args.dtype.clone(),
+        inference_mode: args.inference_mode.clone(),
+        readout: "f32".into(),
+        kernels: None,
+        backend: Some(basal_gpu::ExecutionBackend::Cpu),
+        cpu_work_mb: args.cpu_work_mb,
+        readout_layer: None,
+        quantization: None,
+        ple_placement: None,
+        no_prefix_cache: false,
+        state_cache_mb: 0,
+        tree_max_tokens: basal_core::engine::TREE_MAX_TOKENS,
+        gemm_table: args.gemm_table.clone(),
+        resolved_gemm: None,
+        device: args.device,
+        layer_split: None,
+    };
+    gpu.check_cpu(name)?;
+    let mut model = crate::config::model_ref(name)?;
+    model.model_options = args.model_options.clone();
+    if args.orders.is_some() {
+        model.orders.clone_from(&args.orders);
+    }
+    let dir = crate::config::model_dir(&model)?;
+    let manifest = args.model_options.load_manifest(&dir, model.orders.as_deref(), &model.source_name())?;
+    let thinking = args.model_options.load_thinking(&manifest)?;
+    Ok(crate::planned_engine_from_manifest(manifest, thinking, &gpu)?.engine)
 }
