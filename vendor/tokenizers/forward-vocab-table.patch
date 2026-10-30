@@ -1,0 +1,610 @@
+--- a/src/models/bpe/model.rs
++++ b/src/models/bpe/model.rs
+@@ -2 +2 @@
+-// and optional charged merge and reverse vocabulary tables.
++// and optional charged merge, reverse and forward vocabulary tables.
+@@ -11 +11,3 @@
+-use crate::utils::merge_storage::{MergeBuildError, MergeStorage, TableAccount, TableRefusal};
++use crate::utils::merge_storage::{
++    MergeBuildError, MergeStorage, MergeTableAccount, TableAccount, TableRefusal,
++};
+@@ -36,0 +39,157 @@
++/// A forward vocabulary whose table backing is admitted on a [`TableAccount`].
++///
++/// The key, value and hasher types equal [`Vocab`]'s.
++pub(crate) type ChargedVocab = hashbrown::HashMap<String, u32, ahash::RandomState, TableAlloc>;
++
++/// The forward vocabulary (token to ID) of a [`BPE`]: on the global allocator,
++/// as upstream, or charged and shared by the model and its clones through one
++/// `Arc`. Its iteration order feeds the reverse vocabulary and `get_vocab`.
++#[derive(Clone)]
++pub(crate) enum VocabTable {
++    Global(Vocab),
++    Charged(Arc<ChargedVocab>),
++}
++
++/// Iterator over either forward vocabulary, in that table's own iteration
++/// order. `size_hint` and `fold` forward to the inner iterator, so a collect
++/// keeps the inner iterator's reservation and traversal.
++pub(crate) enum VocabIter<'a> {
++    Global(std::collections::hash_map::Iter<'a, String, u32>),
++    Charged(hashbrown::hash_map::Iter<'a, String, u32>),
++}
++
++impl<'a> Iterator for VocabIter<'a> {
++    type Item = (&'a String, &'a u32);
++
++    fn next(&mut self) -> Option<Self::Item> {
++        match self {
++            Self::Global(iter) => iter.next(),
++            Self::Charged(iter) => iter.next(),
++        }
++    }
++
++    fn size_hint(&self) -> (usize, Option<usize>) {
++        match self {
++            Self::Global(iter) => iter.size_hint(),
++            Self::Charged(iter) => iter.size_hint(),
++        }
++    }
++
++    fn fold<B, F: FnMut(B, Self::Item) -> B>(self, init: B, f: F) -> B {
++        match self {
++            Self::Global(iter) => iter.fold(init, f),
++            Self::Charged(iter) => iter.fold(init, f),
++        }
++    }
++}
++
++impl VocabTable {
++    pub(crate) fn get(&self, token: &str) -> Option<&u32> {
++        match self {
++            Self::Global(map) => map.get(token),
++            Self::Charged(map) => map.get(token),
++        }
++    }
++
++    #[cfg(test)]
++    pub(crate) fn contains_key(&self, token: &str) -> bool {
++        self.get(token).is_some()
++    }
++
++    pub(crate) fn len(&self) -> usize {
++        match self {
++            Self::Global(map) => map.len(),
++            Self::Charged(map) => map.len(),
++        }
++    }
++
++    pub(crate) fn iter(&self) -> VocabIter<'_> {
++        match self {
++            Self::Global(map) => VocabIter::Global(map.iter()),
++            Self::Charged(map) => VocabIter::Charged(map.iter()),
++        }
++    }
++
++    /// A caller-owned, unadmitted copy, as upstream's `get_vocab`: one std
++    /// `RandomState`, then the entries in this table's iteration order.
++    fn to_hash_map(&self) -> HashMap<String, u32> {
++        match self {
++            Self::Global(map) => map.clone().into_iter().collect(),
++            Self::Charged(map) => map.iter().map(|(token, id)| (token.clone(), *id)).collect(),
++        }
++    }
++
++    /// Map equality: same length and every entry found with an equal value.
++    fn same_entries<'o>(&self, len: usize, get: impl Fn(&str) -> Option<&'o u32>) -> bool {
++        self.len() == len && self.iter().all(|(token, id)| get(token) == Some(id))
++    }
++}
++
++impl PartialEq for VocabTable {
++    fn eq(&self, other: &Self) -> bool {
++        match (self, other) {
++            (Self::Global(left), Self::Global(right)) => left == right,
++            (Self::Charged(left), Self::Charged(right)) => left == right,
++            _ => self.same_entries(other.len(), |token| other.get(token)),
++        }
++    }
++}
++
++impl PartialEq<Vocab> for VocabTable {
++    fn eq(&self, other: &Vocab) -> bool {
++        match self {
++            Self::Global(map) => map == other,
++            Self::Charged(_) => self.same_entries(other.len(), |token| other.get(token)),
++        }
++    }
++}
++
++impl std::fmt::Debug for VocabTable {
++    fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
++        fmt.debug_map().entries(self.iter()).finish()
++    }
++}
++
++impl FromIterator<(String, u32)> for VocabTable {
++    /// Collects a global table, exactly as upstream collects its vocabulary.
++    fn from_iter<I: IntoIterator<Item = (String, u32)>>(iter: I) -> Self {
++        Self::Global(iter.into_iter().collect())
++    }
++}
++
++/// The `vocab` field of a BPE deserialized with a forward vocabulary account:
++/// the capacity and hasher that serde's `HashMap` visitor creates at the same
++/// point, then the entries in decoding order. Not a hash table; this staging
++/// storage and the token strings are unadmitted.
++pub(crate) struct StagedVocab {
++    pub(crate) capacity: usize,
++    pub(crate) hasher: ahash::RandomState,
++    pub(crate) entries: Vec<(String, u32)>,
++}
++
++/// The staged entries in a charged table, by the stream of serde's `HashMap`
++/// visitor: `with_capacity_and_hasher(capacity, hasher)` becomes
++/// `with_hasher_in` plus a fallible reservation of the same capacity, and each
++/// `insert` is preceded by `try_reserve(1)`, the fallible form of its own
++/// `reserve(1)`, so a growth admits the new block while the old one is held.
++/// Equal table construction to the global map is claimed only for equal
++/// hasher keys, an identical hashbrown algorithm and layout in std, and the
++/// same target. A refusal drops the partial table (freed, then released) and
++/// the remaining staged entries.
++fn charged_vocab(
++    staged: StagedVocab,
++    account: Arc<dyn TableAccount>,
++) -> std::result::Result<ChargedVocab, TableRefusal> {
++    let mut map = ChargedVocab::with_hasher_in(staged.hasher, TableAlloc::new(account));
++    if let Err(error) = map.try_reserve(staged.capacity) {
++        return Err(table_refusal(map.allocator(), error));
++    }
++    for (token, id) in staged.entries {
++        if let Err(error) = map.try_reserve(1) {
++            return Err(table_refusal(map.allocator(), error));
++        }
++        map.insert(token, id);
++    }
++    Ok(map)
++}
++
+@@ -117 +276,2 @@
+-/// Charged allocator of exactly one charged table (merge or reverse vocabulary).
++/// Charged allocator of exactly one charged table (merge, reverse or forward
++/// vocabulary).
+@@ -484,0 +645,5 @@
++            None::<(
++                StagedVocab,
++                Arc<dyn TableAccount>,
++                fn(TableRefusal) -> crate::Error,
++            )>,
+@@ -492 +657,3 @@
+-    /// Refusal stops the build.
++    /// Refusal stops the build. It does not request
++    /// [`MergeStorage::forward_vocab_table`]: the caller's vocabulary stays on
++    /// the global allocator.
+@@ -496,0 +664,24 @@
++        self.build_with_storage(storage, None)
++    }
++
++    /// [`build_with_merge_storage`](Self::build_with_merge_storage) of a
++    /// deserialized configuration whose forward vocabulary was staged: the
++    /// build first admits that vocabulary's table on `account`.
++    pub(crate) fn build_with_staged_vocab<S: MergeStorage>(
++        mut self,
++        storage: &S,
++        vocab: StagedVocab,
++        merges: Merges,
++        account: MergeTableAccount<S::Error>,
++    ) -> std::result::Result<BPE, MergeBuildError<S::Error>> {
++        self.config.merges = merges;
++        self.build_with_storage(storage, Some((vocab, account)))
++    }
++
++    /// The storage route; `forward`, if any, is the staged forward vocabulary
++    /// and its account.
++    fn build_with_storage<S: MergeStorage>(
++        self,
++        storage: &S,
++        forward: Option<(StagedVocab, MergeTableAccount<S::Error>)>,
++    ) -> std::result::Result<BPE, MergeBuildError<S::Error>> {
+@@ -525,0 +717,6 @@
++            forward.map(|(vocab, table)| {
++                let refused = table.refused;
++                (vocab, table.account, move |refusal| {
++                    MergeBuildError::Storage(refused(refusal))
++                })
++            }),
+@@ -532 +729,3 @@
+-    /// `reverse_table` does the same for the reverse vocabulary table.
++    /// `reverse_table` does the same for the reverse vocabulary table and
++    /// `forward_table` for the staged forward vocabulary, which then replaces
++    /// the configured one.
+@@ -538,0 +738,5 @@
++        forward_table: Option<(
++            StagedVocab,
++            Arc<dyn TableAccount>,
++            impl FnOnce(TableRefusal) -> E,
++        )>,
+@@ -539,0 +744,10 @@
++        // The actual retained forward table, built first: before dropout
++        // validation, so its refusal precedes every later build error. Only
++        // a deserialized configuration is staged; it never has files.
++        let charged = match forward_table {
++            None => None,
++            Some((staged, account, refused)) => {
++                Some(charged_vocab(staged, account).map_err(refused)?)
++            }
++        };
++
+@@ -554,0 +769,4 @@
++        let vocab = match charged {
++            Some(map) => VocabTable::Charged(Arc::new(map)),
++            None => VocabTable::Global(self.config.vocab),
++        };
+@@ -563 +781 @@
+-            None => VocabR::Global(self.config.vocab.iter().map(reverse_entry).collect()),
++            None => VocabR::Global(vocab.iter().map(reverse_entry).collect()),
+@@ -576 +794 @@
+-                if let Err(error) = map.try_reserve(self.config.vocab.len()) {
++                if let Err(error) = map.try_reserve(vocab.len()) {
+@@ -579,7 +797,3 @@
+-                self.config
+-                    .vocab
+-                    .iter()
+-                    .map(reverse_entry)
+-                    .for_each(|(id, token)| {
+-                        map.insert(id, token);
+-                    });
++                vocab.iter().map(reverse_entry).for_each(|(id, token)| {
++                    map.insert(id, token);
++                });
+@@ -594 +807,0 @@
+-        let vocab = self.config.vocab;
+@@ -670 +883,2 @@
+-pub(crate) struct BpeMergeSeed<'a, S> {
++/// With `forward`, the forward vocabulary is staged and admitted on it.
++pub(crate) struct BpeMergeSeed<'a, S: MergeStorage> {
+@@ -671,0 +886 @@
++    pub(crate) forward: Option<MergeTableAccount<S::Error>>,
+@@ -676,0 +892,8 @@
++/// [`BpeTrial`] with a staged forward vocabulary; `builder` holds every other
++/// parsed field.
++pub(crate) struct BpeStagedTrial {
++    pub(crate) builder: BpeBuilder,
++    pub(crate) vocab: StagedVocab,
++    pub(crate) merges: Merges,
++}
++
+@@ -681 +904 @@
+-    pub(crate) vocab: Vocab,
++    pub(crate) vocab: VocabTable,
+@@ -751,4 +974 @@
+-pub(crate) fn convert_merges_to_hashmap<I: Iterator<Item = String>>(
+-    iter: I,
+-    _vocab: &Vocab,
+-) -> Result<Merges> {
++pub(crate) fn convert_merges_to_hashmap<I: Iterator<Item = String>>(iter: I) -> Result<Merges> {
+@@ -814,3 +1034,2 @@
+-        let merges = ResultShunt::process(merge_file.lines(), |iter| {
+-            convert_merges_to_hashmap(iter, &vocab)
+-        })??;
++        let merges =
++            ResultShunt::process(merge_file.lines(), |iter| convert_merges_to_hashmap(iter))??;
+@@ -836 +1055 @@
+-        self.vocab.clone().into_iter().collect()
++        self.vocab.to_hash_map()
+@@ -979 +1198 @@
+-        self.vocab.clone().into_iter().collect()
++        self.vocab.to_hash_map()
+--- a/src/models/bpe/serialization.rs
++++ b/src/models/bpe/serialization.rs
+@@ -1 +1,2 @@
+-// Modified for basal-rs: deserialize BPE with typed merge-storage refusals.
++// Modified for basal-rs: deserialize BPE with typed merge-storage refusals and
++// an optionally staged forward vocabulary.
+@@ -3,2 +4,2 @@
+-    super::OrderedVocabIter, convert_merges_to_hashmap, BpeBuilder, BpeMergeSeed, BpeTrial, Pair,
+-    BPE,
++    super::OrderedVocabIter, convert_merges_to_hashmap, BpeBuilder, BpeMergeSeed, BpeStagedTrial,
++    BpeTrial, Merges, Pair, StagedVocab, Vocab, BPE,
+@@ -7 +7,0 @@
+-use ahash::AHashMap;
+@@ -12,0 +13 @@
++use std::marker::PhantomData;
+@@ -69 +70,16 @@
+-        deserializer.deserialize_struct("BPE", FIELDS, BPEVisitor(BpeBuilder::build))
++        let build = |builder: BpeBuilder, vocab: Vocab, merges| {
++            builder.vocab_and_merges(vocab, merges).build()
++        };
++        deserializer.deserialize_struct("BPE", FIELDS, BPEVisitor(build, PhantomData))
++    }
++}
++
++/// A storage build's refusal is the inner `Err`; a backend error stays the
++/// visitor's error.
++fn seed_outcome<E>(
++    built: Result<BPE, MergeBuildError<E>>,
++) -> crate::Result<Result<BPE, MergeBuildError<E>>> {
++    match built {
++        Ok(bpe) => Ok(Ok(bpe)),
++        Err(MergeBuildError::Backend(error)) => Err(error),
++        Err(refusal) => Ok(Err(refusal)),
+@@ -80,6 +96,19 @@
+-        let build = |builder: BpeBuilder| match builder.build_with_merge_storage(self.storage) {
+-            Ok(bpe) => Ok(Ok(bpe)),
+-            Err(MergeBuildError::Backend(error)) => Err(error),
+-            Err(refusal) => Ok(Err(refusal)),
+-        };
+-        deserializer.deserialize_struct("BPE", FIELDS, BPEVisitor(build))
++        let storage = self.storage;
++        match self.forward {
++            None => {
++                let build = |builder: BpeBuilder, vocab: Vocab, merges| {
++                    seed_outcome(
++                        builder
++                            .vocab_and_merges(vocab, merges)
++                            .build_with_merge_storage(storage),
++                    )
++                };
++                deserializer.deserialize_struct("BPE", FIELDS, BPEVisitor(build, PhantomData))
++            }
++            Some(account) => {
++                let build = |builder: BpeBuilder, vocab: StagedVocab, merges| {
++                    seed_outcome(builder.build_with_staged_vocab(storage, vocab, merges, account))
++                };
++                deserializer.deserialize_struct("BPE", FIELDS, BPEVisitor(build, PhantomData))
++            }
++        }
+@@ -94 +123,70 @@
+-        deserializer.deserialize_struct("BPE", FIELDS, BPEVisitor(|builder| Ok(BpeTrial(builder))))
++        let parsed = |builder: BpeBuilder, vocab: Vocab, merges| {
++            Ok(BpeTrial(builder.vocab_and_merges(vocab, merges)))
++        };
++        deserializer.deserialize_struct("BPE", FIELDS, BPEVisitor(parsed, PhantomData))
++    }
++}
++
++impl<'de> Deserialize<'de> for BpeStagedTrial {
++    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
++    where
++        D: Deserializer<'de>,
++    {
++        let parsed = |builder, vocab, merges| {
++            Ok(BpeStagedTrial {
++                builder,
++                vocab,
++                merges,
++            })
++        };
++        deserializer.deserialize_struct("BPE", FIELDS, BPEVisitor(parsed, PhantomData))
++    }
++}
++
++/// serde_core 1.0.229's `size_hint::cautious::<(String, u32)>`
++/// (`private/size_hint.rs`), the capacity its `HashMap` visitor requests.
++/// The element size is nonzero. Re-check on any serde lock change.
++fn cautious_vocab_capacity(hint: Option<usize>) -> usize {
++    const MAX_PREALLOC_BYTES: usize = 1024 * 1024;
++    hint.unwrap_or(0)
++        .min(MAX_PREALLOC_BYTES / std::mem::size_of::<(String, u32)>())
++}
++
++impl<'de> Deserialize<'de> for StagedVocab {
++    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
++    where
++        D: Deserializer<'de>,
++    {
++        deserializer.deserialize_map(StagedVocabVisitor)
++    }
++}
++
++/// serde_core 1.0.229's `HashMap` visitor (`de/impls.rs`) with
++/// `ahash::RandomState` and `(String, u32)` entries, except that each entry is
++/// staged instead of inserted.
++struct StagedVocabVisitor;
++impl<'de> Visitor<'de> for StagedVocabVisitor {
++    type Value = StagedVocab;
++
++    fn expecting(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
++        fmt.write_str("a map")
++    }
++
++    /// The same calls in the same order: `size_hint`, the cautious capacity,
++    /// one `RandomState::new()` (serde's `S::default()`), then `next_entry`
++    /// until the end or the first error.
++    fn visit_map<A>(self, mut map: A) -> Result<StagedVocab, A::Error>
++    where
++        A: MapAccess<'de>,
++    {
++        let capacity = cautious_vocab_capacity(map.size_hint());
++        let hasher = ahash::RandomState::new();
++        let mut entries = Vec::with_capacity(capacity);
++        while let Some(entry) = map.next_entry::<String, u32>()? {
++            entries.push(entry);
++        }
++        Ok(StagedVocab {
++            capacity,
++            hasher,
++            entries,
++        })
+@@ -98,3 +196,4 @@
+-/// Parses the fields, then hands the configured builder to `F`.
+-struct BPEVisitor<F>(F);
+-impl<'de, T, F> Visitor<'de> for BPEVisitor<F>
++/// Parses the fields, then hands the configured builder, the `vocab` field as
++/// `Voc` and the converted merges to `F`.
++struct BPEVisitor<Voc, F>(F, PhantomData<Voc>);
++impl<'de, T, Voc, F> Visitor<'de> for BPEVisitor<Voc, F>
+@@ -102 +201,2 @@
+-    F: FnOnce(BpeBuilder) -> crate::Result<T>,
++    Voc: Deserialize<'de>,
++    F: FnOnce(BpeBuilder, Voc, Merges) -> crate::Result<T>,
+@@ -115 +215 @@
+-        let mut vocab: Option<AHashMap<String, u32>> = None;
++        let mut vocab: Option<Voc> = None;
+@@ -179 +279 @@
+-                    convert_merges_to_hashmap(merges.into_iter(), &vocab).map_err(Error::custom)?
++                    convert_merges_to_hashmap(merges.into_iter()).map_err(Error::custom)?
+@@ -182,2 +282 @@
+-            builder = builder.vocab_and_merges(vocab, merges);
+-            Ok((self.0)(builder).map_err(Error::custom)?)
++            Ok((self.0)(builder, vocab, merges).map_err(Error::custom)?)
+--- a/src/models/mod.rs
++++ b/src/models/mod.rs
+@@ -2,2 +2,3 @@
+-// Modified for basal-rs: preserve model selection with caller-provided BPE scratch;
+-// ordered vocabulary serialization also accepts a charged BPE reverse vocabulary.
++// Modified for basal-rs: preserve model selection with caller-provided BPE scratch,
++// also when the BPE forward vocabulary is staged for a charged table; ordered
++// vocabulary serialization also accepts a charged BPE reverse vocabulary.
+@@ -16 +17 @@
+-use crate::models::bpe::{BpeMergeSeed, BpeTrainer, BpeTrial, BPE};
++use crate::models::bpe::{BpeMergeSeed, BpeStagedTrial, BpeTrainer, BpeTrial, BPE};
+@@ -173,2 +174,2 @@
+-        // configuration, which is built below. A backend build failure resumes the
+-        // trial at WordPiece. `expecting` keeps the untagged error text.
++        // configuration `B`, which is built below. A backend build failure resumes
++        // the trial at WordPiece. `expecting` keeps the untagged error text.
+@@ -180,2 +181,2 @@
+-        enum ModelTrial {
+-            BPE(BpeTrial),
++        enum ModelTrial<B> {
++            BPE(B),
+@@ -197,3 +198,31 @@
+-        let bpe = BpeMergeSeed {
+-            storage: self.storage,
+-        };
++        /// The legacy untagged trial, whose parsed BPE configuration `B` is
++        /// built by `build`.
++        fn legacy_trial<B, E, Er>(
++            value: serde_json::Value,
++            build: impl FnOnce(B) -> std::result::Result<BPE, MergeBuildError<E>>,
++        ) -> std::result::Result<std::result::Result<ModelWrapper, MergeBuildError<E>>, Er>
++        where
++            B: serde::de::DeserializeOwned,
++            Er: serde::de::Error,
++        {
++            // Each untagged trial reads its own owned copy, as `from_value` did.
++            let trial =
++                serde_json::from_value::<ModelTrial<B>>(value.clone()).map_err(Er::custom)?;
++            Ok(Ok(match trial {
++                ModelTrial::BPE(parsed) => match build(parsed) {
++                    Ok(bpe) => ModelWrapper::BPE(bpe),
++                    Err(MergeBuildError::Backend(_)) => {
++                        match serde_json::from_value(value).map_err(Er::custom)? {
++                            ModelTrialAfterBpe::WordPiece(model) => ModelWrapper::WordPiece(model),
++                            ModelTrialAfterBpe::WordLevel(model) => ModelWrapper::WordLevel(model),
++                            ModelTrialAfterBpe::Unigram(model) => ModelWrapper::Unigram(model),
++                        }
++                    }
++                    Err(refusal) => return Ok(Err(refusal)),
++                },
++                ModelTrial::WordPiece(model) => ModelWrapper::WordPiece(model),
++                ModelTrial::WordLevel(model) => ModelWrapper::WordLevel(model),
++                ModelTrial::Unigram(model) => ModelWrapper::Unigram(model),
++            }))
++        }
++
+@@ -200,0 +230,10 @@
++        // Requested once, only for a value a BPE build may receive.
++        let forward = match &helper {
++            ModelHelper::Tagged(Tagged {
++                variant: EnumType::BPE,
++                ..
++            })
++            | ModelHelper::Legacy(_) => self.storage.forward_vocab_table(),
++            ModelHelper::Tagged(_) => None,
++        };
++        let storage = self.storage;
+@@ -203 +242 @@
+-                EnumType::BPE => match bpe
++                EnumType::BPE => match (BpeMergeSeed { storage, forward })
+@@ -221,28 +260,14 @@
+-                // Each untagged trial reads its own owned copy, as `from_value` did.
+-                let trial =
+-                    serde_json::from_value(value.clone()).map_err(serde::de::Error::custom)?;
+-                match trial {
+-                    ModelTrial::BPE(BpeTrial(builder)) => {
+-                        match builder.build_with_merge_storage(self.storage) {
+-                            Ok(bpe) => ModelWrapper::BPE(bpe),
+-                            Err(MergeBuildError::Backend(_)) => {
+-                                match serde_json::from_value(value)
+-                                    .map_err(serde::de::Error::custom)?
+-                                {
+-                                    ModelTrialAfterBpe::WordPiece(model) => {
+-                                        ModelWrapper::WordPiece(model)
+-                                    }
+-                                    ModelTrialAfterBpe::WordLevel(model) => {
+-                                        ModelWrapper::WordLevel(model)
+-                                    }
+-                                    ModelTrialAfterBpe::Unigram(model) => {
+-                                        ModelWrapper::Unigram(model)
+-                                    }
+-                                }
+-                            }
+-                            Err(refusal) => return Ok(Err(refusal)),
+-                        }
+-                    }
+-                    ModelTrial::WordPiece(model) => ModelWrapper::WordPiece(model),
+-                    ModelTrial::WordLevel(model) => ModelWrapper::WordLevel(model),
+-                    ModelTrial::Unigram(model) => ModelWrapper::Unigram(model),
++                return match forward {
++                    None => legacy_trial(value, |BpeTrial(builder)| {
++                        builder.build_with_merge_storage(storage)
++                    }),
++                    Some(account) => legacy_trial(
++                        value,
++                        |BpeStagedTrial {
++                             builder,
++                             vocab,
++                             merges,
++                         }| {
++                            builder.build_with_staged_vocab(storage, vocab, merges, account)
++                        },
++                    ),
+--- a/src/utils/merge_storage.rs
++++ b/src/utils/merge_storage.rs
+@@ -2,3 +2,3 @@
+-//! optionally, accounts for the built model's merge table and reverse
+-//! vocabulary table backing and for the compiled backing of decoder-tree
+-//! regexes.
++//! optionally, accounts for the built model's merge table, reverse vocabulary
++//! table and forward vocabulary table backing and for the compiled backing of
++//! decoder-tree regexes.
+@@ -54,0 +55,19 @@
++    /// The account that admits the forward vocabulary (token to ID)
++    /// hash-table backing of a BPE model deserialized with this storage.
++    ///
++    /// `None` (the default) keeps the forward vocabulary on the global
++    /// allocator, as the legacy route does. It is requested once per model
++    /// value, after the tagged/legacy helper is parsed, only for a tagged
++    /// `BPE` or an untagged value, and before [`merge_table`](Self::merge_table).
++    /// With `Some`, the parsed entries are staged, unadmitted, and the table is
++    /// built from them as the first step of the BPE build, after the whole
++    /// model value is parsed: its initial capacity block and every growth block
++    /// are admitted before allocation and released after deallocation, while
++    /// the returned model or any of its clones holds the table. A refusal is
++    /// never a legacy untagged mismatch. A vocabulary passed to `BpeBuilder` is
++    /// never admitted: `BpeBuilder::build_with_merge_storage` does not request
++    /// this account.
++    fn forward_vocab_table(&self) -> Option<MergeTableAccount<Self::Error>> {
++        None
++    }
++
+@@ -69 +88 @@
+-/// Account charged for each charged block: a merge-table or reverse
++/// Account charged for each charged block: a merge-table, reverse or forward
+@@ -114,2 +133,2 @@
+-/// The caller's account for one charged table of one build (the merge table
+-/// or the reverse vocabulary) or for the decoder regexes.
++/// The caller's account for one charged table of one build (the merge table,
++/// the reverse or the forward vocabulary) or for the decoder regexes.
+@@ -154,4 +173,5 @@
+-    /// [`MergeStorage::merge_table`], [`MergeStorage::reverse_vocab_table`]
+-    /// or [`MergeStorage::decoder_regex`] account, a merge-table, reverse
+-    /// vocabulary table or decoder-regex block. The message is unchanged; the
+-    /// source tells them apart.
++    /// [`MergeStorage::merge_table`], [`MergeStorage::reverse_vocab_table`],
++    /// [`MergeStorage::forward_vocab_table`] or [`MergeStorage::decoder_regex`]
++    /// account, a merge-table, reverse or forward vocabulary table or
++    /// decoder-regex block. The message is unchanged; the source tells them
++    /// apart.

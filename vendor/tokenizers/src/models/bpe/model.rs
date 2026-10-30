@@ -1,5 +1,5 @@
 // Modified for basal-rs: support caller-provided BPE merge scratch storage
-// and optional charged merge and reverse vocabulary tables.
+// and optional charged merge, reverse and forward vocabulary tables.
 use super::{
     super::{OrderedVocab, OrderedVocabIter},
     trainer::BpeTrainer,
@@ -8,7 +8,9 @@ use super::{
 use crate::tokenizer::{Model, Result, Token};
 use crate::utils::cache::{DEFAULT_CACHE_CAPACITY, MAX_LENGTH};
 use crate::utils::iter::ResultShunt;
-use crate::utils::merge_storage::{MergeBuildError, MergeStorage, TableAccount, TableRefusal};
+use crate::utils::merge_storage::{
+    MergeBuildError, MergeStorage, MergeTableAccount, TableAccount, TableRefusal,
+};
 use ahash::AHashMap;
 use allocator_api2::alloc::{AllocError, Allocator};
 use hashbrown::TryReserveError;
@@ -33,6 +35,163 @@ use std::{
 
 pub type Vocab = AHashMap<String, u32>;
 pub type MergeMap = AHashMap<Pair, (u32, u32)>;
+
+/// A forward vocabulary whose table backing is admitted on a [`TableAccount`].
+///
+/// The key, value and hasher types equal [`Vocab`]'s.
+pub(crate) type ChargedVocab = hashbrown::HashMap<String, u32, ahash::RandomState, TableAlloc>;
+
+/// The forward vocabulary (token to ID) of a [`BPE`]: on the global allocator,
+/// as upstream, or charged and shared by the model and its clones through one
+/// `Arc`. Its iteration order feeds the reverse vocabulary and `get_vocab`.
+#[derive(Clone)]
+pub(crate) enum VocabTable {
+    Global(Vocab),
+    Charged(Arc<ChargedVocab>),
+}
+
+/// Iterator over either forward vocabulary, in that table's own iteration
+/// order. `size_hint` and `fold` forward to the inner iterator, so a collect
+/// keeps the inner iterator's reservation and traversal.
+pub(crate) enum VocabIter<'a> {
+    Global(std::collections::hash_map::Iter<'a, String, u32>),
+    Charged(hashbrown::hash_map::Iter<'a, String, u32>),
+}
+
+impl<'a> Iterator for VocabIter<'a> {
+    type Item = (&'a String, &'a u32);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Global(iter) => iter.next(),
+            Self::Charged(iter) => iter.next(),
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            Self::Global(iter) => iter.size_hint(),
+            Self::Charged(iter) => iter.size_hint(),
+        }
+    }
+
+    fn fold<B, F: FnMut(B, Self::Item) -> B>(self, init: B, f: F) -> B {
+        match self {
+            Self::Global(iter) => iter.fold(init, f),
+            Self::Charged(iter) => iter.fold(init, f),
+        }
+    }
+}
+
+impl VocabTable {
+    pub(crate) fn get(&self, token: &str) -> Option<&u32> {
+        match self {
+            Self::Global(map) => map.get(token),
+            Self::Charged(map) => map.get(token),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contains_key(&self, token: &str) -> bool {
+        self.get(token).is_some()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            Self::Global(map) => map.len(),
+            Self::Charged(map) => map.len(),
+        }
+    }
+
+    pub(crate) fn iter(&self) -> VocabIter<'_> {
+        match self {
+            Self::Global(map) => VocabIter::Global(map.iter()),
+            Self::Charged(map) => VocabIter::Charged(map.iter()),
+        }
+    }
+
+    /// A caller-owned, unadmitted copy, as upstream's `get_vocab`: one std
+    /// `RandomState`, then the entries in this table's iteration order.
+    fn to_hash_map(&self) -> HashMap<String, u32> {
+        match self {
+            Self::Global(map) => map.clone().into_iter().collect(),
+            Self::Charged(map) => map.iter().map(|(token, id)| (token.clone(), *id)).collect(),
+        }
+    }
+
+    /// Map equality: same length and every entry found with an equal value.
+    fn same_entries<'o>(&self, len: usize, get: impl Fn(&str) -> Option<&'o u32>) -> bool {
+        self.len() == len && self.iter().all(|(token, id)| get(token) == Some(id))
+    }
+}
+
+impl PartialEq for VocabTable {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Global(left), Self::Global(right)) => left == right,
+            (Self::Charged(left), Self::Charged(right)) => left == right,
+            _ => self.same_entries(other.len(), |token| other.get(token)),
+        }
+    }
+}
+
+impl PartialEq<Vocab> for VocabTable {
+    fn eq(&self, other: &Vocab) -> bool {
+        match self {
+            Self::Global(map) => map == other,
+            Self::Charged(_) => self.same_entries(other.len(), |token| other.get(token)),
+        }
+    }
+}
+
+impl std::fmt::Debug for VocabTable {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
+        fmt.debug_map().entries(self.iter()).finish()
+    }
+}
+
+impl FromIterator<(String, u32)> for VocabTable {
+    /// Collects a global table, exactly as upstream collects its vocabulary.
+    fn from_iter<I: IntoIterator<Item = (String, u32)>>(iter: I) -> Self {
+        Self::Global(iter.into_iter().collect())
+    }
+}
+
+/// The `vocab` field of a BPE deserialized with a forward vocabulary account:
+/// the capacity and hasher that serde's `HashMap` visitor creates at the same
+/// point, then the entries in decoding order. Not a hash table; this staging
+/// storage and the token strings are unadmitted.
+pub(crate) struct StagedVocab {
+    pub(crate) capacity: usize,
+    pub(crate) hasher: ahash::RandomState,
+    pub(crate) entries: Vec<(String, u32)>,
+}
+
+/// The staged entries in a charged table, by the stream of serde's `HashMap`
+/// visitor: `with_capacity_and_hasher(capacity, hasher)` becomes
+/// `with_hasher_in` plus a fallible reservation of the same capacity, and each
+/// `insert` is preceded by `try_reserve(1)`, the fallible form of its own
+/// `reserve(1)`, so a growth admits the new block while the old one is held.
+/// Equal table construction to the global map is claimed only for equal
+/// hasher keys, an identical hashbrown algorithm and layout in std, and the
+/// same target. A refusal drops the partial table (freed, then released) and
+/// the remaining staged entries.
+fn charged_vocab(
+    staged: StagedVocab,
+    account: Arc<dyn TableAccount>,
+) -> std::result::Result<ChargedVocab, TableRefusal> {
+    let mut map = ChargedVocab::with_hasher_in(staged.hasher, TableAlloc::new(account));
+    if let Err(error) = map.try_reserve(staged.capacity) {
+        return Err(table_refusal(map.allocator(), error));
+    }
+    for (token, id) in staged.entries {
+        if let Err(error) = map.try_reserve(1) {
+            return Err(table_refusal(map.allocator(), error));
+        }
+        map.insert(token, id);
+    }
+    Ok(map)
+}
 
 /// A reverse vocabulary whose table backing is admitted on a [`TableAccount`].
 ///
@@ -114,7 +273,8 @@ impl OrderedVocab for VocabR {
 pub(crate) type ChargedMergeMap =
     hashbrown::HashMap<Pair, (u32, u32), ahash::RandomState, TableAlloc>;
 
-/// Charged allocator of exactly one charged table (merge or reverse vocabulary).
+/// Charged allocator of exactly one charged table (merge, reverse or forward
+/// vocabulary).
 ///
 /// Not `Clone`, so hashbrown's infallible `HashMap::clone`/`clone_from` are
 /// unavailable: the table grows only through `try_reserve` during its build.
@@ -482,6 +642,11 @@ impl BpeBuilder {
             |buffer: &mut Vec<u8>, _| Ok(buffer.as_mut_slice()),
             None::<(Arc<dyn TableAccount>, fn(TableRefusal) -> crate::Error)>,
             None::<(Arc<dyn TableAccount>, fn(TableRefusal) -> crate::Error)>,
+            None::<(
+                StagedVocab,
+                Arc<dyn TableAccount>,
+                fn(TableRefusal) -> crate::Error,
+            )>,
         )
     }
 
@@ -489,10 +654,36 @@ impl BpeBuilder {
     /// `storage` instead of allocating it and, if `storage` supplies a
     /// [`MergeStorage::merge_table`] or [`MergeStorage::reverse_vocab_table`]
     /// account, admits the merge table or the reverse vocabulary table on it.
-    /// Refusal stops the build.
+    /// Refusal stops the build. It does not request
+    /// [`MergeStorage::forward_vocab_table`]: the caller's vocabulary stays on
+    /// the global allocator.
     pub fn build_with_merge_storage<S: MergeStorage>(
         self,
         storage: &S,
+    ) -> std::result::Result<BPE, MergeBuildError<S::Error>> {
+        self.build_with_storage(storage, None)
+    }
+
+    /// [`build_with_merge_storage`](Self::build_with_merge_storage) of a
+    /// deserialized configuration whose forward vocabulary was staged: the
+    /// build first admits that vocabulary's table on `account`.
+    pub(crate) fn build_with_staged_vocab<S: MergeStorage>(
+        mut self,
+        storage: &S,
+        vocab: StagedVocab,
+        merges: Merges,
+        account: MergeTableAccount<S::Error>,
+    ) -> std::result::Result<BPE, MergeBuildError<S::Error>> {
+        self.config.merges = merges;
+        self.build_with_storage(storage, Some((vocab, account)))
+    }
+
+    /// The storage route; `forward`, if any, is the staged forward vocabulary
+    /// and its account.
+    fn build_with_storage<S: MergeStorage>(
+        self,
+        storage: &S,
+        forward: Option<(StagedVocab, MergeTableAccount<S::Error>)>,
     ) -> std::result::Result<BPE, MergeBuildError<S::Error>> {
         self.build_with_scratch(
             |max_len| {
@@ -523,20 +714,43 @@ impl BpeBuilder {
                     MergeBuildError::Storage(refused(refusal))
                 })
             }),
+            forward.map(|(vocab, table)| {
+                let refused = table.refused;
+                (vocab, table.account, move |refusal| {
+                    MergeBuildError::Storage(refused(refusal))
+                })
+            }),
         )
     }
 
     /// The build body shared by both routes. `zeroed` creates the merge
     /// buffer; `slice` yields the one slice used for all merge writes and reads.
     /// `table`, if any, charges the merge table and converts its refusals;
-    /// `reverse_table` does the same for the reverse vocabulary table.
+    /// `reverse_table` does the same for the reverse vocabulary table and
+    /// `forward_table` for the staged forward vocabulary, which then replaces
+    /// the configured one.
     fn build_with_scratch<B, E: From<crate::Error>>(
         mut self,
         zeroed: impl FnOnce(usize) -> std::result::Result<B, E>,
         slice: impl FnOnce(&mut B, usize) -> std::result::Result<&mut [u8], E>,
         table: Option<(Arc<dyn TableAccount>, impl FnOnce(TableRefusal) -> E)>,
         reverse_table: Option<(Arc<dyn TableAccount>, impl FnOnce(TableRefusal) -> E)>,
+        forward_table: Option<(
+            StagedVocab,
+            Arc<dyn TableAccount>,
+            impl FnOnce(TableRefusal) -> E,
+        )>,
     ) -> std::result::Result<BPE, E> {
+        // The actual retained forward table, built first: before dropout
+        // validation, so its refusal precedes every later build error. Only
+        // a deserialized configuration is staged; it never has files.
+        let charged = match forward_table {
+            None => None,
+            Some((staged, account, refused)) => {
+                Some(charged_vocab(staged, account).map_err(refused)?)
+            }
+        };
+
         // Validate dropout.
         if let Some(p) = self.config.dropout {
             if !(0.0..=1.0).contains(&p) {
@@ -552,6 +766,10 @@ impl BpeBuilder {
             self.config.merges = m;
         }
 
+        let vocab = match charged {
+            Some(map) => VocabTable::Charged(Arc::new(map)),
+            None => VocabTable::Global(self.config.vocab),
+        };
         let mut max_len = 0;
         let reverse_entry = |(key, val): (&String, &u32)| {
             if max_len < key.len() {
@@ -560,7 +778,7 @@ impl BpeBuilder {
             (*val, key.to_owned())
         };
         let vocab_r = match reverse_table {
-            None => VocabR::Global(self.config.vocab.iter().map(reverse_entry).collect()),
+            None => VocabR::Global(vocab.iter().map(reverse_entry).collect()),
             // The same stream as the global collect: one `RandomState::new()`,
             // then `reserve` of the exact vocabulary length, made fallible here,
             // then one insert per entry in the vocabulary's iteration order,
@@ -573,16 +791,12 @@ impl BpeBuilder {
                     ahash::RandomState::new(),
                     TableAlloc::new(account),
                 );
-                if let Err(error) = map.try_reserve(self.config.vocab.len()) {
+                if let Err(error) = map.try_reserve(vocab.len()) {
                     return Err(refused(table_refusal(map.allocator(), error)));
                 }
-                self.config
-                    .vocab
-                    .iter()
-                    .map(reverse_entry)
-                    .for_each(|(id, token)| {
-                        map.insert(id, token);
-                    });
+                vocab.iter().map(reverse_entry).for_each(|(id, token)| {
+                    map.insert(id, token);
+                });
                 VocabR::Charged(Arc::new(map))
             }
         };
@@ -591,7 +805,6 @@ impl BpeBuilder {
             capacity => Some(BpeCache::new(capacity)),
         };
 
-        let vocab = self.config.vocab;
         let prefix_len = if let Some(prefix) = &self.config.continuing_subword_prefix {
             prefix.len()
         } else {
@@ -667,18 +880,28 @@ impl BpeBuilder {
 
 /// Deserializes a BPE whose merge scratch comes from explicit storage.
 /// Storage refusal is the inner `Err`; every other error keeps its channel.
-pub(crate) struct BpeMergeSeed<'a, S> {
+/// With `forward`, the forward vocabulary is staged and admitted on it.
+pub(crate) struct BpeMergeSeed<'a, S: MergeStorage> {
     pub(crate) storage: &'a S,
+    pub(crate) forward: Option<MergeTableAccount<S::Error>>,
 }
 
 /// The parsed, not yet built, BPE configuration of a legacy untagged model trial.
 pub(crate) struct BpeTrial(pub(crate) BpeBuilder);
 
+/// [`BpeTrial`] with a staged forward vocabulary; `builder` holds every other
+/// parsed field.
+pub(crate) struct BpeStagedTrial {
+    pub(crate) builder: BpeBuilder,
+    pub(crate) vocab: StagedVocab,
+    pub(crate) merges: Merges,
+}
+
 /// A [Byte Pair Encoding](https://www.aclweb.org/anthology/P16-1162/) model.
 #[derive(PartialEq)]
 pub struct BPE {
     /// The vocabulary assigns a number to each token.
-    pub(crate) vocab: Vocab,
+    pub(crate) vocab: VocabTable,
     /// Reversed vocabulary, to rebuild sentences.
     pub(crate) vocab_r: VocabR,
     /// Contains the mapping between Pairs and their (rank, new_id).
@@ -748,10 +971,7 @@ impl Clone for BPE {
 
 /// Converts the merges strings (for example from `merges.txt` file) with the format
 /// "{pair_a} {pair_b}" into the format expected by the BPE struct
-pub(crate) fn convert_merges_to_hashmap<I: Iterator<Item = String>>(
-    iter: I,
-    _vocab: &Vocab,
-) -> Result<Merges> {
+pub(crate) fn convert_merges_to_hashmap<I: Iterator<Item = String>>(iter: I) -> Result<Merges> {
     let mut merges = vec![];
 
     let lines = iter.filter(|l| !l.starts_with("#version"));
@@ -811,9 +1031,8 @@ impl BPE {
         // Read merges file
         let merge_file = File::open(merges)?;
         let merge_file = BufReader::new(merge_file);
-        let merges = ResultShunt::process(merge_file.lines(), |iter| {
-            convert_merges_to_hashmap(iter, &vocab)
-        })??;
+        let merges =
+            ResultShunt::process(merge_file.lines(), |iter| convert_merges_to_hashmap(iter))??;
 
         Ok((vocab, merges))
     }
@@ -833,7 +1052,7 @@ impl BPE {
     }
 
     pub fn get_vocab(&self) -> HashMap<String, u32> {
-        self.vocab.clone().into_iter().collect()
+        self.vocab.to_hash_map()
     }
 
     pub fn get_unk_token(&self) -> &Option<String> {
@@ -976,7 +1195,7 @@ impl Model for BPE {
     type Trainer = BpeTrainer;
 
     fn get_vocab(&self) -> HashMap<String, u32> {
-        self.vocab.clone().into_iter().collect()
+        self.vocab.to_hash_map()
     }
 
     fn get_vocab_size(&self) -> usize {

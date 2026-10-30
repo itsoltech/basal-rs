@@ -237,8 +237,8 @@ crates.io.
   `tokenizers/PROVENANCE.md`. `tokenizers/UPSTREAM-SHA256SUMS` lists the 77
   copied release files before the change. Of the 73 copied source files, 66
   remain byte for byte identical after the first two patches and 62 after the
-  third, `decoder-regex.patch`, and the fourth, `reverse-vocab-table.patch`
-  (see below); `LICENSE`, `README.md` and
+  third, `decoder-regex.patch`, the fourth, `reverse-vocab-table.patch`, and
+  the fifth, `forward-vocab-table.patch` (see below); `LICENSE`, `README.md` and
   `Cargo.toml.orig` are unchanged.
 - The normalized release manifest omits only the upstream test and benchmark
   targets, their dev dependencies and the profiles that Cargo ignores outside
@@ -494,5 +494,84 @@ only, the duplicate tree is unchanged and the paste exception check passes.
 All four tokenizers patches reproduce the 78 copied and new library,
 manifest, license and README files from the checksum-verified release
 archive, and all 84 vendored checksums pass. No test, tokenizer execution,
+output comparison, memory measurement or GPU check was performed. REQ-009
+remains partial.
+
+### Charged BPE forward vocabulary table
+
+A fifth local patch, `tokenizers/forward-vocab-table.patch`, lets a fifth
+opt-in core route, `read_with_bpe_forward_vocab_table_budget` in
+[GGUF.md](../docs/GGUF.md), admit the backing of the BPE's actual retained
+forward vocabulary (token to ID) hash table on the same GGUF source ledger,
+together with the merge scratch, merge table and reverse vocabulary table
+admitted as on the reverse vocabulary route. Decoder regexes are not
+admitted. The patch applies with `patch -p1` after the four earlier patches
+and changes `src/models/bpe/model.rs`, `src/models/bpe/serialization.rs`,
+`src/models/mod.rs` and `src/utils/merge_storage.rs`, all already modified by
+them. No manifest, lock, dependency or feature changes.
+
+- `MergeStorage` gains a provided `forward_vocab_table` method returning
+  `None`. The model seed requests it once per model value, after the
+  tagged/legacy helper is parsed and only for a tagged `BPE` or an untagged
+  value; with `None` every existing storage and legacy route parses and
+  builds the forward vocabulary exactly as before, into the upstream
+  `AHashMap`. `BpeBuilder::build_with_merge_storage` never requests it, so a
+  caller-supplied vocabulary stays global. Other methods, adapters and error
+  messages are unchanged.
+- With an account, the `vocab` field is staged instead of inserted: a visitor
+  repeats serde_core 1.0.229's `HashMap` visitor calls in order
+  (`size_hint`, its `cautious::<(String, u32)>` capacity, one
+  `ahash::RandomState::new()` at the same point, `next_entry` until the end),
+  but appends each decoded entry to an unadmitted vector. serde, serde_json,
+  the derived untagged trial and its `Content` buffering, number dispatch
+  (including `arbitrary_precision`), fallback order and error texts stay in
+  charge; only the parsed type of the BPE trial changes. The capacity formula
+  is copied from serde_core's private module, so any serde lock change
+  requires re-reading it.
+- The first build step turns the staged entries into the actual retained
+  table: the same hasher is moved into a hashbrown map on the existing
+  non-`Clone` table allocator, whose code is unchanged, the staged capacity is
+  reserved fallibly, then each entry is inserted in decoding order after a
+  fallible `try_reserve(1)`. Every block, the initial one and each growth
+  block while the old block is still held, is admitted before allocation and
+  released after it is freed; an empty vocabulary allocates nothing. Under
+  the inherited conditions (same hasher keys, hashbrown algorithm and layout
+  in std, target and exact allocator) the table has the legacy capacity
+  history and iteration order, so the reverse vocabulary, duplicate-ID
+  winners and `get_vocab` order are unchanged. This is source reasoning, not
+  a measured equality.
+- Chronology changes on this route only: the table is allocated after the
+  whole BPE value is parsed instead of while its entries are decoded, and the
+  staging vector lives from the `vocab` field to the end of that build step,
+  so it briefly coexists with the full table. A parse failure releases the
+  staging without any charge. The table's refusal comes before dropout and
+  merge validation and the other tables, through the unchanged
+  `MergeBuildError::Storage` channel, and it is never treated as a mismatch
+  of a legacy untagged model: an untagged value that parses fully as BPE is
+  refused even if it would otherwise fall back to another model after a
+  later build error. A later refusal or backend error frees the table, then
+  releases its charge, before any fallback. Model clones share the charged
+  table through one `Arc`; the charge lasts until the last owner drops it, on
+  any thread.
+- Not admitted: the staging vector and its growth, all token strings, the
+  table's entire `Arc` allocation, serde/JSON buffers, `get_vocab` copies and
+  everything not admitted on the earlier routes. This route bounds neither
+  the parser nor peak or total tokenizer memory, RSS or OOM.
+
+Static validation with Rust 1.95.0, offline and locked: workspace formatting,
+release Clippy and private Rustdoc with warnings denied pass for default,
+Intel and CUDA all-features builds; each lint and doc log still shows the 16
+inherited, unsuppressed `onig_sys/src/ffi.rs` warnings described above. The
+four changed tokenizers files keep rustfmt's 100-column upstream style.
+Direct uncapped Clippy of tokenizers 0.23.2 reports no diagnostic in its own
+code; its direct private Rustdoc reports only the same six upstream
+diagnostics. Diagnostics of the `onig` and `onig_sys` dependencies in those
+direct logs are the same as before this patch. The rustdoc auto-trait lists
+of `BPE`, `ModelWrapper` and `Tokenizer` are unchanged. `cargo deny --offline`
+passes with the same 22 duplicate warnings and the cached advisory database
+only, the duplicate tree is unchanged and the paste exception check passes.
+All five tokenizers patches reproduce the 78 copied and new library,
+manifest, license and README files from the checksum-verified release
+archive, and all 85 vendored checksums pass. No test, tokenizer execution,
 output comparison, memory measurement or GPU check was performed. REQ-009
 remains partial.

@@ -556,6 +556,83 @@ Nie ma dowodu runtime, równości wyników z inną ścieżką, pomiaru pamięci,
 ochrony OOM, wydajności, bitwise ani pokrycia pakietów. REQ009 pozostaje
 częściowe.
 
+### Opcjonalne admission tablicy słownika BPE (token → ID)
+
+`GgufImmutableCompanionSemantics::read_with_bpe_forward_vocab_table_budget(directory,
+options, lease, &budget)` przyjmuje te same wejścia i wykonuje tę samą
+chronologię co `read_with_bpe_reverse_vocab_table_budget`, z tym samym
+admission bufora scratch, tablicy scalań i tablicy odwrotnego słownika.
+Dodatkowo bloki pamięci rzeczywistej, zachowywanej przez BPE tablicy
+haszującej słownika (token → ID) są opłacane na **tym samym ledgerze** przed
+alokacją: blok początkowy i każdy blok powiększenia. Regexy dekodera nie są
+na tej ścieżce admitowane. Zwraca tego samego właściciela albo
+`GgufForwardVocabTableReadError`: `Existing`, `Scratch`, `MergeTable`
+i `ReverseVocabTable` jak w `GgufReverseVocabTableReadError` oraz
+`ForwardVocabTable { source: GgufForwardVocabTableError }`.
+`GgufForwardVocabTableError` to `Admission { source: GgufRawSourceError }`
+(busy, poisoned/zamknięty ledger, overflow, limit, brak pamięci) albo
+`CapacityOverflow`, gdy obliczenie pojemności tablicy przepełnia się przed
+żądaniem. `read`, cztery wcześniejsze ścieżki, ich typy błędów, opłaty
+i komunikaty oraz ścieżki CLI/Engine/Legacy nie zmieniają się.
+
+Lokalnie łatany tokenizers dodaje do `MergeStorage` opcjonalne konto słownika
+(`forward_vocab_table`, domyślnie `None`). Seed modelu pobiera je raz na
+wartość modelu, po sparsowaniu pomocnika tagged/legacy, tylko dla tagged
+`BPE` albo wartości bez tagu, przed kontami tablicy scalań i odwrotnego
+słownika. Bez konta parser i budowa BPE tworzą słownik jak upstream
+w `AHashMap` na globalnym alokatorze; `BpeBuilder::build_with_merge_storage`
+nigdy nie pobiera tego konta, więc słownik przekazany przez wywołującego
+pozostaje globalny. Z kontem pole `vocab` jest odkładane zamiast wstawiane:
+visitor powtarza w tej samej kolejności wywołania visitora `HashMap`
+z serde_core 1.0.229 (`size_hint`, pojemność `cautious::<(String, u32)>`,
+jedno `ahash::RandomState::new()` w tym samym miejscu, `next_entry` do końca),
+ale dopisuje każdy zdekodowany wpis do nieadmitowanego wektora. serde,
+serde_json, wyprowadzona próba bez tagu z buforowaniem `Content`, dyspozycja
+liczb (także `arbitrary_precision`), kolejność prób modeli i teksty błędów
+pozostają bez zmian; zmienia się tylko typ sparsowanej próby BPE. Wzór
+pojemności jest skopiowany z prywatnego modułu serde_core, więc każda zmiana
+wersji serde w `Cargo.lock` wymaga ponownego sprawdzenia.
+
+Pierwszy krok budowy BPE zamienia odłożone wpisy w zachowywaną tablicę:
+przenosi ten sam haszer do `hashbrown::HashMap` na tym samym prywatnym
+alokatorze bez `Clone` co pozostałe tablice, wykonuje `try_reserve`
+odłożonej pojemności, a potem dla każdego wpisu w kolejności dekodowania
+`try_reserve(1)` i `insert`. Powiększenie opłaca nowy blok, gdy stary jest
+jeszcze trzymany, i zwraca opłatę starego dopiero po jego zwolnieniu; pusty
+słownik nie alokuje ani nie opłaca bloku. Przy odziedziczonych warunkach
+(te same klucze haszera, ten sam algorytm i układ hashbrown w std, ten sam
+target i dokładny alokator) tablica ma historię pojemności i kolejność
+iteracji ścieżki legacy, więc odwrotny słownik, zwycięzcy duplikatów ID
+i kolejność `get_vocab` nie zmieniają się. To rozumowanie na podstawie
+źródeł, nie zmierzona równość.
+
+Na tej ścieżce zmienia się chronologia: tablica jest alokowana po
+sparsowaniu całej wartości BPE, a nie w trakcie dekodowania wpisów, a wektor
+wpisów żyje od pola `vocab` do końca tego kroku budowy, więc przez chwilę
+współistnieje z pełną tablicą. Błąd parsowania porzuca wektor bez żadnej
+opłaty. Odmowa tablicy słownika następuje przed walidacją dropout i scaleń
+oraz przed pozostałymi tablicami, przez niezmieniony kanał
+`MergeBuildError::Storage`, bez formatowania i `Box`, i nigdy nie jest
+traktowana jako niedopasowanie modelu bez tagu: wartość bez tagu, która
+w całości parsuje się jako BPE, zostaje odrzucona także wtedy, gdy po
+późniejszym błędzie budowy przeszłaby do innego modelu. Późniejsza odmowa
+lub błąd backendu zwalnia tablicę i zwraca jej opłatę przed jakąkolwiek
+próbą innego modelu. Zbudowany BPE przechowuje opłaconą tablicę we
+współdzielonym `Arc`; klon tokenizera lub modelu współdzieli ją bez
+alokacji. Opłata trwa, dopóki zwrócony właściciel albo dowolny klon
+tokenizera trzyma tablicę, i wraca po zwolnieniu bloków przez ostatniego
+właściciela na dowolnym wątku. Ten sam limit, który przyjmuje ścieżkę
+odwrotnego słownika, może odmówić tutaj.
+
+Pokryte są wyłącznie bloki tablicy słownika i to, co pokrywa ścieżka
+odwrotnego słownika. Nieadmitowane pozostają: wektor odłożonych wpisów i jego
+powiększenia, wszystkie teksty tokenów, cała alokacja `Arc` każdej tablicy,
+kopie `get_vocab` oraz wszystko, co nieadmitowane na ścieżce odwrotnego
+słownika. Ścieżka nie ogranicza parsera ani szczytowej lub całkowitej
+pamięci tokenizera, RSS ani OOM i nie jest gwarancją loadera. Nie ma dowodu
+runtime, równości wyników z inną ścieżką, pomiaru pamięci, ochrony OOM,
+wydajności, bitwise ani pokrycia pakietów. REQ009 pozostaje częściowe.
+
 ## Zamknięty zakres semantyki G1
 
 Nowe API wymaga zwykłej architektury Llama: `LlamaForCausalLM`, `silu`, osobnej
