@@ -3,14 +3,16 @@
 //! third opt-in route also admits the retained compiled Oniguruma backing of
 //! decoder-tree regexes. A fourth, separate from the third, admits the merge
 //! scratch, the merge table and the built BPE's reverse vocabulary table
-//! backing.
+//! backing. A fifth admits all of the fourth plus the backing of the BPE's
+//! actual retained forward vocabulary table.
 //!
 //! Only that temporary buffer, those tables' backing blocks and those regex
 //! backing blocks are admitted. Tokenizer JSON values, serde helper storage,
-//! each table's entire `Arc` allocation (control block, map header, allocator
-//! and hasher), the forward vocabulary map, all vocabulary strings, added
-//! vocabulary, other native regex state and caches remain unadmitted, as on
-//! the original route.
+//! the fifth route's staged forward vocabulary entries, each table's entire
+//! `Arc` allocation (control block, map header, allocator and hasher), the
+//! forward vocabulary map outside the fifth route, all vocabulary strings,
+//! added vocabulary, other native regex state and caches remain unadmitted,
+//! as on the original route.
 
 use std::path::Path;
 
@@ -540,6 +542,158 @@ pub(super) fn build_captured_tokenizer_with_bpe_tables(
     .map_err(|error| match error {
         AdmittedTokenizerError::Semantic(source) => {
             GgufReverseVocabTableReadError::Existing { source: GgufImmutableSemanticError::Tokenizer { source } }
+        }
+        AdmittedTokenizerError::Refused(error) => error,
+    })
+}
+
+/// Typed refusal of the BPE forward vocabulary table backing. No input text is retained.
+#[derive(Debug, thiserror::Error)]
+pub enum GgufForwardVocabTableError {
+    #[error("BPE forward vocabulary table admission failed")]
+    Admission {
+        #[source]
+        source: GgufRawSourceError,
+    },
+    #[error("BPE forward vocabulary table capacity overflows")]
+    CapacityOverflow,
+}
+
+/// Failure of `GgufImmutableCompanionSemantics::read_with_bpe_forward_vocab_table_budget`.
+#[derive(Debug, thiserror::Error)]
+pub enum GgufForwardVocabTableReadError {
+    /// Any failure of the existing immutable read, unchanged.
+    #[error("GGUF immutable companion read failed")]
+    Existing {
+        #[from]
+        source: GgufImmutableSemanticError,
+    },
+    #[error("GGUF tokenizer BPE merge scratch was refused")]
+    Scratch {
+        #[source]
+        source: GgufMergeScratchError,
+    },
+    #[error("GGUF tokenizer BPE merge table was refused")]
+    MergeTable {
+        #[source]
+        source: GgufMergeTableError,
+    },
+    #[error("GGUF tokenizer BPE reverse vocabulary table was refused")]
+    ReverseVocabTable {
+        #[source]
+        source: GgufReverseVocabTableError,
+    },
+    #[error("GGUF tokenizer BPE forward vocabulary table was refused")]
+    ForwardVocabTable {
+        #[source]
+        source: GgufForwardVocabTableError,
+    },
+}
+
+/// Merge scratch, merge table, reverse and forward vocabulary table backing
+/// on the declaration budget's raw ledger. Decoder regexes keep the default
+/// `None`.
+struct BpeVocabTablesAdmission<'a> {
+    raw: &'a GgufRawSourceBudget,
+}
+
+/// Private refusal of any admitted storage of the forward vocabulary route.
+#[derive(Debug, thiserror::Error)]
+enum BpeVocabTablesAdmissionError {
+    #[error("BPE merge scratch admission failed")]
+    Scratch(#[source] GgufRawSourceError),
+    #[error("BPE merge table admission failed")]
+    MergeTable(#[source] TableRefusal),
+    #[error("BPE reverse vocabulary table admission failed")]
+    ReverseVocab(#[source] TableRefusal),
+    #[error("BPE forward vocabulary table admission failed")]
+    ForwardVocab(#[source] TableRefusal),
+}
+
+impl MergeStorage for BpeVocabTablesAdmission<'_> {
+    type Buffer = MergeScratchBuffer;
+    type Error = BpeVocabTablesAdmissionError;
+
+    /// The scratch buffer exactly as on the scratch-only route.
+    fn try_zeroed(&self, length: usize) -> Result<MergeScratchBuffer, BpeVocabTablesAdmissionError> {
+        MergeScratch { raw: self.raw }.try_zeroed(length).map_err(BpeVocabTablesAdmissionError::Scratch)
+    }
+
+    fn merge_table(&self) -> Option<MergeTableAccount<BpeVocabTablesAdmissionError>> {
+        Some(MergeTableAccount { account: self.raw.table_account(), refused: BpeVocabTablesAdmissionError::MergeTable })
+    }
+
+    fn reverse_vocab_table(&self) -> Option<MergeTableAccount<BpeVocabTablesAdmissionError>> {
+        Some(MergeTableAccount {
+            account: self.raw.table_account(),
+            refused: BpeVocabTablesAdmissionError::ReverseVocab,
+        })
+    }
+
+    fn forward_vocab_table(&self) -> Option<MergeTableAccount<BpeVocabTablesAdmissionError>> {
+        Some(MergeTableAccount {
+            account: self.raw.table_account(),
+            refused: BpeVocabTablesAdmissionError::ForwardVocab,
+        })
+    }
+}
+
+fn forward_vocab_table_error(refusal: TableRefusal) -> GgufForwardVocabTableError {
+    match ledger_cause(refusal) {
+        Some(source) => GgufForwardVocabTableError::Admission { source },
+        None => GgufForwardVocabTableError::CapacityOverflow,
+    }
+}
+
+/// `build_captured_tokenizer_with_bpe_tables`, and the BPE's actual retained
+/// forward vocabulary (token to ID) table is admitted on `raw` block by block
+/// while the returned tokenizer, or any clone of it, holds that table. The
+/// parsed entries are staged unadmitted; the table is built from them as the
+/// first BPE build step, after the whole model value is parsed and before
+/// dropout and merge validation, the reverse table, scratch and merge table,
+/// so its refusal wins over a later build error and over the legacy untagged
+/// fallback. Decoder regexes stay unadmitted, as on the merge-table route.
+pub(super) fn build_captured_tokenizer_with_bpe_vocab_tables(
+    snapshot: &GgufCompanionSnapshot,
+    directory: &Path,
+    vocab: usize,
+    style: ChatStyle,
+    bos_token: &str,
+    raw: &GgufRawSourceBudget,
+) -> Result<(BasalTokenizer, u32), GgufForwardVocabTableReadError> {
+    let storage = BpeVocabTablesAdmission { raw };
+    build_captured_tokenizer_with(snapshot, directory, vocab, style, bos_token, |original, path, style| {
+        BasalTokenizer::from_json_value_with(original, path, style, |text| {
+            tokenizers::Tokenizer::from_str_with_merge_storage(text, &storage).map_err(|error| match error {
+                MergeBuildError::Storage(BpeVocabTablesAdmissionError::Scratch(source)) => {
+                    let source = GgufMergeScratchError::Admission { source };
+                    AdmittedTokenizerError::Refused(GgufForwardVocabTableReadError::Scratch { source })
+                }
+                MergeBuildError::Storage(BpeVocabTablesAdmissionError::MergeTable(refusal)) => {
+                    let source = table_error(refusal);
+                    AdmittedTokenizerError::Refused(GgufForwardVocabTableReadError::MergeTable { source })
+                }
+                MergeBuildError::Storage(BpeVocabTablesAdmissionError::ReverseVocab(refusal)) => {
+                    let source = reverse_vocab_table_error(refusal);
+                    AdmittedTokenizerError::Refused(GgufForwardVocabTableReadError::ReverseVocabTable { source })
+                }
+                MergeBuildError::Storage(BpeVocabTablesAdmissionError::ForwardVocab(refusal)) => {
+                    let source = forward_vocab_table_error(refusal);
+                    AdmittedTokenizerError::Refused(GgufForwardVocabTableReadError::ForwardVocabTable { source })
+                }
+                MergeBuildError::BufferLength { requested, actual } => {
+                    let source = GgufMergeScratchError::ProviderLength { requested, actual };
+                    AdmittedTokenizerError::Refused(GgufForwardVocabTableReadError::Scratch { source })
+                }
+                MergeBuildError::Backend(source) => {
+                    TokenizerInputError::Backend { path: path.to_path_buf(), source }.into()
+                }
+            })
+        })
+    })
+    .map_err(|error| match error {
+        AdmittedTokenizerError::Semantic(source) => {
+            GgufForwardVocabTableReadError::Existing { source: GgufImmutableSemanticError::Tokenizer { source } }
         }
         AdmittedTokenizerError::Refused(error) => error,
     })

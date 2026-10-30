@@ -6,9 +6,9 @@ use std::sync::{Arc, Mutex, PoisonError, TryLockError};
 /// Shared allowance for requested layouts admitted by GGUF source routes.
 ///
 /// Opt-in routes also use this ledger for declaration and immutable semantic
-/// backing, BPE merge scratch, the built BPE merge and reverse vocabulary tables
-/// and decoder regexes' compiled backing. Each table's or regex's charge remains
-/// held until its last shared owner drops it.
+/// backing, BPE merge scratch, the built BPE merge, reverse and forward vocabulary
+/// tables and decoder regexes' compiled backing. Each table's or regex's charge
+/// remains held until its last shared owner drops it.
 ///
 /// Create one handle before loads and pass it (or its sharing clones) to every
 /// concurrent load/reload for that allowance. Independent handles have independent
@@ -34,8 +34,8 @@ impl GgufRawSourceBudget {
         RawCharge { ledger: Arc::clone(&self.ledger), bytes: 0 }
     }
 
-    /// The same ledger, for the per-block account of an opt-in BPE merge or
-    /// reverse vocabulary table or decoder regex.
+    /// The same ledger, for the per-block account of an opt-in BPE merge,
+    /// reverse or forward vocabulary table or decoder regex.
     pub(super) fn table_account(&self) -> Arc<RawLedger> {
         Arc::clone(&self.ledger)
     }

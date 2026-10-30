@@ -1,7 +1,7 @@
 //! Explicit, per-call storage for the BPE builder's merge scratch buffer and,
-//! optionally, accounts for the built model's merge table and reverse
-//! vocabulary table backing and for the compiled backing of decoder-tree
-//! regexes.
+//! optionally, accounts for the built model's merge table, reverse vocabulary
+//! table and forward vocabulary table backing and for the compiled backing of
+//! decoder-tree regexes.
 //!
 //! Local basal-rs addition. The legacy `BpeBuilder::build` and `Deserialize`
 //! routes keep their own `vec![0; max_len]` allocation and global merge table.
@@ -52,6 +52,25 @@ pub trait MergeStorage {
         None
     }
 
+    /// The account that admits the forward vocabulary (token to ID)
+    /// hash-table backing of a BPE model deserialized with this storage.
+    ///
+    /// `None` (the default) keeps the forward vocabulary on the global
+    /// allocator, as the legacy route does. It is requested once per model
+    /// value, after the tagged/legacy helper is parsed, only for a tagged
+    /// `BPE` or an untagged value, and before [`merge_table`](Self::merge_table).
+    /// With `Some`, the parsed entries are staged, unadmitted, and the table is
+    /// built from them as the first step of the BPE build, after the whole
+    /// model value is parsed: its initial capacity block and every growth block
+    /// are admitted before allocation and released after deallocation, while
+    /// the returned model or any of its clones holds the table. A refusal is
+    /// never a legacy untagged mismatch. A vocabulary passed to `BpeBuilder` is
+    /// never admitted: `BpeBuilder::build_with_merge_storage` does not request
+    /// this account.
+    fn forward_vocab_table(&self) -> Option<MergeTableAccount<Self::Error>> {
+        None
+    }
+
     /// The account that admits the compiled backing of decoder-tree regexes.
     ///
     /// Requested when the tokenizer's `decoder` entry is reached. `None` (the
@@ -66,7 +85,7 @@ pub trait MergeStorage {
     }
 }
 
-/// Account charged for each charged block: a merge-table or reverse
+/// Account charged for each charged block: a merge-table, reverse or forward
 /// vocabulary table block or, through the decoder-regex account, a compiled
 /// regex backing block.
 pub trait TableAccount: Send + Sync + std::panic::RefUnwindSafe + std::panic::UnwindSafe {
@@ -111,8 +130,8 @@ pub enum TableRefusal {
     CapacityOverflow,
 }
 
-/// The caller's account for one charged table of one build (the merge table
-/// or the reverse vocabulary) or for the decoder regexes.
+/// The caller's account for one charged table of one build (the merge table,
+/// the reverse or the forward vocabulary) or for the decoder regexes.
 pub struct MergeTableAccount<E> {
     /// Charged for every table block; retained by the table until it is freed.
     pub account: Arc<dyn TableAccount>,
@@ -151,10 +170,11 @@ pub(crate) enum AdmittedRegexError {
 #[derive(Debug, thiserror::Error)]
 pub enum MergeBuildError<E> {
     /// The storage refused the scratch buffer or, when it supplies a
-    /// [`MergeStorage::merge_table`], [`MergeStorage::reverse_vocab_table`]
-    /// or [`MergeStorage::decoder_regex`] account, a merge-table, reverse
-    /// vocabulary table or decoder-regex block. The message is unchanged; the
-    /// source tells them apart.
+    /// [`MergeStorage::merge_table`], [`MergeStorage::reverse_vocab_table`],
+    /// [`MergeStorage::forward_vocab_table`] or [`MergeStorage::decoder_regex`]
+    /// account, a merge-table, reverse or forward vocabulary table or
+    /// decoder-regex block. The message is unchanged; the source tells them
+    /// apart.
     #[error("BPE merge scratch storage was refused")]
     Storage(#[source] E),
     /// The storage returned a slice of another length.

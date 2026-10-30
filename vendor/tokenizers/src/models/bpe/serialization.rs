@@ -1,15 +1,16 @@
-// Modified for basal-rs: deserialize BPE with typed merge-storage refusals.
+// Modified for basal-rs: deserialize BPE with typed merge-storage refusals and
+// an optionally staged forward vocabulary.
 use super::{
-    super::OrderedVocabIter, convert_merges_to_hashmap, BpeBuilder, BpeMergeSeed, BpeTrial, Pair,
-    BPE,
+    super::OrderedVocabIter, convert_merges_to_hashmap, BpeBuilder, BpeMergeSeed, BpeStagedTrial,
+    BpeTrial, Merges, Pair, StagedVocab, Vocab, BPE,
 };
 use crate::utils::merge_storage::{MergeBuildError, MergeStorage};
-use ahash::AHashMap;
 use serde::{
     de::{DeserializeSeed, Error, MapAccess, Visitor},
     ser::SerializeStruct,
     Deserialize, Deserializer, Serialize, Serializer,
 };
+use std::marker::PhantomData;
 
 impl Serialize for BPE {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -66,7 +67,22 @@ impl<'de> Deserialize<'de> for BPE {
     where
         D: Deserializer<'de>,
     {
-        deserializer.deserialize_struct("BPE", FIELDS, BPEVisitor(BpeBuilder::build))
+        let build = |builder: BpeBuilder, vocab: Vocab, merges| {
+            builder.vocab_and_merges(vocab, merges).build()
+        };
+        deserializer.deserialize_struct("BPE", FIELDS, BPEVisitor(build, PhantomData))
+    }
+}
+
+/// A storage build's refusal is the inner `Err`; a backend error stays the
+/// visitor's error.
+fn seed_outcome<E>(
+    built: Result<BPE, MergeBuildError<E>>,
+) -> crate::Result<Result<BPE, MergeBuildError<E>>> {
+    match built {
+        Ok(bpe) => Ok(Ok(bpe)),
+        Err(MergeBuildError::Backend(error)) => Err(error),
+        Err(refusal) => Ok(Err(refusal)),
     }
 }
 
@@ -77,12 +93,25 @@ impl<'de, S: MergeStorage> DeserializeSeed<'de> for BpeMergeSeed<'_, S> {
     where
         D: Deserializer<'de>,
     {
-        let build = |builder: BpeBuilder| match builder.build_with_merge_storage(self.storage) {
-            Ok(bpe) => Ok(Ok(bpe)),
-            Err(MergeBuildError::Backend(error)) => Err(error),
-            Err(refusal) => Ok(Err(refusal)),
-        };
-        deserializer.deserialize_struct("BPE", FIELDS, BPEVisitor(build))
+        let storage = self.storage;
+        match self.forward {
+            None => {
+                let build = |builder: BpeBuilder, vocab: Vocab, merges| {
+                    seed_outcome(
+                        builder
+                            .vocab_and_merges(vocab, merges)
+                            .build_with_merge_storage(storage),
+                    )
+                };
+                deserializer.deserialize_struct("BPE", FIELDS, BPEVisitor(build, PhantomData))
+            }
+            Some(account) => {
+                let build = |builder: BpeBuilder, vocab: StagedVocab, merges| {
+                    seed_outcome(builder.build_with_staged_vocab(storage, vocab, merges, account))
+                };
+                deserializer.deserialize_struct("BPE", FIELDS, BPEVisitor(build, PhantomData))
+            }
+        }
     }
 }
 
@@ -91,15 +120,86 @@ impl<'de> Deserialize<'de> for BpeTrial {
     where
         D: Deserializer<'de>,
     {
-        deserializer.deserialize_struct("BPE", FIELDS, BPEVisitor(|builder| Ok(BpeTrial(builder))))
+        let parsed = |builder: BpeBuilder, vocab: Vocab, merges| {
+            Ok(BpeTrial(builder.vocab_and_merges(vocab, merges)))
+        };
+        deserializer.deserialize_struct("BPE", FIELDS, BPEVisitor(parsed, PhantomData))
     }
 }
 
-/// Parses the fields, then hands the configured builder to `F`.
-struct BPEVisitor<F>(F);
-impl<'de, T, F> Visitor<'de> for BPEVisitor<F>
+impl<'de> Deserialize<'de> for BpeStagedTrial {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let parsed = |builder, vocab, merges| {
+            Ok(BpeStagedTrial {
+                builder,
+                vocab,
+                merges,
+            })
+        };
+        deserializer.deserialize_struct("BPE", FIELDS, BPEVisitor(parsed, PhantomData))
+    }
+}
+
+/// serde_core 1.0.229's `size_hint::cautious::<(String, u32)>`
+/// (`private/size_hint.rs`), the capacity its `HashMap` visitor requests.
+/// The element size is nonzero. Re-check on any serde lock change.
+fn cautious_vocab_capacity(hint: Option<usize>) -> usize {
+    const MAX_PREALLOC_BYTES: usize = 1024 * 1024;
+    hint.unwrap_or(0)
+        .min(MAX_PREALLOC_BYTES / std::mem::size_of::<(String, u32)>())
+}
+
+impl<'de> Deserialize<'de> for StagedVocab {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(StagedVocabVisitor)
+    }
+}
+
+/// serde_core 1.0.229's `HashMap` visitor (`de/impls.rs`) with
+/// `ahash::RandomState` and `(String, u32)` entries, except that each entry is
+/// staged instead of inserted.
+struct StagedVocabVisitor;
+impl<'de> Visitor<'de> for StagedVocabVisitor {
+    type Value = StagedVocab;
+
+    fn expecting(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
+        fmt.write_str("a map")
+    }
+
+    /// The same calls in the same order: `size_hint`, the cautious capacity,
+    /// one `RandomState::new()` (serde's `S::default()`), then `next_entry`
+    /// until the end or the first error.
+    fn visit_map<A>(self, mut map: A) -> Result<StagedVocab, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let capacity = cautious_vocab_capacity(map.size_hint());
+        let hasher = ahash::RandomState::new();
+        let mut entries = Vec::with_capacity(capacity);
+        while let Some(entry) = map.next_entry::<String, u32>()? {
+            entries.push(entry);
+        }
+        Ok(StagedVocab {
+            capacity,
+            hasher,
+            entries,
+        })
+    }
+}
+
+/// Parses the fields, then hands the configured builder, the `vocab` field as
+/// `Voc` and the converted merges to `F`.
+struct BPEVisitor<Voc, F>(F, PhantomData<Voc>);
+impl<'de, T, Voc, F> Visitor<'de> for BPEVisitor<Voc, F>
 where
-    F: FnOnce(BpeBuilder) -> crate::Result<T>,
+    Voc: Deserialize<'de>,
+    F: FnOnce(BpeBuilder, Voc, Merges) -> crate::Result<T>,
 {
     type Value = T;
 
@@ -112,7 +212,7 @@ where
         V: MapAccess<'de>,
     {
         let mut builder = BpeBuilder::new();
-        let mut vocab: Option<AHashMap<String, u32>> = None;
+        let mut vocab: Option<Voc> = None;
 
         #[derive(Debug, Deserialize)]
         #[serde(untagged)]
@@ -176,11 +276,10 @@ where
             let merges = match merges {
                 MergeType::Tuple(merges) => merges,
                 MergeType::Legacy(merges) => {
-                    convert_merges_to_hashmap(merges.into_iter(), &vocab).map_err(Error::custom)?
+                    convert_merges_to_hashmap(merges.into_iter()).map_err(Error::custom)?
                 }
             };
-            builder = builder.vocab_and_merges(vocab, merges);
-            Ok((self.0)(builder).map_err(Error::custom)?)
+            Ok((self.0)(builder, vocab, merges).map_err(Error::custom)?)
         } else {
             Err(Error::custom("Missing vocab/merges"))
         }

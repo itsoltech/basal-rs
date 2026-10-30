@@ -114,10 +114,40 @@ three earlier patches. It changes no further upstream file:
 - `src/models/mod.rs`: the ordered vocabulary serializer takes either reverse
   vocabulary through a private trait; the legacy map uses the same calls.
 
+`forward-vocab-table.patch` then applies with `patch -p1` to the result of the
+four earlier patches. It changes no further upstream file:
+
+- `src/utils/merge_storage.rs`: a provided `MergeStorage::forward_vocab_table`
+  returns no account by default. Existing signatures and error messages are
+  unchanged; only documentation is generalized.
+- `src/models/bpe/model.rs`: the BPE forward vocabulary becomes a
+  crate-private `VocabTable` enum, global as before or charged in a hashbrown
+  map with the same key, value and hasher, held in one `Arc`. A deserialized
+  configuration may carry the parsed `vocab` entries staged in a vector; the
+  build then turns them into the charged table as its first step, through the
+  existing non-`Clone` table allocator, whose code is unchanged: the staged
+  hasher is moved in, the staged capacity is reserved fallibly, and each entry
+  is inserted in decoding order after a fallible `try_reserve(1)`. Without an
+  account the build and every caller-supplied vocabulary stay global.
+  `convert_merges_to_hashmap` loses its unused vocabulary parameter. Lookup,
+  `get_vocab`, equality, `Debug` and trainer collection keep their results.
+- `src/models/bpe/serialization.rs`: the BPE visitor is generic over the type
+  of its `vocab` field. The staged field repeats the calls of serde_core
+  1.0.229's `HashMap` visitor in order (`size_hint`, its private
+  `size_hint::cautious::<(String, u32)>` capacity formula, one
+  `ahash::RandomState::new()`, `next_entry` until the end) but appends each
+  entry instead of inserting it. The formula is copied, so any serde or
+  serde_core lock change requires re-reading both before acceptance.
+- `src/models/mod.rs`: the forward account is requested once per model value,
+  only for a tagged `BPE` or an untagged value. The derived untagged trial
+  becomes generic over its BPE variant; the legacy route keeps the old one.
+
 `SHA256SUMS` covers every file in this directory except itself.
 
 The eleven modified upstream Rust source files carry an in-file "Modified for
 basal-rs" notice. The new `merge_storage.rs` module is identified above and
 included in the patches and checksum manifest. Serialization, trainer and seed
 files are not changed by `merge-table.patch` or `reverse-vocab-table.patch`;
-the decoder patch changes the files listed above.
+the decoder patch changes the files listed above. `forward-vocab-table.patch`
+changes the BPE `src/models/bpe/serialization.rs` as listed above, and no
+trainer, tokenizer serialization or decoder file.

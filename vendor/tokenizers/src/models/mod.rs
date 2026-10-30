@@ -1,6 +1,7 @@
 //! Popular tokenizer models.
-// Modified for basal-rs: preserve model selection with caller-provided BPE scratch;
-// ordered vocabulary serialization also accepts a charged BPE reverse vocabulary.
+// Modified for basal-rs: preserve model selection with caller-provided BPE scratch,
+// also when the BPE forward vocabulary is staged for a charged table; ordered
+// vocabulary serialization also accepts a charged BPE reverse vocabulary.
 
 pub mod bpe;
 pub mod unigram;
@@ -13,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{de::DeserializeSeed, Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::models::bpe::{BpeMergeSeed, BpeTrainer, BpeTrial, BPE};
+use crate::models::bpe::{BpeMergeSeed, BpeStagedTrial, BpeTrainer, BpeTrial, BPE};
 use crate::models::unigram::{Unigram, UnigramTrainer};
 use crate::models::wordlevel::{WordLevel, WordLevelTrainer};
 use crate::models::wordpiece::{WordPiece, WordPieceTrainer};
@@ -170,15 +171,15 @@ impl<'de, S: MergeStorage> DeserializeSeed<'de> for ModelMergeSeed<'_, S> {
         D: Deserializer<'de>,
     {
         // `ModelUntagged`'s trial order. Its BPE trial only parses and converts the
-        // configuration, which is built below. A backend build failure resumes the
-        // trial at WordPiece. `expecting` keeps the untagged error text.
+        // configuration `B`, which is built below. A backend build failure resumes
+        // the trial at WordPiece. `expecting` keeps the untagged error text.
         #[derive(Deserialize)]
         #[serde(
             untagged,
             expecting = "data did not match any variant of untagged enum ModelUntagged"
         )]
-        enum ModelTrial {
-            BPE(BpeTrial),
+        enum ModelTrial<B> {
+            BPE(B),
             WordPiece(WordPiece),
             WordLevel(WordLevel),
             Unigram(Unigram),
@@ -194,13 +195,51 @@ impl<'de, S: MergeStorage> DeserializeSeed<'de> for ModelMergeSeed<'_, S> {
             Unigram(Unigram),
         }
 
-        let bpe = BpeMergeSeed {
-            storage: self.storage,
-        };
+        /// The legacy untagged trial, whose parsed BPE configuration `B` is
+        /// built by `build`.
+        fn legacy_trial<B, E, Er>(
+            value: serde_json::Value,
+            build: impl FnOnce(B) -> std::result::Result<BPE, MergeBuildError<E>>,
+        ) -> std::result::Result<std::result::Result<ModelWrapper, MergeBuildError<E>>, Er>
+        where
+            B: serde::de::DeserializeOwned,
+            Er: serde::de::Error,
+        {
+            // Each untagged trial reads its own owned copy, as `from_value` did.
+            let trial =
+                serde_json::from_value::<ModelTrial<B>>(value.clone()).map_err(Er::custom)?;
+            Ok(Ok(match trial {
+                ModelTrial::BPE(parsed) => match build(parsed) {
+                    Ok(bpe) => ModelWrapper::BPE(bpe),
+                    Err(MergeBuildError::Backend(_)) => {
+                        match serde_json::from_value(value).map_err(Er::custom)? {
+                            ModelTrialAfterBpe::WordPiece(model) => ModelWrapper::WordPiece(model),
+                            ModelTrialAfterBpe::WordLevel(model) => ModelWrapper::WordLevel(model),
+                            ModelTrialAfterBpe::Unigram(model) => ModelWrapper::Unigram(model),
+                        }
+                    }
+                    Err(refusal) => return Ok(Err(refusal)),
+                },
+                ModelTrial::WordPiece(model) => ModelWrapper::WordPiece(model),
+                ModelTrial::WordLevel(model) => ModelWrapper::WordLevel(model),
+                ModelTrial::Unigram(model) => ModelWrapper::Unigram(model),
+            }))
+        }
+
         let helper = ModelHelper::deserialize(deserializer)?;
+        // Requested once, only for a value a BPE build may receive.
+        let forward = match &helper {
+            ModelHelper::Tagged(Tagged {
+                variant: EnumType::BPE,
+                ..
+            })
+            | ModelHelper::Legacy(_) => self.storage.forward_vocab_table(),
+            ModelHelper::Tagged(_) => None,
+        };
+        let storage = self.storage;
         Ok(Ok(match helper {
             ModelHelper::Tagged(model) => match model.variant {
-                EnumType::BPE => match bpe
+                EnumType::BPE => match (BpeMergeSeed { storage, forward })
                     .deserialize(model.rest)
                     .map_err(serde::de::Error::custom)?
                 {
@@ -218,34 +257,20 @@ impl<'de, S: MergeStorage> DeserializeSeed<'de> for ModelMergeSeed<'_, S> {
                 ),
             },
             ModelHelper::Legacy(value) => {
-                // Each untagged trial reads its own owned copy, as `from_value` did.
-                let trial =
-                    serde_json::from_value(value.clone()).map_err(serde::de::Error::custom)?;
-                match trial {
-                    ModelTrial::BPE(BpeTrial(builder)) => {
-                        match builder.build_with_merge_storage(self.storage) {
-                            Ok(bpe) => ModelWrapper::BPE(bpe),
-                            Err(MergeBuildError::Backend(_)) => {
-                                match serde_json::from_value(value)
-                                    .map_err(serde::de::Error::custom)?
-                                {
-                                    ModelTrialAfterBpe::WordPiece(model) => {
-                                        ModelWrapper::WordPiece(model)
-                                    }
-                                    ModelTrialAfterBpe::WordLevel(model) => {
-                                        ModelWrapper::WordLevel(model)
-                                    }
-                                    ModelTrialAfterBpe::Unigram(model) => {
-                                        ModelWrapper::Unigram(model)
-                                    }
-                                }
-                            }
-                            Err(refusal) => return Ok(Err(refusal)),
-                        }
-                    }
-                    ModelTrial::WordPiece(model) => ModelWrapper::WordPiece(model),
-                    ModelTrial::WordLevel(model) => ModelWrapper::WordLevel(model),
-                    ModelTrial::Unigram(model) => ModelWrapper::Unigram(model),
+                return match forward {
+                    None => legacy_trial(value, |BpeTrial(builder)| {
+                        builder.build_with_merge_storage(storage)
+                    }),
+                    Some(account) => legacy_trial(
+                        value,
+                        |BpeStagedTrial {
+                             builder,
+                             vocab,
+                             merges,
+                         }| {
+                            builder.build_with_staged_vocab(storage, vocab, merges, account)
+                        },
+                    ),
                 }
             }
         }))
