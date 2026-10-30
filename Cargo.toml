@@ -5,7 +5,7 @@ exclude = ["vendor/candle-core", "vendor/tokenizers"]
 
 # Candle 0.11.0 still requires vulnerable zip 8.x. Keep its tensor code unchanged
 # while adapting archive names to patched zip 9; see vendor/README.md.
-# tokenizers 0.23.2 adds only an explicit BPE merge-scratch storage route;
+# tokenizers 0.23.2 adds explicit BPE merge-scratch and merge-table storage routes;
 # tokenizers 0.22.2 stays on crates.io. See vendor/README.md.
 [patch.crates-io]
 candle-core = { path = "vendor/candle-core" }

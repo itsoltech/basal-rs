@@ -3,14 +3,18 @@
 use std::alloc::{alloc, Layout};
 use std::sync::{Arc, Mutex, PoisonError, TryLockError};
 
-/// Shared allowance for original raw source-content requested layouts only.
+/// Shared allowance for requested layouts admitted by GGUF source routes.
+///
+/// Opt-in routes also use this ledger for declaration and immutable semantic
+/// backing, BPE merge scratch, and the built BPE merge table. The table's charge
+/// remains held until its last shared owner drops it.
 ///
 /// Create one handle before loads and pass it (or its sharing clones) to every
 /// concurrent load/reload for that allowance. Independent handles have independent
 /// limits. CLI/Engine do not provide this application context yet.
 ///
 /// Excludes bootstrap/control blocks, objects, paths, names, records, errors,
-/// serde/native/tokenizer/cache heaps, GGUF scratch, staging and device memory.
+/// other serde/native/tokenizer/cache heaps, GGUF scratch, staging and device memory.
 /// Allocator rounding, OS/RSS and physical OOM protection are also excluded.
 #[derive(Clone)]
 pub struct GgufRawSourceBudget {

@@ -255,8 +255,8 @@ impl GgufImmutableCompanionSemantics {
     /// and every backing block of the built BPE's merge hash table is admitted on
     /// the same ledger before allocation and released after it is freed, which is
     /// when the returned owner's tokenizer and any clone of it are gone. Every
-    /// other tokenizer heap, including the table's `Arc` control block, remains
-    /// unadmitted.
+    /// other tokenizer heap, including the table's entire `Arc` allocation
+    /// (control block, map header, allocator and hasher), remains unadmitted.
     pub fn read_with_bpe_merge_table_budget(
         directory: &Path,
         options: ModelLoadOptions<'_>,

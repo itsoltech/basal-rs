@@ -425,8 +425,9 @@ tablicę, i wraca przy zwolnieniu przez ostatniego właściciela na dowolnym
 wątku. Rywalizacja o ledger daje `Busy`, jak dla pozostałych opłat.
 
 Pokryte są wyłącznie bloki tablicy scalań i dotychczasowy bufor scratch.
-Nieadmitowane pozostają: Value/tekst JSON i pomocnicze bufory serde, blok
-kontrolny `Arc` tablicy, wejściowa lista scalań, mapy słownika i odwrotnego
+Nieadmitowane pozostają: Value/tekst JSON i pomocnicze bufory serde, cała
+alokacja `Arc` tablicy (blok kontrolny, nagłówek mapy, alokator i hasher),
+wejściowa lista scalań, mapy słownika i odwrotnego
 słownika z ich tekstami, błędy backendu, added vocabulary i jej trie, modele
 Unigram/WordPiece/WordLevel, dekodery, procesory, normalizatory,
 pre-tokenizery, native Oniguruma, cache TLS BPE i bufory kodowania oraz cache

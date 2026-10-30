@@ -2,7 +2,8 @@
 //! on a second opt-in route, of the built BPE's merge hash-table backing.
 //!
 //! Only that temporary buffer and that table's backing blocks are admitted.
-//! Tokenizer JSON values, serde helper storage, the table's `Arc` control block,
+//! Tokenizer JSON values, serde helper storage, the table's entire `Arc` allocation
+//! (control block, map header, allocator and hasher),
 //! vocabulary maps and strings, added vocabulary, native regex state and caches
 //! remain unadmitted, as on the original route.
 

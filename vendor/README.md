@@ -221,12 +221,14 @@ compilation is not available on this Linux host. Neither GPU runtime behavior no
 equivalence, performance or general OOM safety was measured. REQ-009 remains
 partial; model mapping and resource policy remain open.
 
-## tokenizers 0.23.2: explicit BPE merge scratch
+## tokenizers 0.23.2: explicit BPE merge scratch and table storage
 
 `tokenizers/` is the library from the official crates.io `tokenizers 0.23.2`
-release. It is patched locally so that one opt-in core route can admit the BPE
-builder's temporary merge scratch buffer on the existing GGUF source ledger;
-see `read_with_bpe_merge_scratch_budget` in [GGUF.md](../docs/GGUF.md). No
+release. It is patched locally so that opt-in core routes can admit the BPE
+builder's temporary merge scratch buffer and the built model's merge-table
+backing on the existing GGUF source ledger; see
+`read_with_bpe_merge_scratch_budget` and `read_with_bpe_merge_table_budget` in
+[GGUF.md](../docs/GGUF.md). No
 advisory motivates this patch. The `[patch.crates-io]` entry matches only
 `0.23.2`; `tokenizers 0.22.2`, required by another dependency, stays on
 crates.io.
