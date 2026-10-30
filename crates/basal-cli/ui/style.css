@@ -95,7 +95,7 @@ code, kbd, pre, .mono { font-family: var(--mono); font-size: 0.92em; }
 }
 .brand { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 17px; color: var(--text); text-decoration: none; padding: 4px 8px; }
 .brand-lg { font-size: 22px; justify-content: center; margin-bottom: 8px; }
-.version { font-weight: 500; font-size: 11px; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 0 6px; }
+.version { white-space: nowrap; font-weight: 500; font-size: 11px; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 0 6px; }
 .nav { flex: 1; overflow-y: auto; }
 .nav-group + .nav-group { margin-top: 14px; }
 .nav-label { margin: 0 0 4px; padding: 0 8px; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }

@@ -303,13 +303,21 @@ function batchesCard(r) {
     kv([['Profile', d.profile], ['Ready', yes(d.ready)], ['Accepting', yes(d.accepting)], ['Processing', yes(d.processing)],
       ['Storage', comp(d.storage, 'engine')], ['Artifacts', comp(d.artifacts, 'backend')],
       ['Execution profiles', Array.isArray(d.profiles) ? d.profiles.map((p) => `${p.model}${p.qualification && p.qualification.qualified ? '' : ' (not qualified)'}`).join(', ') || 'None' : '—'],
-      d.backlog_error ? ['Backlog', h('span', { class: 'warn-text' }, d.backlog_error)] : null]),
-    Array.isArray(d.backlog) && d.backlog.length ? table([
+      d.backlog_error ? ['Backlog', h('span', { class: 'warn-text' }, d.backlog_error)] : null,
+      Array.isArray(d.backlog) && !d.backlog.length ? ['Backlog', 'Empty'] : null]));
+}
+
+/** The Batch backlog in its own full-width card (a table is too wide for a grid column), or null when empty. */
+function backlogCard(r) {
+  const d = r.data && typeof r.data === 'object' ? r.data : {};
+  if (!Array.isArray(d.backlog) || !d.backlog.length) return null;
+  return h('section', { class: 'card card-wide' }, h('h2', { class: 'section-title' }, 'Batch backlog'),
+    table([
       { label: 'Status', render: (b) => pill(b.status) },
       { label: 'Batches', class: 'num', render: (b) => fmtNum(b.batches) },
       { label: 'Queued records', class: 'num', render: (b) => fmtNum(b.queued) },
-      { label: 'Fingerprint', render: (b) => (b.fingerprint ? mono(String(b.fingerprint).slice(0, 16)) : '—') },
-    ], d.backlog, { caption: 'Backlog' }) : h('p', { class: 'muted small' }, 'No backlog.'));
+      { label: 'Model fingerprint', render: (b) => (b.fingerprint ? mono(String(b.fingerprint)) : '—') },
+    ], d.backlog, { caption: 'Batch backlog' }));
 }
 
 function metricsCard(r) {
@@ -353,7 +361,7 @@ export async function renderHealth(root, ctx) {
       ]);
       if (disposed) return;
       grid.replaceChildren(...[serverCard(health, config.version), batches && batchesCard(batches),
-        metrics && metricsCard(metrics), modelsCard(models)].filter(Boolean));
+        metrics && metricsCard(metrics), batches && backlogCard(batches), modelsCard(models)].filter(Boolean));
       updated.textContent = `Updated ${new Date().toLocaleTimeString()}`;
     } finally {
       busy = false;

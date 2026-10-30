@@ -169,7 +169,9 @@ function startShell() {
   setRoot(h('div', { class: 'app' },
     h('aside', { class: 'sidebar' },
       h('a', { class: 'brand', href: '#/playground' }, h('img', { src: './favicon.svg', alt: '', width: 24, height: 24 }),
-        h('span', null, 'basal'), h('span', { class: 'version' }, ctx.config.version)),
+        h('span', null, 'basal'),
+        // The full build description (commit, backend) is long; the pill shows the release only.
+        h('span', { class: 'version', title: ctx.config.version }, ctx.config.version.split(' ')[0])),
       nav, user),
     main));
   window.addEventListener('hashchange', route);
