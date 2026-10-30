@@ -237,7 +237,8 @@ crates.io.
   `tokenizers/PROVENANCE.md`. `tokenizers/UPSTREAM-SHA256SUMS` lists the 77
   copied release files before the change. Of the 73 copied source files, 66
   remain byte for byte identical after the first two patches and 62 after the
-  third, `decoder-regex.patch` (see below); `LICENSE`, `README.md` and
+  third, `decoder-regex.patch`, and the fourth, `reverse-vocab-table.patch`
+  (see below); `LICENSE`, `README.md` and
   `Cargo.toml.orig` are unchanged.
 - The normalized release manifest omits only the upstream test and benchmark
   targets, their dev dependencies and the profiles that Cargo ignores outside
@@ -413,8 +414,9 @@ registry source and checksum. No dependency version changes.
 Verify the copied files with `sha256sum --check SHA256SUMS` in `onig/`,
 `onig_sys/` and `tokenizers/`. `onig/regex-account.patch` and
 `onig_sys/regex-account.patch` apply with `patch -p1` to the preimages listed in
-their `UPSTREAM-SHA256SUMS`; the three tokenizers patches apply in order. The
-results are byte for byte equal to the vendored files.
+their `UPSTREAM-SHA256SUMS`; the tokenizers patches apply in order, now four
+with `reverse-vocab-table.patch` below. The results are byte for byte equal to
+the vendored files.
 
 Static validation with Rust 1.95.0, offline and locked: workspace formatting,
 release Clippy and private Rustdoc with warnings denied pass for default,
@@ -432,5 +434,65 @@ duplicate warnings and the cached advisory database only; the paste exception
 check passes. Locked feature trees for Linux, macOS and the CUDA feature show
 one local `onig_sys` without `generate`/bindgen, used by both tokenizers
 versions through the local `onig`. No test, native execution, tokenizer run,
+output comparison, memory measurement or GPU check was performed. REQ-009
+remains partial.
+
+### Charged BPE reverse vocabulary table
+
+A fourth local patch, `tokenizers/reverse-vocab-table.patch`, lets a fourth
+opt-in core route, `read_with_bpe_reverse_vocab_table_budget` in
+[GGUF.md](../docs/GGUF.md), admit the backing block of the built BPE's reverse
+vocabulary (ID to token) hash table on the same GGUF source ledger, together
+with the merge scratch and merge table admitted as on the merge-table route.
+It does not admit decoder regexes; `read_with_decoder_regex_budget` is
+unchanged and the two routes are not combined. The patch applies with
+`patch -p1` after the three earlier patches and changes
+`src/models/bpe/model.rs`, `src/models/mod.rs` and
+`src/utils/merge_storage.rs`, all already modified by them. No manifest,
+lock, dependency or feature changes.
+
+- `MergeStorage` gains a provided `reverse_vocab_table` method returning
+  `None`, requested once after `merge_table`, so every existing storage and
+  legacy route still collects the reverse vocabulary into the upstream
+  `AHashMap`. The other storage methods, their adapters and all error
+  messages are unchanged.
+- With an account, the build keeps the legacy stream: one
+  `RandomState::new()` where the legacy `collect` creates it, then a fallible
+  reservation of the vocabulary length in place of the legacy reservation of
+  the same size, then the same per-entry conversion and `insert` in the
+  forward vocabulary's iteration order. After that reservation no insert
+  grows the table, so it has exactly one block (none for an empty
+  vocabulary), admitted by the existing non-`Clone` table allocator, whose
+  code is unchanged, before any token is copied and before the scratch buffer
+  and merges. A duplicate ID still keeps its last spelling in that order; the
+  forward vocabulary, hasher seeds, sorting and limits are unchanged.
+- A refusal is returned through the unchanged `MergeBuildError::Storage`
+  channel, never boxed or formatted, and is never treated as a mismatch of a
+  legacy untagged model. A later refusal or backend error frees the finished
+  table, then releases its charge. Model clones share the charged table
+  through one `Arc`; the charge lasts until the last owner drops it, on any
+  thread.
+- The ordered vocabulary serializer reads either table through a private
+  trait; the legacy map performs the same calls. Lookup, indexing, equality,
+  trainer and serialization call sites are textually unchanged.
+- Not admitted: the copied token strings, each table's entire `Arc`
+  allocation, the forward vocabulary and its keys, and everything not
+  admitted on the earlier routes.
+
+Static validation with Rust 1.95.0, offline and locked: workspace formatting,
+release Clippy and private Rustdoc with warnings denied pass for default,
+Intel and CUDA all-features builds; each lint and doc log still shows the 16
+inherited, unsuppressed `onig_sys/src/ffi.rs` warnings described above. The
+three changed tokenizers files keep rustfmt's 100-column upstream style.
+Direct uncapped Clippy of tokenizers 0.23.2 reports no diagnostic in its own
+code; its direct private Rustdoc reports only the same six upstream
+diagnostics. Diagnostics of the `onig` and `onig_sys` dependencies in those
+direct logs are the same as before this patch. The rustdoc auto-trait lists
+of `BPE`, `ModelWrapper` and `Tokenizer` are unchanged. `cargo deny --offline`
+passes with the same 22 duplicate warnings and the cached advisory database
+only, the duplicate tree is unchanged and the paste exception check passes.
+All four tokenizers patches reproduce the 78 copied and new library,
+manifest, license and README files from the checksum-verified release
+archive, and all 84 vendored checksums pass. No test, tokenizer execution,
 output comparison, memory measurement or GPU check was performed. REQ-009
 remains partial.

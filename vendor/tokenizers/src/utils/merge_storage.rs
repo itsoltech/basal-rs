@@ -1,6 +1,7 @@
 //! Explicit, per-call storage for the BPE builder's merge scratch buffer and,
-//! optionally, accounts for the built model's merge table backing and for the
-//! compiled backing of decoder-tree regexes.
+//! optionally, accounts for the built model's merge table and reverse
+//! vocabulary table backing and for the compiled backing of decoder-tree
+//! regexes.
 //!
 //! Local basal-rs addition. The legacy `BpeBuilder::build` and `Deserialize`
 //! routes keep their own `vec![0; max_len]` allocation and global merge table.
@@ -37,6 +38,20 @@ pub trait MergeStorage {
         None
     }
 
+    /// The account that admits the built BPE's reverse vocabulary (ID to
+    /// token) hash-table backing.
+    ///
+    /// `None` (the default) keeps the reverse vocabulary on the global
+    /// allocator, as the legacy build does. The account is requested once
+    /// before the build starts, after [`merge_table`](Self::merge_table). With
+    /// `Some`, the table's single capacity request, the vocabulary length, is
+    /// admitted before allocation and before any token is copied, and released
+    /// after deallocation, while the returned model or any of its clones holds
+    /// the table. The copied token strings stay on the global allocator.
+    fn reverse_vocab_table(&self) -> Option<MergeTableAccount<Self::Error>> {
+        None
+    }
+
     /// The account that admits the compiled backing of decoder-tree regexes.
     ///
     /// Requested when the tokenizer's `decoder` entry is reached. `None` (the
@@ -51,7 +66,9 @@ pub trait MergeStorage {
     }
 }
 
-/// Account charged for each merge-table backing block.
+/// Account charged for each charged block: a merge-table or reverse
+/// vocabulary table block or, through the decoder-regex account, a compiled
+/// regex backing block.
 pub trait TableAccount: Send + Sync + std::panic::RefUnwindSafe + std::panic::UnwindSafe {
     /// Admits `bytes` before their allocation. A refusal leaves the account
     /// unchanged.
@@ -59,11 +76,13 @@ pub trait TableAccount: Send + Sync + std::panic::RefUnwindSafe + std::panic::Un
 
     /// Returns `bytes` admitted earlier, after their block was freed or its
     /// allocation failed. It may run on any thread that drops the last owner.
-    /// It must not panic, nor allocate through a charged merge table.
+    /// It must not panic, nor allocate through a charged table.
     fn release(&self, bytes: usize);
 }
 
-/// Fixed refusal of one merge-table backing block; it retains no input.
+/// Fixed refusal of one charged block; it retains no input. The messages name
+/// the merge table for every charged table; the storage's per-account
+/// `refused` function identifies which table or regex was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum TableRefusal {
     /// The account is in use by another admission.
@@ -92,7 +111,8 @@ pub enum TableRefusal {
     CapacityOverflow,
 }
 
-/// The caller's account for one build's merge table.
+/// The caller's account for one charged table of one build (the merge table
+/// or the reverse vocabulary) or for the decoder regexes.
 pub struct MergeTableAccount<E> {
     /// Charged for every table block; retained by the table until it is freed.
     pub account: Arc<dyn TableAccount>,
@@ -131,9 +151,10 @@ pub(crate) enum AdmittedRegexError {
 #[derive(Debug, thiserror::Error)]
 pub enum MergeBuildError<E> {
     /// The storage refused the scratch buffer or, when it supplies a
-    /// [`MergeStorage::merge_table`] or [`MergeStorage::decoder_regex`]
-    /// account, a merge-table or decoder-regex block. The message is
-    /// unchanged; the source tells them apart.
+    /// [`MergeStorage::merge_table`], [`MergeStorage::reverse_vocab_table`]
+    /// or [`MergeStorage::decoder_regex`] account, a merge-table, reverse
+    /// vocabulary table or decoder-regex block. The message is unchanged; the
+    /// source tells them apart.
     #[error("BPE merge scratch storage was refused")]
     Storage(#[source] E),
     /// The storage returned a slice of another length.

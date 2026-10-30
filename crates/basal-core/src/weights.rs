@@ -38,7 +38,7 @@ use json_envelope::JsonReadMode;
 pub use json_envelope::{JsonEnvelopeError, JsonEnvelopeResource};
 pub use provider_construction::{
     GgufDecoderRegexError, GgufDecoderRegexReadError, GgufMergeScratchError, GgufMergeScratchReadError,
-    GgufMergeTableError, GgufMergeTableReadError,
+    GgufMergeTableError, GgufMergeTableReadError, GgufReverseVocabTableError, GgufReverseVocabTableReadError,
 };
 use raw_source::RawCharge;
 pub use raw_source::{GgufRawSourceBudget, GgufRawSourceError};

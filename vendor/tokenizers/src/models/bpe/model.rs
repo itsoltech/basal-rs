@@ -1,6 +1,10 @@
 // Modified for basal-rs: support caller-provided BPE merge scratch storage
-// and an optional charged merge table.
-use super::{super::OrderedVocabIter, trainer::BpeTrainer, Error, Pair, Word};
+// and optional charged merge and reverse vocabulary tables.
+use super::{
+    super::{OrderedVocab, OrderedVocabIter},
+    trainer::BpeTrainer,
+    Error, Pair, Word,
+};
 use crate::tokenizer::{Model, Result, Token};
 use crate::utils::cache::{DEFAULT_CACHE_CAPACITY, MAX_LENGTH};
 use crate::utils::iter::ResultShunt;
@@ -13,6 +17,7 @@ use std::alloc::Layout;
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::iter::FromIterator;
+use std::ops::Index;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -27,8 +32,80 @@ use std::{
 };
 
 pub type Vocab = AHashMap<String, u32>;
-type VocabR = AHashMap<u32, String>;
 pub type MergeMap = AHashMap<Pair, (u32, u32)>;
+
+/// A reverse vocabulary whose table backing is admitted on a [`TableAccount`].
+///
+/// The key, value and hasher types equal the global reverse vocabulary's.
+pub(crate) type ChargedVocabR = hashbrown::HashMap<u32, String, ahash::RandomState, TableAlloc>;
+
+/// The reverse vocabulary (ID to token) of a [`BPE`]: on the global allocator,
+/// as upstream, or charged and shared by the model and its clones through one
+/// `Arc`. Only lookups, map equality and the largest ID observe it, never its
+/// iteration order.
+#[derive(Clone)]
+pub(crate) enum VocabR {
+    Global(AHashMap<u32, String>),
+    Charged(Arc<ChargedVocabR>),
+}
+
+impl VocabR {
+    pub(crate) fn get(&self, id: &u32) -> Option<&String> {
+        match self {
+            Self::Global(map) => map.get(id),
+            Self::Charged(map) => map.get(id),
+        }
+    }
+}
+
+impl Index<&u32> for VocabR {
+    type Output = String;
+
+    /// Panics, as both maps' `Index` does, if `id` is absent.
+    fn index(&self, id: &u32) -> &String {
+        match self {
+            Self::Global(map) => &map[id],
+            Self::Charged(map) => &map[id],
+        }
+    }
+}
+
+impl PartialEq for VocabR {
+    /// Map equality: same length and every entry found with an equal value.
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Global(left), Self::Global(right)) => left == right,
+            (Self::Charged(left), Self::Charged(right)) => left == right,
+            (Self::Global(global), Self::Charged(charged))
+            | (Self::Charged(charged), Self::Global(global)) => {
+                global.len() == charged.len()
+                    && global
+                        .iter()
+                        .all(|(id, token)| charged.get(id) == Some(token))
+            }
+        }
+    }
+}
+
+impl FromIterator<(u32, String)> for VocabR {
+    /// Collects a global table, exactly as upstream collects its reverse vocabulary.
+    fn from_iter<I: IntoIterator<Item = (u32, String)>>(iter: I) -> Self {
+        Self::Global(iter.into_iter().collect())
+    }
+}
+
+impl OrderedVocab for VocabR {
+    fn max_id(&self) -> Option<u32> {
+        match self {
+            Self::Global(map) => map.max_id(),
+            Self::Charged(map) => map.keys().max().copied(),
+        }
+    }
+
+    fn token(&self, id: u32) -> Option<&String> {
+        self.get(&id)
+    }
+}
 
 /// A merge table whose every backing block is admitted on a [`TableAccount`].
 ///
@@ -37,7 +114,7 @@ pub type MergeMap = AHashMap<Pair, (u32, u32)>;
 pub(crate) type ChargedMergeMap =
     hashbrown::HashMap<Pair, (u32, u32), ahash::RandomState, TableAlloc>;
 
-/// Charged allocator of exactly one merge table.
+/// Charged allocator of exactly one charged table (merge or reverse vocabulary).
 ///
 /// Not `Clone`, so hashbrown's infallible `HashMap::clone`/`clone_from` are
 /// unavailable: the table grows only through `try_reserve` during its build.
@@ -200,11 +277,10 @@ impl FromIterator<(Pair, (u32, u32))> for MergeTable {
 }
 
 /// The table's own refusal for a failed `try_reserve`.
-fn table_refusal(map: &ChargedMergeMap, error: TryReserveError) -> TableRefusal {
+fn table_refusal(alloc: &TableAlloc, error: TryReserveError) -> TableRefusal {
     match error {
         TryReserveError::CapacityOverflow => TableRefusal::CapacityOverflow,
-        TryReserveError::AllocError { .. } => *map
-            .allocator()
+        TryReserveError::AllocError { .. } => *alloc
             .refusal
             .get()
             .expect("TableAlloc records its refusal before every allocation error"),
@@ -405,12 +481,14 @@ impl BpeBuilder {
             |max_len| Ok(vec![0; max_len]),
             |buffer: &mut Vec<u8>, _| Ok(buffer.as_mut_slice()),
             None::<(Arc<dyn TableAccount>, fn(TableRefusal) -> crate::Error)>,
+            None::<(Arc<dyn TableAccount>, fn(TableRefusal) -> crate::Error)>,
         )
     }
 
     /// Like [`build`](Self::build), but takes the merge scratch buffer from
     /// `storage` instead of allocating it and, if `storage` supplies a
-    /// [`MergeStorage::merge_table`] account, admits the merge table on it.
+    /// [`MergeStorage::merge_table`] or [`MergeStorage::reverse_vocab_table`]
+    /// account, admits the merge table or the reverse vocabulary table on it.
     /// Refusal stops the build.
     pub fn build_with_merge_storage<S: MergeStorage>(
         self,
@@ -439,17 +517,25 @@ impl BpeBuilder {
                     MergeBuildError::Storage(refused(refusal))
                 })
             }),
+            storage.reverse_vocab_table().map(|table| {
+                let refused = table.refused;
+                (table.account, move |refusal| {
+                    MergeBuildError::Storage(refused(refusal))
+                })
+            }),
         )
     }
 
     /// The build body shared by both routes. `zeroed` creates the merge
     /// buffer; `slice` yields the one slice used for all merge writes and reads.
-    /// `table`, if any, charges the merge table and converts its refusals.
+    /// `table`, if any, charges the merge table and converts its refusals;
+    /// `reverse_table` does the same for the reverse vocabulary table.
     fn build_with_scratch<B, E: From<crate::Error>>(
         mut self,
         zeroed: impl FnOnce(usize) -> std::result::Result<B, E>,
         slice: impl FnOnce(&mut B, usize) -> std::result::Result<&mut [u8], E>,
         table: Option<(Arc<dyn TableAccount>, impl FnOnce(TableRefusal) -> E)>,
+        reverse_table: Option<(Arc<dyn TableAccount>, impl FnOnce(TableRefusal) -> E)>,
     ) -> std::result::Result<BPE, E> {
         // Validate dropout.
         if let Some(p) = self.config.dropout {
@@ -467,17 +553,39 @@ impl BpeBuilder {
         }
 
         let mut max_len = 0;
-        let vocab_r = self
-            .config
-            .vocab
-            .iter()
-            .map(|(key, val)| {
-                if max_len < key.len() {
-                    max_len = key.len();
+        let reverse_entry = |(key, val): (&String, &u32)| {
+            if max_len < key.len() {
+                max_len = key.len();
+            }
+            (*val, key.to_owned())
+        };
+        let vocab_r = match reverse_table {
+            None => VocabR::Global(self.config.vocab.iter().map(reverse_entry).collect()),
+            // The same stream as the global collect: one `RandomState::new()`,
+            // then `reserve` of the exact vocabulary length, made fallible here,
+            // then one insert per entry in the vocabulary's iteration order,
+            // the last spelling of a duplicate ID winning. After that
+            // reservation no insert grows the table, so its only block is
+            // admitted before any token is copied. A refusal drops the still
+            // empty, unallocated table before returning.
+            Some((account, refused)) => {
+                let mut map = ChargedVocabR::with_hasher_in(
+                    ahash::RandomState::new(),
+                    TableAlloc::new(account),
+                );
+                if let Err(error) = map.try_reserve(self.config.vocab.len()) {
+                    return Err(refused(table_refusal(map.allocator(), error)));
                 }
-                (*val, key.to_owned())
-            })
-            .collect();
+                self.config
+                    .vocab
+                    .iter()
+                    .map(reverse_entry)
+                    .for_each(|(id, token)| {
+                        map.insert(id, token);
+                    });
+                VocabR::Charged(Arc::new(map))
+            }
+        };
         let cache = match self.config.cache_capacity {
             0 => None,
             capacity => Some(BpeCache::new(capacity)),
@@ -531,7 +639,7 @@ impl BpeBuilder {
                 for merge in merges {
                     let (pair, value) = merge?;
                     if let Err(error) = map.try_reserve(1) {
-                        return Err(refused(table_refusal(&map, error)));
+                        return Err(refused(table_refusal(map.allocator(), error)));
                     }
                     map.insert(pair, value);
                 }

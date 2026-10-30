@@ -1,0 +1,258 @@
+--- a/src/models/bpe/model.rs
++++ b/src/models/bpe/model.rs
+@@ -2,2 +2,6 @@
+-// and an optional charged merge table.
+-use super::{super::OrderedVocabIter, trainer::BpeTrainer, Error, Pair, Word};
++// and optional charged merge and reverse vocabulary tables.
++use super::{
++    super::{OrderedVocab, OrderedVocabIter},
++    trainer::BpeTrainer,
++    Error, Pair, Word,
++};
+@@ -15,0 +20 @@
++use std::ops::Index;
+@@ -30 +34,0 @@
+-type VocabR = AHashMap<u32, String>;
+@@ -32,0 +37,73 @@
++/// A reverse vocabulary whose table backing is admitted on a [`TableAccount`].
++///
++/// The key, value and hasher types equal the global reverse vocabulary's.
++pub(crate) type ChargedVocabR = hashbrown::HashMap<u32, String, ahash::RandomState, TableAlloc>;
++
++/// The reverse vocabulary (ID to token) of a [`BPE`]: on the global allocator,
++/// as upstream, or charged and shared by the model and its clones through one
++/// `Arc`. Only lookups, map equality and the largest ID observe it, never its
++/// iteration order.
++#[derive(Clone)]
++pub(crate) enum VocabR {
++    Global(AHashMap<u32, String>),
++    Charged(Arc<ChargedVocabR>),
++}
++
++impl VocabR {
++    pub(crate) fn get(&self, id: &u32) -> Option<&String> {
++        match self {
++            Self::Global(map) => map.get(id),
++            Self::Charged(map) => map.get(id),
++        }
++    }
++}
++
++impl Index<&u32> for VocabR {
++    type Output = String;
++
++    /// Panics, as both maps' `Index` does, if `id` is absent.
++    fn index(&self, id: &u32) -> &String {
++        match self {
++            Self::Global(map) => &map[id],
++            Self::Charged(map) => &map[id],
++        }
++    }
++}
++
++impl PartialEq for VocabR {
++    /// Map equality: same length and every entry found with an equal value.
++    fn eq(&self, other: &Self) -> bool {
++        match (self, other) {
++            (Self::Global(left), Self::Global(right)) => left == right,
++            (Self::Charged(left), Self::Charged(right)) => left == right,
++            (Self::Global(global), Self::Charged(charged))
++            | (Self::Charged(charged), Self::Global(global)) => {
++                global.len() == charged.len()
++                    && global
++                        .iter()
++                        .all(|(id, token)| charged.get(id) == Some(token))
++            }
++        }
++    }
++}
++
++impl FromIterator<(u32, String)> for VocabR {
++    /// Collects a global table, exactly as upstream collects its reverse vocabulary.
++    fn from_iter<I: IntoIterator<Item = (u32, String)>>(iter: I) -> Self {
++        Self::Global(iter.into_iter().collect())
++    }
++}
++
++impl OrderedVocab for VocabR {
++    fn max_id(&self) -> Option<u32> {
++        match self {
++            Self::Global(map) => map.max_id(),
++            Self::Charged(map) => map.keys().max().copied(),
++        }
++    }
++
++    fn token(&self, id: u32) -> Option<&String> {
++        self.get(&id)
++    }
++}
++
+@@ -40 +117 @@
+-/// Charged allocator of exactly one merge table.
++/// Charged allocator of exactly one charged table (merge or reverse vocabulary).
+@@ -203 +280 @@
+-fn table_refusal(map: &ChargedMergeMap, error: TryReserveError) -> TableRefusal {
++fn table_refusal(alloc: &TableAlloc, error: TryReserveError) -> TableRefusal {
+@@ -206,2 +283 @@
+-        TryReserveError::AllocError { .. } => *map
+-            .allocator()
++        TryReserveError::AllocError { .. } => *alloc
+@@ -407,0 +484 @@
++            None::<(Arc<dyn TableAccount>, fn(TableRefusal) -> crate::Error)>,
+@@ -413 +490,2 @@
+-    /// [`MergeStorage::merge_table`] account, admits the merge table on it.
++    /// [`MergeStorage::merge_table`] or [`MergeStorage::reverse_vocab_table`]
++    /// account, admits the merge table or the reverse vocabulary table on it.
+@@ -441,0 +520,6 @@
++            storage.reverse_vocab_table().map(|table| {
++                let refused = table.refused;
++                (table.account, move |refusal| {
++                    MergeBuildError::Storage(refused(refusal))
++                })
++            }),
+@@ -447 +531,2 @@
+-    /// `table`, if any, charges the merge table and converts its refusals.
++    /// `table`, if any, charges the merge table and converts its refusals;
++    /// `reverse_table` does the same for the reverse vocabulary table.
+@@ -452,0 +538 @@
++        reverse_table: Option<(Arc<dyn TableAccount>, impl FnOnce(TableRefusal) -> E)>,
+@@ -470,7 +556,22 @@
+-        let vocab_r = self
+-            .config
+-            .vocab
+-            .iter()
+-            .map(|(key, val)| {
+-                if max_len < key.len() {
+-                    max_len = key.len();
++        let reverse_entry = |(key, val): (&String, &u32)| {
++            if max_len < key.len() {
++                max_len = key.len();
++            }
++            (*val, key.to_owned())
++        };
++        let vocab_r = match reverse_table {
++            None => VocabR::Global(self.config.vocab.iter().map(reverse_entry).collect()),
++            // The same stream as the global collect: one `RandomState::new()`,
++            // then `reserve` of the exact vocabulary length, made fallible here,
++            // then one insert per entry in the vocabulary's iteration order,
++            // the last spelling of a duplicate ID winning. After that
++            // reservation no insert grows the table, so its only block is
++            // admitted before any token is copied. A refusal drops the still
++            // empty, unallocated table before returning.
++            Some((account, refused)) => {
++                let mut map = ChargedVocabR::with_hasher_in(
++                    ahash::RandomState::new(),
++                    TableAlloc::new(account),
++                );
++                if let Err(error) = map.try_reserve(self.config.vocab.len()) {
++                    return Err(refused(table_refusal(map.allocator(), error)));
+@@ -478,3 +579,10 @@
+-                (*val, key.to_owned())
+-            })
+-            .collect();
++                self.config
++                    .vocab
++                    .iter()
++                    .map(reverse_entry)
++                    .for_each(|(id, token)| {
++                        map.insert(id, token);
++                    });
++                VocabR::Charged(Arc::new(map))
++            }
++        };
+@@ -534 +642 @@
+-                        return Err(refused(table_refusal(&map, error)));
++                        return Err(refused(table_refusal(map.allocator(), error)));
+--- a/src/models/mod.rs
++++ b/src/models/mod.rs
+@@ -2 +2,2 @@
+-// Modified for basal-rs: preserve model selection with caller-provided BPE scratch.
++// Modified for basal-rs: preserve model selection with caller-provided BPE scratch;
++// ordered vocabulary serialization also accepts a charged BPE reverse vocabulary.
+@@ -21,0 +23,18 @@
++/// A vocab mapping (ID -> token) that can be serialized in order of token ID.
++trait OrderedVocab {
++    /// The largest ID, if any.
++    fn max_id(&self) -> Option<u32>;
++    /// The token of `id`, if any.
++    fn token(&self, id: u32) -> Option<&String>;
++}
++
++impl OrderedVocab for AHashMap<u32, String> {
++    fn max_id(&self) -> Option<u32> {
++        self.keys().max().copied()
++    }
++
++    fn token(&self, id: u32) -> Option<&String> {
++        self.get(&id)
++    }
++}
++
+@@ -24,2 +43,2 @@
+-struct OrderedVocabIter<'a> {
+-    vocab_r: &'a AHashMap<u32, String>,
++struct OrderedVocabIter<'a, V> {
++    vocab_r: &'a V,
+@@ -28,2 +47,2 @@
+-impl<'a> OrderedVocabIter<'a> {
+-    fn new(vocab_r: &'a AHashMap<u32, String>) -> Self {
++impl<'a, V: OrderedVocab> OrderedVocabIter<'a, V> {
++    fn new(vocab_r: &'a V) -> Self {
+@@ -34 +53 @@
+-impl Serialize for OrderedVocabIter<'_> {
++impl<V: OrderedVocab> Serialize for OrderedVocabIter<'_, V> {
+@@ -41,3 +60,3 @@
+-        let result = if let Some(max) = self.vocab_r.keys().max() {
+-            let iter = (0..*max + 1).filter_map(|i| {
+-                if let Some(token) = self.vocab_r.get(&i) {
++        let result = if let Some(max) = self.vocab_r.max_id() {
++            let iter = (0..max + 1).filter_map(|i| {
++                if let Some(token) = self.vocab_r.token(i) {
+--- a/src/utils/merge_storage.rs
++++ b/src/utils/merge_storage.rs
+@@ -2,2 +2,3 @@
+-//! optionally, accounts for the built model's merge table backing and for the
+-//! compiled backing of decoder-tree regexes.
++//! optionally, accounts for the built model's merge table and reverse
++//! vocabulary table backing and for the compiled backing of decoder-tree
++//! regexes.
+@@ -39,0 +41,14 @@
++    /// The account that admits the built BPE's reverse vocabulary (ID to
++    /// token) hash-table backing.
++    ///
++    /// `None` (the default) keeps the reverse vocabulary on the global
++    /// allocator, as the legacy build does. The account is requested once
++    /// before the build starts, after [`merge_table`](Self::merge_table). With
++    /// `Some`, the table's single capacity request, the vocabulary length, is
++    /// admitted before allocation and before any token is copied, and released
++    /// after deallocation, while the returned model or any of its clones holds
++    /// the table. The copied token strings stay on the global allocator.
++    fn reverse_vocab_table(&self) -> Option<MergeTableAccount<Self::Error>> {
++        None
++    }
++
+@@ -54 +69,3 @@
+-/// Account charged for each merge-table backing block.
++/// Account charged for each charged block: a merge-table or reverse
++/// vocabulary table block or, through the decoder-regex account, a compiled
++/// regex backing block.
+@@ -62 +79 @@
+-    /// It must not panic, nor allocate through a charged merge table.
++    /// It must not panic, nor allocate through a charged table.
+@@ -66 +83,3 @@
+-/// Fixed refusal of one merge-table backing block; it retains no input.
++/// Fixed refusal of one charged block; it retains no input. The messages name
++/// the merge table for every charged table; the storage's per-account
++/// `refused` function identifies which table or regex was refused.
+@@ -95 +114,2 @@
+-/// The caller's account for one build's merge table.
++/// The caller's account for one charged table of one build (the merge table
++/// or the reverse vocabulary) or for the decoder regexes.
+@@ -134,3 +154,4 @@
+-    /// [`MergeStorage::merge_table`] or [`MergeStorage::decoder_regex`]
+-    /// account, a merge-table or decoder-regex block. The message is
+-    /// unchanged; the source tells them apart.
++    /// [`MergeStorage::merge_table`], [`MergeStorage::reverse_vocab_table`]
++    /// or [`MergeStorage::decoder_regex`] account, a merge-table, reverse
++    /// vocabulary table or decoder-regex block. The message is unchanged; the
++    /// source tells them apart.
