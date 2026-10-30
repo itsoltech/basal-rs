@@ -29,6 +29,12 @@ modelu, więc nie wykonano porównania numerycznego ani pomiaru wydajności.
   kluczy; idempotentne odwołanie i błędy dla złego zakresu, czasu, id i użytkownika.
   Tworzenie, duplikat, wyłączanie i włączanie użytkowników. Klucz dla
   nieistniejącego lub wyłączonego użytkownika jest odrzucany.
+- PASS, lokalna baza serwera (izolowany `BASAL_HOME`):
+  - Bez sekcji `database:` polecenia i `basal serve --auth` (bez `--batches`) używają
+    `<katalog danych>/db/basal.sqlite3`, katalog 0700.
+  - Istniejący plik `<katalog batchy>/batches.sqlite3` z wcześniejszych wersji
+    pozostaje w użyciu, z notą o jego położeniu.
+  - `basal serve` bez `auth` i bez batchy nie tworzy żadnej bazy, a `/v1/models` daje 200 bez klucza.
 - PASS, migracja: baza SQLite w wersji 2 jest odrzucana przez `basal keys`
   z błędem schematu. Po `basal database migrate` ma wersję 3 i działa.
 - PASS, HTTP z `auth.enabled`:

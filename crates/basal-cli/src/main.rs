@@ -1318,22 +1318,21 @@ fn run() -> Result<()> {
             c.batches.apply_cli(batches, batch_data_dir);
             let batch_settings =
                 c.batches.validate(&serve::batches::config::ValidateContext { default_data_dir: paths::data_dir() })?;
-            // The Batch API uses the root database, or without one its local SQLite default. An enabled root
-            // database without an enabled consumer is only migrated at start (with auto_migrate), never otherwise
-            // connected.
+            // The consumers (Batch API, API keys) use the root database, or without one the local server database. An
+            // enabled root database without an enabled consumer is only migrated at start (with auto_migrate), never
+            // otherwise connected. API keys never fall back to serving without a database.
+            c.auth.enabled |= auth;
             let database = match (&batch_settings, database_section) {
                 (Some(batches), section) => Some(batches.database(&section)?),
                 (None, database::DatabaseSection::Enabled(settings)) => Some(settings),
+                (None, database::DatabaseSection::Absent) if c.auth.enabled => {
+                    Some(database::DatabaseSettings::local_default(&paths::data_dir(), &c.batches.local_data_dir()))
+                }
+                (None, database::DatabaseSection::Disabled) if c.auth.enabled => {
+                    bail!("API keys (auth.enabled or --auth) need a database, but `database.enabled` is false")
+                }
                 (None, database::DatabaseSection::Absent | database::DatabaseSection::Disabled) => None,
             };
-            // API keys live in the same database; there is no fallback that would serve without them.
-            c.auth.enabled |= auth;
-            if c.auth.enabled && database.is_none() {
-                bail!(
-                    "API keys (auth.enabled or --auth) need a database: add an enabled `database:` section, or \
-                     --batches for the local SQLite default"
-                );
-            }
             let batch_qualifications = c
                 .models
                 .iter()

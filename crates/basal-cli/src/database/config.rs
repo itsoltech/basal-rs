@@ -6,7 +6,7 @@
 //! output or error messages. Every remote connection uses TLS with certificate and host name verification, which a
 //! connection string cannot weaken, and a bounded pool.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -185,6 +185,19 @@ impl DatabaseSettings {
     /// A local SQLite file with the defaults of a written `backend: sqlite` section (automatic migration).
     pub(crate) fn sqlite(path: PathBuf) -> Self {
         Self { target: Target::Sqlite { path }, auto_migrate: true }
+    }
+
+    /// The local database of the server without a `database:` section, for every consumer (Batch API, API keys):
+    /// `<data_dir>/db/basal.sqlite3` in its own private directory. The file of earlier releases,
+    /// `<batch_data_dir>/batches.sqlite3` of `basal serve --batches`, stays in use while it exists, so an existing
+    /// local queue is neither lost nor moved.
+    pub(crate) fn local_default(data_dir: &Path, batch_data_dir: &Path) -> Self {
+        let earlier = batch_data_dir.join("batches.sqlite3");
+        if earlier.exists() {
+            crate::note!("local database {} (earlier location; still used while it exists)", crate::term::P(&earlier));
+            return Self::sqlite(earlier);
+        }
+        Self::sqlite(data_dir.join("db").join("basal.sqlite3"))
     }
 
     /// Engine label for logs, metrics and health (no addresses).

@@ -135,7 +135,7 @@ przekazują trasom Batch API jako przestrzeń danych. Użytkownicy i klucze są 
 `api_users` i `api_keys` tego samego schematu; `basal users` i `basal keys` (`keys.rs`)
 zarządzają nimi bez modelu i GPU.
 Opcjonalna usługa batchy w `basal-cli/src/serve/batches/` ma osobne planowanie CPU,
-trwały magazyn metadanych (w bazie z `database:` albo lokalnym domyślnym SQLite)
+trwały magazyn metadanych (w bazie z `database:` albo lokalnej bazie serwera SQLite)
 oraz artefakty FS/S3. `store::Store` udostępnia typowane
 operacje domenowe: SQLite, PostgreSQL i SQL Server korzystają ze wspólnych operacji
 z jawnym dialektem SQL, a MongoDB z natywnych transakcji replica set. Lease,

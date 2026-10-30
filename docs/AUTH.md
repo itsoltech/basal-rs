@@ -31,9 +31,9 @@ auth:
 ```
 
 `basal serve --auth` włącza klucze tak samo jak `auth.enabled: true`.
-Klucze używają tej samej bazy co Batch API. Bez sekcji `database:` mogą użyć
-lokalnego pliku SQLite Batch API (`basal serve --batches --auth`). Bez bazy serwer
-odmawia startu. Nie ma trybu awaryjnego, który przepuszczałby żądania bez klucza.
+Klucze używają bazy serwera, tej samej co Batch API. Bez sekcji `database:`
+jest to [lokalna baza serwera](DATABASE.md#lokalna-baza-bez-sekcji-database)
+(SQLite), także bez `--batches`. Przy `database.enabled: false` serwer odmawia startu. Nie ma trybu awaryjnego, który przepuszczałby żądania bez klucza.
 
 ## Przygotowanie i zarządzanie
 
@@ -88,7 +88,7 @@ odmawia startu. Nie ma trybu awaryjnego, który przepuszczałby żądania bez kl
    Bez tej opcji pozostaje ważny do `basal keys revoke`.
 
 `basal users` i `basal keys` wybierają bazę tak jak `basal batches`: sekcja `database:` z `--config`,
-`BASAL_CONFIG` albo `basal-serve.yml`, a bez niej lokalny plik SQLite Batch API.
+`BASAL_CONFIG` albo `basal-serve.yml`, a bez niej lokalną bazę serwera.
 Polecenia nie ładują modelu ani GPU.
 
 ## Token, zakresy i przestrzeń danych

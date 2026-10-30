@@ -4,10 +4,26 @@ Zwykła inferencja nie potrzebuje bazy danych. Bez sekcji `database:` i bez
 włączonego konsumenta `basal serve` nie otwiera połączeń, nie tworzy plików bazy
 i nie uruchamia migracji.
 
-Sekcja główna `database:` opisuje jedną bazę procesu: backend, plik SQLite,
+Baza jest wspólna dla całego serwera, nie dla jednej funkcji. Sekcja główna
+`database:` opisuje jedną bazę procesu: backend, plik SQLite,
 poświadczenia runtime i migracji, TLS, pulę oraz `auto_migrate`. Konsumentami są
 [Batch i Files API](BATCHES.md) oraz [klucze API](AUTH.md). Ustawienia bazy nie należą do
 sekcji `batches:`. Kolejne moduły serwera mogą korzystać z tej samej sekcji.
+
+## Lokalna baza bez sekcji `database:`
+
+Gdy konsument jest włączony (`--batches` w profilu `local` albo `--auth`), a sekcji
+`database:` brak, serwer i polecenia administracyjne (`basal database migrate`,
+`basal users`, `basal keys`, `basal batches`) używają pliku SQLite
+`<katalog danych>/db/basal.sqlite3` z automatyczną migracją. Katalog `db` ma
+uprawnienia 0700, plik 0600. Katalog danych to `~/.local/share/basal`
+(macOS: `~/Library/Application Support/basal`; z `BASAL_HOME`: `$BASAL_HOME/.local`).
+
+Wcześniejsze wersje zapisywały tę bazę w `<katalog batchy>/batches.sqlite3`
+(domyślnie `<katalog danych>/batches/`). Jeśli ten plik istnieje, pozostaje
+w użyciu, a serwer wypisuje jego położenie. Aby przejść na nową ścieżkę,
+zatrzymaj serwer i przenieś plik razem z ewentualnymi `-wal` i `-shm`.
+Produkcja ustawia jawną sekcję `database:`.
 
 ## Konfiguracja
 
@@ -36,7 +52,7 @@ database:
 
 | Pole | Zachowanie |
 |---|---|
-| sekcja pominięta | brak bazy; konsument może użyć własnego domyślnego pliku lokalnego (Batch: niżej) |
+| sekcja pominięta | brak bazy; włączony konsument używa lokalnej bazy serwera (niżej) |
 | `enabled: false` | brak bazy i brak dalszej walidacji pól; konsument wymagający bazy odmawia startu |
 | `backend` | wymagany przy włączonej sekcji |
 | `auto_migrate` | pominięte: `true` dla SQLite, `false` dla PostgreSQL, SQL Server i MongoDB |

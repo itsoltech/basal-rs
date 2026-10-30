@@ -79,10 +79,13 @@ model domyślny. Rewizja, która obejmuje te modele, także szersza,
 pozostaje aktualna. Przyjęte batche zachowują swoją rewizję i fingerprint. Bez
 zgodnego workera czekają na anulowanie albo wygaśnięcie.
 
-Bez sekcji głównej `database:` profil `local` używa dotychczasowego pliku
-`<katalog danych>/batches.sqlite3` z automatyczną migracją. Jawna sekcja
-`database:` z `backend: sqlite` i własnym `path` zastępuje ten plik; wtedy
-`--batch-data-dir` dotyczy już tylko artefaktów. Przy
+Bez sekcji głównej `database:` profil `local` używa
+[lokalnej bazy serwera](DATABASE.md#lokalna-baza-bez-sekcji-database)
+`<katalog danych>/db/basal.sqlite3` z automatyczną migracją. Plik
+`<katalog batchy>/batches.sqlite3` z wcześniejszych wersji pozostaje w użyciu,
+dopóki istnieje. Jawna sekcja `database:` z `backend: sqlite` i własnym `path`
+zastępuje oba pliki. `--batch-data-dir` dotyczy artefaktów i wskazuje,
+gdzie szukać wcześniejszego pliku. Przy
 `database.enabled: false` opcja `--batches` nie wybiera innej bazy: serwer
 odmawia startu przed ładowaniem modelu. Szczegóły bazy: [DATABASE.md](DATABASE.md).
 
@@ -349,8 +352,7 @@ basal batches doctor --config serve.yml --json
 Operacje administracyjne nie wymagają sekcji `models`. Migracja i zapis
 konfiguracji używają konta migracyjnego. `install` wymaga aktualnego schematu
 i nie wykonuje DDL; niezmienione limity i katalog zachowują obecną rewizję.
-`batches migrate` działa też dla lokalnego pliku domyślnego bez sekcji
-`database:` (np. z `--batch-data-dir`). `doctor` łączy się kontem runtime
+`batches migrate` działa też dla lokalnej bazy serwera bez sekcji `database:`. `doctor` łączy się kontem runtime
 i nie wykonuje DDL.
 
 Katalog JSON zawiera `version: 1`, `default_model` i `models` z polami `name`,

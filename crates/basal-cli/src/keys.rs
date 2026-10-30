@@ -14,7 +14,7 @@
 //!   revoked or, with `--expire-old-in`, until that time.
 //!
 //! The database is the root `database:` section of the serve configuration (`--config FILE`, `BASAL_CONFIG` or
-//! `basal-serve.yml`), else the local SQLite default of `basal serve --batches`. Records are written with the runtime
+//! `basal-serve.yml`), else the local server database (`DatabaseSettings::local_default`). Records are written with the runtime
 //! account; with `auto_migrate` (the SQLite default) a missing schema is created first, otherwise run
 //! `basal database migrate`.
 
@@ -308,17 +308,21 @@ async fn check_quota(store: &Store, user: &OwnerId) {
     }
 }
 
-/// The database of users and keys: the root `database:` section, else the local default of `basal serve --batches`.
+/// The database of users and keys: the root `database:` section, else the local server database.
 fn database(source: &Source) -> Result<DatabaseSettings> {
-    if let Some(path) = source.config.clone().or_else(crate::paths::config_file) {
-        let config = crate::config::ServeConfig::load_admin(&path)?;
-        match DatabaseConfig::section(config.database.as_ref())? {
-            DatabaseSection::Enabled(settings) => return Ok(settings),
-            DatabaseSection::Disabled => bail!("database.enabled is false in {}", crate::term::P(&path)),
-            DatabaseSection::Absent => {}
+    let file = source.config.clone().or_else(crate::paths::config_file);
+    let mut config = match &file {
+        Some(path) => crate::config::ServeConfig::load_admin(path)?,
+        None => crate::config::ServeConfig::for_models(Vec::new()),
+    };
+    match DatabaseConfig::section(config.database.as_ref())? {
+        DatabaseSection::Enabled(settings) => Ok(settings),
+        DatabaseSection::Disabled => bail!("database.enabled is false in the configuration"),
+        DatabaseSection::Absent => {
+            config.batches.apply_cli(false, source.batch_data_dir.clone());
+            Ok(DatabaseSettings::local_default(&crate::paths::data_dir(), &config.batches.local_data_dir()))
         }
     }
-    Ok(crate::batches::settings(source)?.1)
 }
 
 fn key_not_found(error: StoreError, id: &ApiKeyId) -> anyhow::Error {

@@ -98,8 +98,8 @@ pub struct ServeOptions {
     pub access_log: bool,
     /// Collect and expose Prometheus metrics; disabled by default.
     pub metrics: bool,
-    /// The process database (`database:` or the local Batch default); `None` opens no database. Set whenever
-    /// `batches` is.
+    /// The process database (`database:` or the local server database); `None` opens no database. Set whenever
+    /// `batches` or `auth` is.
     pub(crate) database: Option<std::sync::Arc<crate::database::Database>>,
     /// Checked configuration; `None` opens no batch storage and creates no background workers.
     pub(crate) batches: Option<batches::config::BatchSettings>,

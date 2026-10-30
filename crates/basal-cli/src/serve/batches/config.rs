@@ -29,7 +29,7 @@
 //! it into [`BatchSettings`] and fails closed. The database, its credentials and migrations are the root `database:`
 //! section; [`BatchSettings::database`] picks the one the Batch API uses. The local profile
 //! (`basal serve --batches`) only uses SQLite and the filesystem, a shared storage namespace,
-//! with finite default quota; without a root `database:` section its SQLite file is `<data_dir>/batches.sqlite3`.
+//! with finite default quota; without a root `database:` section it uses the local server database (`database`).
 //! The production profile needs a remote root database, explicit artifacts and quota policy. Secrets
 //! (S3 keys) come from one environment variable or one file each, are read only when a component connects, and
 //! never appear in `Debug` output or error messages.
@@ -168,8 +168,7 @@ impl BatchSettings {
     }
 
     /// The database of the Batch API: the root `database:` section when it is written. Without one, the local
-    /// profile keeps the SQLite file of `basal serve --batches`, `<data_dir>/batches.sqlite3` (automatic migration),
-    /// so an existing queue stays in use. A disabled section is refused, never replaced by another database; the
+    /// profile uses the local server database ([`DatabaseSettings::local_default`], automatic migration). A disabled section is refused, never replaced by another database; the
     /// local profile uses SQLite and the production profile a remote database.
     pub(crate) fn database(&self, root: &DatabaseSection) -> Result<DatabaseSettings, ConfigError> {
         let settings = match root {
@@ -182,7 +181,7 @@ impl BatchSettings {
                 ))
             }
             DatabaseSection::Absent => match (&self.data_dir, self.profile) {
-                (Some(dir), Profile::Local) => DatabaseSettings::sqlite(dir.join("batches.sqlite3")),
+                (Some(dir), Profile::Local) => DatabaseSettings::local_default(&crate::paths::data_dir(), dir),
                 _ => {
                     return Err(invalid(
                         "database",
@@ -207,6 +206,15 @@ impl BatchSettings {
 }
 
 impl BatchConfig {
+    /// Directory of local Batch state, also when the API is disabled: `batches.data_dir` (relative to the working
+    /// directory), else `<data dir>/batches`. Only locates the earlier local database file.
+    pub(crate) fn local_data_dir(&self) -> PathBuf {
+        match &self.data_dir {
+            Some(dir) => std::env::current_dir().map_or_else(|_| dir.clone(), |cwd| cwd.join(dir)),
+            None => crate::paths::data_dir().join("batches"),
+        }
+    }
+
     /// `basal serve --batches [--batch-data-dir DIR]`: enable the API; a directory from the command line replaces
     /// the one of the file.
     pub(crate) fn apply_cli(&mut self, enable: bool, data_dir: Option<PathBuf>) {

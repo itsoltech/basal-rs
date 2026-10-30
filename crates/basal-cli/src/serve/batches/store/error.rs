@@ -125,7 +125,7 @@ pub(crate) enum StoreError {
     PolicyInvalid(&'static str),
     #[error("policy limits of owner {0} are below its current commitments")]
     PolicyBelowCommitted(OwnerId),
-    #[error("batch storage schema is not usable: {0:?}")]
+    #[error("database schema is not usable: {0:?}")]
     Schema(SchemaState),
     #[error("invalid store configuration: {0}")]
     Config(&'static str),
