@@ -362,7 +362,7 @@ fn execute(
     let host = host_memory()?;
     // A layer split's coverage needs the model's config.json and is refused before any device context (each probe
     // below creates one), as in serve: its model files come next; one GPU keeps its device check before them.
-    let split_files = if g.ple_placement == Some(basal_gpu::PleMode::Host) {
+    let mut split_files = if g.ple_placement == Some(basal_gpu::PleMode::Host) {
         let files = model_files(model, g, report)?;
         basal_gpu::PleMode::Host.resolve(&files.2.config, g.layer_split.is_some())?;
         Some(files)
@@ -392,6 +392,23 @@ fn execute(
                 anyhow::Ok(files)
             })
             .transpose()?
+    };
+    // A custom thinking source: the model files and the verified source, then its split coverage and admission,
+    // before the first device query below; both are reused at their usual place.
+    let custom_thinking = if g.model_options.custom_thinking() {
+        let files = match split_files.take() {
+            Some(files) => files,
+            None => model_files(model, g, report)?,
+        };
+        crate::check_thinking_gpu_options(g)?;
+        let thinking = g.model_options.load_thinking(&files.2)?;
+        if let Some(t) = &thinking {
+            crate::admit_custom_thinking(t, g.layer_split.as_ref(), g.device(), &model.model)?;
+        }
+        split_files = Some(files);
+        Some(thinking)
+    } else {
+        None
     };
     // one GPU, or the stages of a layer split in order: the first one is the device the top-level fields describe,
     // `layer_split` reports every stage's device (only with a split)
@@ -428,12 +445,44 @@ fn execute(
         Some(files) => files,
         None => model_files(model, g, report)?,
     };
-    crate::check_thinking_gpu_options(g)?;
-    let thinking = g.model_options.load_thinking(&manifest)?;
-    let resident_models = if thinking.is_some() { 2 } else { 1 };
-    if thinking.is_some() {
-        report["model"]["thinking_checkpoint_bytes"] =
-            basal_core::checkpoint::bytes(&manifest.dir.join("think"))?.into();
+    let thinking = match custom_thinking {
+        Some(thinking) => thinking,
+        None => {
+            crate::check_thinking_gpu_options(g)?;
+            g.model_options.load_thinking(&manifest)?
+        }
+    };
+    let custom = thinking.as_ref().and_then(|t| t.custom.as_ref().map(|c| (t.manifest.config.num_layers(), c)));
+    let resident_models = if thinking.is_some() && custom.is_none() { 2 } else { 1 };
+    if let Some(t) = &thinking {
+        report["model"]["thinking_checkpoint_bytes"] = match &t.custom {
+            Some(c) => c.verified.inventory.total_bytes().into(),
+            None => basal_core::checkpoint::bytes(&manifest.dir.join("think"))?.into(),
+        };
+    }
+    // A custom thinking checkpoint adds its own device payload per stage, not a second copy of the base model.
+    let custom_stages: Vec<u64> = match custom {
+        None => Vec::new(),
+        Some((layers, c)) => {
+            let ranges = match &g.layer_split {
+                None => std::iter::once(0..layers).collect(),
+                Some(split) => split.ranges(layers)?,
+            };
+            let last = ranges.len() - 1;
+            ranges
+                .into_iter()
+                .enumerate()
+                .map(|(i, r)| c.verified.resources.stage_bytes(r, i == 0, i == last))
+                .collect::<Result<_>>()?
+        }
+    };
+    let custom_bytes = custom_stages
+        .iter()
+        .try_fold(0u64, |sum, b| sum.checked_add(*b))
+        .context("custom thinking stage estimate overflow")?;
+    if custom.is_some() {
+        report["model"]["custom_thinking_estimated_device_bytes"] = json!({"bytes": custom_bytes, "stages": custom_stages,
+            "method": "custom thinking source estimate: weights at two bytes each including zero biases, plus the cuBLASLt workspace of each stage; allocator, K/V and generation work excluded, not a measurement"});
     }
     // quantization exists for Llama only: an Omni (Gemma) model is refused before the preflight
     crate::config::check_architecture(&manifest, quantization, g.layer_split.is_some())?;
@@ -478,6 +527,7 @@ fn execute(
     let weight_bytes = weight_bytes
         .checked_mul(resident_models)
         .and_then(|n| n.checked_add(report["model"]["exit_head_resident_bytes"].as_u64().unwrap_or(0)))
+        .and_then(|n| n.checked_add(custom_bytes))
         .context("resident model/head weight estimate overflow")?;
     report["model"]["estimated_weight_bytes"] =
         json!({"bytes": weight_bytes, "quantization": quantization.as_str(), "method": method});
@@ -520,7 +570,10 @@ fn execute(
                         g.media,
                     )?,
                 };
-                let bytes = bytes.checked_mul(resident_models).context("dual-model stage estimate overflow")?;
+                let bytes = bytes
+                    .checked_mul(resident_models)
+                    .and_then(|b| b.checked_add(custom_stages.get(i).copied().unwrap_or(0)))
+                    .context("dual-model stage estimate overflow")?;
                 let stage_guard = if i == 0 { &mut guard } else { &mut others[i - 1].2 };
                 let checked = stage_guard
                     .check(&host_memory()?, &basal_gpu::gpu_memory(stage.device)?, bytes)

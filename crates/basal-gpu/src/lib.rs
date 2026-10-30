@@ -1632,8 +1632,8 @@ fn bf16_to_f16(src: &[u8], dst: &mut [half::f16]) {
 /// blocks are dropped here unless `keep_blocks` (the q4_k warm-up check).
 #[cfg(feature = "cuda")]
 fn load_blocks<B: candle_core::quantized::GgmlType + Send + Sync + 'static, S>(
-    st: &MmapedSafetensors,
-    reader: &TensorReader,
+    st: &Header<'_>,
+    reader: &Bytes<'_>,
     names: &[String],
     dev: &Device,
     quantization: Quantization,
@@ -1644,8 +1644,8 @@ fn load_blocks<B: candle_core::quantized::GgmlType + Send + Sync + 'static, S>(
     let Device::Cuda(cuda) = dev else { bail!("{quantization} weights need a CUDA device") };
     let (mut rows, mut cols) = (0usize, None);
     for n in names {
-        let v = st.get(n)?;
-        let &[r, c] = v.shape() else { bail!("{n}: shape {:?}, expected a matrix", v.shape()) };
+        let shape = st.shape(n)?;
+        let &[r, c] = shape.as_slice() else { bail!("{n}: shape {:?}, expected a matrix", shape) };
         ensure!(cols.is_none_or(|k| k == c), "{n}: K = {c} differs from the other parts of the projection");
         cols = Some(c);
         rows = rows.checked_add(r).context("row count overflows")?;
@@ -1672,12 +1672,12 @@ fn load_blocks<B: candle_core::quantized::GgmlType + Send + Sync + 'static, S>(
 
 /// The bf16 tensors of a projection, concatenated along N in this order: name and rows (q4_k positions).
 #[cfg(feature = "cuda")]
-fn source_parts(st: &MmapedSafetensors, names: &[String]) -> Result<Vec<(String, usize)>> {
+fn source_parts(st: &Header<'_>, names: &[String]) -> Result<Vec<(String, usize)>> {
     names
         .iter()
         .map(|n| {
-            let v = st.get(n)?;
-            let &[r, _] = v.shape() else { bail!("{n}: shape {:?}, expected a matrix", v.shape()) };
+            let shape = st.shape(n)?;
+            let &[r, _] = shape.as_slice() else { bail!("{n}: shape {:?}, expected a matrix", shape) };
             Ok((n.clone(), r))
         })
         .collect()
@@ -1688,6 +1688,106 @@ fn check(st: &MmapedSafetensors, name: &str, shape: &[usize]) -> Result<()> {
     ensure!(v.shape() == shape, "{name}: shape {:?}, expected {:?}", v.shape(), shape);
     ensure!(v.dtype() == safetensors::Dtype::BF16, "{name}: dtype {:?}, expected BF16", v.dtype());
     Ok(())
+}
+
+/// Exactly the tensors and shapes of a Llama checkpoint this runtime implements: every expected tensor with its shape,
+/// and no others (an unknown tensor would mean a model this code does not implement).
+pub fn llama_expected_tensors(cfg: &LlamaConfig) -> BTreeMap<String, Vec<usize>> {
+    let (h, i, v) = (cfg.hidden, cfg.intermediate, cfg.vocab);
+    let kvd = cfg.kv_heads * cfg.head_dim;
+    let mut expected: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    expected.insert("model.embed_tokens.weight".into(), vec![v, h]);
+    expected.insert("model.norm.weight".into(), vec![h]);
+    expected.insert("lm_head.weight".into(), vec![v, h]);
+    for l in 0..cfg.num_layers {
+        let p = format!("model.layers.{l}");
+        let qd = cfg.heads * cfg.head_dim;
+        for (n, s) in [
+            ("input_layernorm.weight", vec![h]),
+            ("post_attention_layernorm.weight", vec![h]),
+            ("self_attn.q_proj.weight", vec![qd, h]),
+            ("self_attn.q_proj.bias", vec![qd]),
+            ("self_attn.k_proj.weight", vec![kvd, h]),
+            ("self_attn.k_proj.bias", vec![kvd]),
+            ("self_attn.v_proj.weight", vec![kvd, h]),
+            ("self_attn.v_proj.bias", vec![kvd]),
+            ("self_attn.o_proj.weight", vec![h, qd]),
+            ("self_attn.o_proj.bias", vec![h]),
+            ("mlp.gate_proj.weight", vec![i, h]),
+            ("mlp.gate_proj.bias", vec![i]),
+            ("mlp.up_proj.weight", vec![i, h]),
+            ("mlp.up_proj.bias", vec![i]),
+            ("mlp.down_proj.weight", vec![h, i]),
+            ("mlp.down_proj.bias", vec![h]),
+        ] {
+            if n.ends_with(".bias") && !cfg.bias {
+                continue;
+            }
+            expected.insert(format!("{p}.{n}"), s);
+        }
+    }
+    expected
+}
+
+/// Where [`GpuBackend::load_stages_source`] reads a Llama checkpoint: `model.safetensors` of a directory (mapped for
+/// names and shapes, read by [`TensorReader`]), or an operator-verified [`basal_core::checkpoint::Inventory`] whose
+/// retained handles serve both.
+#[derive(Clone, Copy)]
+pub(crate) enum CheckpointSource<'a> {
+    Dir(&'a Path),
+    Verified(&'a basal_core::checkpoint::Inventory),
+}
+
+/// Names and shapes of the checkpoint tensors.
+enum Header<'a> {
+    Mapped(MmapedSafetensors),
+    Verified(&'a basal_core::checkpoint::Inventory),
+}
+
+impl Header<'_> {
+    fn shape(&self, name: &str) -> Result<Vec<usize>> {
+        match self {
+            Self::Mapped(st) => Ok(st.get(name)?.shape().to_vec()),
+            Self::Verified(inv) => {
+                Ok(inv.tensor(name).with_context(|| format!("tensor {name} not in the checkpoint"))?.shape.clone())
+            }
+        }
+    }
+
+    /// `name` exists with `shape` and dtype BF16 (an inventory holds BF16 tensors only).
+    fn check(&self, name: &str, shape: &[usize]) -> Result<()> {
+        match self {
+            Self::Mapped(st) => check(st, name, shape),
+            Self::Verified(inv) => {
+                let t = inv.tensor(name).with_context(|| format!("checkpoint tensor {name} missing"))?;
+                ensure!(t.shape == shape, "{name}: shape {:?}, expected {:?}", t.shape, shape);
+                Ok(())
+            }
+        }
+    }
+
+    fn names(&self) -> Vec<String> {
+        match self {
+            Self::Mapped(st) => st.tensors().into_iter().map(|(n, _)| n).collect(),
+            Self::Verified(inv) => inv.names().map(str::to_string).collect(),
+        }
+    }
+}
+
+/// Tensor bytes of the checkpoint.
+enum Bytes<'a> {
+    File(TensorReader),
+    Verified(&'a basal_core::checkpoint::Inventory),
+}
+
+impl Bytes<'_> {
+    /// Append the bytes of tensor `name` to `out`.
+    fn read(&self, name: &str, out: &mut Vec<u8>) -> Result<()> {
+        match self {
+            Self::File(reader) => reader.read(name, out),
+            Self::Verified(inv) => inv.read(name, out),
+        }
+    }
 }
 
 impl GpuBackend {
@@ -1814,6 +1914,59 @@ impl GpuBackend {
         Self::load_stages(model_dir, cfg, precision, readout, kernels, quantization, &Self::gpu_stages(stages))
     }
 
+    /// [`GpuBackend::load_unplanned`] from an operator-verified inventory (custom thinking): the same loader, every
+    /// tensor read through the inventory's retained handles; no evidence head.
+    #[cfg_attr(
+        all(feature = "intel", not(feature = "cuda"), not(target_os = "macos")),
+        expect(dead_code, reason = "an Intel-only build loads Llama through IntelBackend")
+    )]
+    pub(crate) fn load_unplanned_verified(
+        inv: &basal_core::checkpoint::Inventory,
+        cfg: &LlamaConfig,
+        precision: Precision,
+        readout: Readout,
+        kernels: Kernels,
+        quantization: Quantization,
+        device: usize,
+    ) -> Result<Self> {
+        quantization.check(precision, kernels, cfg!(feature = "cuda"))?;
+        Self::load_stages_source(
+            CheckpointSource::Verified(inv),
+            cfg,
+            precision,
+            readout,
+            kernels,
+            quantization,
+            &[(StageDevice::Gpu(device), 0..cfg.num_layers)],
+        )
+    }
+
+    /// [`GpuBackend::load_split_unplanned`] from an operator-verified inventory ([`GpuBackend::load_unplanned_verified`]).
+    #[cfg_attr(
+        all(feature = "intel", not(feature = "cuda"), not(target_os = "macos")),
+        expect(dead_code, reason = "an Intel-only build loads Llama through IntelBackend")
+    )]
+    pub(crate) fn load_split_unplanned_verified(
+        inv: &basal_core::checkpoint::Inventory,
+        cfg: &LlamaConfig,
+        precision: Precision,
+        readout: Readout,
+        kernels: Kernels,
+        quantization: Quantization,
+        split: &LayerSplit,
+    ) -> Result<Self> {
+        let stages = Self::split_stages(cfg, precision, kernels, quantization, split)?;
+        Self::load_stages_source(
+            CheckpointSource::Verified(inv),
+            cfg,
+            precision,
+            readout,
+            kernels,
+            quantization,
+            &Self::gpu_stages(stages),
+        )
+    }
+
     /// The stages of a layer split as GPU stages of [`GpuBackend::load_stages`].
     fn gpu_stages(stages: Vec<(usize, Range<usize>)>) -> Vec<(StageDevice, Range<usize>)> {
         stages.into_iter().map(|(device, range)| (StageDevice::Gpu(device), range)).collect()
@@ -1846,6 +1999,21 @@ impl GpuBackend {
         quantization: Quantization,
         plan: &[(StageDevice, Range<usize>)],
     ) -> Result<Self> {
+        Self::load_stages_source(CheckpointSource::Dir(model_dir), cfg, precision, readout, kernels, quantization, plan)
+    }
+
+    /// [`GpuBackend::load_stages`] from `source`. A directory's `model.safetensors` is mapped for names and shapes
+    /// and read with [`TensorReader`], with its optional `evidence_head.pt`; a verified inventory serves both through
+    /// its retained handles and has no evidence head.
+    fn load_stages_source(
+        source: CheckpointSource<'_>,
+        cfg: &LlamaConfig,
+        precision: Precision,
+        readout: Readout,
+        kernels: Kernels,
+        quantization: Quantization,
+        plan: &[(StageDevice, Range<usize>)],
+    ) -> Result<Self> {
         let t0 = Instant::now();
         ensure!(!plan.is_empty(), "a model needs at least one stage");
         ensure!(plan.len() == 1 || plan.iter().all(|(d, _)| *d != StageDevice::Cpu), "the host CPU runs one stage");
@@ -1864,48 +2032,25 @@ impl GpuBackend {
             })
             .collect::<Result<Vec<_>>>()?;
         let kind = if devs[0].is_cuda() { "CUDA" } else { "GPU" };
-        let path = model_dir.join("model.safetensors");
-        // SAFETY: the checkpoint file is not modified while mapped.
-        let st = unsafe { MmapedSafetensors::new(&path) }.with_context(|| format!("mapping {}", path.display()))?;
-        let (h, i, v) = (cfg.hidden, cfg.intermediate, cfg.vocab);
+        let st = match source {
+            CheckpointSource::Dir(model_dir) => {
+                let path = model_dir.join("model.safetensors");
+                // SAFETY: the checkpoint file is not modified while mapped.
+                let st =
+                    unsafe { MmapedSafetensors::new(&path) }.with_context(|| format!("mapping {}", path.display()))?;
+                Header::Mapped(st)
+            }
+            CheckpointSource::Verified(inv) => Header::Verified(inv),
+        };
+        let (h, i) = (cfg.hidden, cfg.intermediate);
         let kvd = cfg.kv_heads * cfg.head_dim;
         // The loader accepts exactly the tensors of this architecture: every expected tensor with its shape, and no
         // others (an unknown tensor would mean a model this code does not implement).
-        let mut expected: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-        expected.insert("model.embed_tokens.weight".into(), vec![v, h]);
-        expected.insert("model.norm.weight".into(), vec![h]);
-        expected.insert("lm_head.weight".into(), vec![v, h]);
-        for l in 0..cfg.num_layers {
-            let p = format!("model.layers.{l}");
-            let qd = cfg.heads * cfg.head_dim;
-            for (n, s) in [
-                ("input_layernorm.weight", vec![h]),
-                ("post_attention_layernorm.weight", vec![h]),
-                ("self_attn.q_proj.weight", vec![qd, h]),
-                ("self_attn.q_proj.bias", vec![qd]),
-                ("self_attn.k_proj.weight", vec![kvd, h]),
-                ("self_attn.k_proj.bias", vec![kvd]),
-                ("self_attn.v_proj.weight", vec![kvd, h]),
-                ("self_attn.v_proj.bias", vec![kvd]),
-                ("self_attn.o_proj.weight", vec![h, qd]),
-                ("self_attn.o_proj.bias", vec![h]),
-                ("mlp.gate_proj.weight", vec![i, h]),
-                ("mlp.gate_proj.bias", vec![i]),
-                ("mlp.up_proj.weight", vec![i, h]),
-                ("mlp.up_proj.bias", vec![i]),
-                ("mlp.down_proj.weight", vec![h, i]),
-                ("mlp.down_proj.bias", vec![h]),
-            ] {
-                if n.ends_with(".bias") && !cfg.bias {
-                    continue;
-                }
-                expected.insert(format!("{p}.{n}"), s);
-            }
-        }
+        let expected = llama_expected_tensors(cfg);
         for (name, shape) in &expected {
-            check(&st, name, shape)?;
+            st.check(name, shape)?;
         }
-        let present: Vec<String> = st.tensors().into_iter().map(|(n, _)| n).collect();
+        let present: Vec<String> = st.names();
         let extra: Vec<&String> = present.iter().filter(|n| !expected.contains_key(*n)).collect();
         ensure!(extra.is_empty(), "checkpoint has tensors this runtime does not implement: {extra:?}");
 
@@ -1914,11 +2059,14 @@ impl GpuBackend {
         // pool and raised the peak footprint by the size of all gate/up weights).
         let dt = precision.storage();
         // the mapping above gives names and shapes; the data is read (see TensorReader)
-        let reader = TensorReader::open(&path)?;
+        let reader = match source {
+            CheckpointSource::Dir(model_dir) => Bytes::File(TensorReader::open(&model_dir.join("model.safetensors"))?),
+            CheckpointSource::Verified(inv) => Bytes::Verified(inv),
+        };
         let load_cat = |names: &[String], dev: &Device| -> Result<Tensor> {
-            let views = names.iter().map(|n| st.get(n)).collect::<candle_core::Result<Vec<_>>>()?;
-            let mut shape = views[0].shape().to_vec();
-            shape[0] = views.iter().map(|v| v.shape()[0]).sum();
+            let shapes = names.iter().map(|n| st.shape(n)).collect::<Result<Vec<_>>>()?;
+            let mut shape = shapes[0].clone();
+            shape[0] = shapes.iter().map(|s| s[0]).sum();
             let mut bytes = Vec::new();
             for n in names {
                 reader.read(n, &mut bytes)?;
@@ -2077,10 +2225,10 @@ impl GpuBackend {
                             // lm_head stays in the checkpoint dtype; only the letter rows are gathered and converted to
                             // f32 per call.
                             let lm_head = {
-                                let v = st.get("lm_head.weight")?;
+                                let shape = st.shape("lm_head.weight")?;
                                 let mut bytes = Vec::new();
                                 reader.read("lm_head.weight", &mut bytes)?;
-                                Tensor::from_raw_buffer(&bytes, DType::BF16, v.shape(), dev)?
+                                Tensor::from_raw_buffer(&bytes, DType::BF16, &shape, dev)?
                             };
                             w.head = Some(Head { norm, lm_head, evidence: None, exits: None });
                         }
@@ -2140,8 +2288,12 @@ impl GpuBackend {
         // stage, then the publication barrier: these allocations were queued on this thread's streams after the
         // synchronisation above, and the engines of other threads read them only after this synchronisation.
         let published = (|| -> Result<()> {
-            let p = model_dir.join("evidence_head.pt");
-            if p.exists() {
+            // a verified inventory has no evidence head
+            let evidence = match source {
+                CheckpointSource::Dir(model_dir) => Some(model_dir.join("evidence_head.pt")),
+                CheckpointSource::Verified(_) => None,
+            };
+            if let Some(p) = evidence.filter(|p| p.exists()) {
                 if split {
                     match bind_twice(&devs[last]) {
                         Twice::First => {}

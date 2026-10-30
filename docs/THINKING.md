@@ -8,14 +8,19 @@ Loader sprawdza SHA-256 obu opublikowanych plików wag, konfigurację, zgodnoś�
 tokenizerów i efektywny zbiór EOS `[4, 2]`; hash pliku generation config
 pozostaje w tożsamości źródeł. Mini i Pico nie mają tych wytrenowanych
 artefaktów; aktywacja na nich odmawia startu. Nie ma adaptera LoRA, zero-shot
-ani zastępowania P2 modelem bazowym.
+ani zastępowania P2 modelem bazowym. Własny pełny checkpoint Llama z lokalnego
+katalogu można wskazać jawnie (`think_source`, sekcja
+[Własny checkpoint thinking](#własny-checkpoint-thinking)); wtedy para
+opublikowana nie jest pobierana ani używana.
 
 ```sh
 basal serve --model 2.0-4.5B --think auto --think-tokens 256 --think-max-len 8192
 ```
 
 W YAML te same opcje modelu mają nazwy `think`, `think_tokens`, `think_max_len`,
-`think_calibration`, `think_numerics`. Jawne flagi CLI zastępują wartości danego modelu w YAML.
+`think_calibration`, `think_numerics`, `think_source`, `think_integrity`,
+`think_gemm_table`. Jawne flagi CLI zastępują wartości danego modelu w YAML;
+`--think-source` i `--think-integrity` zastępują je zawsze jako para.
 Limity muszą być dodatnie, mieścić się w u32, a `think_tokens + 16` musi być
 mniejsze od limitu kontekstu; rzeczywisty limit checkpointu dodatkowo ogranicza
 `think_max_len`. Walidacja i wybór osobnej kalibracji następują przed GEMM
@@ -30,6 +35,193 @@ orders/layout, strict identity ani `--no-calibration` readoutu bazowego.
 Temperatury per primitive/bucket i certyfikaty P2 pochodzą wyłącznie z tego
 pliku. Opublikowany plik zawiera temperatury, lecz jego certyfikaty per-type
 1%/5% są null: to nie potwierdzenie certyfikowanej jakości P2.
+
+## Własny checkpoint thinking
+
+`--think-source DIR --think-integrity FILE` (YAML `think_source`,
+`think_integrity`) ładuje jako backend thinking własny pełny checkpoint Llama
+z lokalnego katalogu, opisany deskryptorem integralności operatora. Katalog może
+być lokalnym snapshotem HF, ale jest czytany wyłącznie jako ścieżka: basal nic
+dla niego nie pobiera, nie stosuje ograniczenia do pary 4.5B, wzorców `think/`
+ani automatycznego `CALIBRATION.think.json`. Model bazowy pobiera się jak
+zwykły model. Nie ma fallbacku do `think/`, modelu bazowego, adaptera ani
+zero-shot. Bazowy model może mieć dowolną architekturę obsługiwaną przez GPU
+tego buildu; tokenizer i wymiary obu modeli nie muszą być równe, ale wejście
+media bazowego modelu jest odrzucane.
+
+```sh
+basal serve --model ./base --think auto \
+  --think-source ./my-think --think-integrity ./my-think.integrity.json \
+  --think-gemm-table auto
+```
+
+### Deskryptor `basal-think-source.1`
+
+```json
+{
+  "schema": "basal-think-source.1",
+  "files": { "<nazwa>": {"sha256": "<64 małe znaki hex>", "bytes": <u64>} },
+  "calibration": "off"
+}
+```
+
+`calibration` to `"off"` albo `{"file": "<nazwa>", "source_model_id": "<64 hex>"}`.
+Plik ma najwyżej 1 MiB, jest ścisłym UTF-8 JSON-em, a nieznane pola, powtórzone
+pola i powtórzone nazwy plików są odrzucane. Nazwa to 1–255 bajtów
+`[A-Za-z0-9_.-]`, bez `/` i bez kropki na początku; dowiązania symboliczne
+snapshotów HF są dopuszczalne, jeśli wskazują zwykły plik.
+
+`files` musi zawierać **dokładnie** czytane pliki (7–72 wpisy), wszystkie
+obowiązkowe:
+
+| Rola | Pliki | Limit bajtów |
+|---|---|---|
+| struktura | `config.json`, `basal.json`, `tokenizer_config.json`, `chat_template.jinja` | 1 MiB każdy |
+| tokenizer | `tokenizer.json` | 64 MiB |
+| generacja | `generation_config.json` | 1 MiB |
+| korzeń | dokładnie jeden z `model.safetensors` (zarazem jedyny plik wag) albo `model.safetensors.index.json` | 1 TiB / 16 MiB |
+| shardy (tryb indeksu) | każda nazwa z `weight_map`, 1–64 pliki `.safetensors` | każdy plik i suma ≤ 1 TiB |
+| kalibracja | `calibration.file`, jeśli podany | 16 MiB |
+
+O zbiorze wag decyduje deskryptor, nie zawartość katalogu: brakujący wpis
+i wpis pliku, którego basal nie czyta, są błędem. Inne pliki katalogu
+(`evidence_head.pt`, `CALIBRATION*.json`, `think/`, dodatkowe shardy) nie są
+otwierane. Plik kalibracji nie może mieć innej roli.
+
+### Walidacja przed GPU i GEMM
+
+Statyczne odmowy w `validate()`, przed pobieraniem modelu: `think_source`
+i `think_integrity` wymagają `think: auto` i występują razem;
+`think_calibration` jest z nimi sprzeczne; `think_gemm_table` wymaga
+`think_source`; `think_numerics` musi być `inherit`; tabela musi mieć składnię
+`gemm_table`; build musi mieć backend Llama CUDA albo Metal (Intel i build bez
+GPU odmawiają). Przed odczytem deskryptora odmawiane są: backend CPU,
+kwantyzacja inna niż `none`, wejście media, reprodukowalny plan bazowy bez
+`think_gemm_table` `pinned`/`sha256:` oraz kilka `replica_devices` przy
+`think_gemm_table: none`.
+
+Potem kolejno: deskryptor i zbiór plików; każdy plik spoza wag jest otwierany
+raz, porównywany z zadeklarowanym rozmiarem i limitem, czytany do końca,
+haszowany i zamykany. `config.json` musi opisywać Llamę z `head_dim` 128
+(jądra fused attention), co najwyżej 256 głowami, `hidden_size` ≤ 32768,
+256 warstwami, `intermediate_size` ≤ 262 144, słownikiem i kontekstem
+≤ 1 048 576. Manifest jest czytany z canonical/order1 i wyłącznie z kalibracją
+deskryptora; konfiguracja musi być równa wcześniej zahaszowanej. Format promptu
+thinking musi mieścić co najmniej tyle opcji co bazowy. Tokenizer musi mieć
+słownik równy konfiguracji, dekoder Llama o znanym limicie bajtów i BOS będący
+jednym tokenem (zgodny z `bos_token_id` w `config.json`, jeśli podano).
+`generation_config.json` jest czytany z zahaszowanych bajtów: `eos_token_id`
+to liczba albo lista 1–64 unikalnych ID poniżej rozmiaru słownika, a
+`bos_token_id`, jeśli podany, równa się BOS tokenizera; nie ma stałej `[4, 2]`.
+Następnie nagłówki safetensors, routing tensorów, dokładny zbiór i kształty
+tensorów Llama, SHA-256 każdego pliku wag, tożsamość, wszystkie reguły core
+thinking bez backendu (canonical Llama order1, gęsty słownik, EOS, dekoder)
+i fence. Każdy błąd następuje przed wyborem tabeli GEMM, zapytaniem
+o urządzenie i ładowaniem.
+
+### Wagi: jeden uchwyt na plik
+
+Każdy plik wag jest otwierany dokładnie raz i ten sam uchwyt służy do odczytu
+nagłówka, SHA-256 i każdego tensora; nie ma mapowania ani drugiego otwarcia.
+Nagłówek ma najwyżej 100 000 000 B (suma nagłówków 256 MiB), każdy tensor jest
+BF16, offsety pokrywają sekcję danych ciągle od zera, rozmiar odpowiada
+kształtowi, powtórzony klucz w pliku i ten sam tensor w dwóch shardach są
+błędem (żaden wpis nie wygrywa „ostatni”). W trybie indeksu `weight_map` musi
+być dokładnie równy faktycznemu routingowi. Złożenie wag (`qkv`, `gate/up`,
+zerowe biasy, lm_head BF16) jest takie jak w domyślnym loaderze; nie ma
+evidence head.
+
+### Plan, profil i tabela GEMM
+
+Checkpoint thinking używa zawsze profilu `llama-generic.v1`, nigdy profilu
+katalogu wybranego po nazwie z `basal.json`. Precyzja, kernele, tryb inferencji
+i `readout_layer` (rozwiązany dla konfiguracji thinking) pochodzą z instancji
+bazowej, readout jest FP32. Tabela GEMM jest własna: `think_gemm_table`
+(`none` domyślnie, `auto`, `pinned`, `sha256:<hex>` albo ścieżka) jest
+rozwiązywana dla kształtów checkpointu thinking; tabela bazowa nie jest
+kopiowana. `auto` może uruchomić wyszukiwanie dopiero po całej walidacji
+i admission. Przy layer split liczba warstw thinking musi być pokryta przez
+ten sam split; niezależny split thinking nie istnieje.
+
+### Tożsamość i kalibracja
+
+`model_id` to SHA-256 zwartego JSON
+`{"files":{"<nazwa>":{"bytes":N,"sha256":"<hex>"},…},"schema":"basal-think-model.1"}`
+po wszystkich czytanych plikach oprócz kalibracji, z nazwami w kolejności
+bajtowej. `sources` zawiera `kind: operator-local`, `provenance:
+operator-supplied`, `schema`, `descriptor_sha256` (hash bajtów deskryptora:
+zmiana samego formatowania zmienia odcisk), `model_id`, `profile`, hash
+każdego pliku, `checkpoint` (`layout` single/index, liczba shardów, tensorów,
+bajtów), `calibration` (`{"off": true}` albo plik, jego hash i
+`source_model_id`), `numerics: inherit` oraz plan wykonania. Nie zawiera
+lokalnych ścieżek, nazw katalogów ani nazwy z `basal.json`; trafia do profilu
+batchy, benchmarku i forków jak dla pary opublikowanej.
+
+Kalibracja `off` daje prawdopodobieństwa bez kalibracji (T=1). Plik kalibracji
+jest czytany przez core z katalogu; jego `content_sha256` musi równać się
+hashowi z deskryptora, a `source_model_id` — `model_id` checkpointu. To
+deklaracje rodowodu operatora związane hashami: nie dowodzą, że kalibrację
+dopasowano do tego modelu, ani jakości. Hashe potwierdzają tylko, że basal
+przeczytał zadeklarowane bajty, nie autentyczność wydawcy, pochodzenie
+treningu ani jakość.
+
+### Kontrakt stabilnego katalogu
+
+Deskryptor i każdy wskazany plik muszą pozostać niezmienione, nieobcięte,
+niezastąpione i nieprzemianowane przez cały czas działania procesu.
+`tokenizer.json` jest czytany ponownie po ścieżce przy każdym forku
+(także dla pary opublikowanej), a `config.json`, `basal.json`,
+`tokenizer_config.json`, szablon i tokenizer — przez core przy ładowaniu.
+Wiązanie bajtami obejmuje wagi (ten sam uchwyt haszowany i czytany), deskryptor,
+indeks i `generation_config.json` (parsowane z zahaszowanego bufora) oraz
+kalibrację (równość `content_sha256`). Pozostałe ponowne odczyty po ścieżce
+osłania tylko fence: porównanie `fstat` uchwytów wag i `stat` każdej ścieżki
+(urządzenie, inode, rozmiar, mtime, ctime) po weryfikacji i po każdym
+utworzeniu thinking. Fence nie wykrywa zapisu w miejscu o tym samym rozmiarze
+z zachowanymi mtime/ctime, podmiany i przywrócenia między sprawdzeniami ani
+zmian po ostatnim fence. To nie jest niezmienny ani odporny na atak snapshot;
+operator zapewnia kontrakt np. snapshotem tylko do odczytu albo montowaniem
+read-only. Uchwyty wag są zamykane po załadowaniu (w serve po ostatniej replice
+danego modelu).
+
+### Szacunki zasobów (admission)
+
+Przed tabelami GEMM i ładowaniem basal sprawdza nazwane szacunki źródłowe
+z ograniczonej konfiguracji i nagłówków: na hoście metadane inwentarza plus
+największe z: składania jednego tensora (3S dla wielu części, 2S dla jednej,
+lm_head 2S), budowy tabeli RoPE (`2 * 4 * max_positions * 128` B plus
+odwrotności częstotliwości) i największego nagłówka; w serve dodatkowo RoPE
+zatrzymywany przez każdą instancję. Na każdym urządzeniu suma etapów:
+wagi po 2 B (z zerowymi biasami), embedding na pierwszym etapie, norma na
+każdym, lm_head na ostatnim i 32 MiB workspace cuBLASLt na etap w CUDA (bez
+`BASAL_GEMM=cublas`); przy pamięci zunifikowanej ta suma dolicza się też do
+hosta. Admission jest pierwszym zapytaniem o urządzenie na tej ścieżce;
+porównanie typów GPU splitu lub replik następuje po nim. Szacunki nie obejmują
+wzrostu `Vec` ponad podane współczynniki, narzutu metadanych i allocatora,
+stagingu sterownika, cache puli candle, modelu bazowego (ładowanego po
+thinking), K/V ani pracy generacji. Nie są to granice allocatora, RSS ani
+ochrona przed OOM. Benchmark dolicza dla własnego checkpointu jego szacunek
+etapów zamiast drugiej kopii modelu bazowego.
+
+Znana luka: nagłówki są parsowane w `Inventory::open`, przed admission.
+Parser tworzy wszystkie wpisy przed kontrolą długości nazw, rangi kształtu
+i liczby tensorów. Może wtedy zużyć kilka razy więcej pamięci niż surowy
+nagłówek; spreparowany nagłówek o limicie 100 MB może wymagać około 0,9 GB
+przed odmową. To przykład wywiedziony z kodu, nie pomiar ani górna granica.
+Ten koszt parsowania nie jest objęty powyższym szacunkiem. Kontrola limitów
+podczas parsowania pozostaje otwarta.
+
+### Ograniczenia
+
+Ta ścieżka nie została uruchomiona: brak pomiaru generacji, P2, odmów na
+uszkodzonych plikach, sprzątania przy przerwaniu, pamięci i wydajności, a także
+bitowej równości pary opublikowanej po wspólnej refaktoryzacji loadera. Nie
+ma deklaracji FP32, jakości ani kalibracji żadnego własnego modelu. Otwarte
+pozostają: LoRA, gramatyki Gemma/Qwen, pobieranie z sieci, słowniki
+z paddingiem, `head_dim` inny niż 128, kwantyzacja i
+`upstream-bf16-pointwise`, CPU i Intel, niezależny split thinking, formaty
+GGUF/ModelOpt, szacowanie przez `doctor`, Windows oraz wiązanie bajtami
+plików czytanych przez core po ścieżce. Pamięć tokenizera nie jest szacowana.
 
 ## Opcjonalna numeryka BF16
 

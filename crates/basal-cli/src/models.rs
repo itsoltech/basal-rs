@@ -506,6 +506,12 @@ pub fn by_repo(repo: &str) -> Option<&'static CatalogEntry> {
     CATALOG.iter().find(|m| m.repo == repo)
 }
 
+/// The generic Llama profile, without measured model/GPU rules or pins: the profile of a custom thinking checkpoint,
+/// whatever its `basal.json` name.
+pub fn generic_llama_profile() -> &'static Profile {
+    &LLAMA_GENERIC
+}
+
 /// The profile of a loaded model: the catalog's for its `basal.json` name, else the generic one of its
 /// architecture.
 pub fn profile_for(manifest: &ModelManifest) -> &'static Profile {

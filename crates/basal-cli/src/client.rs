@@ -494,6 +494,15 @@ fn load_local(args: &ClientArgs, name: &str) -> Result<basal_core::Engine<crate:
     }
     let dir = crate::config::model_dir(&model)?;
     let manifest = args.model_options.load_manifest(&dir, model.orders.as_deref(), &model.source_name())?;
+    if args.model_options.custom_thinking() {
+        args.model_options.check_custom_think_execution(
+            basal_gpu::Quantization::None,
+            model.media,
+            crate::gemm_artifact::TableRequest::parse(&model.gemm_table)?.reproducibility(),
+            false,
+            false,
+        )?;
+    }
     args.model_options.check_think_execution(
         basal_gpu::Kernels::Fused,
         basal_gpu::Quantization::None,
@@ -502,6 +511,10 @@ fn load_local(args: &ClientArgs, name: &str) -> Result<basal_core::Engine<crate:
         crate::gemm_artifact::TableRequest::parse(&model.gemm_table)?.reproducibility(),
     )?;
     let thinking = args.model_options.load_thinking(&manifest)?;
+    // a custom thinking source is admitted on this device before the precision rule and the base GEMM table
+    if let Some(t) = &thinking {
+        crate::admit_custom_thinking(t, None, device, &format!("model {}", manifest.name))?;
+    }
     let precision = crate::config::model_precision(&model.dtype, &manifest, device)?;
     let table = crate::gemm_artifact::resolve(
         &crate::gemm_artifact::TableRequest::parse(&model.gemm_table)?,

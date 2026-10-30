@@ -44,7 +44,7 @@ pub(crate) struct ModelOptions {
     #[arg(long)]
     #[serde(default)]
     pub exit_heads: Option<PathBuf>,
-    /// Native second-checkpoint reasoning: off (default) or auto; only the published 2.0 4.5B pair
+    /// Native second-checkpoint reasoning: off (default) or auto; the published 2.0 4.5B pair, or --think-source
     #[arg(long, value_parser = ["off", "auto"])]
     #[serde(default)]
     pub think: Option<String>,
@@ -64,6 +64,18 @@ pub(crate) struct ModelOptions {
     #[arg(long)]
     #[serde(default)]
     pub think_calibration: Option<PathBuf>,
+    /// Custom full Llama thinking checkpoint directory (operator-supplied integrity, not publisher-verified)
+    #[arg(long)]
+    #[serde(default)]
+    pub think_source: Option<PathBuf>,
+    /// basal-think-source.1 integrity descriptor of every file think_source consumes
+    #[arg(long)]
+    #[serde(default)]
+    pub think_integrity: Option<PathBuf>,
+    /// GEMM table of the custom thinking checkpoint: none (default), auto, pinned, sha256:DIGEST or a path
+    #[arg(long)]
+    #[serde(default)]
+    pub think_gemm_table: Option<String>,
     /// Prompt layout (otherwise the model declaration, default canonical)
     #[arg(long, value_parser = ["canonical", "qfirst", "state_twice"])]
     #[serde(default)]
@@ -108,6 +120,9 @@ impl ModelOptions {
             || self.think_tokens.is_some()
             || self.think_max_len.is_some()
             || self.think_calibration.is_some()
+            || self.think_source.is_some()
+            || self.think_integrity.is_some()
+            || self.think_gemm_table.is_some()
             || self.layout.is_some()
             || self.calibration.is_some()
             || self.no_calibration
@@ -142,6 +157,14 @@ impl ModelOptions {
         }
         if cli.think_calibration.is_some() {
             self.think_calibration.clone_from(&cli.think_calibration);
+        }
+        // a custom thinking source and its descriptor are replaced as a pair
+        if cli.think_source.is_some() || cli.think_integrity.is_some() {
+            self.think_source.clone_from(&cli.think_source);
+            self.think_integrity.clone_from(&cli.think_integrity);
+        }
+        if cli.think_gemm_table.is_some() {
+            self.think_gemm_table.clone_from(&cli.think_gemm_table);
         }
         if cli.layout.is_some() {
             self.layout.clone_from(&cli.layout);
@@ -195,6 +218,7 @@ impl ModelOptions {
         self.thinking_enabled()?;
         self.think_numerics()?;
         self.think_settings()?;
+        self.check_think_source()?;
         ensure!(!(self.no_calibration && self.calibration.is_some()), "calibration conflicts with no_calibration");
         if let Some(layout) = &self.layout {
             PromptLayout::parse(layout)?;
@@ -214,6 +238,85 @@ impl ModelOptions {
 
     pub(crate) fn exits_enabled(&self) -> bool {
         self.early_exit.is_some() || self.exit_heads.is_some()
+    }
+
+    /// Whether thinking uses the published `think/` pair (fetched with a repository model): thinking without a custom
+    /// `think_source`.
+    pub(crate) fn shipped_thinking(&self) -> Result<bool> {
+        Ok(self.thinking_enabled()? && self.think_source.is_none())
+    }
+
+    /// Whether a custom thinking checkpoint is configured (its options are checked by [`ModelOptions::validate`]).
+    pub(crate) fn custom_thinking(&self) -> bool {
+        self.think_source.is_some()
+    }
+
+    /// The GEMM table request of the custom thinking checkpoint (`think_gemm_table`, default none).
+    pub(crate) fn think_gemm_request(&self) -> Result<crate::gemm_artifact::TableRequest> {
+        crate::gemm_artifact::TableRequest::parse(self.think_gemm_table.as_deref().unwrap_or("none"))
+    }
+
+    /// Static refusals of the custom thinking options and of this build, without I/O; nothing when none is set.
+    fn check_think_source(&self) -> Result<()> {
+        if self.think_source.is_some() || self.think_integrity.is_some() {
+            ensure!(self.thinking_enabled()?, "think_source and think_integrity require think: auto");
+            ensure!(
+                self.think_source.is_some() && self.think_integrity.is_some(),
+                "think_source and think_integrity must be given together"
+            );
+            ensure!(
+                self.think_calibration.is_none(),
+                "think_calibration conflicts with think_source; the integrity descriptor names the thinking calibration"
+            );
+        }
+        ensure!(
+            self.think_gemm_table.is_none() || self.think_source.is_some(),
+            "think_gemm_table requires think_source; the published pair inherits the base GEMM table"
+        );
+        if self.think_source.is_some() {
+            ensure!(
+                self.think_numerics()? == ThinkNumerics::Inherit,
+                "think_numerics upstream-bf16-pointwise is defined for the published pair; think_source supports inherit"
+            );
+            self.think_gemm_request()?;
+            use basal_gpu::plan::BackendKind;
+            ensure!(
+                matches!(BackendKind::llama(), BackendKind::Cuda | BackendKind::Metal),
+                "think_source needs a CUDA or Metal Llama backend in this build"
+            );
+        }
+        Ok(())
+    }
+
+    /// Refuse instance settings that custom thinking does not implement, before its descriptor is read; nothing
+    /// without `think_source`. `reproducibility` is the base plan's, `replicas` several replica devices, `cpu` an
+    /// instance on the CPU backend.
+    pub(crate) fn check_custom_think_execution(
+        &self,
+        quantization: basal_gpu::Quantization,
+        media: bool,
+        reproducibility: basal_gpu::Reproducibility,
+        replicas: bool,
+        cpu: bool,
+    ) -> Result<()> {
+        if self.think_source.is_none() {
+            return Ok(());
+        }
+        use crate::gemm_artifact::TableRequest;
+        use basal_gpu::Reproducibility;
+        ensure!(!cpu, "custom thinking is not implemented on the CPU backend");
+        ensure!(quantization == basal_gpu::Quantization::None, "custom thinking supports quantization none");
+        let request = self.think_gemm_request()?;
+        ensure!(
+            reproducibility != Reproducibility::Pinned || request.reproducibility() == Reproducibility::Pinned,
+            "a reproducible base plan needs think_gemm_table pinned or sha256:<digest> for the custom thinking checkpoint"
+        );
+        ensure!(!media, "custom thinking does not combine with media input");
+        ensure!(
+            !replicas || request != TableRequest::None,
+            "several replica_devices need think_gemm_table auto, pinned, sha256:<digest> or an invariant table path"
+        );
+        Ok(())
     }
 
     pub(crate) fn think_numerics(&self) -> Result<ThinkNumerics> {
@@ -269,17 +372,30 @@ impl ModelOptions {
         )?))
     }
 
-    fn think_settings(&self) -> Result<basal_core::thinking::ThinkSettings> {
+    pub(crate) fn think_settings(&self) -> Result<basal_core::thinking::ThinkSettings> {
         basal_core::thinking::ThinkSettings::new(self.think_tokens.unwrap_or(256), self.think_max_len.unwrap_or(8192))
     }
 
-    /// Validate the separately published checkpoint, tokenizer, calibration and content identities before GPU or
-    /// GEMM activity. No fallback to base weights, adapters or an untrained smaller model.
+    /// The thinking checkpoint, validated before GPU or GEMM activity: the published `think/` pair, or the custom
+    /// `think_source` verified against its `think_integrity` descriptor. No fallback from one to the other, to base
+    /// weights, adapters or an untrained smaller model.
     pub(crate) fn load_thinking(&self, base: &ModelManifest) -> Result<Option<LoadedThinking>> {
         let numerics = self.think_numerics()?;
         if !self.thinking_enabled()? {
             return Ok(None);
         }
+        match &self.think_source {
+            None => self.load_shipped_thinking(base, numerics),
+            Some(dir) => {
+                let descriptor = self.think_integrity.as_deref().context("think_source needs think_integrity")?;
+                crate::think_source::load_custom_thinking(self, base, dir, descriptor).map(Some)
+            }
+        }
+    }
+
+    /// Validate the separately published checkpoint, tokenizer, calibration and content identities before GPU or
+    /// GEMM activity. No fallback to base weights, adapters or an untrained smaller model.
+    fn load_shipped_thinking(&self, base: &ModelManifest, numerics: ThinkNumerics) -> Result<Option<LoadedThinking>> {
         use basal_core::prompt::{ChatStyle, PromptFormat};
         use basal_core::thinking::{THINK_REPO, THINK_REVISION};
         ensure!(
@@ -375,9 +491,7 @@ impl ModelOptions {
         let tokenizer = basal_core::tokenize::BasalTokenizer::load(&dir.join("tokenizer.json"))?;
         ensure!(tokenizer.vocab_size() == t.vocab, "thinking vocabulary size differs from config");
         let raw: Value = serde_json::from_slice(&std::fs::read(dir.join("tokenizer.json"))?)?;
-        let decoder = json!({"type":"Sequence","decoders":[
-            {"type":"Replace","pattern":{"String":"▁"},"content":" "},
-            {"type":"ByteFallback"},{"type":"Fuse"},{"type":"Strip","content":" ","start":1,"stop":0}]});
+        let decoder = llama_decoder();
         ensure!(
             raw.get("decoder") == Some(&decoder),
             "thinking decoded-byte bound requires the published Llama decoder"
@@ -408,7 +522,7 @@ impl ModelOptions {
             let key = if checkpoint == base.dir { "base/model.safetensors" } else { "think/model.safetensors" };
             sources["files"][key] = hash.into();
         }
-        Ok(Some(LoadedThinking { manifest, settings, eos, calibration_label, sources, numerics }))
+        Ok(Some(LoadedThinking { manifest, settings, eos, calibration_label, sources, numerics, custom: None }))
     }
 
     /// Identity follows upstream: HF snapshot repo/commit, otherwise the actual configured source and no revision.
@@ -465,6 +579,15 @@ pub(crate) struct LoadedThinking {
     pub calibration_label: String,
     pub sources: Value,
     pub numerics: ThinkNumerics,
+    /// The verified custom checkpoint and its own GEMM table; None for the published pair.
+    pub custom: Option<crate::think_source::CustomSource>,
+}
+
+/// `tokenizer.json` decoder of the Llama tokenizers whose decoded-byte bound the thinking generator relies on.
+pub(crate) fn llama_decoder() -> Value {
+    json!({"type":"Sequence","decoders":[
+        {"type":"Replace","pattern":{"String":"▁"},"content":" "},
+        {"type":"ByteFallback"},{"type":"Fuse"},{"type":"Strip","content":" ","start":1,"stop":0}]})
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -473,7 +596,7 @@ pub(crate) enum ThinkNumerics {
     UpstreamBf16Pointwise,
 }
 
-fn content_hash(bytes: &[u8]) -> String {
+pub(crate) fn content_hash(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     format!("{:x}", Sha256::digest(bytes))
 }
