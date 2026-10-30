@@ -104,10 +104,21 @@ pub fn run(file: Option<PathBuf>, model_refs: &[String], as_json: bool) -> Resul
             }
         }
     }
+    // A configuration of `backend: cpu` models only needs no GPU: discovery is skipped.
+    let cpu_only = config.as_ref().is_some_and(|c| {
+        !c.models.is_empty() && c.models.iter().all(|m| m.backend == basal_gpu::ExecutionBackend::Cpu)
+    });
     // Resolve scheduler/routing conflicts before update notices and device discovery for Device and Host alike.
-    build(&mut r, !invalid_scheduler);
+    build(&mut r, !invalid_scheduler, cpu_only);
     system(&mut r);
-    let gpus = if invalid_ple || invalid_scheduler { None } else { gpu(&mut r) };
+    let gpus = if invalid_ple || invalid_scheduler {
+        None
+    } else if cpu_only {
+        r.info("gpu", "skipped: every configured model uses backend: cpu");
+        None
+    } else {
+        gpu(&mut r)
+    };
     r.0.extend(config_report.0);
     if let Some(c) = &config {
         if !invalid_scheduler {
@@ -165,7 +176,7 @@ fn command(cmd: &str, args: &[&str]) -> Option<String> {
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-fn build(r: &mut Report, check_update: bool) {
+fn build(r: &mut Report, check_update: bool, cpu_only: bool) {
     r.ok("basal", format!("basal {}", crate::version()));
     // the binary itself (Homebrew links bin/basal to Cellar/basal-rs/<version>/bin/basal)
     let exe = std::env::current_exe().ok().map(|e| e.canonicalize().unwrap_or(e));
@@ -183,6 +194,8 @@ fn build(r: &mut Report, check_update: bool) {
     }
     if let Some(b) = crate::paths::cuda_binary() {
         r.info("basal", format!("GPU commands run the CUDA build {}", crate::term::P(&b)));
+    } else if basal_gpu::BUILD_BACKEND == "no GPU backend" && cpu_only {
+        r.info("basal", "this build has no GPU backend; the configured models use backend: cpu");
     } else if basal_gpu::BUILD_BACKEND == "no GPU backend" {
         r.fail(
             "basal",
@@ -587,6 +600,10 @@ fn models(r: &mut Report, c: &ServeConfig, gpus: Option<&[Gpu]>) {
                 continue;
             }
         };
+        if matches!(placement, config::Placement::Cpu) {
+            cpu_model(r, c, m, routing.workers(false));
+            continue;
+        }
         // the static checks `basal serve` makes of a layer split before any download
         if let Some(split) = placement.split() {
             if let Err(e) = config::check_layer_split(&config::describe(m), split, &m.dtype, "fused", cuda) {
@@ -674,7 +691,7 @@ fn models(r: &mut Report, c: &ServeConfig, gpus: Option<&[Gpu]>) {
                 Ok((memory, host, workers, replicas)) => {
                     bytes = memory.estimated_device_weight_bytes;
                     for devices in placement.instances() {
-                        for device in devices {
+                        for &device in devices.gpus() {
                             let scratch = ple_load_scratch.entry(device).or_default();
                             *scratch = (*scratch).max(memory.estimated_device_load_scratch_bytes);
                         }
@@ -703,7 +720,7 @@ fn models(r: &mut Report, c: &ServeConfig, gpus: Option<&[Gpu]>) {
             // the checkpoint is loaded on every device of the model
             None => {
                 for devices in placement.instances() {
-                    for d in devices {
+                    for &d in devices.gpus() {
                         *resident.entry(d).or_default() += bytes;
                     }
                 }
@@ -843,6 +860,69 @@ fn models(r: &mut Report, c: &ServeConfig, gpus: Option<&[Gpu]>) {
         let gpus = crate::config::bundled_gpus();
         let built_in = if gpus.is_empty() { "none".to_string() } else { gpus.join(", ") };
         r.info("models", format!("GEMM tables: {}; built in for: {built_in}", crate::term::P(&gc)));
+    }
+}
+
+/// A `backend: cpu` model: the static refusals of `basal serve`, then, with a local or cached checkpoint, its host
+/// source estimate (`workers` forward ceilings and the Batch pool) against the current host headroom. No GPU is asked.
+fn cpu_model(r: &mut Report, c: &ServeConfig, m: &config::ModelConfig, workers: u64) {
+    let model = config::describe(m);
+    if c.models.len() != 1 {
+        r.fail(
+            "models",
+            format!("{model}: backend: cpu serves exactly one model per process in this release"),
+            "serve the CPU model in its own `basal serve` process",
+        );
+        return;
+    }
+    let work = match config::cpu_work(m, None, "f32") {
+        Ok(Some(work)) => work,
+        Ok(None) => return,
+        Err(e) => {
+            r.fail(
+                "models",
+                format!("{e:#}"),
+                "with `backend: cpu` set `cpu_work_mb` and leave the GPU-only options at their defaults",
+            );
+            return;
+        }
+    };
+    let dir = m
+        .path
+        .clone()
+        .or_else(|| m.repo.as_deref().and_then(|repo| config::cached_model_dir(repo, m.revision.as_deref())));
+    let Some(dir) = dir else {
+        r.info("models", format!("{model}: backend: cpu; the host estimate needs the downloaded checkpoint"));
+        return;
+    };
+    let estimate = (|| -> Result<_> {
+        let value = serde_json::from_str(&std::fs::read_to_string(dir.join("config.json"))?)?;
+        let arch = basal_core::architecture::Architecture::parse(&value)?;
+        anyhow::ensure!(
+            matches!(arch, basal_core::architecture::Architecture::Llama(_)),
+            "the CPU backend runs dense BF16 Llama checkpoints; Gemma/Omni and Qwen3.5 are not implemented on CPU"
+        );
+        let memory = basal_gpu::RuntimeBackend::cpu_host_memory(&dir, &arch)?;
+        let pool = c.batches.host_exec_pool_bytes()?;
+        let bytes = memory.startup_bytes(workers, work.get())?.checked_add(pool).context("CPU estimate overflow")?;
+        config::check_host_headroom(bytes, "the CPU backend")?;
+        Ok((memory, bytes))
+    })();
+    match estimate {
+        Ok((memory, bytes)) => r.ok(
+            "models",
+            format!(
+                "{model}: backend: cpu, {workers} worker(s) with a {work} byte forward ceiling; {bytes} estimated host \
+                 bytes within current host/cgroup headroom; source estimate {} (named tensor payloads, not \
+                 allocator peaks, RSS or OOM protection)",
+                serde_json::to_string(&memory).unwrap_or_default()
+            ),
+        ),
+        Err(e) => r.fail(
+            "models",
+            format!("{model}: {e:#}"),
+            "use a dense BF16 Llama checkpoint, lower `cpu_work_mb` or free host RAM",
+        ),
     }
 }
 

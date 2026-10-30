@@ -101,6 +101,22 @@ fn delegate_gpu_command(cmd: &Cmd) {
     ) {
         return;
     }
+    // `--backend cpu` runs in this binary
+    let g = match cmd {
+        Cmd::Benchmark { g, .. }
+        | Cmd::Decide { g, .. }
+        | Cmd::Export { g, .. }
+        | Cmd::BenchRequests { g, .. }
+        | Cmd::EvalChoiceSet { g, .. }
+        | Cmd::EvalLargeChoice { g, .. }
+        | Cmd::Profile { g, .. }
+        | Cmd::Serve { g, .. }
+        | Cmd::Bench { g, .. } => Some(g),
+        _ => None,
+    };
+    if g.is_some_and(|g| g.backend == Some(basal_gpu::ExecutionBackend::Cpu)) {
+        return;
+    }
     if let Some(bin) = paths::cuda_binary() {
         let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
         let err = cuda_command(&bin).args(&args[1..]).exec();
@@ -161,9 +177,18 @@ struct GpuArgs {
     /// Letter logits: f32, or bf16 (f32 rounded to bf16, diagnostic emulation of a bf16 lm_head)
     #[arg(long, default_value = "f32")]
     readout: String,
-    /// Decoder kernels: fused (default) or candle (stock candle ops, first port; for comparison)
-    #[arg(long, default_value = "fused")]
-    kernels: String,
+    /// Decoder kernels: fused (default; candle with --backend cpu) or candle (stock candle ops, first port; for
+    /// comparison)
+    #[arg(long)]
+    kernels: Option<String>,
+    /// gpu (default: this build's GPU backend) or cpu: a dense BF16 Llama model on the host CPU, computed in f32 with
+    /// candle kernels, text only, one model. With a serve configuration file set `backend` per model instead
+    #[arg(long)]
+    backend: Option<basal_gpu::ExecutionBackend>,
+    /// Required with --backend cpu: MiB of host working set one CPU forward may use (larger inputs are refused, longer
+    /// batches run in sub-batches). With a serve configuration file set `cpu_work_mb` per model instead
+    #[arg(long)]
+    cpu_work_mb: Option<usize>,
     /// Last-layer row pruning: auto (current behavior), on or off (fused CUDA/Metal Llama).
     /// With a serve configuration file, set `readout_layer` per model instead.
     #[arg(long)]
@@ -224,6 +249,46 @@ impl GpuArgs {
         model.model_options = self.model_options.clone();
         config::check_ple_source(basal_gpu::PleMode::Host, self.layer_split.is_some(), &model)
     }
+
+    /// `--kernels`, else candle with `--backend cpu`, else fused.
+    fn kernels(&self) -> &str {
+        match (&self.kernels, self.backend) {
+            (Some(kernels), _) => kernels,
+            (None, Some(basal_gpu::ExecutionBackend::Cpu)) => "candle",
+            (None, _) => "fused",
+        }
+    }
+
+    /// `source` configured with the options of the command line, as a serve configuration would set them.
+    fn cpu_model(&self, source: &str) -> Result<config::ModelConfig> {
+        let mut model = config::model_ref(source)?;
+        model.backend = self.backend.unwrap_or_default();
+        model.cpu_work_mb = self.cpu_work_mb;
+        model.dtype.clone_from(&self.dtype);
+        model.inference_mode.clone_from(&self.inference_mode);
+        model.quantization = self.quantization.clone().unwrap_or_else(|| Quantization::None.as_str().into());
+        model.ple_placement = self.ple_placement.unwrap_or_default();
+        model.readout_layer = self.readout_layer.unwrap_or_default();
+        model.state_cache_mb = self.state_cache_mb;
+        model.media = self.media;
+        model.model_options = self.model_options.clone();
+        model.device = self.device;
+        model.layer_split.clone_from(&self.layer_split);
+        model.gemm_table = self.gemm_table.as_ref().map_or_else(|| "none".into(), |t| t.display().to_string());
+        Ok(model)
+    }
+
+    /// The static CPU refusals of `source` with these options, before any download, GPU or GEMM table: the CPU
+    /// per-forward ceiling with `--backend cpu`, else None (refusing `--cpu-work-mb`).
+    fn check_cpu(&self, source: &str) -> Result<Option<std::num::NonZeroU64>> {
+        let model = self.cpu_model(source)?;
+        let work = config::cpu_work(&model, self.kernels.as_deref(), &self.readout)?;
+        if work.is_some() {
+            model.placement()?;
+        }
+        Ok(work)
+    }
+
     /// The GPU ordinal (`--device`, default 0).
     fn device(&self) -> usize {
         self.device.unwrap_or(0)
@@ -238,7 +303,7 @@ impl GpuArgs {
     /// driver (every ordinal visible, one GPU type), before any download, GEMM table or load.
     fn check_layer_split(&self, model: &str) -> Result<()> {
         let Some(split) = &self.layer_split else { return Ok(()) };
-        config::check_layer_split(model, split, &self.dtype, &self.kernels, cfg!(feature = "cuda"))?;
+        config::check_layer_split(model, split, &self.dtype, self.kernels(), cfg!(feature = "cuda"))?;
         config::check_same_gpus(model, &config::Placement::Split(split.clone()))
     }
 
@@ -248,7 +313,7 @@ impl GpuArgs {
             model,
             self.quantization.as_deref().unwrap_or(Quantization::None.as_str()),
             &self.dtype,
-            &self.kernels,
+            self.kernels(),
             cfg!(feature = "cuda"),
         )
     }
@@ -703,7 +768,8 @@ fn read_request(src: &str) -> Result<Value> {
 }
 
 fn gpu_engine(m: &ModelArgs, g: &GpuArgs) -> Result<Engine<GpuBackend>> {
-    // an unsupported weight format or layer split fails before the model is downloaded
+    // an unsupported CPU option, weight format or layer split fails before the model is downloaded
+    g.check_cpu(&m.model)?;
     g.quantization(&m.model)?;
     g.check_ple_source(&m.model)?;
     g.check_layer_split(&m.model)?;
@@ -783,7 +849,7 @@ fn check_thinking_gpu_options(g: &GpuArgs) -> Result<()> {
         .reproducibility(),
     };
     g.model_options.check_think_execution(
-        Kernels::parse(&g.kernels)?,
+        Kernels::parse(g.kernels())?,
         g.quantization.as_deref().unwrap_or("none").parse()?,
         parse_inference_mode(&g.inference_mode)?,
         g.layer_split.is_some(),
@@ -806,6 +872,9 @@ fn planned_engine_from_manifest(
     thinking: Option<model_options::LoadedThinking>,
     g: &GpuArgs,
 ) -> Result<PlannedEngine> {
+    if g.backend == Some(basal_gpu::ExecutionBackend::Cpu) {
+        return cpu_engine_from_manifest(manifest, thinking, g);
+    }
     check_thinking_gpu_options(g)?;
     let dir = manifest.dir.as_path();
     let inference_mode = parse_inference_mode(&g.inference_mode)?;
@@ -818,7 +887,7 @@ fn planned_engine_from_manifest(
     ple.resolve(&manifest.config, g.layer_split.is_some())?;
     let readout = g.readout()?;
     let profile = models::profile_for(&manifest);
-    let kernels = Kernels::parse(&g.kernels)?;
+    let kernels = Kernels::parse(g.kernels())?;
     let readout_layer = g.readout_layer.unwrap_or_default();
     readout_layer.resolve(&manifest.config, kernels)?;
     // Before precision/device/GEMM work below, heads are validated from the exact published model.
@@ -1023,6 +1092,58 @@ fn planned_engine_from_manifest(
     Ok(PlannedEngine { engine, plan, profile })
 }
 
+/// Load the model of `manifest` on the host CPU (`--backend cpu`): the static CPU refusals of `g`, Llama only, the
+/// host headroom of its source estimate, then a CPU plan frozen without any GPU query (no GPU discovery, memory query,
+/// precision rule, GEMM table or Intel loader) and the shared Llama loader on `Device::Cpu`.
+fn cpu_engine_from_manifest(
+    manifest: ModelManifest,
+    thinking: Option<model_options::LoadedThinking>,
+    g: &GpuArgs,
+) -> Result<PlannedEngine> {
+    let work = g.check_cpu(&manifest.dir.to_string_lossy())?.context("the CPU backend needs cpu_work_mb")?;
+    anyhow::ensure!(thinking.is_none(), "model {}: thinking is not implemented on the CPU backend", manifest.name);
+    config::check_cpu_architecture(&manifest)?;
+    let memory = GpuBackend::cpu_host_memory(&manifest.dir, &manifest.config)?;
+    config::check_host_headroom(memory.startup_bytes(1, work.get())?, "the CPU backend")?;
+    crate::note!(
+        "{}: CPU host source estimate {} (named tensor payloads, not allocator peaks, RSS or OOM protection)",
+        manifest.name,
+        serde_json::to_string(&memory)?
+    );
+    let profile = models::profile_for(&manifest);
+    let plan = basal_gpu::ResolvedExecutionPlan::freeze_cpu(
+        profile.id,
+        profile.kernel_set,
+        &profile.dispatch,
+        &manifest.config,
+        work,
+    )
+    .with_context(|| format!("model {} (profile {})", manifest.name, profile.id))?;
+    crate::note!("{}: execution plan {}", manifest.name, plan_summary(&plan));
+    let (backend, _) =
+        GpuBackend::load_planned(&manifest.dir, &manifest.config, &plan, basal_gpu::PlannedPlacement::Cpu, false)
+            .with_context(|| format!("loading {} on the host CPU", manifest.name))?;
+    crate::done!(
+        "{} loaded on the host CPU in {:.1}s ({} GEMM threads, cpu work ceiling {} bytes)",
+        manifest.name,
+        backend.load_s(),
+        plan.cpu_gemm_threads().unwrap_or(0),
+        work
+    );
+    let mut engine = Engine::new(manifest, backend)?;
+    engine.request_batching = g.model_options.request_batching();
+    if g.model_options.soam == Some(model_options::Soam::Off) {
+        crate::note!(
+            "SOAM off: Budget primitive rows, option orders packed together; queue entries remain whole requests"
+        );
+    }
+    engine.set_auto_orders(g.model_options.auto_orders()?);
+    engine.set_context_overflow(g.model_options.overflow()?);
+    engine.mark_state = false;
+    engine.tree_max_tokens = g.tree_max_tokens;
+    Ok(PlannedEngine { engine, plan, profile })
+}
+
 /// Profile, digest of the plan identity and its main decisions, for the log.
 fn plan_summary(plan: &basal_gpu::ResolvedExecutionPlan) -> String {
     use sha2::Digest;
@@ -1156,7 +1277,7 @@ fn run() -> Result<()> {
             let batching = parse_batching(&batching)?;
             let mut engine = gpu_engine(&m, &g)?;
             let load_s = engine.backend.load_s();
-            let mut run = json!({"dtype": g.dtype, "inference_mode": g.inference_mode, "quantization": g.quantization(&m.model)?.as_str(), "readout": g.readout, "kernels": g.kernels, "prefix_cache": !g.no_prefix_cache, "load_s": load_s});
+            let mut run = json!({"dtype": g.dtype, "inference_mode": g.inference_mode, "quantization": g.quantization(&m.model)?.as_str(), "readout": g.readout, "kernels": g.kernels(), "prefix_cache": !g.no_prefix_cache, "load_s": load_s});
             // only with a split: its stages as given (one GPU keeps the run object unchanged)
             if let Some(split) = &g.layer_split {
                 run["layer_split"] = serde_json::to_value(split.stages())?;
@@ -1402,10 +1523,18 @@ fn run() -> Result<()> {
                     g.layer_split.is_none(),
                     "--layer-split applies to --model; with a configuration file set `layer_split` per model in it"
                 );
+                anyhow::ensure!(
+                    g.backend.is_none() && g.cpu_work_mb.is_none(),
+                    "--backend and --cpu-work-mb apply to --model; with a configuration file set `backend` and \
+                     `cpu_work_mb` per model in it"
+                );
             } else {
                 // models from the command line: the options of the command line
                 for m in &mut c.models {
-                    if g.dtype != "auto" {
+                    m.backend = g.backend.unwrap_or_default();
+                    m.cpu_work_mb = g.cpu_work_mb;
+                    // a catalog model's GPU dtype (f16) does not apply on the CPU backend
+                    if g.dtype != "auto" || m.backend == basal_gpu::ExecutionBackend::Cpu {
                         m.dtype = g.dtype.clone();
                     }
                     m.inference_mode = g.inference_mode.clone();
@@ -1469,6 +1598,19 @@ fn run() -> Result<()> {
             };
             let batch_qualifications =
                 c.models.iter().map(config::ModelConfig::batch_qualification).collect::<Result<Vec<_>, _>>()?;
+            // the CPU backend's static refusals and per-forward ceilings, before any download or GPU
+            let cpu_works = c
+                .models
+                .iter()
+                .map(|m| config::cpu_work(m, g.kernels.as_deref(), &g.readout))
+                .collect::<Result<Vec<_>>>()?;
+            if cpu_works.iter().any(Option::is_some) {
+                anyhow::ensure!(
+                    c.models.len() == 1,
+                    "backend: cpu serves exactly one model per process in this release"
+                );
+                anyhow::ensure!(!g.media, "media is not implemented on the CPU backend");
+            }
             // devices of every model's instances, its weight format and layer split; the GPUs of a replica group or
             // a layer split are compared before any download
             let placements: Vec<config::Placement> = c
@@ -1477,10 +1619,10 @@ fn run() -> Result<()> {
                 .map(|m| {
                     let model = config::describe(m);
                     config::check_ple_source(m.ple_placement, m.layer_split.is_some(), m)?;
-                    config::check_quantization(&model, &m.quantization, &m.dtype, &g.kernels, cfg!(feature = "cuda"))?;
+                    config::check_quantization(&model, &m.quantization, &m.dtype, g.kernels(), cfg!(feature = "cuda"))?;
                     let placement = m.placement().with_context(|| format!("model {model}"))?;
                     if let Some(split) = placement.split() {
-                        config::check_layer_split(&model, split, &m.dtype, &g.kernels, cfg!(feature = "cuda"))?;
+                        config::check_layer_split(&model, split, &m.dtype, g.kernels(), cfg!(feature = "cuda"))?;
                     }
                     Ok(placement)
                 })
@@ -1512,7 +1654,7 @@ fn run() -> Result<()> {
                 .zip(&placements)
                 .map(|((mc, manifest), placement)| {
                     mc.model_options.check_think_execution(
-                        Kernels::parse(&g.kernels)?,
+                        Kernels::parse(g.kernels())?,
                         mc.quantization.parse()?,
                         parse_inference_mode(&mc.inference_mode)?,
                         placement.split().is_some(),
@@ -1525,13 +1667,16 @@ fn run() -> Result<()> {
             for ((mc, manifest), placement) in c.models.iter().zip(&manifests).zip(&placements) {
                 let quantization: Quantization =
                     mc.quantization.parse().with_context(|| format!("model {}", manifest.name))?;
+                if matches!(placement, config::Placement::Cpu) {
+                    config::check_cpu_architecture(manifest)?;
+                }
                 config::check_architecture(manifest, quantization, placement.split().is_some())?;
                 mc.ple_placement.resolve(&manifest.config, placement.split().is_some())?;
-                mc.readout_layer.resolve(&manifest.config, Kernels::parse(&g.kernels)?)?;
+                mc.readout_layer.resolve(&manifest.config, Kernels::parse(g.kernels())?)?;
                 if mc.model_options.exits_enabled() {
                     let readout = g.readout()?;
                     GpuBackend::check_early_exit(
-                        Kernels::parse(&g.kernels)?,
+                        Kernels::parse(g.kernels())?,
                         quantization,
                         readout,
                         placement.split().is_some(),
@@ -1579,11 +1724,33 @@ fn run() -> Result<()> {
                     host_ple_load.checked_add(pool).context("host PLE plus Batch pool overflow")?,
                 )?;
             }
+            // The CPU model (the only one): resident, load scratch and one ceiling per worker (main and long lane,
+            // counted although one gate serializes them), plus the Batch pool, before anything loads.
+            for ((mc, manifest), work) in c.models.iter().zip(&manifests).zip(&cpu_works) {
+                let Some(work) = work else { continue };
+                let memory = GpuBackend::cpu_host_memory(&manifest.dir, &manifest.config)?;
+                let workers = mc.routing_policy()?.workers(false);
+                let pool = batch_settings.as_ref().map_or(0, |b| b.host.exec_pool_bytes);
+                let bytes =
+                    memory.startup_bytes(workers, work.get())?.checked_add(pool).context("CPU estimate overflow")?;
+                config::check_host_headroom(bytes, "the CPU backend")?;
+                crate::note!(
+                    "{}: CPU {} worker(s) with a {} byte forward ceiling each, plus {pool} Batch pool bytes; source \
+                     estimate {} (named tensor payloads, not allocator peaks, RSS or OOM protection)",
+                    manifest.name,
+                    workers,
+                    work,
+                    serde_json::to_string(&memory)?
+                );
+            }
             // one table per model, chosen on its first device (first phase of the execution plan) and checked on
-            // every device of the model before anything loads
+            // every device of the model before anything loads; none on the host CPU
             let mut tables = Vec::new();
             for ((mc, manifest), placement) in c.models.iter().zip(&manifests).zip(&placements) {
-                let device = placement.first_device();
+                let Some(device) = placement.first_device() else {
+                    tables.push(gemm_artifact::ResolvedGemm::none(false));
+                    continue;
+                };
                 let precision = config::model_precision(&mc.dtype, manifest, device)?;
                 let profile = models::profile_for(manifest);
                 let table = gemm_artifact::resolve(
@@ -1592,7 +1759,7 @@ fn run() -> Result<()> {
                     profile,
                     precision,
                     &c.gemm_cache,
-                    &placement.instances().concat(),
+                    &placement.instances().iter().flat_map(|i| i.gpus().iter().copied()).collect::<Vec<_>>(),
                 )?;
                 config::check_table_on_devices(manifest, table.table.as_ref(), placement)?;
                 tables.push(table);
@@ -1611,7 +1778,7 @@ fn run() -> Result<()> {
                 let instances = placement.instances();
                 let mut replicas = Vec::with_capacity(instances.len());
                 for devices in instances {
-                    let mg = GpuArgs {
+                    let mut mg = GpuArgs {
                         model_options: mc.model_options.clone(),
                         media: mc.media || g.media,
                         orders: mc.orders.clone(),
@@ -1619,6 +1786,8 @@ fn run() -> Result<()> {
                         inference_mode: mc.inference_mode.clone(),
                         readout: g.readout.clone(),
                         kernels: g.kernels.clone(),
+                        backend: None,
+                        cpu_work_mb: None,
                         readout_layer: Some(mc.readout_layer),
                         quantization: Some(mc.quantization.clone()),
                         ple_placement: Some(mc.ple_placement),
@@ -1626,10 +1795,21 @@ fn run() -> Result<()> {
                         state_cache_mb: mc.state_cache_mb,
                         tree_max_tokens: mc.tree_max_tokens,
                         gemm_table: None,
-                        resolved_gemm: Some(table.clone()),
-                        device: placement.split().is_none().then(|| devices[0]),
-                        layer_split: placement.split().cloned(),
+                        resolved_gemm: None,
+                        device: None,
+                        layer_split: None,
                     };
+                    match &devices {
+                        config::InstanceDevices::Gpu(ds) => {
+                            mg.resolved_gemm = Some(table.clone());
+                            mg.device = placement.split().is_none().then(|| ds[0]);
+                            mg.layer_split = placement.split().cloned();
+                        }
+                        config::InstanceDevices::Cpu => {
+                            mg.backend = Some(basal_gpu::ExecutionBackend::Cpu);
+                            mg.cpu_work_mb = mc.cpu_work_mb;
+                        }
+                    }
                     let planned = planned_engine_from_manifest(manifest.clone(), thinking.clone(), &mg)?;
                     let scheduling = planned.scheduling();
                     let mut engine = planned.engine;
@@ -1742,6 +1922,10 @@ fn run() -> Result<()> {
             eprintln!("facts: {n} states -> {}", out.display());
         }
         Cmd::Bench { m, g, reference, out, lat_n, batching } => {
+            anyhow::ensure!(
+                g.backend != Some(basal_gpu::ExecutionBackend::Cpu) && g.cpu_work_mb.is_none(),
+                "bench measures GPU resources; the CPU backend has no benchmark telemetry in this release"
+            );
             let batch = parse_batching(&batching)?;
             anyhow::ensure!(batch != basal_core::Batching::Single, "bench --batching requires budget or tree");
             let mut engine = gpu_engine(&m, &g)?;

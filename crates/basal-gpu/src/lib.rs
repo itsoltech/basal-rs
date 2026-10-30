@@ -34,6 +34,8 @@ use candle_nn::ops::{rms_norm, softmax_last_dim};
 use candle_nn::rotary_emb::rope;
 use serde_json::{json, Value};
 
+mod cpu;
+pub use cpu::CpuHostMemory;
 #[cfg(feature = "cuda")]
 mod cublaslt;
 mod early_exit;
@@ -51,8 +53,8 @@ pub use inference::{InferenceConfigError, InferenceMode};
 mod memory;
 pub mod plan;
 pub use plan::{
-    AttentionProducts, DeviceDefaultRule, DiagnosticOverrides, DispatchRule, ExecutionPolicy, GemmArtifact,
-    GemmFallback, GemmPolicy, GemmProvenance, KernelSet, PlanError, PlanOptions, PleMode, ReadoutLayer,
+    AttentionProducts, DeviceDefaultRule, DiagnosticOverrides, DispatchRule, ExecutionBackend, ExecutionPolicy,
+    GemmArtifact, GemmFallback, GemmPolicy, GemmProvenance, KernelSet, PlanError, PlanOptions, PleMode, ReadoutLayer,
     Reproducibility, ResolvedExecutionPlan,
 };
 mod quant;
@@ -584,14 +586,45 @@ pub struct GpuBackend {
     pub last_timing: (f64, f64),
     /// Stop token of background work ([`Backend::set_stop_token`]); never inherited by forks.
     stop: Option<StopToken>,
+    /// Some exactly when the single stage is [`StageDevice::Cpu`]: the frozen per-forward ceiling and GEMM threads of
+    /// the host CPU instance, copied to forks.
+    cpu: Option<cpu::CpuWork>,
 }
 
-/// One consecutive range of decoder layers on one GPU.
+/// Where a stage runs: a GPU ordinal ([`gpu_device`]) or the host CPU (`Device::Cpu`, the only stage).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StageDevice {
+    Gpu(usize),
+    Cpu,
+}
+
+impl StageDevice {
+    /// The GPU ordinal; None on the host CPU.
+    fn gpu(self) -> Option<usize> {
+        match self {
+            Self::Gpu(d) => Some(d),
+            Self::Cpu => None,
+        }
+    }
+}
+
+impl std::fmt::Display for StageDevice {
+    /// A GPU stage prints its ordinal alone, as the plain ordinal did before.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Gpu(d) => write!(f, "{d}"),
+            Self::Cpu => f.write_str("cpu"),
+        }
+    }
+}
+
+/// One consecutive range of decoder layers on one GPU, or the whole model on the host CPU.
 struct Stage {
-    /// `gpu_device(device)` of this stage: its own candle device (handles, kernel caches) on the GPU's primary context.
+    /// `gpu_device(device)` of this stage: its own candle device (handles, kernel caches) on the GPU's primary context;
+    /// `Device::Cpu` for the host CPU.
     dev: Device,
-    /// The ordinal `dev` was opened with ([`gpu_device`]).
-    device: usize,
+    /// The ordinal `dev` was opened with ([`gpu_device`]), or the host CPU.
+    device: StageDevice,
     /// Global indices of the stage's layers.
     layers: Range<usize>,
     /// Device memory of the stage (weights, its cuBLASLt handle), freed with the stage's context bound.
@@ -1140,7 +1173,8 @@ struct TransferStats {
 
 impl TransferStats {
     fn new(stages: &[Stage]) -> Self {
-        Self::for_devices(&stages.iter().map(|s| s.device).collect::<Vec<_>>())
+        // only a layer split has boundaries, and its stages are GPUs by construction (the host CPU runs one stage)
+        Self::for_devices(&stages.iter().filter_map(|s| s.device.gpu()).collect::<Vec<_>>())
     }
 
     fn for_devices(devices: &[usize]) -> Self {
@@ -1704,7 +1738,7 @@ impl GpuBackend {
             readout,
             kernels,
             quantization,
-            &[(device, 0..cfg.num_layers)],
+            &[(StageDevice::Gpu(device), 0..cfg.num_layers)],
         )?;
         backend.attention_defaults = defaults;
         Ok(backend)
@@ -1729,7 +1763,8 @@ impl GpuBackend {
         let stages = Self::split_stages(cfg, precision, kernels, quantization, split)?;
         let devices: Vec<usize> = stages.iter().map(|(d, _)| *d).collect();
         let defaults = DeviceDefaultRule::V1.stage_kernels(&devices)?;
-        let mut backend = Self::load_stages(model_dir, cfg, precision, readout, kernels, quantization, &stages)?;
+        let mut backend =
+            Self::load_stages(model_dir, cfg, precision, readout, kernels, quantization, &Self::gpu_stages(stages))?;
         backend.attention_defaults = defaults;
         Ok(backend)
     }
@@ -1750,7 +1785,15 @@ impl GpuBackend {
         device: usize,
     ) -> Result<Self> {
         quantization.check(precision, kernels, cfg!(feature = "cuda"))?;
-        Self::load_stages(model_dir, cfg, precision, readout, kernels, quantization, &[(device, 0..cfg.num_layers)])
+        Self::load_stages(
+            model_dir,
+            cfg,
+            precision,
+            readout,
+            kernels,
+            quantization,
+            &[(StageDevice::Gpu(device), 0..cfg.num_layers)],
+        )
     }
 
     /// [`GpuBackend::load_split`] without an attention policy ([`GpuBackend::load_unplanned`]).
@@ -1768,7 +1811,12 @@ impl GpuBackend {
         split: &LayerSplit,
     ) -> Result<Self> {
         let stages = Self::split_stages(cfg, precision, kernels, quantization, split)?;
-        Self::load_stages(model_dir, cfg, precision, readout, kernels, quantization, &stages)
+        Self::load_stages(model_dir, cfg, precision, readout, kernels, quantization, &Self::gpu_stages(stages))
+    }
+
+    /// The stages of a layer split as GPU stages of [`GpuBackend::load_stages`].
+    fn gpu_stages(stages: Vec<(usize, Range<usize>)>) -> Vec<(StageDevice, Range<usize>)> {
+        stages.into_iter().map(|(device, range)| (StageDevice::Gpu(device), range)).collect()
     }
 
     /// The checked device and layer range of every stage of `split`.
@@ -1785,10 +1833,10 @@ impl GpuBackend {
         Ok(split.devices().into_iter().zip(ranges).collect())
     }
 
-    /// Load the stages `plan` (device ordinal and global layer range of each, in layer order; one stage is the whole
-    /// model on one GPU). Stages are filled one after another; each stage's memory belongs to its entry of a local
-    /// `built` list from before its first allocation, so a failed load frees everything already loaded, each stage
-    /// with its own context bound.
+    /// Load the stages `plan` (device and global layer range of each, in layer order; one stage is the whole model on
+    /// one GPU or on the host CPU). Stages are filled one after another; each stage's memory belongs to its entry of a
+    /// local `built` list from before its first allocation, so a failed load frees everything already loaded, each
+    /// stage with its own context bound.
     fn load_stages(
         model_dir: &Path,
         cfg: &LlamaConfig,
@@ -1796,16 +1844,18 @@ impl GpuBackend {
         readout: Readout,
         kernels: Kernels,
         quantization: Quantization,
-        plan: &[(usize, Range<usize>)],
+        plan: &[(StageDevice, Range<usize>)],
     ) -> Result<Self> {
         let t0 = Instant::now();
         ensure!(!plan.is_empty(), "a model needs at least one stage");
+        ensure!(plan.len() == 1 || plan.iter().all(|(d, _)| *d != StageDevice::Cpu), "the host CPU runs one stage");
         let split = plan.len() > 1;
         let devs = plan
             .iter()
             .enumerate()
             .map(|(s, (device, _))| {
-                let dev = gpu_device(*device);
+                let StageDevice::Gpu(device) = *device else { return Ok(Device::Cpu) };
+                let dev = gpu_device(device);
                 if split {
                     dev.with_context(|| format!("stage {s} (CUDA device {device})"))
                 } else {
@@ -1911,7 +1961,7 @@ impl GpuBackend {
                          projection: Projection,
                          names: &[String],
                          dev: &Device,
-                         device: usize|
+                         device: StageDevice|
          -> Result<ProjWeight> {
             match quantization {
                 Quantization::None => Ok(ProjWeight::Dense(load_cat(names, dev)?)),
@@ -1956,7 +2006,7 @@ impl GpuBackend {
             }
         };
         let qd = cfg.heads * cfg.head_dim;
-        let load_layer = |l: usize, dev: &Device, device: usize| -> Result<Layer> {
+        let load_layer = |l: usize, dev: &Device, device: StageDevice| -> Result<Layer> {
             let p = |n: &str| format!("model.layers.{l}.{n}");
             let ps = |ns: &[&str]| ns.iter().map(|n| p(n)).collect::<Vec<_>>();
             Ok(Layer {
@@ -2008,8 +2058,10 @@ impl GpuBackend {
                         built.push(OnStage::new(dev, true, &lineage.health, StageWeights::default()));
                         let w = built.last_mut().context("the stage was just added")?.get_mut();
                         for l in range.clone() {
-                            let layer = load_layer(l, dev, device)
-                                .with_context(|| format!("layer {l} of stage {s} on {kind} device {device}"))?;
+                            let layer = load_layer(l, dev, device).with_context(|| match device {
+                                StageDevice::Gpu(device) => format!("layer {l} of stage {s} on {kind} device {device}"),
+                                StageDevice::Cpu => format!("layer {l} of stage {s} on the host CPU"),
+                            })?;
                             w.layers.push(layer);
                         }
                         if s == 0 {
@@ -2140,6 +2192,7 @@ impl GpuBackend {
             .collect();
         let transfers = split.then(|| Arc::new(TransferStats::new(&stages)));
         Ok(Self {
+            cpu: None,
             stages,
             lineage,
             transfers,
@@ -2860,14 +2913,8 @@ impl GpuBackend {
     fn transfer(&self, gates: &mut StageGates<'_>, s: usize, buf: Tensor) -> Result<Tensor> {
         let dims = buf.dims();
         ensure!(dims.len() == 3 && dims[0] == 2, "boundary buffer of shape {dims:?}, [2, M, H] expected");
-        transfer_activation(
-            gates,
-            s,
-            (self.stages[s].device, self.stages[s + 1].device),
-            buf,
-            &self.lineage,
-            self.transfers.as_deref(),
-        )
+        let ordinal = |s: usize| self.stages[s].device.gpu().context("a layer split runs on GPUs");
+        transfer_activation(gates, s, (ordinal(s)?, ordinal(s + 1)?), buf, &self.lineage, self.transfers.as_deref())
     }
 
     /// `x + (y + b)` and its RMSNorm with `ln`: one fused kernel on CUDA, the two separate ops elsewhere (bitwise the
@@ -3242,7 +3289,7 @@ impl GpuBackend {
                         let mut v = st.w.get().lt.as_deref().map_or(Value::Null, tuning);
                         if let Some(o) = v.as_object_mut() {
                             o.insert("stage".into(), json!(s));
-                            o.insert("device".into(), json!(st.device));
+                            o.insert("device".into(), json!(st.device.gpu()));
                         }
                         v
                     })
@@ -3307,9 +3354,9 @@ impl GpuBackend {
         &self.stages[0].dev
     }
 
-    /// Ordinal and device of every stage, in stage order.
+    /// Ordinal and device of every GPU stage, in stage order (none on the host CPU).
     fn stage_devices(&self) -> impl Iterator<Item = (usize, &Device)> {
-        self.stages.iter().map(|s| (s.device, &s.dev))
+        self.stages.iter().filter_map(|s| Some((s.device.gpu()?, &s.dev)))
     }
 
     /// Transfer counters of a layer split (shared with the forks); None on one GPU.
@@ -3931,15 +3978,18 @@ impl Backend for GpuBackend {
             }
             _ => None,
         };
-        let devices = (0..self.stages.len())
+        let Some(devices) = (0..self.stages.len())
             .map(|s| {
                 let mut t = self.stage_work(s, letter);
                 if let Some(e) = evidence {
                     t = t.peak(self.stage_work(s, e));
                 }
-                DeviceBytes { device: self.stages[s].device, bytes: t.bytes, allocations: t.allocations }
+                Some(DeviceBytes { device: self.stages[s].device.gpu()?, bytes: t.bytes, allocations: t.allocations })
             })
-            .collect();
+            .collect::<Option<Vec<_>>>()
+        else {
+            return DeviceWorkBound::Unknown("the CPU backend bounds each call by its frozen cpu work ceiling".into());
+        };
         DeviceWorkBound::Estimate(DeviceWorkEstimate {
             devices,
             basis: format!(
@@ -3964,6 +4014,9 @@ impl Backend for GpuBackend {
 
     fn evidence_scores(&mut self, ids: &[u32], t0: usize, t1: usize) -> Result<(Vec<f32>, Vec<f32>)> {
         ensure!(!self.lineage.health.is_lost(), LOST);
+        if self.cpu.is_some() {
+            return self.cpu_evidence_scores(ids, t0, t1);
+        }
         let owners = self.gate_owners();
         let mut gates = StageGates::new(&owners);
         let result = self.evidence_gated(&mut gates, ids, t0, t1);
@@ -4012,6 +4065,7 @@ impl Backend for GpuBackend {
             residual_max: None,
             last_timing: (0.0, 0.0),
             stop: None,
+            cpu: self.cpu,
         })
     }
 
@@ -4033,11 +4087,11 @@ impl Backend for GpuBackend {
         gate: Arc<Gate>,
         class: WorkClass,
     ) -> std::result::Result<(), ExecutionError> {
-        let devices: Vec<usize> = self.stages.iter().map(|s| s.device).collect();
+        let devices: Vec<usize> = self.stages.iter().filter_map(|s| s.device.gpu()).collect();
         let stage = self
             .stages
             .iter_mut()
-            .find(|s| s.device == device)
+            .find(|s| s.device == StageDevice::Gpu(device))
             .ok_or(ExecutionError::NoSuchDevice { device, devices })?;
         stage.gate = Some((gate, class));
         Ok(())
@@ -4137,6 +4191,9 @@ impl Backend for GpuBackend {
     }
 
     fn describe(&self) -> Value {
+        if let Some(cpu) = &self.cpu {
+            return self.cpu_describe(cpu);
+        }
         let cuda = self.is_cuda();
         let device = self.stages[0].device;
         let mut d = json!({
@@ -4225,7 +4282,7 @@ impl Backend for GpuBackend {
                                 holds.push("evidence_head");
                             }
                         }
-                        json!({"stage": s, "device": st.device, "first_layer": st.layers.start,
+                        json!({"stage": s, "device": st.device.gpu(), "first_layer": st.layers.start,
                             "last_layer": st.layers.end.saturating_sub(1), "holds": holds})
                     })
                     .collect(),
@@ -4237,6 +4294,9 @@ impl Backend for GpuBackend {
 
     fn letter_logits(&mut self, rows: &[&Packed], letters: &[&[Vec<u32>]]) -> Result<Vec<Vec<Vec<f32>>>> {
         ensure!(!self.lineage.health.is_lost(), LOST);
+        if self.cpu.is_some() {
+            return self.cpu_letter_logits(rows, letters);
+        }
         let owners = self.gate_owners();
         let mut gates = StageGates::new(&owners);
         let result = self.letter_logits_gated(&mut gates, rows, letters);

@@ -583,6 +583,105 @@ Błędy walidacji i alokacji wgpu są przechwytywane; odczyt GPU ma timeout.
 Telemetria używa `VK_EXT_memory_budget` rzeczywistego urządzenia, zachowując jego lifetime.
 Szczegóły opcji i ograniczeń: [INTEL.md](INTEL.md).
 
+### Backend CPU
+
+`backend: cpu` (`--backend cpu`) uruchamia gęsty checkpoint Llama BF16 na
+procesorze hosta w każdym buildzie, także bez GPU. Ładowanie używa wspólnego
+loadera Llama z typowanym urządzeniem etapu (`StageDevice::Cpu`, jeden etap,
+`Device::Cpu`), a obliczenia istniejącego dekodera Candle z wierszami
+dopełnionymi (`forward_padded`): `Precision::F32` (wagi BF16 rozszerzane do f32
+przy użyciu), `Kernels::Candle`, odczyt f32, bez kwantyzacji, cache prefiksu i
+cache stanu. Matmul CPU w Candle nie obsługuje BF16, dlatego obliczenia są f32.
+`RuntimeBackend::CpuLlama` ma jawne gałęzie każdej metody: brak tabel GEMM,
+sond pamięci GPU, porządkowych urządzeń, transferów etapów i pracy w tle
+(`background_support` zwraca `Unsupported`). Evidence liczy jeden dopełniony
+forward przyczynowy całego promptu z jawną maską i tę samą głowicę f32; ścieżka
+GPU `evidence_gated` pozostaje bez zmian.
+
+Plan CPU zamraża `ResolvedExecutionPlan::freeze_cpu` bez zapytania o GPU
+(`gpus: []`, polityka `{"family":"llama","backend":"cpu",...}`, GEMM
+`not_applicable`) i dodaje do tożsamości
+`"cpu":{"schema":"basal-cpu-execution.1","work_bytes":W,"gemm_threads":N}`.
+`work_bytes` zmienia podział na podpartie (kształty GEMM), a `gemm_threads`
+(`candle_core::utils::get_num_threads()`, odczytane raz) równoległość GEMM.
+Plany GPU, ich JSON i fingerprinty są bez zmian. Wybór CPU w CLI pomija
+odkrywanie GPU, zapytania o pamięć GPU, regułę precyzji zależną od karty,
+loader Intel, tabele GEMM i delegację do binarki CUDA; `load_planned` odrzuca
+plan CPU z umiejscowieniem GPU i odwrotnie.
+
+W paczce Linux wybór `backend: cpu` wyłącznie w pliku YAML nadal przekazuje
+`serve` do dołączonej binarki CUDA. Ta binarka wymaga sterownika NVIDIA i
+bibliotek CUDA już przy uruchomieniu, mimo że backend CPU nie odpytuje GPU.
+Na hoście bez tych bibliotek użyj
+`basal serve --model mini --backend cpu --cpu-work-mb 2048`, które pomija
+delegację. `basal doctor` dla konfiguracji CPU pomija kontrolę tej zależności.
+
+Wątki: model liczy na wątku polecenia albo na wątkach toru głównego i długiego
+serwera, nigdy na Tokio. Wewnętrzna równoległość Candle i gemm używa globalnej
+puli Rayon (rozmiar z `RAYON_NUM_THREADS` albo dostępnej równoległości przy
+pierwszym użyciu); basal nie ustawia zmiennych środowiska ani nie tworzy puli.
+Serwer obsługuje z CPU dokładnie jeden model i jedną instancję. Przy włączonym
+torze długich żądań jedna bramka (zbudowana jak bramka GPU) szereguje oba tory,
+więc naraz działa jeden forward CPU; bramka jest zwalniana między podpartiami,
+a forward nie jest przerywany w trakcie. Zamknięcie dołącza wątki po bieżącym
+forwardzie.
+
+Ograniczenia pamięci hosta to arytmetyka nazwanych tensorów ze źródła, w `u64`
+ze sprawdzaniem przepełnienia (przepełnienie oznacza przekroczenie). Oznaczenia:
+`H` hidden, `I` intermediate, `V` vocab, `NL` warstwy, `nh`, `nkv`, `hd`,
+`P` max_positions, `qd = nh·hd`, `kvd = nkv·hd`, `Q = qd + 2·kvd`,
+`half = hd / 2`, `VEC = size_of::<Vec<f32>>()`.
+
+```
+resident     = 2·(2VH + H + NL·(2H + H(Q + qd + 3I) + Q + 2H + 2I)) + 4·P·hd + 8·half + E_f32
+load_scratch = 4·max(VH, QH, H·qd, 2IH, HI) + nagłówek safetensors + 4·P·hd + E_src
+start        = resident + load_scratch + workers·cpu_work (+ pula Batch w serwerze)
+
+T = b·l (wiersze · najdłuższy wiersz), r odczyty, u różne litery, n identyfikatory liter
+inputs(b, l, r) = 2(4T + 8T·half + 4b·l² + 4r) + l²
+layer(b, l)     = 4(T(9H + 8qd + 9kvd + 6I) + 3b·nh·l² + H(Q + qd + 3I) + 4H + Q + 2I)
+W    = inputs + 6TH + layer + 4(2rH + H) + 4u + 6uH + 8ru + r·VEC + 8n + (b + r)·VEC
+W_ev = inputs(1, T, r) + 6TH + layer(1, T) + 4(2rH + H) + 4rH + 16(r+1)H + 8(r+1)k + 32r + 8m,
+       T tokenów promptu, m = t1 − t0, r = m + 1, k szerokość głowicy evidence
+```
+
+`E_src` i `E_f32` to logiczne rozmiary sześciu tensorów `evidence_head.pt`
+(w zapisanym dtype oraz jako f32), odczytane z metadanych pickle
+(`candle_core::pickle::read_pth_tensor_info`) przed odczytem jakiegokolwiek
+tensora; bez pliku oba wynoszą 0. Walidacja wymaga dokładnie sześciu
+unikalnych nazw, kształtów `[k, H]` (wspólne `k`) i `[1, H]` oraz układu, który
+czyta loader (ciągły albo Fortran), i sprawdza przepełnienia. Nie jest to rozmiar
+skompresowanego archiwum ani rozmiar magazynu (`storage_size`). Katalog
+checkpointu musi pozostać niezmieniony między odczytem metadanych a ponownym
+otwarciem pliku przez loader; nie jest to migawka odporna na podmianę pliku.
+
+Start (`serve`, polecenia, `doctor`) sprawdza `start` względem dostępnej pamięci
+hosta i cgroup (workerzy liczeni osobno, choć bramka je szereguje). Każde
+wywołanie najpierw dzieli wiersze zachłannie, po kolei, na podpartie z
+`W ≤ cpu_work` i `T ≤ u32::MAX`, sprawdza wszystkie (także pozycje i niepuste
+podpartie), a dopiero potem liczy każdą raz, zachowując kolejność wierszy,
+odczytów i liter; nie ma ponawiania. Wiersz, który sam przekracza limit, oraz
+forward evidence z `W_ev > cpu_work` są odrzucane błędem silnika (HTTP 500 w
+serwerze) przed alokacją wejść forwardu. Limit dotyczy tensorów jednego
+forwardu: wektory wyników zebrane wcześniej w tym samym wywołaniu oraz dane
+sterujące planisty są stanem żądania poza limitem.
+
+Poza wzorami (nigdy nie deklarowane jako ograniczone): bufory pakowania i
+lokalne bloki wątków gemm, stosy wątków Rayon, metadane i fragmentacja
+alokatora, obiekty `Tensor`, mapowanie checkpointu i page cache, wartość JSON
+nagłówka, metadane ZIP/pickle, bufory dekompresji i pominięte offsety czytnika
+evidence oraz jego zachowanie na uszkodzonym pliku, tokenizer, planowanie
+żądań, HTTP/Tokio i tracing. Alokacje pozostają nieomylne: to nie jest
+pomiar RSS, szczyt alokatora ani ochrona przed OOM.
+
+Na CPU nie zaimplementowano: thinking, wytrenowanych early-exit, mediów,
+Gemma/Omni, Qwen3.5, obliczeń f16/bf16 i kwantyzacji, replik, podziału warstw,
+kilku modeli w procesie, trwałych batchy w tle, odmowy długości na etapie
+planowania (4xx) oraz telemetrii `bench`/`benchmark`. Wynik zależy od podziału
+na podpartie, liczby wątków i zestawu instrukcji; nie deklarujemy bitowej
+zgodności między hostami. Zgodność z FP32 upstream, powtarzalność, szczytowa
+pamięć i opóźnienia nie zostały zmierzone.
+
 ## Rozszerzenia basal-1.5
 
 - `multi`: osobne pytanie tak/nie dla każdej etykiety, temperatura `noul`;

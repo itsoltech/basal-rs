@@ -434,6 +434,50 @@ sprzed zmiany oraz ruch równoległy sprawdzono na sprzęcie
 ([raport](reports/multigpu-placement-2026-10-11/README.md)); pomiar nie
 wyznacza skalowania przepustowości ani zachowania kart różnych architektur.
 
+CPU (opt-in): `backend: cpu` z wymaganym `cpu_work_mb: N` przy modelu albo
+`--backend cpu --cpu-work-mb N` (`serve --model`, `decide`, `export`,
+`bench-requests`, `profile`, `eval-*`, `client --local`) uruchamia gęsty
+checkpoint Llama BF16 na procesorze hosta. Wagi pozostają w BF16 i są
+rozszerzane do f32 przy każdym użyciu; dekoder to istniejąca ścieżka Candle z
+wierszami dopełnionymi do najdłuższego w podpartii, odczyt liter i głowica
+evidence liczą w f32. Ta ścieżka nie odpytuje GPU, nie wybiera precyzji według
+karty i nie używa tabel GEMM. Proces z modelem CPU obsługuje tylko ten jeden
+model i jedną instancję; tor długich żądań i tor główny dzielą jedną bramkę,
+więc naraz liczy jeden forward CPU. `cpu_work_mb` to limit pamięci roboczej
+hosta jednego forwardu według wzorów ze źródła
+([ARCHITECTURE.md](docs/ARCHITECTURE.md#backend-cpu)): wiersze żądania są
+dzielone na kolejne podpartie mieszczące się w limicie, wszystkie sprawdzane
+przed pierwszym forwardem, a wiersz albo forward evidence powyżej limitu jest
+odrzucany przed alokacją wejść (w `serve` jako błąd silnika, HTTP 500). Przy
+starcie serwer sprawdza, czy wagi, bufory ładowania i limit dla każdego toru
+mieszczą się w dostępnej pamięci hosta. To szacunek nazwanych tensorów, nie
+pomiar RSS ani ochrona przed OOM.
+
+W paczce Linux konfiguracja `backend: cpu` z pliku YAML nadal uruchamia
+dołączoną binarkę CUDA, która wymaga sterownika NVIDIA i bibliotek CUDA.
+Na hoście bez nich użyj `basal serve --model mini --backend cpu --cpu-work-mb 2048`;
+jawne `--backend cpu` uruchamia CPU w głównej binarce pakietu. `basal doctor`
+nie sprawdza tej zależności dla konfiguracji złożonej tylko z modeli CPU.
+
+```yaml
+models:
+  - path: .models/basal-1.5-mini
+    backend: cpu
+    cpu_work_mb: 2048           # wymagane; bez backend: cpu odrzucane
+```
+
+Na CPU odrzucane są: `dtype` inne niż `auto`/`f32`, `inference_mode` inne niż
+`auto`, kwantyzacja, `--kernels` inne niż `candle`, `--readout bf16`, jawne
+`readout_layer`, `ple_placement: host`, `state_cache_mb`, `media`, thinking,
+early-exit, tabele GEMM inne niż `auto`/`none` (obie oznaczają brak tabeli),
+`device`, `replica_devices`, `layer_split`, trwałe batche w tle
+(`batch_profile`), modele Gemma/Omni i Qwen3.5 oraz `bench` i `benchmark`.
+`basal doctor` dla konfiguracji złożonej tylko z modeli CPU pomija wykrywanie
+GPU. Wątki obliczeń to globalna pula Rayon (`RAYON_NUM_THREADS`, inaczej
+dostępne rdzenie); basal jej nie konfiguruje. Wynik zależy od podziału na
+podpartie, liczby wątków i zestawu instrukcji procesora. Zgodność z FP32
+upstream, szczytowa pamięć i wydajność ścieżki CPU nie zostały zmierzone.
+
 Repliki (CUDA): `replica_devices: [0, 1]` przy modelu albo
 `basal serve --model mini --replica-devices 0,1` ładuje niezależną kopię modelu
 na każdą wymienioną kartę pod jedną nazwą w API (`/v1/models` wymienia model
@@ -1082,6 +1126,10 @@ basal client --template examples/client/routing.json --state examples/client/tic
 
 Pytania bez pliku, formaty wejścia, JSONL, `act`, warunki Bash oraz gotowe skrypty:
 [Klient do automatyzacji](docs/CLIENT.md).
+
+Polecenia ładujące model przyjmują `--backend cpu --cpu-work-mb N` dla gęstej
+Llama BF16 na procesorze hosta ([warunki](#serwer)); `bench` i `benchmark`
+mierzą zasoby GPU i odrzucają tę opcję.
 
 `benchmark` pokazuje, jak sprzęt radzi sobie z ruchem sekwencyjnym i
 mieszanym przez rzeczywisty serwer HTTP. Wystarcza sama binarka:

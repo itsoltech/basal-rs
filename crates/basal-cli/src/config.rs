@@ -21,17 +21,21 @@
 //!       - {device: 5, layers: 25}  # layers 25-49, final norm, lm_head, evidence head
 //! ```
 //!
+//! A configuration may instead hold exactly one `backend: cpu` model with `cpu_work_mb: N` (host CPU, dense BF16
+//! Llama computed in f32; see `serve.example.yml`).
+//!
 //! A model is addressed by its optional `name`, otherwise the name in `basal.json` (the `model` field of requests).
 //! The alias never changes the source identity used by runtime profiles or calibration. The optional durable features
 //! have their own sections: `database:` (`crate::database`, docs/DATABASE.md) and `batches:`
 //! (`serve::batches::config`, docs/BATCHES.md).
 
 use std::net::SocketAddr;
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
 use basal_core::ModelManifest;
-use basal_gpu::{Kernels, LayerSplit, Precision, Quantization};
+use basal_gpu::{ExecutionBackend, Kernels, LayerSplit, Precision, Quantization};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -149,6 +153,13 @@ pub struct ModelConfig {
     /// computations as on one GPU; the stages run one after another.
     #[serde(default)]
     pub layer_split: Option<LayerSplit>,
+    /// gpu (default: this build's GPU backend) or cpu (the host CPU: dense BF16 Llama computed in f32 with Candle
+    /// kernels, text only, the only model of the process). Absent keeps the GPU path unchanged.
+    #[serde(default)]
+    pub backend: ExecutionBackend,
+    /// MiB of host working set one CPU forward may use; required with `backend: cpu`, refused otherwise.
+    #[serde(default)]
+    pub cpu_work_mb: Option<usize>,
     /// auto, accurate (Llama original, Gemma FP32 attention), or balanced (CUDA FP16 Llama).
     #[serde(default = "default_inference_mode")]
     pub inference_mode: String,
@@ -298,8 +309,15 @@ impl ModelConfig {
     /// Where the model runs: one GPU (`device`), validated `replica_devices` (non-empty, distinct, not together with
     /// `device`; several need a GEMM table) or a `layer_split` (not together with `device` or `replica_devices`; the
     /// split itself is validated when parsed). Whether the ordinals exist and the GPUs match is checked against the
-    /// driver ([`check_same_gpus`]).
+    /// driver ([`check_same_gpus`]). `backend: cpu` is one instance on the host CPU, without any of them.
     pub fn placement(&self) -> Result<Placement> {
+        if self.backend == ExecutionBackend::Cpu {
+            ensure!(
+                self.device.is_none() && self.replica_devices.is_none() && self.layer_split.is_none(),
+                "`backend: cpu` runs one instance on the host CPU; remove `device`, `replica_devices` and `layer_split`"
+            );
+            return Ok(Placement::Cpu);
+        }
         if let Some(split) = &self.layer_split {
             ensure!(self.device.is_none(), "give either `device` or `layer_split`, not both");
             ensure!(self.replica_devices.is_none(), "replicas of a layer-split model are not supported");
@@ -349,13 +367,121 @@ pub(crate) fn check_ple_source(ple: basal_gpu::PleMode, split: bool, model: &Mod
 
 /// Narrow host-PLE startup check. A conservative source/reservation estimate, not an allocator or OOM guarantee.
 pub(crate) fn check_host_ple_headroom(bytes: u64) -> Result<()> {
+    check_host_headroom(bytes, "host PLE")
+}
+
+/// `what` needs `bytes` more host memory than is available now within host/cgroup limits (or the host reports memory
+/// pressure). A source estimate checked at startup, not an allocator or OOM guarantee.
+pub(crate) fn check_host_headroom(bytes: u64, what: &str) -> Result<()> {
     let host = crate::benchmark::resources::host_memory()?;
     ensure!(
         !host.pressure && host.available_bytes >= bytes,
-        "host PLE needs {bytes} additional estimated host bytes; {} available within host/cgroup limits",
+        "{what} needs {bytes} additional estimated host bytes; {} available within host/cgroup limits",
         host.available_bytes
     );
     Ok(())
+}
+
+/// The static refusals of the CPU backend, before any download, GPU or GEMM table: the per-forward ceiling
+/// `cpu_work_mb · 2^20` bytes (required, positive, within the address space) for `backend: cpu`, else None after
+/// refusing `cpu_work_mb`. Every option the CPU slice does not implement is refused by name. `kernels`: an explicit
+/// `--kernels` (None: not given); `readout`: `--readout`.
+pub(crate) fn cpu_work(model: &ModelConfig, kernels: Option<&str>, readout: &str) -> Result<Option<NonZeroU64>> {
+    let name = describe(model);
+    if model.backend != ExecutionBackend::Cpu {
+        ensure!(model.cpu_work_mb.is_none(), "model {name}: cpu_work_mb applies to backend: cpu");
+        return Ok(None);
+    }
+    let mb = model.cpu_work_mb.with_context(|| {
+        format!("model {name}: backend: cpu needs cpu_work_mb (MiB of host working set per forward)")
+    })?;
+    let bytes =
+        mb.checked_mul(1 << 20).and_then(|b| u64::try_from(b).ok()).and_then(NonZeroU64::new).with_context(|| {
+            format!("model {name}: cpu_work_mb {mb} must be positive and fit this host's address space")
+        })?;
+    let unsupported = |option: String| format!("model {name}: {option} is not implemented on the CPU backend");
+    ensure!(
+        matches!(model.dtype.as_str(), "auto" | "f32" | "float32"),
+        unsupported(format!("dtype {} (it computes f32 over bf16 weights; use auto or f32)", model.dtype))
+    );
+    ensure!(model.inference_mode == "auto", unsupported(format!("inference_mode {}", model.inference_mode)));
+    ensure!(model.quantization == "none", unsupported(format!("quantization {}", model.quantization)));
+    ensure!(model.ple_placement == basal_gpu::PleMode::Device, unsupported("host ple_placement".into()));
+    ensure!(model.readout_layer == basal_gpu::ReadoutLayer::Auto, unsupported("an explicit readout_layer".into()));
+    ensure!(model.state_cache_mb == 0, unsupported("the state cache (state_cache_mb)".into()));
+    ensure!(!model.media, unsupported("media".into()));
+    ensure!(
+        matches!(model.gemm_table.as_str(), "auto" | "none"),
+        unsupported(format!("gemm_table {} (it uses no GEMM tables)", model.gemm_table))
+    );
+    ensure!(!model.model_options.exits_enabled(), unsupported("trained early_exit".into()));
+    ensure!(
+        !model.model_options.thinking_enabled()? && model.model_options.think_numerics.is_none(),
+        unsupported("thinking (think, think_numerics)".into())
+    );
+    ensure!(
+        !matches!(
+            model.batch_qualification()?,
+            crate::serve::batches::config::BackgroundQualification::Qualified { .. }
+        ),
+        unsupported("durable background batch execution (batch_profile)".into())
+    );
+    ensure!(kernels.is_none_or(|k| k == "candle"), unsupported(format!("kernels {}", kernels.unwrap_or_default())));
+    ensure!(readout == "f32", unsupported(format!("readout {readout}")));
+    Ok(Some(bytes))
+}
+
+/// The CPU backend runs dense BF16 Llama checkpoints only; refused once `config.json` is read, before any load.
+pub fn check_cpu_architecture(manifest: &ModelManifest) -> Result<()> {
+    ensure!(
+        matches!(manifest.config, basal_core::architecture::Architecture::Llama(_)),
+        "model {}: the CPU backend runs dense BF16 Llama checkpoints; Gemma/Omni and Qwen3.5 are not implemented on CPU",
+        manifest.name
+    );
+    Ok(())
+}
+
+/// What one served instance runs on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InstanceDevices {
+    /// GPU ordinals: one, or the stages of a layer split in order.
+    Gpu(Vec<usize>),
+    /// The host CPU (`backend: cpu`).
+    Cpu,
+}
+
+impl InstanceDevices {
+    /// The GPU ordinals of the instance (none on the host CPU).
+    pub fn gpus(&self) -> &[usize] {
+        match self {
+            Self::Gpu(devices) => devices,
+            Self::Cpu => &[],
+        }
+    }
+
+    /// The `device` label of the Prometheus replica metrics: the ordinals joined by commas, or `cpu`.
+    pub fn metric_label(&self) -> String {
+        match self {
+            Self::Gpu(devices) => devices.iter().map(ToString::to_string).collect::<Vec<_>>().join(","),
+            Self::Cpu => "cpu".into(),
+        }
+    }
+}
+
+impl std::fmt::Display for InstanceDevices {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Gpu(devices) => match devices.as_slice() {
+                [device] => write!(f, "GPU {device}"),
+                stages => write!(
+                    f,
+                    "GPUs {} (layer split)",
+                    stages.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+                ),
+            },
+            Self::Cpu => f.write_str("the host CPU"),
+        }
+    }
 }
 
 /// Where a configured model runs ([`ModelConfig::placement`]).
@@ -367,31 +493,37 @@ pub enum Placement {
     Replicas(Vec<usize>),
     /// One instance whose consecutive layer ranges run on the split's devices.
     Split(LayerSplit),
+    /// One instance on the host CPU (`backend: cpu`).
+    Cpu,
 }
 
 impl Placement {
-    /// The devices of every instance: one device per instance, all the split's devices for its one instance.
-    pub fn instances(&self) -> Vec<Vec<usize>> {
+    /// The devices of every instance: one device per instance, all the split's devices for its one instance, the host
+    /// CPU for its one instance.
+    pub fn instances(&self) -> Vec<InstanceDevices> {
         match self {
-            Self::Single(d) => vec![vec![*d]],
-            Self::Replicas(ds) => ds.iter().map(|&d| vec![d]).collect(),
-            Self::Split(split) => vec![split.devices()],
+            Self::Single(d) => vec![InstanceDevices::Gpu(vec![*d])],
+            Self::Replicas(ds) => ds.iter().map(|&d| InstanceDevices::Gpu(vec![d])).collect(),
+            Self::Split(split) => vec![InstanceDevices::Gpu(split.devices())],
+            Self::Cpu => vec![InstanceDevices::Cpu],
         }
     }
 
-    /// The device a table `auto` is resolved on: the first instance's first device (a split's stage 0).
-    pub fn first_device(&self) -> usize {
+    /// The device a table `auto` is resolved on: the first instance's first device (a split's stage 0); None on
+    /// the host CPU, which uses no GEMM table.
+    pub fn first_device(&self) -> Option<usize> {
         match self {
-            Self::Single(d) => *d,
-            Self::Replicas(ds) => ds.first().copied().unwrap_or(0),
-            Self::Split(split) => split.devices().first().copied().unwrap_or(0),
+            Self::Single(d) => Some(*d),
+            Self::Replicas(ds) => Some(ds.first().copied().unwrap_or(0)),
+            Self::Split(split) => Some(split.devices().first().copied().unwrap_or(0)),
+            Self::Cpu => None,
         }
     }
 
     /// Several GPUs that need one GPU type and one GEMM table checked on each: a replica group or a split.
     pub fn shared_devices(&self) -> Option<Vec<usize>> {
         match self {
-            Self::Single(_) => None,
+            Self::Single(_) | Self::Cpu => None,
             Self::Replicas(ds) => (ds.len() > 1).then(|| ds.clone()),
             Self::Split(split) => Some(split.devices()),
         }

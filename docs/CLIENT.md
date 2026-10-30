@@ -210,6 +210,18 @@ zwracają błąd. `--dtype` i `--gemm-table` dotyczą lokalnej inferencji; autom
 GEMM używają tej samej logiki co serwer. Porównanie odpowiedzi lokalnych i HTTP wymaga tej samej konfiguracji modelu;
 `usage.latency_ms` nie jest miarą zgodności numerycznej.
 
+Bez GPU lokalny model gęstej Llama BF16 może liczyć na procesorze hosta w f32:
+
+```bash
+basal client --local --backend cpu --cpu-work-mb 2048 --model mini --ask 'Czy zgłoszenie jest pilne?' < tekst.txt
+```
+
+`--cpu-work-mb` jest wtedy wymagane i ogranicza pamięć roboczą jednego forwardu według wzoru ze źródła
+([ARCHITECTURE.md](ARCHITECTURE.md#backend-cpu)); dłuższe partie liczą się w kolejnych podpartiach, a za długi wiersz
+kończy rekord błędem. Ścieżka CPU nie odpytuje GPU, nie używa tabel GEMM i odrzuca `--device`, `--gemm-table` (poza
+`auto`/`none`), `--media`, `--dtype` inne niż `auto`/`f32`, `--inference-mode` inne niż `auto`, thinking i early-exit.
+Wynik CPU nie jest deklarowany jako zgodny z wynikiem GPU ani z FP32 upstream; nie mierzono go.
+
 ## Konfiguracja i kontrakt automatyzacji
 
 HTTP:

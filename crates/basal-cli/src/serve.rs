@@ -62,6 +62,8 @@ use basal_core::{Backend, DecideError, DeviceHealth, Engine};
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot, Semaphore};
 
+use crate::config::InstanceDevices;
+
 pub(crate) mod backlog;
 pub(crate) mod batches;
 pub(crate) mod collection;
@@ -116,9 +118,9 @@ pub struct ServeOptions {
 /// One instance of a served model.
 pub struct Replica<B: Backend> {
     pub engine: Engine<B>,
-    /// GPU ordinals the engine was loaded on: one, or the stages of a layer split in order. Engines using the same
-    /// ordinal share its gate.
-    pub devices: Vec<usize>,
+    /// GPU ordinals the engine was loaded on: one, or the stages of a layer split in order; or the host CPU. Engines
+    /// using the same ordinal share its gate.
+    pub devices: crate::config::InstanceDevices,
     /// How the main lane collects requests: the model profile's policy with the features of the engine's plan.
     pub scheduling: crate::models::SchedulingPolicy,
 }
@@ -216,8 +218,8 @@ impl Drop for Reservation {
 /// Queue of one instance of a model.
 struct ReplicaRoute {
     tx: mpsc::UnboundedSender<Job>,
-    /// GPU ordinals of the instance (one, or the stages of a layer split).
-    devices: Vec<usize>,
+    /// GPU ordinals of the instance (one, or the stages of a layer split), or the host CPU.
+    devices: crate::config::InstanceDevices,
     /// Device readiness reported by its engines (none when its backend does not report it).
     health: Vec<DeviceHealth>,
     /// Always set in a replica group; for a single instance only with metrics.
@@ -1418,7 +1420,7 @@ async fn health(State(app): State<Arc<App>>) -> Response {
             .enumerate()
             // replicas run on one GPU each (a layer-split model has no replicas)
             .filter_map(|(i, r)| {
-                r.unavailable().map(|why| json!({"replica": i, "device": r.devices[0], "reason": why}))
+                r.unavailable().map(|why| json!({"replica": i, "device": r.devices.gpus().first(), "reason": why}))
             })
             .collect();
         if down.is_empty() {
@@ -1559,7 +1561,7 @@ fn background_limits<B: Backend>(
             else {
                 continue;
             };
-            for device in model.replicas.iter().flat_map(|replica| replica.devices.iter().copied()) {
+            for device in model.replicas.iter().flat_map(|replica| replica.devices.gpus().iter().copied()) {
                 policies
                     .entry(device)
                     .and_modify(|policy| {
@@ -1598,7 +1600,7 @@ fn serve_inner<B: Backend + Send + 'static>(
     check_long_share(opts.long_share)?;
     anyhow::ensure!(!models.is_empty(), "no models to serve");
     check_admission_limits(opts.max_inflight, opts.max_large_inflight)?;
-    let mut layout: Vec<(String, Vec<Vec<usize>>)> = Vec::with_capacity(models.len());
+    let mut layout: Vec<(String, Vec<InstanceDevices>)> = Vec::with_capacity(models.len());
     for m in &models {
         crate::note!("routing {}: {}", m.name, m.routing.identity());
         if let Some(identity) = m.scheduler.identity() {
@@ -1606,15 +1608,26 @@ fn serve_inner<B: Backend + Send + 'static>(
         }
         let first = m.replicas.first().context("a served model needs at least one engine")?;
         let name = &m.name;
-        let mut devices: Vec<Vec<usize>> = Vec::with_capacity(m.replicas.len());
+        let mut devices: Vec<InstanceDevices> = Vec::with_capacity(m.replicas.len());
         for r in &m.replicas {
             anyhow::ensure!(
                 r.engine.manifest.name == first.engine.manifest.name,
                 "replicas of {name} load different models"
             );
-            anyhow::ensure!(!r.devices.is_empty(), "{name}: an instance without a GPU");
-            for d in &r.devices {
-                anyhow::ensure!(!devices.iter().flatten().any(|o| o == d), "{name}: two replicas on GPU {d}");
+            match &r.devices {
+                InstanceDevices::Gpu(gpus) => {
+                    anyhow::ensure!(!gpus.is_empty(), "{name}: an instance without a GPU");
+                    for d in gpus {
+                        anyhow::ensure!(
+                            !devices.iter().flat_map(InstanceDevices::gpus).any(|o| o == d),
+                            "{name}: two replicas on GPU {d}"
+                        );
+                    }
+                }
+                InstanceDevices::Cpu => anyhow::ensure!(
+                    models.len() == 1 && m.replicas.len() == 1,
+                    "{name}: the CPU backend serves one instance per process"
+                ),
             }
             devices.push(r.devices.clone());
         }
@@ -1639,17 +1652,15 @@ fn serve_inner<B: Backend + Send + 'static>(
     // of its GPUs) or a long lane on it, every engine on that GPU takes turns through its gate (long requests yield
     // between layers according to the root policy). GPUs do not wait for each other; a layer-split instance
     // holds one of its gates at a time.
-    let instances: Vec<(&[usize], bool)> = models
-        .iter()
-        .flat_map(|m| m.replicas.iter().map(move |r| (r.devices.as_slice(), m.routing.enabled())))
-        .collect();
+    let instances: Vec<(&[usize], bool)> =
+        models.iter().flat_map(|m| m.replicas.iter().map(move |r| (r.devices.gpus(), m.routing.enabled()))).collect();
     let background_devices: std::collections::BTreeSet<usize> = models
         .iter()
         .filter(|model| {
             opts.batches.is_some()
                 && matches!(model.batch_qualification, batches::config::BackgroundQualification::Qualified { .. })
         })
-        .flat_map(|model| model.replicas.iter().flat_map(|replica| replica.devices.iter().copied()))
+        .flat_map(|model| model.replicas.iter().flat_map(|replica| replica.devices.gpus().iter().copied()))
         .collect();
     let mut gates: HashMap<usize, Arc<Gate>> = HashMap::new();
     for &(devices, long_enabled) in &instances {
@@ -1672,6 +1683,20 @@ fn serve_inner<B: Backend + Send + 'static>(
             }
         }
     }
+    // The CPU instance (the only one of the process) with a long lane: one gate, built like a GPU gate, serializes
+    // its main and long lanes, so that at most one CPU forward uses the host's thread pool.
+    let cpu_gate = match models.iter().find(|m| m.replicas.iter().any(|r| r.devices == InstanceDevices::Cpu)) {
+        Some(m) if m.routing.enabled() => {
+            let slice = std::time::Duration::from_millis(opts.long_slice_ms);
+            let gate = match opts.long_share {
+                None => Gate::new(slice),
+                Some(share) => Gate::with_long_share(slice, share).context("the host CPU: long_share gate")?,
+            };
+            crate::note!("CPU: one gate shared by the main and long lanes");
+            Some(Arc::new(gate))
+        }
+        _ => None,
+    };
     match opts.long_share {
         None => crate::note!("long_share absent: legacy yielding after min_slice={} ms; {} shared device gates", opts.long_slice_ms, gates.len()),
         Some(share) => crate::note!("root long_share={share} in [0,1]: {} shared device gates; yields require a waiting main lane and min_slice={} ms, then recent long share >= target (0: legacy, 1: no mid-forward yield). Continuous 2s occupied-online-wall-time memory across models; idle/background/reservation time excluded. No active long lane: no share effect; no new lanes/gates. Not GPU utilization or a throughput/fairness guarantee", gates.len(), opts.long_slice_ms),
@@ -1731,7 +1756,8 @@ fn serve_inner<B: Backend + Send + 'static>(
                 // threads and messages: the model's name, with the replica index in a group
                 let label = if group { format!("{name}-r{index}") } else { name.clone() };
                 let device_gates: Vec<(usize, &Arc<Gate>)> =
-                    devices.iter().filter_map(|&d| gates.get(&d).map(|g| (d, g))).collect();
+                    devices.gpus().iter().filter_map(|&d| gates.get(&d).map(|g| (d, g))).collect();
+                let cpu = devices == InstanceDevices::Cpu;
                 let mut health: Vec<DeviceHealth> = engine.work_health();
                 let (tx, rx) = mpsc::unbounded_channel();
                 let batching = engine.request_batching;
@@ -1749,11 +1775,16 @@ fn serve_inner<B: Backend + Send + 'static>(
                     if let batches::config::BackgroundQualification::Qualified { composition, max_requests, .. } =
                         &batch_qualification
                     {
+                        // refused statically (`config::cpu_work`): no durable background lane on the host CPU
+                        anyhow::ensure!(!cpu, "{label}: background is unsupported on the CPU backend");
                         let mut background = engine.fork().with_context(|| format!("{label}: background engine"))?;
                         background
                             .configure_background()
                             .with_context(|| format!("{label}: background configuration"))?;
-                        anyhow::ensure!(device_gates.len() == devices.len(), "background needs every device gate");
+                        anyhow::ensure!(
+                            device_gates.len() == devices.gpus().len(),
+                            "background needs every device gate"
+                        );
                         for &(device, gate) in &device_gates {
                             background.set_device_work_class(
                                 device,
@@ -1770,18 +1801,22 @@ fn serve_inner<B: Backend + Send + 'static>(
                             worker: batches::bg_lane::BgLane::start(&label, &name, background)?,
                             composition_qualified: *composition == batches::config::Composition::Group,
                             max_requests: *max_requests as usize,
-                            devices: devices.clone(),
+                            devices: devices.gpus().to_vec(),
                         });
                     }
                 }
                 let long = if routing.enabled() {
                     let mut le = engine.fork().with_context(|| format!("{label}: second engine for the long lane"))?;
                     anyhow::ensure!(
-                        device_gates.len() == devices.len(),
+                        device_gates.len() == devices.gpus().len(),
                         "{label}: the long lane needs the gate of every GPU it uses"
                     );
                     for &(d, gate) in &device_gates {
                         le.set_device_gate(d, gate.clone(), false).with_context(|| format!("{label}: long lane"))?;
+                    }
+                    if cpu {
+                        let gate = cpu_gate.as_ref().context("the CPU long lane needs the CPU gate")?;
+                        le.backend.set_gate(Arc::clone(gate), false);
                     }
                     health.extend(le.work_health());
                     let (ltx, lrx) = std::sync::mpsc::channel();
@@ -1799,6 +1834,10 @@ fn serve_inner<B: Backend + Send + 'static>(
                 };
                 for &(d, gate) in &device_gates {
                     engine.set_device_gate(d, gate.clone(), true).with_context(|| label.clone())?;
+                }
+                let instance_gate = cpu.then(|| cpu_gate.clone()).flatten();
+                if let Some(gate) = &instance_gate {
+                    engine.backend.set_gate(Arc::clone(gate), true);
                 }
                 let mut main_lane = lane("main");
                 main_lane.usage_lane = long.as_ref().map(|_| "main");
@@ -1830,17 +1869,10 @@ fn serve_inner<B: Backend + Send + 'static>(
                                 );
                             }
                         })
-                        .context("starting a GPU thread")?,
+                        .context(if cpu { "starting the CPU model thread" } else { "starting a GPU thread" })?,
                 );
-                let on = match devices.as_slice() {
-                    [device] => format!("GPU {device}"),
-                    stages => format!(
-                        "GPUs {} (layer split)",
-                        stages.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
-                    ),
-                };
                 crate::note!(
-                    "serving {name}{} on {on} (batch {max_batch_tokens} tokens, {:?}); routing {}",
+                    "serving {name}{} on {devices} (batch {max_batch_tokens} tokens, {:?}); routing {}",
                     if group { format!(" replica {index}") } else { String::new() },
                     scheduler_policy.schedule(),
                     routing.identity()
@@ -1852,7 +1884,8 @@ fn serve_inner<B: Backend + Send + 'static>(
                         metrics: metrics.as_ref().map(|m| m.replica(&name, index)),
                     })
                 });
-                let instance_gates = device_gates.iter().map(|(_, gate)| Arc::clone(gate)).collect();
+                let instance_gates =
+                    device_gates.iter().map(|(_, gate)| Arc::clone(gate)).chain(instance_gate).collect();
                 queues.push(ReplicaRoute { tx, devices, health, load, gates: instance_gates });
             }
             let route = if group {

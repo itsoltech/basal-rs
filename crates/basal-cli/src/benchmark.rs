@@ -176,7 +176,7 @@ impl Server {
         };
         let model = ServedModel {
             name: engine.manifest.name.clone(),
-            replicas: vec![Replica { engine, devices, scheduling }],
+            replicas: vec![Replica { engine, devices: crate::config::InstanceDevices::Gpu(devices), scheduling }],
             max_batch_tokens: options.max_batch_tokens,
             collection: Default::default(),
             scheduler: options.scheduler_policy()?,
@@ -268,6 +268,10 @@ impl PoolTelemetry {
 }
 
 pub(crate) fn run(model: &ModelArgs, gpu_options: &GpuArgs, options: &Options) -> Result<()> {
+    anyhow::ensure!(
+        gpu_options.backend != Some(basal_gpu::ExecutionBackend::Cpu) && gpu_options.cpu_work_mb.is_none(),
+        "benchmark measures GPU resources; the CPU backend has no benchmark telemetry in this release"
+    );
     options.validate()?;
     // an unsupported weight format or layer split fails before any GPU check or download
     let quantization = gpu_options.quantization(&model.model)?;
@@ -366,7 +370,7 @@ fn execute(
         let files = model_files(model, g, report)?;
         let readout = g.readout()?;
         GpuBackend::check_early_exit(
-            basal_gpu::Kernels::parse(&g.kernels)?,
+            basal_gpu::Kernels::parse(g.kernels())?,
             quantization,
             readout,
             g.layer_split.is_some(),
@@ -433,7 +437,7 @@ fn execute(
     }
     // quantization exists for Llama only: an Omni (Gemma) model is refused before the preflight
     crate::config::check_architecture(&manifest, quantization, g.layer_split.is_some())?;
-    g.readout_layer.unwrap_or_default().resolve(&manifest.config, basal_gpu::Kernels::parse(&g.kernels)?)?;
+    g.readout_layer.unwrap_or_default().resolve(&manifest.config, basal_gpu::Kernels::parse(g.kernels())?)?;
     let ple_memory = if g.ple_placement == Some(basal_gpu::PleMode::Host) {
         let memory = GpuBackend::host_ple_memory(&dir, &manifest.config)?;
         let workers = options.routing_policy()?.workers(false);
@@ -593,7 +597,7 @@ fn execute(
         Some(name) => name.to_string_lossy().into_owned(),
         None => format!("sha256:{}", t.digest()),
     });
-    report["settings"] = json!({"dtype": g.dtype, "inference_mode": g.inference_mode, "quantization": quantization.as_str(), "kernels": g.kernels, "readout": g.readout, "prefix_cache": !g.no_prefix_cache,
+    report["settings"] = json!({"dtype": g.dtype, "inference_mode": g.inference_mode, "quantization": quantization.as_str(), "kernels": g.kernels(), "readout": g.readout, "prefix_cache": !g.no_prefix_cache,
         "state_cache_mb": g.state_cache_mb, "gemm_table": gemm_table, "tree_max_tokens": g.tree_max_tokens,
         "max_batch_tokens": options.max_batch_tokens, "max_inflight": options.max_inflight,
         "max_large_inflight": options.max_large_inflight, "schedule": format!("{:?}", options.schedule),
