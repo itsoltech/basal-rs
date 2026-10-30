@@ -57,8 +57,8 @@ Istniejące `PlanOptions` i `freeze` zachowują API; opt-in używa
 odkrywaniem GPU/GEMM, gdy znana jest architektura; Candle/Intel/Gemma/Qwen
 obsługują wyłącznie `auto`. Opcja obowiązuje też w planie osobnego thinking.
 Efektywna polityka jest stosowana przed cache'ami i kopiowana do forków.
-Split wybiera wiersze na ostatnim stage'u; capture-only zachowuje wyjście
-po zapisaniu K/V. Szacunek scratch uwzględnia pełną normalizację i późny gather,
+Split wybiera wiersze na ostatnim stage'u; capture-only nadal kończy się zaraz
+po zapisaniu K/V ostatniej warstwy. Szacunek scratch uwzględnia pełną normalizację i późny gather,
 bez deklaracji ochrony przed całym OOM procesu. Zmiana rozmiaru GEMM może
 zmienić bity wyniku; brak dowodu runtime, FP32, pamięci lub wydajności.
 

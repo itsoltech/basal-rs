@@ -57,7 +57,7 @@ impl ReadoutLayer {
         {
             return Err(PlanError::Option("explicit readout-layer on/off requires fused CUDA or Metal Llama".into()));
         }
-        Ok(fused_llama && self != Self::Off)
+        Ok(self != Self::Off)
     }
 }
 

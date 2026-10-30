@@ -433,6 +433,7 @@ fn execute(
     }
     // quantization exists for Llama only: an Omni (Gemma) model is refused before the preflight
     crate::config::check_architecture(&manifest, quantization, g.layer_split.is_some())?;
+    g.readout_layer.unwrap_or_default().resolve(&manifest.config, basal_gpu::Kernels::parse(&g.kernels)?)?;
     let ple_memory = if g.ple_placement == Some(basal_gpu::PleMode::Host) {
         let memory = GpuBackend::host_ple_memory(&dir, &manifest.config)?;
         let workers = options.routing_policy()?.workers(false);
