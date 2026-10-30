@@ -28,8 +28,9 @@ Omitted from the archive: `benches/` (ten files), `tests/` (nine files),
 `.cargo_vcs_info.json`. The manifest omits the 8 `[[test]]` and 9 `[[bench]]`
 targets, the 5 dev dependencies (`assert_approx_eq`, `criterion`, `tempfile`,
 `tracing`, `tracing-subscriber`) and the `profiling`/`release` profiles, which
-Cargo ignores outside the workspace root. Its first line records this. Runtime
-dependencies, features, edition and library target are unchanged. Inline
+Cargo ignores outside the workspace root. Its first line records this. The
+initial copy preserves runtime dependencies, features, edition and library
+target; the added direct dependencies are listed below. Inline
 `#[cfg(test)]` modules remain unchanged and are not run by this project.
 
 ## Local change
@@ -73,9 +74,31 @@ preimages in `UPSTREAM-SHA256SUMS` and creates the eighth. Apply it with
 - `src/models/bpe/word.rs`: `Word::merge_all` takes a lookup function instead
   of the map type.
 
+`decoder-regex.patch` then applies with `patch -p1` to that result and the
+pinned upstream preimages of the four newly modified source files:
+
+- `src/utils/onig.rs`: admitted regexes share an `Arc<Regex>`; legacy clones
+  still recompile, and the existing `Debug` text is retained.
+- `src/utils/merge_storage.rs`: a provided `MergeStorage::decoder_regex`
+  returns no account by default, with crate-private account/error adapters.
+- `src/normalizers/replace.rs`: admitted construction for `Replace` uses that
+  account, and cloning shares the compiled program and its charge.
+- `src/decoders/mod.rs` and `src/decoders/sequence.rs`: the decoder seed reads
+  `Replace` and nested sequences with the account and preserves legacy tagged
+  and untagged parsing. A refusal ends the read rather than trying an
+  uncharged variant.
+- `src/tokenizer/serialization.rs`: the decoder strategy uses that seed and
+  the existing first-refusal channel.
+
+Admitted clones do not recompile, so they do not observe compile-time global
+changes made after construction, unlike legacy clones. The retained native
+allocation boundary and the separate `onig`/`onig_sys` patches are documented
+in the parent `vendor/README.md` and those crates' provenance files.
+
 `SHA256SUMS` covers every file in this directory except itself.
 
-The seven modified upstream Rust source files carry an in-file "Modified for
+The eleven modified upstream Rust source files carry an in-file "Modified for
 basal-rs" notice. The new `merge_storage.rs` module is identified above and
 included in the patches and checksum manifest. Serialization, trainer and seed
-files are not changed by `merge-table.patch`.
+files are not changed by `merge-table.patch`; the later decoder patch changes
+the files listed above.

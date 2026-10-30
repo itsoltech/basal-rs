@@ -459,11 +459,14 @@ zwolnieniu. Przy wzroście tablicy nowy blok jest opłacony, zanim stary
 zostanie zwolniony. Kompilacja używa tego samego `Syntax::default()`, opcji,
 kodowania UTF-8, blokady kompilacji i niezmienionego kodu natywnego co
 `Regex::new`, a wyszukiwanie tego samego kodu co dotąd. Globalne ustawienia
-Oniguruma (składnia, callouty, właściwości użytkownika, limity) są więc
-odczytywane w tych samych miejscach; nic nie jest kopiowane ani zamrażane.
+Oniguruma (składnia, callouty, właściwości użytkownika, limity) są przy
+pierwszej konstrukcji i wyszukiwaniu odczytywane w tych samych miejscach.
 Klon `Replace` współdzieli opłacony regex; opłata trwa, dopóki zwrócony
 właściciel albo dowolny klon tokenizera trzyma regex, i wraca przy
 zwolnieniu przez ostatniego właściciela na dowolnym wątku.
+Taki klon nie kompiluje programu ponownie, więc w przeciwieństwie do klonu
+Legacy nie uwzględnia zmian globalnych ustawień kompilacji dokonanych po
+konstrukcji regexu; kod basal nie zmienia tych ustawień.
 
 Pierwsza odmowa, błąd alokacji, przepełnienie rozmiaru albo panika konta
 w jednej kompilacji jest zapamiętywana; kolejne są pomijane. Odmowa wraca

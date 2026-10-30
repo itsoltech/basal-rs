@@ -66,7 +66,8 @@ accepted patterns, results, error codes and messages of the legacy routes
 are unchanged. When `RUSTONIG_SYSTEM_LIBONIG` or `RUSTONIG_DYNAMIC_LIBONIG`
 selects a system library, the bundled sources, including `onig_basal.c`, are
 not compiled. A binary that references `onig_basal_new` then fails to link,
-because the system library lacks it; binaries using only the legacy API keep
-working. This follows from the build script and was not linked or run.
+because the system library lacks it. Legacy-only linking depends on the linker
+discarding unused references to that symbol and has not been verified. These
+are source conclusions, not link or runtime results.
 
 `SHA256SUMS` covers every file in this directory except itself.

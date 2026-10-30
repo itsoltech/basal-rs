@@ -363,8 +363,8 @@ registry source and checksum. No dependency version changes.
   lives. Admitted-only guards turn signed `int` size overflow into a typed
   `CapacityOverflow`. Compilation and search otherwise run the unchanged
   native code under the same compile lock, so process-wide syntax, callout,
-  user-property, case-fold and limit settings are observed exactly where the
-  legacy constructor observes them.
+  user-property, case-fold and limit settings are observed at initial
+  construction and search where the legacy code observes them.
 - **Legacy effect.** Every legacy `regex_t` in the process, including those of
   `tokenizers 0.22.2`, grows by one pointer, and the listed legacy compile and
   free sites evaluate one NULL branch. Every legacy `SysRegex` in tokenizers
@@ -393,6 +393,9 @@ registry source and checksum. No dependency version changes.
   model refusal. A refusal inside a legacy untagged decoder is never treated
   as a variant mismatch. Admitted regexes are shared by `Replace` clones, so
   the charge lasts until the last owner drops it, on any thread.
+  Unlike legacy clones, admitted clones do not recompile and therefore do not
+  observe compile-time global changes made after construction; basal does not
+  change those settings.
   `RegexCharge` and `AdmittedRegexError` are crate-private items in
   `merge_storage.rs`, because the `utils::onig` module is private.
 - Not admitted: regex parse and compile temporaries, the name table and
@@ -403,7 +406,9 @@ registry source and checksum. No dependency version changes.
   not requested.
 - With `RUSTONIG_SYSTEM_LIBONIG` or `RUSTONIG_DYNAMIC_LIBONIG`, the bundled
   sources are not compiled; a binary that references `onig_basal_new` then
-  fails to link. This is reasoned from the build script, not linked.
+  fails to link. Legacy-only linking depends on the linker discarding unused
+  references to that symbol and has not been verified. These are source
+  conclusions, not link results.
 
 Verify the copied files with `sha256sum --check SHA256SUMS` in `onig/`,
 `onig_sys/` and `tokenizers/`. `onig/regex-account.patch` and
