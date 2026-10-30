@@ -1,5 +1,6 @@
-//! API users and keys (MongoDB): the same operations as `ops::keys`, one small document per user (`_id` = user id)
-//! and per key (`_id` = key id).
+//! API users, keys and UI sessions (MongoDB): the same operations as `ops::keys`, one small document per user
+//! (`_id` = user id), per key (`_id` = key id) and per session (`_id` = hex SHA-256 of the session token). Users
+//! created before schema version 4 have no `role` (read as `user`) and no `password_hash`.
 
 use std::time::Duration;
 
@@ -8,10 +9,14 @@ use mongodb::bson::{doc, Document};
 use super::super::error::StoreError;
 use super::super::ops::common::millis;
 use super::super::types::{
-    ApiKeyId, ApiKeyLookup, ApiKeyRecord, ApiScopes, ApiUserRecord, NewApiKey, OwnerId, UnixMillis,
+    ApiKeyId, ApiKeyLookup, ApiKeyRecord, ApiRole, ApiScopes, ApiSessionLookup, ApiUserRecord, NewApiKey,
+    NewApiSession, OwnerId, PasswordHash, Sha256Digest, UnixMillis,
 };
-use super::convert::{digest, owner};
-use super::driver::{bin, bytes, corrupt, int, mtx, opt_i64, opt_int, text, Core, Tx, API_KEYS, API_USERS};
+use super::convert::{digest, owner, quota_usage};
+use super::driver::{
+    bin, bytes, corrupt, int, mtx, opt_i64, opt_int, opt_str, opt_text, text, Core, Tx, API_KEYS, API_SESSIONS,
+    API_USERS, QUOTA,
+};
 
 fn record(doc: &Document) -> Result<ApiKeyRecord, StoreError> {
     Ok(ApiKeyRecord {
@@ -37,6 +42,12 @@ fn user_record(doc: &Document) -> Result<ApiUserRecord, StoreError> {
         name: text(doc, "name")?,
         created_at: UnixMillis(int(doc, "created_at")?),
         disabled_at: opt_int(doc, "disabled_at")?.map(UnixMillis),
+        role: opt_text(doc, "role")?
+            .map_or(Ok(ApiRole::User), |role| ApiRole::parse(&role))
+            .map_err(|_| corrupt("api user role"))?,
+        password: opt_text(doc, "password_hash")?
+            .map(|hash| PasswordHash::parse(&hash).map_err(|_| corrupt("api user password hash")))
+            .transpose()?,
     })
 }
 
@@ -44,9 +55,26 @@ async fn get_user_tx(tx: &mut Tx<'_>, id: &OwnerId) -> Result<Option<ApiUserReco
     tx.one(API_USERS, doc! { "_id": id.as_str() }).await?.as_ref().map(user_record).transpose()
 }
 
-pub(super) async fn create_user(core: &Core, id: &OwnerId, name: &str) -> Result<Option<ApiUserRecord>, StoreError> {
+pub(super) async fn user(core: &Core, id: &OwnerId) -> Result<Option<ApiUserRecord>, StoreError> {
+    core.read_one(API_USERS, doc! { "_id": id.as_str() }).await?.as_ref().map(user_record).transpose()
+}
+
+pub(super) async fn create_user(
+    core: &Core,
+    id: &OwnerId,
+    name: &str,
+    role: ApiRole,
+    password: Option<&PasswordHash>,
+) -> Result<Option<ApiUserRecord>, StoreError> {
     let now = core.server_now().await?;
-    let row = doc! { "_id": id.as_str(), "name": name, "created_at": now, "disabled_at": opt_i64(None) };
+    let row = doc! {
+        "_id": id.as_str(),
+        "name": name,
+        "created_at": now,
+        "disabled_at": opt_i64(None),
+        "role": role.as_str(),
+        "password_hash": opt_str(password.map(PasswordHash::as_str)),
+    };
     mtx!(core, tx => async {
         if get_user_tx(tx, id).await?.is_some() {
             return Ok(None);
@@ -76,11 +104,88 @@ pub(super) async fn set_user_disabled(core: &Core, id: &OwnerId, disabled: bool)
         if disabled {
             tx.update(API_USERS, doc! { "_id": id.as_str(), "disabled_at": null }, doc! { "$set": { "disabled_at": now } })
                 .await?;
+            tx.delete_many(API_SESSIONS, doc! { "user_id": id.as_str() }).await?;
         } else {
             tx.update(API_USERS, doc! { "_id": id.as_str() }, doc! { "$set": { "disabled_at": null } }).await?;
         }
         get_user_tx(tx, id).await?.ok_or(StoreError::NotFound)
     })
+}
+
+pub(super) async fn set_user_password(
+    core: &Core,
+    id: &OwnerId,
+    password: Option<&PasswordHash>,
+    keep: Option<&Sha256Digest>,
+) -> Result<ApiUserRecord, StoreError> {
+    let hash = opt_str(password.map(PasswordHash::as_str));
+    let keep = keep.map_or_else(String::new, |k| k.to_hex());
+    mtx!(core, tx => async {
+        if tx.update(API_USERS, doc! { "_id": id.as_str() }, doc! { "$set": { "password_hash": hash.clone() } }).await? == 0
+        {
+            // `update` counts matched documents, so 0 is an unknown user.
+            return Err(StoreError::NotFound);
+        }
+        tx.delete_many(API_SESSIONS, doc! { "user_id": id.as_str(), "_id": { "$ne": keep.as_str() } }).await?;
+        get_user_tx(tx, id).await?.ok_or(StoreError::NotFound)
+    })
+}
+
+pub(super) async fn delete_user(core: &Core, id: &OwnerId, disabled_for: Duration) -> Result<(), StoreError> {
+    let now = core.server_now().await?;
+    mtx!(core, tx => async {
+        let user = get_user_tx(tx, id).await?.ok_or(StoreError::NotFound)?;
+        if user.disabled_at.is_none_or(|at| now.saturating_sub(at.0) < millis(disabled_for)) {
+            return Err(StoreError::UserNotDisabled);
+        }
+        // Locked like every Batch operation that adds data, so none can commit after this check.
+        if let Some((row, _)) = tx.lock(QUOTA, doc! { "_id": id.as_str() }).await? {
+            if !quota_usage(&row)?.is_empty() {
+                return Err(StoreError::UserHasData);
+            }
+        }
+        tx.delete_many(API_SESSIONS, doc! { "user_id": id.as_str() }).await?;
+        tx.delete_many(API_KEYS, doc! { "user_id": id.as_str() }).await?;
+        tx.delete_one(API_USERS, doc! { "_id": id.as_str() }).await.map(drop)
+    })
+}
+
+pub(super) async fn create_session(core: &Core, session: &NewApiSession) -> Result<ApiSessionLookup, StoreError> {
+    let now = core.server_now().await?;
+    let expires_at = now.saturating_add(millis(session.ttl));
+    let row = doc! {
+        "_id": session.id.to_hex(),
+        "user_id": session.user.as_str(),
+        "created_at": now,
+        "expires_at": expires_at,
+    };
+    mtx!(core, tx => async {
+        let user = get_user_tx(tx, &session.user).await?.ok_or(StoreError::NotFound)?;
+        if user.disabled_at.is_some() || user.password != session.password {
+            return Err(StoreError::UserDisabled);
+        }
+        tx.delete_many(API_SESSIONS, doc! { "user_id": session.user.as_str(), "expires_at": { "$lte": now } }).await?;
+        tx.insert(API_SESSIONS, row.clone()).await?;
+        Ok(ApiSessionLookup { user, expires_at: UnixMillis(expires_at), now: UnixMillis(now) })
+    })
+}
+
+pub(super) async fn lookup_session(core: &Core, id: &Sha256Digest) -> Result<Option<ApiSessionLookup>, StoreError> {
+    let Some(row) = core.read_one(API_SESSIONS, doc! { "_id": id.to_hex() }).await? else {
+        return Ok(None);
+    };
+    let user = core.read_one(API_USERS, doc! { "_id": text(&row, "user_id")? }).await?;
+    let user = user.as_ref().map(user_record).transpose()?.ok_or(corrupt("api session without its user"))?;
+    Ok(Some(ApiSessionLookup {
+        user,
+        expires_at: UnixMillis(int(&row, "expires_at")?),
+        now: UnixMillis(core.server_now().await?),
+    }))
+}
+
+pub(super) async fn delete_session(core: &Core, id: &Sha256Digest) -> Result<(), StoreError> {
+    let id = id.to_hex();
+    mtx!(core, tx => async { tx.delete_one(API_SESSIONS, doc! { "_id": id.as_str() }).await.map(drop) })
 }
 
 pub(super) async fn create(core: &Core, key: &NewApiKey) -> Result<ApiKeyRecord, StoreError> {

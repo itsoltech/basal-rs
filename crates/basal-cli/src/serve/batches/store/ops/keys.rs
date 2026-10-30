@@ -1,18 +1,19 @@
-//! API users and keys: insertion, listing, enabling/disabling users, key lookup for authentication, revocation,
-//! expiry and throttled last use.
+//! API users, their keys and UI sessions: insertion, listing, enabling/disabling, passwords and deletion of users,
+//! key and session lookup for authentication, revocation, expiry and throttled last use.
 //!
-//! These rows are independent of every batch table, so the operations take no batch lock. A key created while its
-//! user is being disabled is harmless: authentication checks the user on every lookup. Times come from the database
-//! clock.
+//! These rows are independent of every batch table, so the operations take no batch lock (deletion only reads the
+//! user's quota row). A key or session created while its user is being disabled is harmless: authentication checks
+//! the user on every lookup. Times come from the database clock.
 
 use std::time::Duration;
 
 use super::super::error::StoreError;
 use super::super::sql::{args, db_now, SqlRow, SqlTx};
 use super::super::types::{
-    ApiKeyId, ApiKeyLookup, ApiKeyRecord, ApiScopes, ApiUserRecord, NewApiKey, OwnerId, UnixMillis,
+    ApiKeyId, ApiKeyLookup, ApiKeyRecord, ApiRole, ApiScopes, ApiSessionLookup, ApiUserRecord, NewApiKey,
+    NewApiSession, OwnerId, PasswordHash, Sha256Digest, UnixMillis,
 };
-use super::common::{corrupt, digest_from_db, millis, owner_from_db};
+use super::common::{corrupt, digest_from_db, lock_quota, millis, owner_from_db};
 
 const COLUMNS: &str = "id, user_id, name, token_sha256, scopes, created_at, expires_at, revoked_at, last_used_at";
 
@@ -35,7 +36,7 @@ async fn get<T: SqlTx>(tx: &mut T, id: &ApiKeyId) -> Result<Option<ApiKeyRecord>
     tx.fetch_optional(&sql, args![id.as_str()]).await?.as_ref().map(record).transpose()
 }
 
-const USER_COLUMNS: &str = "id, name, created_at, disabled_at";
+const USER_COLUMNS: &str = "id, name, created_at, disabled_at, role, password_hash";
 
 fn user_record<R: SqlRow>(row: &R) -> Result<ApiUserRecord, StoreError> {
     Ok(ApiUserRecord {
@@ -43,10 +44,19 @@ fn user_record<R: SqlRow>(row: &R) -> Result<ApiUserRecord, StoreError> {
         name: row.text_at(1)?,
         created_at: UnixMillis(row.i64_at(2)?),
         disabled_at: row.opt_i64_at(3)?.map(UnixMillis),
+        role: ApiRole::parse(&row.text_at(4)?).map_err(|_| corrupt("api user role"))?,
+        password: row
+            .opt_text_at(5)?
+            .map(|hash| PasswordHash::parse(&hash).map_err(|_| corrupt("api user password hash")))
+            .transpose()?,
     })
 }
 
-async fn get_user<T: SqlTx>(tx: &mut T, id: &OwnerId) -> Result<Option<ApiUserRecord>, StoreError> {
+/// The user `id`, if any.
+pub(in super::super) async fn get_user<T: SqlTx>(
+    tx: &mut T,
+    id: &OwnerId,
+) -> Result<Option<ApiUserRecord>, StoreError> {
     let sql = format!("SELECT {USER_COLUMNS} FROM api_users WHERE id = $1");
     tx.fetch_optional(&sql, args![id.as_str()]).await?.as_ref().map(user_record).transpose()
 }
@@ -56,10 +66,18 @@ pub(in super::super) async fn create_user<T: SqlTx>(
     tx: &mut T,
     id: &OwnerId,
     name: &str,
+    role: ApiRole,
+    password: Option<&PasswordHash>,
 ) -> Result<Option<ApiUserRecord>, StoreError> {
     let now = db_now(tx).await?;
-    let sql = tx.dialect().insert_if_absent("api_users", &["id", "name", "created_at"], &["$1", "$2", "$3"], 1);
-    if tx.execute(&sql, args![id.as_str(), name, now]).await? == 0 {
+    let sql = tx.dialect().insert_if_absent(
+        "api_users",
+        &["id", "name", "created_at", "role", "password_hash"],
+        &["$1", "$2", "$3", "$4", "$5"],
+        1,
+    );
+    let hash = password.map(PasswordHash::as_str);
+    if tx.execute(&sql, args![id.as_str(), name, now, role.as_str(), hash]).await? == 0 {
         return Ok(None);
     }
     get_user(tx, id).await?.ok_or(corrupt("inserted api user vanished")).map(Some)
@@ -81,7 +99,8 @@ pub(in super::super) async fn list_users<T: SqlTx>(
     tx.fetch_all(&sql, args![]).await?.iter().map(user_record).collect()
 }
 
-/// Disable or enable a user; disabling again keeps the first time. `NotFound` for an unknown id.
+/// Disable or enable a user; disabling again keeps the first time and ends the user's sessions. `NotFound` for an
+/// unknown id.
 pub(in super::super) async fn set_user_disabled<T: SqlTx>(
     tx: &mut T,
     id: &OwnerId,
@@ -94,10 +113,94 @@ pub(in super::super) async fn set_user_disabled<T: SqlTx>(
             args![now, id.as_str()],
         )
         .await?;
+        tx.execute("DELETE FROM api_sessions WHERE user_id = $1", args![id.as_str()]).await?;
     } else {
         tx.execute("UPDATE api_users SET disabled_at = NULL WHERE id = $1", args![id.as_str()]).await?;
     }
     get_user(tx, id).await?.ok_or(StoreError::NotFound)
+}
+
+/// Set or clear a user's password and end its sessions except `keep` (the session that changed its own password).
+/// `NotFound` for an unknown id.
+pub(in super::super) async fn set_user_password<T: SqlTx>(
+    tx: &mut T,
+    id: &OwnerId,
+    password: Option<&PasswordHash>,
+    keep: Option<&Sha256Digest>,
+) -> Result<ApiUserRecord, StoreError> {
+    let hash = password.map(PasswordHash::as_str);
+    if tx.execute("UPDATE api_users SET password_hash = $1 WHERE id = $2", args![hash, id.as_str()]).await? == 0 {
+        return Err(StoreError::NotFound);
+    }
+    let keep = keep.map_or_else(String::new, |k| k.to_hex());
+    tx.execute("DELETE FROM api_sessions WHERE user_id = $1 AND id <> $2", args![id.as_str(), keep]).await?;
+    get_user(tx, id).await?.ok_or(StoreError::NotFound)
+}
+
+/// Delete a user with its keys and sessions. Only a user disabled at least `disabled_for` ago (no server still
+/// accepts its cached keys) without Batch data (quota row all zero) is deleted: `UserNotDisabled`, `UserHasData`,
+/// `NotFound`. Batch metadata already counted out of the quota stays until the Batch retention purges it.
+pub(in super::super) async fn delete_user<T: SqlTx>(
+    tx: &mut T,
+    id: &OwnerId,
+    disabled_for: Duration,
+) -> Result<(), StoreError> {
+    let user = get_user(tx, id).await?.ok_or(StoreError::NotFound)?;
+    let now = db_now(tx).await?;
+    if user.disabled_at.is_none_or(|at| now.saturating_sub(at.0) < millis(disabled_for)) {
+        return Err(StoreError::UserNotDisabled);
+    }
+    // The quota lock is the first lock of every Batch operation that adds data, so none can commit after this check.
+    if !lock_quota(tx, id).await?.is_empty() {
+        return Err(StoreError::UserHasData);
+    }
+    tx.execute("DELETE FROM api_sessions WHERE user_id = $1", args![id.as_str()]).await?;
+    tx.execute("DELETE FROM api_keys WHERE user_id = $1", args![id.as_str()]).await?;
+    tx.execute("DELETE FROM api_users WHERE id = $1", args![id.as_str()]).await?;
+    Ok(())
+}
+
+/// Insert a session of an existing, enabled user whose password is still the verified one (`NotFound`; disabled or
+/// changed meanwhile: `UserDisabled`) and delete the user's expired sessions.
+pub(in super::super) async fn create_session<T: SqlTx>(
+    tx: &mut T,
+    session: &NewApiSession,
+) -> Result<ApiSessionLookup, StoreError> {
+    let user = get_user(tx, &session.user).await?.ok_or(StoreError::NotFound)?;
+    if user.disabled_at.is_some() || user.password != session.password {
+        return Err(StoreError::UserDisabled);
+    }
+    let now = db_now(tx).await?;
+    tx.execute("DELETE FROM api_sessions WHERE user_id = $1 AND expires_at <= $2", args![user.id.as_str(), now])
+        .await?;
+    let expires_at = now.saturating_add(millis(session.ttl));
+    tx.execute(
+        "INSERT INTO api_sessions (id, user_id, created_at, expires_at) VALUES ($1, $2, $3, $4)",
+        args![session.id.to_hex(), user.id.as_str(), now, expires_at],
+    )
+    .await?;
+    Ok(ApiSessionLookup { user, expires_at: UnixMillis(expires_at), now: UnixMillis(now) })
+}
+
+/// The session `id` (also expired) with its user and the database time of the read.
+pub(in super::super) async fn lookup_session<T: SqlTx>(
+    tx: &mut T,
+    id: &Sha256Digest,
+) -> Result<Option<ApiSessionLookup>, StoreError> {
+    let row =
+        tx.fetch_optional("SELECT user_id, expires_at FROM api_sessions WHERE id = $1", args![id.to_hex()]).await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let user_id = owner_from_db(row.text_at(0)?)?;
+    let user = get_user(tx, &user_id).await?.ok_or(corrupt("api session without its user"))?;
+    Ok(Some(ApiSessionLookup { user, expires_at: UnixMillis(row.i64_at(1)?), now: UnixMillis(db_now(tx).await?) }))
+}
+
+/// Delete a session (logout); deleting a missing one is not an error.
+pub(in super::super) async fn delete_session<T: SqlTx>(tx: &mut T, id: &Sha256Digest) -> Result<(), StoreError> {
+    tx.execute("DELETE FROM api_sessions WHERE id = $1", args![id.to_hex()]).await?;
+    Ok(())
 }
 
 /// Insert a key of an existing user: `NotFound` for an unknown user, `UserDisabled` for a disabled one.

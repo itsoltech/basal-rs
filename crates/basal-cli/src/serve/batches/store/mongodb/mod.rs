@@ -292,9 +292,51 @@ impl MongoStore {
 
     // API users and keys
 
-    pub(super) async fn create_api_user(&self, id: &OwnerId, name: &str) -> Result<Option<ApiUserRecord>, StoreError> {
-        let (id, name) = (id.clone(), name.to_owned());
-        self.run(move |core| async move { keys::create_user(&core, &id, &name).await }).await
+    pub(super) async fn create_api_user(
+        &self,
+        id: &OwnerId,
+        name: &str,
+        role: ApiRole,
+        password: Option<&PasswordHash>,
+    ) -> Result<Option<ApiUserRecord>, StoreError> {
+        let (id, name, password) = (id.clone(), name.to_owned(), password.cloned());
+        self.run(move |core| async move { keys::create_user(&core, &id, &name, role, password.as_ref()).await }).await
+    }
+
+    pub(super) async fn api_user(&self, id: &OwnerId) -> Result<Option<ApiUserRecord>, StoreError> {
+        let id = id.clone();
+        self.run(move |core| async move { keys::user(&core, &id).await }).await
+    }
+
+    pub(super) async fn set_api_user_password(
+        &self,
+        id: &OwnerId,
+        password: Option<&PasswordHash>,
+        keep: Option<&Sha256Digest>,
+    ) -> Result<ApiUserRecord, StoreError> {
+        let (id, password, keep) = (id.clone(), password.cloned(), keep.copied());
+        self.run(move |core| async move { keys::set_user_password(&core, &id, password.as_ref(), keep.as_ref()).await })
+            .await
+    }
+
+    pub(super) async fn delete_api_user(&self, id: &OwnerId, disabled_for: Duration) -> Result<(), StoreError> {
+        let id = id.clone();
+        self.run(move |core| async move { keys::delete_user(&core, &id, disabled_for).await }).await
+    }
+
+    pub(super) async fn create_api_session(&self, session: &NewApiSession) -> Result<ApiSessionLookup, StoreError> {
+        let session = session.clone();
+        self.run(move |core| async move { keys::create_session(&core, &session).await }).await
+    }
+
+    pub(super) async fn lookup_api_session(&self, id: &Sha256Digest) -> Result<Option<ApiSessionLookup>, StoreError> {
+        let id = *id;
+        self.run(move |core| async move { keys::lookup_session(&core, &id).await }).await
+    }
+
+    pub(super) async fn delete_api_session(&self, id: &Sha256Digest) -> Result<(), StoreError> {
+        let id = *id;
+        self.run(move |core| async move { keys::delete_session(&core, &id).await }).await
     }
 
     pub(super) async fn list_api_users(

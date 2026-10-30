@@ -93,7 +93,7 @@ impl ApiError {
     }
 
     /// `Retry-After` of at least one second.
-    fn with_retry_after(mut self, retry_after_s: u32) -> Self {
+    pub(crate) fn with_retry_after(mut self, retry_after_s: u32) -> Self {
         self.retry_after_s = Some(retry_after_s.max(1));
         self
     }
@@ -691,7 +691,7 @@ impl ListQuery {
 }
 
 /// `%XX` and `+` decoding of one query component; `None` for malformed escapes or invalid UTF-8.
-fn percent_decode(s: &str) -> Option<String> {
+pub(crate) fn percent_decode(s: &str) -> Option<String> {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;

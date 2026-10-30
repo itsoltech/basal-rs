@@ -134,6 +134,11 @@ routera: sprawdzają token, zakres trasy i stan użytkownika, a jego identyfikat
 przekazują trasom Batch API jako przestrzeń danych. Użytkownicy i klucze są w tabelach
 `api_users` i `api_keys` tego samego schematu; `basal users` i `basal keys` (`keys.rs`)
 zarządzają nimi bez modelu i GPU.
+Opcjonalny interfejs w przeglądarce (`basal-cli/src/serve/ui/`, [UI.md](UI.md)) serwuje
+wkompilowane strony z `basal-cli/ui/` (HTML, CSS i moduły JavaScript bez kroku budowania)
+oraz API kont `/ui/api`. Sesje (`api_sessions`) i hasła argon2id użytkowników sprawdza ta sama
+warstwa `auth.rs`; sesja daje zakresy `inference` i `batches`, więc strony korzystają
+z istniejących tras `/v1/…` w przestrzeni danych zalogowanego użytkownika.
 Opcjonalna usługa batchy w `basal-cli/src/serve/batches/` ma osobne planowanie CPU,
 trwały magazyn metadanych (w bazie z `database:` albo lokalnej bazie serwera SQLite)
 oraz artefakty FS/S3. `store::Store` udostępnia typowane

@@ -86,6 +86,9 @@ pub struct ServeConfig {
     /// API keys stored in `database`; disabled unless explicitly enabled.
     #[serde(default)]
     pub(crate) auth: crate::serve::auth::AuthConfig,
+    /// Browser UI under /ui/; disabled unless explicitly enabled. Accounts use `auth`.
+    #[serde(default)]
+    pub(crate) ui: crate::serve::ui::UiConfig,
     /// Directory of the GEMM tables of `gemm_table: auto`.
     #[serde(default = "default_gemm_cache")]
     pub gemm_cache: PathBuf,

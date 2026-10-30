@@ -20,6 +20,12 @@
 //! Each key and its user are read from the database at most once per [`CACHE_TTL`] per process, so a revocation,
 //! expiry or disabled user takes effect within that time, and when the database is unreachable after it requests are refused (503), never let
 //! through. Uses are recorded in `last_used_at` at most once per [`TOUCH_INTERVAL`] per key, in the background.
+//!
+//! With the browser UI (`serve::ui`) a request without an `Authorization` header may instead carry the session
+//! cookie of a logged-in user, together with `X-Basal-UI: 1` (otherwise 403). Sessions are read from the database on
+//! every request (no cache: logout, a disabled user and a password change act at once) and give the scopes of
+//! `ui::session::scopes`. The account routes `/ui/api/...` accept only sessions; the pages, `/ui/api/config`,
+//! `/ui/api/login` and `/ui/api/logout` are public (the last two check the UI header themselves).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -34,10 +40,14 @@ use base64::Engine as _;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::{mpsc, Semaphore, SemaphorePermit};
 
 use super::batches::dto::ApiError;
-use super::batches::store::{ApiKeyId, ApiKeyRecord, ApiScopes, OwnerId, Sha256Digest, Store, UnixMillis};
+use super::batches::store::{
+    ApiKeyId, ApiKeyRecord, ApiScopes, ApiSessionLookup, OwnerId, Sha256Digest, Store, UnixMillis,
+};
+use super::ui::api::{ui_header_required, UiSession};
+use super::ui::session;
 use crate::config_support::SecretString;
 
 /// Prefix of every token; lets secret scanners recognise leaked keys.
@@ -107,11 +117,14 @@ fn token_key_id(token: &str) -> Option<ApiKeyId> {
 enum Need {
     Nothing,
     Scope(ApiScopes),
-    /// Any valid key (unknown routes: no route is revealed without one).
+    /// Any valid key or session (unknown routes: no route is revealed without one).
     AnyKey,
+    /// A UI session, not a key (account routes of the UI).
+    Session,
 }
 
-fn need(path: &str, protect_metrics: bool) -> Need {
+/// `ui`: the browser UI is served (its routes exist only then).
+fn need(path: &str, protect_metrics: bool, ui: bool) -> Need {
     let under = |prefix: &str| path == prefix || path.strip_prefix(prefix).is_some_and(|r| r.starts_with('/'));
     match path {
         "/health" | "/health/batches" => Need::Nothing,
@@ -120,6 +133,10 @@ fn need(path: &str, protect_metrics: bool) -> Need {
         "/mcp" => Need::Scope(ApiScopes::MCP),
         "/v1/basal" | "/v1/systemone" | "/v1/decisions" | "/v1/models" => Need::Scope(ApiScopes::INFERENCE),
         _ if under("/v1/files") || under("/v1/batches") => Need::Scope(ApiScopes::BATCHES),
+        // Logout also clears the cookie of an expired session; it checks the UI header itself.
+        "/ui/api/config" | "/ui/api/login" | "/ui/api/logout" if ui => Need::Nothing,
+        _ if ui && under("/ui/api") => Need::Session,
+        _ if ui && under("/ui") => Need::Nothing,
         _ => Need::AnyKey,
     }
 }
@@ -145,6 +162,8 @@ impl Cached {
 pub(crate) struct Authenticator {
     store: Store,
     protect_metrics: bool,
+    /// The browser UI is served: its routes and session cookies are accepted.
+    ui: bool,
     /// Never held across an await.
     cache: Mutex<HashMap<ApiKeyId, Cached>>,
     lookups: Semaphore,
@@ -162,6 +181,8 @@ enum Refusal {
     Unauthenticated,
     Forbidden,
     Unavailable,
+    /// A session cookie without `X-Basal-UI: 1`.
+    UiHeaderMissing,
 }
 
 impl IntoResponse for Refusal {
@@ -181,6 +202,7 @@ impl IntoResponse for Refusal {
                     .into_response()
             }
             Self::Unavailable => ApiError::unavailable(5).into_response(),
+            Self::UiHeaderMissing => ui_header_required().into_response(),
         }
     }
 }
@@ -188,7 +210,7 @@ impl IntoResponse for Refusal {
 impl Authenticator {
     /// Start the authenticator over a connected store; spawns the task that records uses (it ends with the
     /// authenticator). Call inside the runtime.
-    pub(crate) fn start(store: Store, config: &AuthConfig) -> Arc<Self> {
+    pub(crate) fn start(store: Store, config: &AuthConfig, ui: bool) -> Arc<Self> {
         let (touches, mut queue) = mpsc::channel::<ApiKeyId>(TOUCH_QUEUE);
         let recorder = store.clone();
         tokio::spawn(async move {
@@ -201,6 +223,7 @@ impl Authenticator {
         Arc::new(Self {
             store,
             protect_metrics: config.protect_metrics,
+            ui,
             cache: Mutex::new(HashMap::new()),
             lookups: Semaphore::new(MAX_LOOKUPS),
             touches,
@@ -216,10 +239,9 @@ impl Authenticator {
         let (record, now) = match cached {
             Some(hit) => hit,
             None => {
-                let _permit = tokio::time::timeout(LOOKUP_WAIT, self.lookups.acquire())
-                    .await
-                    .map_err(|_| Refusal::Unavailable)?
-                    .map_err(|_| Refusal::Unavailable)?;
+                let _permit = self.lookup_permit().await?;
+                // Stamped before the read: the entry never outlives CACHE_TTL from the data it holds.
+                let fetched = Instant::now();
                 let lookup = self.store.lookup_api_key(&id).await.map_err(|e| {
                     crate::warn!("auth: reading key {}: {e}", id.as_str());
                     Refusal::Unavailable
@@ -228,7 +250,7 @@ impl Authenticator {
                     Some(l) => ((!l.user_disabled).then_some(l.record), l.now),
                     None => (None, UnixMillis(0)),
                 };
-                let entry = Cached { record, db_now, fetched: Instant::now(), touched: None };
+                let entry = Cached { record, db_now, fetched, touched: None };
                 let hit = (entry.record.clone(), entry.now());
                 self.with_cache(|cache| {
                     if cache.len() >= MAX_CACHED {
@@ -250,6 +272,27 @@ impl Authenticator {
             }
             _ => Err(Refusal::Unauthenticated),
         }
+    }
+
+    /// The active session `id` with its user, read from the database (the lookup limit applies).
+    async fn verify_session(&self, id: &Sha256Digest) -> Result<ApiSessionLookup, Refusal> {
+        let _permit = self.lookup_permit().await?;
+        match self.store.lookup_api_session(id).await {
+            Ok(Some(lookup)) if lookup.active() => Ok(lookup),
+            Ok(_) => Err(Refusal::Unauthenticated),
+            Err(e) => {
+                crate::warn!("auth: reading a UI session: {e}");
+                Err(Refusal::Unavailable)
+            }
+        }
+    }
+
+    /// A permit of the lookup limit, waited for at most [`LOOKUP_WAIT`].
+    async fn lookup_permit(&self) -> Result<SemaphorePermit<'_>, Refusal> {
+        tokio::time::timeout(LOOKUP_WAIT, self.lookups.acquire())
+            .await
+            .map_err(|_| Refusal::Unavailable)?
+            .map_err(|_| Refusal::Unavailable)
     }
 
     /// Queue a use record unless one was queued within [`TOUCH_INTERVAL`].
@@ -281,29 +324,49 @@ fn bearer(request: &Request) -> Option<&str> {
     scheme.eq_ignore_ascii_case("bearer").then(|| token.trim())
 }
 
-/// Middleware of the whole router: authenticate, check the route's scope, then pass the request on with the key's
-/// [`OwnerId`] as an extension (clients cannot set extensions). Use with
-/// `axum::middleware::from_fn_with_state(authenticator, require_key)`.
-pub(crate) async fn require_key(State(auth): State<Arc<Authenticator>>, mut request: Request, next: Next) -> Response {
-    let need = need(request.uri().path(), auth.protect_metrics);
+/// Middleware of the whole router: authenticate a key (or, with the UI, a session), check the route's scope, then
+/// pass the request on with the caller's [`OwnerId`] (and for a session its [`UiSession`]) as extensions (clients
+/// cannot set extensions). Use with `axum::middleware::from_fn_with_state(authenticator, require_key)`.
+pub(crate) async fn require_key(State(auth): State<Arc<Authenticator>>, request: Request, next: Next) -> Response {
+    let need = need(request.uri().path(), auth.protect_metrics, auth.ui);
     if need == Need::Nothing {
         return next.run(request).await;
     }
-    let verified = match bearer(&request) {
-        Some(token) => auth.verify(token).await,
-        None => Err(Refusal::Unauthenticated),
+    match authenticate(&auth, need, request).await {
+        Ok(request) => next.run(request).await,
+        Err(refusal) => refusal.into_response(),
+    }
+}
+
+async fn authenticate(auth: &Authenticator, need: Need, mut request: Request) -> Result<Request, Refusal> {
+    let session = match session::cookie_session(request.headers()) {
+        Some(id) if auth.ui && !request.headers().contains_key(AUTHORIZATION) => Some(id),
+        _ => None,
     };
-    let record = match verified {
-        Ok(record) => record,
-        Err(refusal) => return refusal.into_response(),
+    let (owner, scopes) = match session {
+        Some(id) => {
+            if !session::has_ui_header(request.headers()) {
+                return Err(Refusal::UiHeaderMissing);
+            }
+            let lookup = auth.verify_session(&id).await?;
+            let scopes = session::scopes(lookup.user.role);
+            let owner = lookup.user.id.clone();
+            request.extensions_mut().insert(UiSession { id, user: lookup.user });
+            (owner, scopes)
+        }
+        None if need == Need::Session => return Err(Refusal::Unauthenticated),
+        None => {
+            let record = auth.verify(bearer(&request).ok_or(Refusal::Unauthenticated)?).await?;
+            (record.user, record.scopes)
+        }
     };
     if let Need::Scope(scope) = need {
-        if !record.scopes.contains(scope) {
-            return Refusal::Forbidden.into_response();
+        if !scopes.contains(scope) {
+            return Err(Refusal::Forbidden);
         }
     }
-    request.extensions_mut().insert::<OwnerId>(record.user);
-    next.run(request).await
+    request.extensions_mut().insert::<OwnerId>(owner);
+    Ok(request)
 }
 
 /// Connect the key store with the runtime account after the database's automatic migration (when configured).
@@ -315,4 +378,44 @@ pub(crate) async fn connect(database: &crate::database::Database) -> anyhow::Res
     super::batches::connect_store(&options, super::batches::store::StoreSettings::default())
         .await
         .context("connecting the database of the API keys")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn routes_need_scopes() {
+        let scope = |path| need(path, false, false);
+        assert_eq!(scope("/health"), Need::Nothing);
+        assert_eq!(scope("/metrics"), Need::Nothing);
+        assert_eq!(need("/metrics", true, false), Need::Scope(ApiScopes::METRICS));
+        assert_eq!(scope("/v1/decisions"), Need::Scope(ApiScopes::INFERENCE));
+        assert_eq!(scope("/v1/files/file_1/content"), Need::Scope(ApiScopes::BATCHES));
+        assert_eq!(scope("/v1/filesx"), Need::AnyKey, "a prefix is not a path segment");
+        assert_eq!(scope("/mcp"), Need::Scope(ApiScopes::MCP));
+    }
+
+    #[test]
+    fn ui_routes_exist_only_with_the_ui() {
+        assert_eq!(need("/ui/", false, false), Need::AnyKey, "no UI: unknown route");
+        assert_eq!(need("/ui/api/login", false, false), Need::AnyKey);
+        assert_eq!(need("/ui", false, true), Need::Nothing);
+        assert_eq!(need("/ui/app.js", false, true), Need::Nothing);
+        assert_eq!(need("/ui/api/config", false, true), Need::Nothing);
+        assert_eq!(need("/ui/api/login", false, true), Need::Nothing);
+        assert_eq!(need("/ui/api/logout", false, true), Need::Nothing);
+        assert_eq!(need("/ui/api/me", false, true), Need::Session);
+        assert_eq!(need("/ui/api/admin/users", false, true), Need::Session);
+        assert_eq!(need("/ui/apix", false, true), Need::Nothing, "a page name, not the API");
+        assert_eq!(need("/uix", false, true), Need::AnyKey);
+    }
+
+    #[test]
+    fn token_format() {
+        let token = generate_token().unwrap();
+        assert_eq!(token_key_id(token.token.expose()), Some(token.id.clone()));
+        assert_eq!(token_key_id(&token.token.expose()[1..]), None);
+        assert_eq!(token_key_id(&format!("{}x", token.token.expose())), None);
+    }
 }

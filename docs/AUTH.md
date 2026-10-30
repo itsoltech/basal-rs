@@ -37,7 +37,8 @@ jest to [lokalna baza serwera](DATABASE.md#lokalna-baza-bez-sekcji-database)
 
 ## Przygotowanie i zarządzanie
 
-1. Przygotuj schemat bazy (wersja 3 zawiera tabele `api_users` i `api_keys`):
+1. Przygotuj schemat bazy (od wersji 3 tabele `api_users` i `api_keys`, od wersji 4
+   role, hasła i sesje [interfejsu w przeglądarce](UI.md)):
 
    ```sh
    basal database migrate --config serve.yml
@@ -45,12 +46,16 @@ jest to [lokalna baza serwera](DATABASE.md#lokalna-baza-bez-sekcji-database)
 
    SQLite z `auto_migrate: true` (domyślnie) tworzy schemat automatycznie.
    Konto runtime potrzebuje `SELECT` do `batch_schema` (kontrola wersji schematu)
-   oraz `SELECT`, `INSERT` i `UPDATE` do `api_users` i `api_keys`. Przykład dla
-   PostgreSQL, gdy baza służy tylko kluczom:
+   oraz `SELECT`, `INSERT`, `UPDATE` i `DELETE` do `api_users`, `api_keys`
+   i `api_sessions` (`DELETE` służy sesjom i usuwaniu użytkowników), a do usuwania
+   użytkowników także `SELECT`, `INSERT` i `UPDATE` do `batch_quota` (usunięcie
+   blokuje wiersz quota użytkownika). Przykład dla PostgreSQL, gdy baza służy
+   tylko kluczom:
 
    ```sql
    GRANT SELECT ON batch_schema TO basal_runtime;
-   GRANT SELECT, INSERT, UPDATE ON api_users, api_keys TO basal_runtime;
+   GRANT SELECT, INSERT, UPDATE ON batch_quota TO basal_runtime;
+   GRANT SELECT, INSERT, UPDATE, DELETE ON api_users, api_keys, api_sessions TO basal_runtime;
    ```
 
    Bez `SELECT` do `batch_quota_policy` i `batch_quota_limits` polecenie
@@ -82,14 +87,25 @@ jest to [lokalna baza serwera](DATABASE.md#lokalna-baza-bez-sekcji-database)
    | Polecenie | Działanie |
    |---|---|
    | `basal users list [--all] [--json]` | lista użytkowników; `--all` dodaje wyłączonych |
-   | `basal users disable USER` | wszystkie klucze użytkownika przestają działać; dane zostają |
+   | `basal users disable USER` | wszystkie klucze użytkownika przestają działać, sesje UI kończą się od razu; dane zostają |
    | `basal users enable USER` | nieodwołane i niewygasłe klucze znów działają |
+   | `basal users password USER [--clear]` | hasło UI z pierwszej linii stdin albo jego usunięcie; sesje UI użytkownika kończą się |
+   | `basal users delete USER` | usunięcie użytkownika z kluczami i sesjami; tylko wyłączonego co najmniej 30 s, bez danych Batch |
    | `basal keys list [--user U] [--all] [--json]` | lista kluczy bez tokenów; `--all` dodaje odwołane |
    | `basal keys revoke KEY_ID` | odwołanie; ponowne odwołanie zachowuje pierwszy czas |
    | `basal keys rotate KEY_ID [--expire-old-in 24h] [--expires-in 90d]` | nowy klucz z tym samym użytkownikiem, nazwą i zakresami |
 
-   Użytkowników nie usuwa się. Dane wyłączonego użytkownika wygasają według
-   retencji Batch API. Klucza nie da się utworzyć dla nieistniejącego ani
+   `basal users create --admin` tworzy administratora interfejsu w przeglądarce,
+   a `--password-stdin` czyta jego hasło (co najmniej 12 znaków) z pierwszej
+   linii stdin. Hasło nigdy nie jest argumentem. Szczegóły: [UI.md](UI.md).
+
+   Dane wyłączonego użytkownika wygasają według retencji Batch API. Usunąć można
+   tylko użytkownika wyłączonego co najmniej 30 s temu (żaden serwer nie przyjmuje
+   już jego kluczy z cache), którego licznik quota Batch jest pusty: bez plików,
+   batchy, sesji uploadu i zarezerwowanych bajtów. Sprawdzenie blokuje wiersz quota
+   jak operacje Batch, więc żadna nie doda danych w trakcie usuwania. Usunięcie
+   kasuje konto, klucze i sesje UI. Ten sam identyfikator można potem utworzyć
+   ponownie. Pozostałe w bazie metadane wygasłych batchy usuwa retencja Batch API. Klucza nie da się utworzyć dla nieistniejącego ani
    wyłączonego użytkownika.
 
    `KEY_ID` to 16 znaków szesnastkowych po prefiksie `bsk_`. Rotacja nie odwołuje
@@ -157,9 +173,11 @@ Wszystkie przyczyny 401 dają tę samą odpowiedź, więc nie ujawniają stanu k
 
 ## Ograniczenia
 
-- Brak HTTP API do zarządzania; tylko `basal users` i `basal keys` z dostępem do bazy.
-- Brak usuwania użytkowników i ich danych.
-- Brak limitów liczby żądań na klucz i limitu nieudanych prób z jednego adresu.
+- HTTP API do zarządzania istnieje tylko w [interfejsie w przeglądarce](UI.md)
+  (`basal serve --ui`, sesja administratora); klucze API go nie otwierają.
+- Usunięcie użytkownika nie usuwa jego danych Batch; wymaga, żeby już wygasły.
+- Brak limitów liczby żądań na klucz i limitu nieudanych prób z jednego adresu
+  (logowanie do UI ma limit nieudanych prób na użytkownika).
 - `/health/batches` pozostaje publiczne i pokazuje stan magazynu batchy.
 - Rotacja nie jest atomowa: gdy ustawienie wygaśnięcia starego klucza się nie powiedzie,
   nowy token jest już wypisany, a stary klucz pozostaje ważny.

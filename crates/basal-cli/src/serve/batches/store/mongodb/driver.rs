@@ -160,6 +160,7 @@ pub(super) const DEFICITS: &str = "batch_deficits";
 pub(super) const SESSIONS: &str = "artifact_sessions";
 pub(super) const API_USERS: &str = "api_users";
 pub(super) const API_KEYS: &str = "api_keys";
+pub(super) const API_SESSIONS: &str = "api_sessions";
 
 /// Shared state of the adapter: client, database namespace, settings and per-operation server time limit.
 pub(super) struct Core {
