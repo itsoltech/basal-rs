@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::{Path, State};
-use axum::http::header::{RETRY_AFTER, SET_COOKIE};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri};
+use axum::http::header::SET_COOKIE;
+use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use serde::de::DeserializeOwned;
@@ -80,6 +80,15 @@ impl UiState {
             ApiError::internal()
         })
     }
+
+    /// Check and hash a new password, if one is given.
+    async fn hash_new(&self, password: Option<String>) -> Result<Option<PasswordHash>, ApiError> {
+        let Some(password) = password else {
+            return Ok(None);
+        };
+        check_new_password(&password)?;
+        self.hash(password).await.map(Some)
+    }
 }
 
 type ApiResult<T> = Result<T, ApiError>;
@@ -101,6 +110,11 @@ fn store_error(error: StoreError) -> ApiError {
                 .with_retry_after(RETRY_AFTER_S)
         }
     }
+}
+
+fn no_randomness(error: getrandom::Error) -> ApiError {
+    crate::warn!("ui: reading system randomness: {error}");
+    ApiError::internal()
 }
 
 fn not_found(what: &'static str) -> ApiError {
@@ -220,18 +234,11 @@ struct Login {
 
 /// Every failure is the same 401 (unknown user, no password, wrong password, disabled user), after the same hashing
 /// work; ten failures of one user id within 15 minutes refuse it (429) until the window ends.
-pub(super) async fn login(State(state): State<Arc<UiState>>, headers: HeaderMap, bytes: Bytes) -> Response {
-    match login_inner(&state, &headers, &bytes).await {
-        Ok(response) => response,
-        Err(error) => error.into_response(),
-    }
-}
-
-async fn login_inner(state: &UiState, headers: &HeaderMap, bytes: &[u8]) -> ApiResult<Response> {
-    if !session::has_ui_header(headers) {
+pub(super) async fn login(State(state): State<Arc<UiState>>, headers: HeaderMap, bytes: Bytes) -> ApiResult<Response> {
+    if !session::has_ui_header(&headers) {
         return Err(ui_header_required());
     }
-    let Login { user, password } = body(bytes)?;
+    let Login { user, password } = body(&bytes)?;
     let invalid = || {
         ApiError::new(StatusCode::UNAUTHORIZED, "authentication_error", "Invalid user or password.")
             .with_code("invalid_credentials")
@@ -241,15 +248,13 @@ async fn login_inner(state: &UiState, headers: &HeaderMap, bytes: &[u8]) -> ApiR
         return Err(invalid());
     };
     if let Err(wait) = state.throttle.check(&id) {
-        let mut response = ApiError::new(
+        return Err(ApiError::new(
             StatusCode::TOO_MANY_REQUESTS,
             "rate_limit_error",
             "Too many failed logins for this user; try again later.",
         )
         .with_code("too_many_attempts")
-        .into_response();
-        response.headers_mut().insert(RETRY_AFTER, HeaderValue::from(wait.as_secs().max(1)));
-        return Ok(response);
+        .with_retry_after(u32::try_from(wait.as_secs()).unwrap_or(u32::MAX)));
     }
     let record = state.store().api_user(&id).await.map_err(store_error)?;
     let hash = record.as_ref().filter(|u| u.disabled_at.is_none()).and_then(|u| u.password.clone());
@@ -260,21 +265,15 @@ async fn login_inner(state: &UiState, headers: &HeaderMap, bytes: &[u8]) -> ApiR
         return Err(invalid());
     };
     state.throttle.succeeded(&id);
-    let new = session::generate_session().map_err(|e| {
-        crate::warn!("ui: reading system randomness: {e}");
-        ApiError::internal()
-    })?;
+    let new = session::generate_session().map_err(no_randomness)?;
     let session =
-        NewApiSession { id: new.id, user: record.id.clone(), password: verified_hash, ttl: state.settings.session_ttl };
+        NewApiSession { id: new.id, user: record.id, password: verified_hash, ttl: state.settings.session_ttl };
     let created = state.store().create_api_session(&session).await.map_err(|e| match e {
         StoreError::NotFound | StoreError::UserDisabled => invalid(),
         e => store_error(e),
     })?;
-    let mut response = Json(me_json(&created.user)).into_response();
-    response
-        .headers_mut()
-        .insert(SET_COOKIE, session::set_cookie(&new.token, state.settings.session_ttl, state.settings.cookie_secure));
-    Ok(response)
+    let cookie = session::set_cookie(&new.token, state.settings.session_ttl, state.settings.cookie_secure);
+    Ok(([(SET_COOKIE, cookie)], Json(me_json(&created.user))).into_response())
 }
 
 /// 403 for a cookie request without `X-Basal-UI: 1` (also answered by `serve::auth`).
@@ -288,18 +287,14 @@ pub(crate) fn ui_header_required() -> ApiError {
 
 /// Delete the session of the cookie, if any, and clear the cookie: also for an expired session, which the auth
 /// middleware would refuse (so this route is public and checks the UI header itself).
-pub(super) async fn logout(State(state): State<Arc<UiState>>, headers: HeaderMap) -> Response {
+pub(super) async fn logout(State(state): State<Arc<UiState>>, headers: HeaderMap) -> ApiResult<Response> {
     if !session::has_ui_header(&headers) {
-        return ui_header_required().into_response();
+        return Err(ui_header_required());
     }
     if let Some(id) = session::cookie_session(&headers) {
-        if let Err(e) = state.store().delete_api_session(&id).await {
-            return store_error(e).into_response();
-        }
+        state.store().delete_api_session(&id).await.map_err(store_error)?;
     }
-    let mut response = StatusCode::NO_CONTENT.into_response();
-    response.headers_mut().insert(SET_COOKIE, session::clear_cookie(state.settings.cookie_secure));
-    response
+    Ok((StatusCode::NO_CONTENT, [(SET_COOKIE, session::clear_cookie(state.settings.cookie_secure))]).into_response())
 }
 
 pub(super) async fn me(Extension(session): Extension<UiSession>) -> Json<Value> {
@@ -381,10 +376,7 @@ async fn create_key(
     scopes: ApiScopes,
     expires_in: Option<Duration>,
 ) -> ApiResult<Response> {
-    let token = generate_token().map_err(|e| {
-        crate::warn!("ui: reading system randomness: {e}");
-        ApiError::internal()
-    })?;
+    let token = generate_token().map_err(no_randomness)?;
     let new = NewApiKey { id: token.id, user, name: key.name, token_sha256: token.sha256, scopes, expires_in };
     let record = state.store().create_api_key(&new).await.map_err(|e| match e {
         StoreError::NotFound => not_found("user"),
@@ -411,7 +403,7 @@ pub(super) async fn create_my_key(
             .with_param("scopes")
             .with_code("admin_required"));
     }
-    create_key(&state, session.user.id.clone(), key, scopes, expires_in).await
+    create_key(&state, session.user.id, key, scopes, expires_in).await
 }
 
 /// Revoke a key of the caller; another user's key is a 404.
@@ -485,13 +477,7 @@ pub(super) async fn create_user(
         .as_deref()
         .map_or(Ok(ApiRole::User), ApiRole::parse)
         .map_err(|e| ApiError::invalid_request(e.to_string()).with_param("role"))?;
-    let hash = match password {
-        Some(password) => {
-            check_new_password(&password)?;
-            Some(state.hash(password).await?)
-        }
-        None => None,
-    };
+    let hash = state.hash_new(password).await?;
     let user = state
         .store()
         .create_api_user(&id, &name, role, hash.as_ref())
@@ -551,13 +537,7 @@ pub(super) async fn set_password(
     // The admin's own password changes through `change_password`, which asks for the current one.
     not_self(&session, &id)?;
     let SetPassword { password } = body(&bytes)?;
-    let hash = match password {
-        Some(password) => {
-            check_new_password(&password)?;
-            Some(state.hash(password).await?)
-        }
-        None => None,
-    };
+    let hash = state.hash_new(password).await?;
     let user = state.store().set_api_user_password(&id, hash.as_ref(), None).await.map_err(user_not_found)?;
     Ok(Json(user_json(&user)))
 }

@@ -28,7 +28,7 @@ use axum::extract::{DefaultBodyLimit, Path};
 use axum::http::header::{CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, LOCATION};
 use axum::http::{HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{any, delete, get, post};
 use axum::Router;
 use serde::Deserialize;
 
@@ -125,14 +125,14 @@ const ASSETS: &[Asset] = assets![
 
 /// Routes of the UI. `store` is the key store with `auth` (accounts), else `None` (only the pages and `config`).
 pub(crate) fn router(settings: UiSettings, info: &UiInfo, store: Option<Store>) -> Router<()> {
+    let accounts = store.is_some();
     let config = serde_json::json!({
-        "auth": store.is_some(),
+        "auth": accounts,
         "batches": info.batches,
         "metrics": info.metrics,
         "mcp": info.mcp,
         "version": crate::version(),
     });
-    let accounts = store.is_some();
     if accounts {
         tokio::task::spawn_blocking(session::warm_up);
     }
@@ -147,7 +147,7 @@ pub(crate) fn router(settings: UiSettings, info: &UiInfo, store: Option<Store>) 
             .route("/ui/api/me/keys", get(api::my_keys).post(api::create_my_key))
             .route("/ui/api/me/keys/{id}/revoke", post(api::revoke_my_key))
             .route("/ui/api/admin/users", get(api::users).post(api::create_user))
-            .route("/ui/api/admin/users/{id}", axum::routing::delete(api::delete_user))
+            .route("/ui/api/admin/users/{id}", delete(api::delete_user))
             .route("/ui/api/admin/users/{id}/disable", post(api::disable_user))
             .route("/ui/api/admin/users/{id}/enable", post(api::enable_user))
             .route("/ui/api/admin/users/{id}/password", post(api::set_password))
@@ -157,7 +157,7 @@ pub(crate) fn router(settings: UiSettings, info: &UiInfo, store: Option<Store>) 
         routes
     };
     routes
-        .route("/ui/api/{*rest}", axum::routing::any(api_not_found))
+        .route("/ui/api/{*rest}", any(api_not_found))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(state)
         .route("/ui", get(|| async { (StatusCode::PERMANENT_REDIRECT, [(LOCATION, "/ui/")]) }))

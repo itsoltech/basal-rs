@@ -40,7 +40,7 @@ use base64::Engine as _;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::{mpsc, Semaphore, SemaphorePermit};
 
 use super::batches::dto::ApiError;
 use super::batches::store::{
@@ -239,10 +239,7 @@ impl Authenticator {
         let (record, now) = match cached {
             Some(hit) => hit,
             None => {
-                let _permit = tokio::time::timeout(LOOKUP_WAIT, self.lookups.acquire())
-                    .await
-                    .map_err(|_| Refusal::Unavailable)?
-                    .map_err(|_| Refusal::Unavailable)?;
+                let _permit = self.lookup_permit().await?;
                 // Stamped before the read: the entry never outlives CACHE_TTL from the data it holds.
                 let fetched = Instant::now();
                 let lookup = self.store.lookup_api_key(&id).await.map_err(|e| {
@@ -279,10 +276,7 @@ impl Authenticator {
 
     /// The active session `id` with its user, read from the database (the lookup limit applies).
     async fn verify_session(&self, id: &Sha256Digest) -> Result<ApiSessionLookup, Refusal> {
-        let _permit = tokio::time::timeout(LOOKUP_WAIT, self.lookups.acquire())
-            .await
-            .map_err(|_| Refusal::Unavailable)?
-            .map_err(|_| Refusal::Unavailable)?;
+        let _permit = self.lookup_permit().await?;
         match self.store.lookup_api_session(id).await {
             Ok(Some(lookup)) if lookup.active() => Ok(lookup),
             Ok(_) => Err(Refusal::Unauthenticated),
@@ -291,6 +285,14 @@ impl Authenticator {
                 Err(Refusal::Unavailable)
             }
         }
+    }
+
+    /// A permit of the lookup limit, waited for at most [`LOOKUP_WAIT`].
+    async fn lookup_permit(&self) -> Result<SemaphorePermit<'_>, Refusal> {
+        tokio::time::timeout(LOOKUP_WAIT, self.lookups.acquire())
+            .await
+            .map_err(|_| Refusal::Unavailable)?
+            .map_err(|_| Refusal::Unavailable)
     }
 
     /// Queue a use record unless one was queued within [`TOUCH_INTERVAL`].

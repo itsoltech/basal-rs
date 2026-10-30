@@ -1343,10 +1343,9 @@ pub(crate) struct ApiUserRecord {
 }
 
 /// Role of an API user in the browser UI (`serve::ui`). Keys carry scopes, not roles.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ApiRole {
     /// Manages its own keys, files and batches.
-    #[default]
     User,
     /// Also manages every user and key.
     Admin,

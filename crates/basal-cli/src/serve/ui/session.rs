@@ -19,7 +19,7 @@ use crate::config_support::SecretString;
 use crate::serve::batches::store::{ApiRole, ApiScopes, OwnerId, PasswordHash, Sha256Digest};
 
 /// Name of the session cookie.
-pub(crate) const COOKIE_NAME: &str = "basal_session";
+const COOKIE_NAME: &str = "basal_session";
 /// Header every cookie-authenticated request carries (value `1`).
 pub(crate) const UI_HEADER: &str = "x-basal-ui";
 const TOKEN_PREFIX: &str = "bss_";
@@ -27,11 +27,11 @@ const SECRET_BYTES: usize = 32;
 const SECRET_CHARS: usize = 43;
 const SALT_BYTES: usize = 16;
 /// Password length limits: at least 12 characters; the upper bound only caps the hashing input.
-pub(crate) const MIN_PASSWORD_CHARS: usize = 12;
+const MIN_PASSWORD_CHARS: usize = 12;
 const MAX_PASSWORD_BYTES: usize = 1024;
 /// Failed logins of one user id within [`THROTTLE_WINDOW`] before further attempts are refused until it ends.
 const MAX_FAILURES: u32 = 10;
-pub(crate) const THROTTLE_WINDOW: Duration = Duration::from_secs(15 * 60);
+const THROTTLE_WINDOW: Duration = Duration::from_secs(15 * 60);
 /// Most user ids the throttle tracks; when full, expired entries go first, then the oldest.
 const MAX_TRACKED: usize = 10_000;
 
