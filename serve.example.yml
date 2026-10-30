@@ -165,6 +165,9 @@ models:
 # forward may use by the source bound (longer batches run in sub-batches, a larger row is refused with HTTP 500).
 # Without device, replica_devices, layer_split, quantization, media, thinking, early_exit, state cache, batch_profile
 # or a GEMM table; dtype auto or f32. Also `basal serve --model mini --backend cpu --cpu-work-mb 2048`.
+# Linux package: CPU selected only in YAML still starts the bundled CUDA binary and needs the NVIDIA driver and
+# CUDA libraries. Without them use the CLI command above; explicit --backend cpu stays in the main package binary.
+# CPU-only `basal doctor` does not check this packaged-YAML dependency.
 # models:
 #   - path: .models/basal-1.5-mini
 #     backend: cpu

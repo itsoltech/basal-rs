@@ -609,6 +609,13 @@ odkrywanie GPU, zapytania o pamięć GPU, regułę precyzji zależną od karty,
 loader Intel, tabele GEMM i delegację do binarki CUDA; `load_planned` odrzuca
 plan CPU z umiejscowieniem GPU i odwrotnie.
 
+W paczce Linux wybór `backend: cpu` wyłącznie w pliku YAML nadal przekazuje
+`serve` do dołączonej binarki CUDA. Ta binarka wymaga sterownika NVIDIA i
+bibliotek CUDA już przy uruchomieniu, mimo że backend CPU nie odpytuje GPU.
+Na hoście bez tych bibliotek użyj
+`basal serve --model mini --backend cpu --cpu-work-mb 2048`, które pomija
+delegację. `basal doctor` dla konfiguracji CPU pomija kontrolę tej zależności.
+
 Wątki: model liczy na wątku polecenia albo na wątkach toru głównego i długiego
 serwera, nigdy na Tokio. Wewnętrzna równoległość Candle i gemm używa globalnej
 puli Rayon (rozmiar z `RAYON_NUM_THREADS` albo dostępnej równoległości przy

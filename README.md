@@ -453,6 +453,12 @@ starcie serwer sprawdza, czy wagi, bufory ładowania i limit dla każdego toru
 mieszczą się w dostępnej pamięci hosta. To szacunek nazwanych tensorów, nie
 pomiar RSS ani ochrona przed OOM.
 
+W paczce Linux konfiguracja `backend: cpu` z pliku YAML nadal uruchamia
+dołączoną binarkę CUDA, która wymaga sterownika NVIDIA i bibliotek CUDA.
+Na hoście bez nich użyj `basal serve --model mini --backend cpu --cpu-work-mb 2048`;
+jawne `--backend cpu` uruchamia CPU w głównej binarce pakietu. `basal doctor`
+nie sprawdza tej zależności dla konfiguracji złożonej tylko z modeli CPU.
+
 ```yaml
 models:
   - path: .models/basal-1.5-mini
