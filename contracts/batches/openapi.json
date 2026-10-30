@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Basal Batch and Files API",
-    "version": "0.2.0",
-    "description": "Durable batches of native /v1/basal requests in JSONL files, processed with GPU capacity left by online traffic. OpenAI-like resources and error bodies; the native endpoint, limits, Idempotency-Key and the output_expires_after anchor are local extensions. Served by `basal serve` only when batches are enabled (`--batches` or `batches.enabled`); /v1/basal, /v1/systemone, /v1/models and /health are unchanged and not described here. System One batches (/v1/systemone records), `stream`, and network URLs are not supported. From server 0.1.13 all routes are unauthenticated. All callers share the storage namespace selected by batches.owner (default local); request headers never select it. Lists are ordered by created_at, id descending. Times are Unix seconds. This contract is separate from the online contracts (contracts/basal, contracts/typesafe). Batch/Files clients are available in Python, TypeScript/JavaScript and C# SDK 0.6.0+ and Rust SDK 0.7.0+ (basal-rs 0.1.13+).",
+    "version": "0.3.0",
+    "description": "Durable batches of native /v1/basal requests in JSONL files, processed with GPU capacity left by online traffic. OpenAI-like resources and error bodies; the native endpoint, limits, Idempotency-Key and the output_expires_after anchor are local extensions. Served by `basal serve` only when batches are enabled (`--batches` or `batches.enabled`); /v1/basal, /v1/systemone, /v1/models and /health are unchanged and not described here. System One batches (/v1/systemone records), `stream`, and network URLs are not supported. API keys are optional and off by default. When the server runs with auth.enabled, every route here except /health/batches needs `Authorization: Bearer <key>` with a key created by `basal keys create`; clients treat the key as an opaque string. A missing, unknown, revoked or expired key is a 401 (invalid_api_key, WWW-Authenticate: Bearer), a key without the route's scope is a 403 (insufficient_scope), and an unreachable key database is a 503. Without auth.enabled the header is ignored. Without auth.enabled all callers share the storage namespace selected by batches.owner (default local); with it, the namespace is the API user of the verified key: all keys of one user share its files and batches, different users see different ones (another user's resource is a 404), and a user without Batch quota gets a 403 (quota_not_configured). Request headers never select it directly. Lists are ordered by created_at, id descending. Times are Unix seconds. This contract is separate from the online contracts (contracts/basal, contracts/typesafe). Batch/Files clients are available in Python, TypeScript/JavaScript and C# SDK 0.6.0+ and Rust SDK 0.7.0+ (basal-rs 0.1.13+). The optional API key is configurable in Python, TypeScript/JavaScript and C# SDK 0.7.0+ and Rust SDK 0.8.0+.",
     "license": {
       "name": "Apache-2.0"
     }
@@ -11,6 +11,12 @@
   "servers": [
     {
       "url": "http://127.0.0.1:8000"
+    }
+  ],
+  "security": [
+    {},
+    {
+      "bearerAuth": []
     }
   ],
   "paths": {
@@ -80,6 +86,12 @@
           "429": {
             "$ref": "#/components/responses/Throttled"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           },
@@ -135,6 +147,12 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
@@ -169,6 +187,12 @@
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
@@ -194,6 +218,12 @@
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "503": {
             "$ref": "#/components/responses/Unavailable"
@@ -230,6 +260,12 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "503": {
             "$ref": "#/components/responses/Unavailable"
@@ -289,6 +325,12 @@
           "429": {
             "$ref": "#/components/responses/Throttled"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
@@ -333,6 +375,12 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
@@ -367,6 +415,12 @@
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
@@ -399,7 +453,8 @@
               }
             }
           }
-        }
+        },
+        "security": []
       }
     },
     "/v1/batches/{batch_id}/cancel": {
@@ -431,6 +486,12 @@
           "404": {
             "$ref": "#/components/responses/NotFound"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "503": {
             "$ref": "#/components/responses/Unavailable"
           }
@@ -439,9 +500,44 @@
     }
   },
   "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Optional API key from `basal keys create`, required only when the server runs with auth.enabled. Opaque to clients. Without auth.enabled the server ignores the Authorization header."
+      }
+    },
     "responses": {
       "BadRequest": {
         "description": "Malformed control request, unknown field/parameter/option, or unsupported route.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "auth.enabled and a missing, unknown, revoked or expired API key (invalid_api_key, authentication_error).",
+        "headers": {
+          "WWW-Authenticate": {
+            "schema": {
+              "type": "string",
+              "const": "Bearer"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "auth.enabled and a valid API key without scope for this route (insufficient_scope, permission_error).",
         "content": {
           "application/json": {
             "schema": {
@@ -499,7 +595,7 @@
         }
       },
       "Unavailable": {
-        "description": "The batch database or artifact storage is unavailable, or its schema unknown (batch_service_unavailable). Online inference is unaffected.",
+        "description": "The batch database or artifact storage is unavailable, or its schema unknown (batch_service_unavailable); with auth.enabled also when the API key database is unreachable. A batch storage outage does not affect online inference.",
         "headers": {
           "Retry-After": {
             "schema": {
@@ -568,6 +664,8 @@
                 "type": "string",
                 "enum": [
                   "invalid_request_error",
+                  "authentication_error",
+                  "permission_error",
                   "rate_limit_error",
                   "server_error"
                 ]
@@ -588,6 +686,7 @@
                     "type": "string",
                     "examples": [
                       "invalid_api_key",
+                      "insufficient_scope",
                       "invalid_route",
                       "unknown_parameter",
                       "unsupported_endpoint",

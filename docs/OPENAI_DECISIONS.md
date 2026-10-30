@@ -28,8 +28,11 @@ planowanie, kalibrację i model. Odpowiedź TypeSafe jest zamieniana na obiekt
 `/v1/systemone` daje te same prawdopodobieństwa. Wyniki modeli basal nie są
 wynikami `gpt-6-luna`; zgodność dotyczy kontraktu HTTP, nie jakości odpowiedzi.
 
-Serwer nie ma uwierzytelniania; nagłówek `Authorization` wysyłany przez SDK jest
-ignorowany. Endpoint nie zależy od `systemone_dialect`.
+Domyślnie serwer nie ma uwierzytelniania i ignoruje nagłówek `Authorization`
+wysyłany przez SDK (`api_key` może być dowolny). Z [kluczami API](AUTH.md)
+(`auth.enabled`) endpoint wymaga klucza z zakresem `inference`: podaj token
+`bsk_…` jako `api_key` klienta OpenAI. Brak lub zły klucz daje 401
+`invalid_api_key`, klucz bez zakresu 403. Endpoint nie zależy od `systemone_dialect`.
 
 ## Żądanie
 

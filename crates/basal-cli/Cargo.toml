@@ -35,6 +35,9 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 libc = "0.2"
 libloading = "0.8"
 sha2 = "0.10"
+# API keys: token secrets from the OS and constant-time digest comparison
+getrandom = "=0.4.3"
+subtle = "=2.6.1"
 # Durable Batch API storage; selected at runtime, without a database at build time.
 sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-native-roots", "postgres", "sqlite-bundled"] }
 tiberius = { version = "=0.13.0", default-features = false, features = ["tds80", "rustls"] }

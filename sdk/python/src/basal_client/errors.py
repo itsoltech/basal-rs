@@ -12,12 +12,19 @@ class BasalError(Exception):
     """Base SDK error. Transport errors retain their original exception as cause."""
 
 
+_AUTH_HINTS = {
+    401: "missing or invalid API key; pass api_key when the server has auth.enabled",
+    403: "the API key has no scope for this route",
+}
+
+
 class BasalHTTPError(BasalError):
     """Non-2xx response, retaining the body and unmodified Retry-After header."""
 
     def __init__(self, status_code: int, body: Any, retry_after: str | None):
         # Keep server bodies accessible explicitly; do not include state or secrets in logs.
-        super().__init__(f"Basal HTTP {status_code}")
+        hint = _AUTH_HINTS.get(status_code)
+        super().__init__(f"Basal HTTP {status_code}" + (f": {hint}" if hint else ""))
         self.status_code = status_code
         self.body = body
         self.retry_after = retry_after

@@ -59,16 +59,19 @@ use ops::lifecycle::Created;
 const SQLITE_MIGRATIONS: &[Migration] = &[
     Migration { version: 1, id: "0001_init", sql: include_str!("migrations/sqlite/0001_init.sql") },
     Migration { version: 2, id: "0002_abandonment", sql: include_str!("migrations/sqlite/0002_abandonment.sql") },
+    Migration { version: 3, id: "0003_api_keys", sql: include_str!("migrations/sqlite/0003_api_keys.sql") },
 ];
 
 const POSTGRESQL_MIGRATIONS: &[Migration] = &[
     Migration { version: 1, id: "0001_init", sql: include_str!("migrations/postgresql/0001_init.sql") },
     Migration { version: 2, id: "0002_abandonment", sql: include_str!("migrations/postgresql/0002_abandonment.sql") },
+    Migration { version: 3, id: "0003_api_keys", sql: include_str!("migrations/postgresql/0003_api_keys.sql") },
 ];
 
 const MSSQL_MIGRATIONS: &[Migration] = &[
     Migration { version: 1, id: "0001_init", sql: include_str!("migrations/mssql/0001_init.sql") },
     Migration { version: 2, id: "0002_abandonment", sql: include_str!("migrations/mssql/0002_abandonment.sql") },
+    Migration { version: 3, id: "0003_api_keys", sql: include_str!("migrations/mssql/0003_api_keys.sql") },
 ];
 
 /// Retries of a transaction rolled back by a lock timeout, deadlock or busy database.
@@ -413,6 +416,97 @@ impl Store {
         match &self.db {
             Db::Mongodb(mongo) => mongo.active_quota_policy().await,
             Db::Sql(sql) => in_tx!(sql, tx => ops::admin::active_quota_policy(tx)),
+        }
+    }
+
+    // -----------------------------------------------------------------------------------------------------------
+    // API users and keys (see `serve::auth`); independent of every batch table and lock
+    // -----------------------------------------------------------------------------------------------------------
+
+    /// Insert a user; `None` when the id is taken.
+    pub(crate) async fn create_api_user(&self, id: &OwnerId, name: &str) -> Result<Option<ApiUserRecord>, StoreError> {
+        match &self.db {
+            Db::Mongodb(mongo) => mongo.create_api_user(id, name).await,
+            Db::Sql(sql) => in_tx!(sql, tx => ops::keys::create_user(tx, id, name)),
+        }
+    }
+
+    /// At most `limit` users ordered by id, disabled ones only with `include_disabled`.
+    pub(crate) async fn list_api_users(
+        &self,
+        include_disabled: bool,
+        limit: u32,
+    ) -> Result<Vec<ApiUserRecord>, StoreError> {
+        match &self.db {
+            Db::Mongodb(mongo) => mongo.list_api_users(include_disabled, limit).await,
+            Db::Sql(sql) => in_tx!(sql, tx => ops::keys::list_users(tx, include_disabled, limit)),
+        }
+    }
+
+    /// Disable (keeping the first time) or enable a user; `NotFound` for an unknown id. A disabled user's keys are
+    /// refused, its data stays.
+    pub(crate) async fn set_api_user_disabled(
+        &self,
+        id: &OwnerId,
+        disabled: bool,
+    ) -> Result<ApiUserRecord, StoreError> {
+        match &self.db {
+            Db::Mongodb(mongo) => mongo.set_api_user_disabled(id, disabled).await,
+            Db::Sql(sql) => in_tx!(sql, tx => ops::keys::set_user_disabled(tx, id, disabled)),
+        }
+    }
+
+    /// Insert a new key of an existing, enabled user (`NotFound`, `UserDisabled`); its expiry counts from the
+    /// database clock.
+    pub(crate) async fn create_api_key(&self, key: &NewApiKey) -> Result<ApiKeyRecord, StoreError> {
+        match &self.db {
+            Db::Mongodb(mongo) => mongo.create_api_key(key).await,
+            Db::Sql(sql) => in_tx!(sql, tx => ops::keys::create(tx, key)),
+        }
+    }
+
+    /// At most `limit` keys in creation order, optionally of one user, revoked ones only with `include_revoked`.
+    pub(crate) async fn list_api_keys(
+        &self,
+        user: Option<&OwnerId>,
+        include_revoked: bool,
+        limit: u32,
+    ) -> Result<Vec<ApiKeyRecord>, StoreError> {
+        match &self.db {
+            Db::Mongodb(mongo) => mongo.list_api_keys(user, include_revoked, limit).await,
+            Db::Sql(sql) => in_tx!(sql, tx => ops::keys::list(tx, user, include_revoked, limit)),
+        }
+    }
+
+    /// The key `id` (also revoked or expired) with the database time of the read.
+    pub(crate) async fn lookup_api_key(&self, id: &ApiKeyId) -> Result<Option<ApiKeyLookup>, StoreError> {
+        match &self.db {
+            Db::Mongodb(mongo) => mongo.lookup_api_key(id).await,
+            Db::Sql(sql) => in_tx!(sql, tx => ops::keys::lookup(tx, id)),
+        }
+    }
+
+    /// Revoke a key (idempotent: the first revocation time stays); `NotFound` for an unknown id.
+    pub(crate) async fn revoke_api_key(&self, id: &ApiKeyId) -> Result<ApiKeyRecord, StoreError> {
+        match &self.db {
+            Db::Mongodb(mongo) => mongo.revoke_api_key(id).await,
+            Db::Sql(sql) => in_tx!(sql, tx => ops::keys::revoke(tx, id)),
+        }
+    }
+
+    /// Let a key expire `within` from now unless it expires earlier already; `NotFound` for an unknown id.
+    pub(crate) async fn expire_api_key(&self, id: &ApiKeyId, within: Duration) -> Result<ApiKeyRecord, StoreError> {
+        match &self.db {
+            Db::Mongodb(mongo) => mongo.expire_api_key(id, within).await,
+            Db::Sql(sql) => in_tx!(sql, tx => ops::keys::expire_within(tx, id, within)),
+        }
+    }
+
+    /// Record a use of the key now unless its last recorded use is younger than `interval`.
+    pub(crate) async fn touch_api_key(&self, id: &ApiKeyId, interval: Duration) -> Result<(), StoreError> {
+        match &self.db {
+            Db::Mongodb(mongo) => mongo.touch_api_key(id, interval).await,
+            Db::Sql(sql) => in_tx!(sql, tx => ops::keys::touch(tx, id, interval)),
         }
     }
 

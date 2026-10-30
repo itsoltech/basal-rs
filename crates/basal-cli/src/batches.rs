@@ -10,7 +10,7 @@
 //!
 //! The configuration is the `batches:` and root `database:` sections of the serve configuration (`--config FILE`,
 //! `BASAL_CONFIG` or `basal-serve.yml`; `models` may be absent); without one, the local profile under
-//! `--batch-data-dir` or the user data directory, with its SQLite file `batches.sqlite3` there.
+//! `--batch-data-dir` or the user data directory, with the local server database (`DatabaseSettings::local_default`).
 //!
 //! Catalog file (`--catalog`): `{"version": 1, "default_model": "<name>", "models": [{"name": "<name>",
 //! "fingerprint": "<fp1-…>", "planner_version": "basal-planner.3"}]}`. `basal serve` logs the fingerprint of every
@@ -65,14 +65,14 @@ enum Command {
 }
 
 #[derive(clap::Args)]
-struct Source {
+pub(crate) struct Source {
     /// Serve configuration with `batches:` and `database:` sections (default: BASAL_CONFIG, else basal-serve.yml
     /// here)
     #[arg(long)]
-    config: Option<PathBuf>,
+    pub(crate) config: Option<PathBuf>,
     /// Local batch data directory (local profile without a configuration file)
     #[arg(long)]
-    batch_data_dir: Option<PathBuf>,
+    pub(crate) batch_data_dir: Option<PathBuf>,
 }
 
 pub(crate) fn run(args: Args) -> Result<()> {
@@ -96,7 +96,7 @@ pub(crate) fn run(args: Args) -> Result<()> {
     }
 }
 
-fn runtime() -> Result<tokio::runtime::Runtime> {
+pub(crate) fn runtime() -> Result<tokio::runtime::Runtime> {
     // Both rustls providers are in the dependency graph; the drivers need one process default.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     tokio::runtime::Builder::new_multi_thread().enable_all().build().context("starting the runtime")
@@ -123,8 +123,8 @@ async fn open(settings: &BatchSettings, database: &DatabaseSettings, account: Ac
     if let Target::Sqlite { path } = &database.target {
         if !path.exists() {
             bail!(
-                "no batch database at {}; run `basal database migrate` (without a `database:` section: \
-                 `basal batches migrate`) first",
+                "no database at {}; run `basal database migrate` (with batch records: `basal batches migrate`) \
+                 first",
                 crate::term::P(path)
             );
         }

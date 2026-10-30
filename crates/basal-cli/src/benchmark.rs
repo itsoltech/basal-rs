@@ -142,6 +142,7 @@ impl Server {
             metrics: false,
             database: None,
             batches: None,
+            auth: None,
         };
         let model = ServedModel {
             replicas: vec![Replica { engine, devices, scheduling }],

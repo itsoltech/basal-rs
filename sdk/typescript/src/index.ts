@@ -115,6 +115,8 @@ export type RequestInput = string | URL | Request;
 export type Fetch = (input: RequestInput, init?: RequestInit) => Promise<Response>;
 export interface BasalClientOptions {
   baseUrl?: string;
+  /** Optional API key, sent as `Authorization: Bearer <key>` on every request. Opaque; never read from the environment. */
+  apiKey?: string;
   timeoutMs?: number;
   maxResponseBytes?: number;
   /** Defaults to the runtime's native fetch; custom HTTP clients can supply a Fetch adapter. */
@@ -213,6 +215,12 @@ export class BasalClient {
       throw new TypeError("maxResponseBytes must be a positive safe integer");
     }
     this.fetch = options.fetch ?? globalThis.fetch.bind(globalThis);
+    if (options.apiKey !== undefined) {
+      if (!options.apiKey || /[\r\n]/.test(options.apiKey)) throw new TypeError("apiKey must be a nonempty, single-line token");
+      this.headers.Authorization = `Bearer ${options.apiKey}`;
+    }
+    // Node's default inspection and JSON.stringify must not print the API key.
+    Object.defineProperty(this, "headers", { enumerable: false });
     this.files = new Files(this);
     this.batches = new Batches(this);
   }

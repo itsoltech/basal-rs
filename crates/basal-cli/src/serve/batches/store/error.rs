@@ -96,6 +96,9 @@ pub(crate) enum StoreError {
     QuotaExceeded(QuotaResource),
     #[error("owner has no quota in the active policy")]
     OwnerNotProvisioned,
+    /// An API key for a disabled user.
+    #[error("the API user is disabled")]
+    UserDisabled,
     #[error("no quota policy is installed")]
     PolicyMissing,
     #[error("no model catalog is installed")]
@@ -122,7 +125,7 @@ pub(crate) enum StoreError {
     PolicyInvalid(&'static str),
     #[error("policy limits of owner {0} are below its current commitments")]
     PolicyBelowCommitted(OwnerId),
-    #[error("batch storage schema is not usable: {0:?}")]
+    #[error("database schema is not usable: {0:?}")]
     Schema(SchemaState),
     #[error("invalid store configuration: {0}")]
     Config(&'static str),

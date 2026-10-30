@@ -11,9 +11,9 @@
 //!   pool: {max_connections: 16}
 //! ```
 //!
-//! Without the section no database is opened. One configuration serves every consumer of the process; today the
-//! only consumer is the Batch API (`serve::batches`), whose schema (tables, migration ledger and checksums) is the
-//! one schema this binary registers. This module owns the configuration, the connection options built from it, and
+//! Without the section no database is opened. One configuration serves every consumer of the process: the Batch API
+//! (`serve::batches`) and the API keys (`serve::auth`). The Batch store's schema (tables, migration ledger and
+//! checksums; since version 3 also `api_users` and `api_keys`) is the one schema this binary registers. This module owns the configuration, the connection options built from it, and
 //! when and with which account that schema is migrated: [`migrate`] (`basal database migrate`) and
 //! [`Database::prepare`] (`auto_migrate` at server start, at most one successful run per process). The schema's
 //! migrators and every domain query stay in the consumer's native store adapters. Each consumer opens its own

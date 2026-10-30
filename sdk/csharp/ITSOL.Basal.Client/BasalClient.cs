@@ -12,7 +12,12 @@ public class BasalException(string message, Exception? innerException = null) : 
 
 /// <summary>Non-2xx HTTP response. The body is intentionally absent from Message.</summary>
 public sealed class BasalHttpException(int statusCode, JsonNode? body, string? retryAfter)
-    : BasalException($"Basal HTTP {statusCode}")
+    : BasalException(statusCode switch
+    {
+        401 => "Basal HTTP 401: missing or invalid API key; pass apiKey when the server has auth.enabled",
+        403 => "Basal HTTP 403: the API key has no scope for this route",
+        _ => $"Basal HTTP {statusCode}",
+    })
 {
     /// <summary>HTTP status code, including native validation 422 and overload 529.</summary>
     public int StatusCode { get; } = statusCode;
@@ -33,14 +38,16 @@ public sealed partial class BasalClient : IDisposable
     private readonly HttpClient http;
     private readonly bool ownsHttp;
     private readonly Uri baseUrl;
+    private readonly string? apiKey;
     private readonly TimeSpan timeout;
     private readonly int maxResponseBytes;
 
-    /// <summary>Create a pooled client. baseUrl is the server root, optionally with a proxy prefix, without /v1.</summary>
+    /// <summary>Create a pooled client. baseUrl is the server root, optionally with a proxy prefix, without /v1.
+    /// apiKey, when set, is sent as <c>Authorization: Bearer</c> on every request.</summary>
     public BasalClient(string baseUrl = "http://127.0.0.1:8000", TimeSpan? timeout = null,
-        int maxResponseBytes = 8 * 1024 * 1024)
+        int maxResponseBytes = 8 * 1024 * 1024, string? apiKey = null)
     {
-        (this.baseUrl, this.timeout) = Validate(baseUrl, timeout);
+        (this.baseUrl, this.apiKey, this.timeout) = Validate(baseUrl, apiKey, timeout);
         this.maxResponseBytes = ValidateLimit(maxResponseBytes);
         http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false, UseProxy = false }) { Timeout = Timeout.InfiniteTimeSpan };
         ownsHttp = true;
@@ -48,18 +55,19 @@ public sealed partial class BasalClient : IDisposable
     }
 
     /// <summary>Use an externally owned HttpClient, including IHttpClientFactory clients.
-    /// Configure its handler with AllowAutoRedirect=false. Its own Timeout also applies.</summary>
+    /// Configure its handler with AllowAutoRedirect=false. Its own Timeout also applies.
+    /// apiKey is added to each request, not to the shared HttpClient's default headers.</summary>
     public BasalClient(HttpClient httpClient, string baseUrl, TimeSpan? timeout = null,
-        int maxResponseBytes = 8 * 1024 * 1024)
+        int maxResponseBytes = 8 * 1024 * 1024, string? apiKey = null)
     {
         ArgumentNullException.ThrowIfNull(httpClient);
-        (this.baseUrl, this.timeout) = Validate(baseUrl, timeout);
+        (this.baseUrl, this.apiKey, this.timeout) = Validate(baseUrl, apiKey, timeout);
         this.maxResponseBytes = ValidateLimit(maxResponseBytes);
         http = httpClient;
         (Files, Batches) = (new BasalFiles(this), new BasalBatches(this));
     }
 
-    private static (Uri Url, TimeSpan Timeout) Validate(string baseUrl, TimeSpan? timeout)
+    private static (Uri Url, string? Key, TimeSpan Timeout) Validate(string baseUrl, string? apiKey, TimeSpan? timeout)
     {
         if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri) || (uri.Scheme != "http" && uri.Scheme != "https")
             || string.IsNullOrEmpty(uri.Host) || !string.IsNullOrEmpty(uri.UserInfo)
@@ -67,10 +75,12 @@ public sealed partial class BasalClient : IDisposable
             throw new ArgumentException("Expected an HTTP(S) server URL without credentials, query or fragment", nameof(baseUrl));
         if (uri.Scheme != "https" && !uri.IsLoopback)
             throw new ArgumentException("baseUrl requires HTTPS or loopback HTTP (e.g. an SSH tunnel)", nameof(baseUrl));
+        if (apiKey is not null && (apiKey.Length == 0 || apiKey.Contains('\r') || apiKey.Contains('\n')))
+            throw new ArgumentException("Expected a nonempty, single-line token", nameof(apiKey));
         var duration = timeout ?? TimeSpan.FromSeconds(120);
         if (duration <= TimeSpan.Zero || duration.TotalMilliseconds > uint.MaxValue - 1)
             throw new ArgumentOutOfRangeException(nameof(timeout), "Timeout must be positive and at most 4294967294 ms");
-        return (new Uri(uri.AbsoluteUri.TrimEnd('/') + "/"), duration);
+        return (new Uri(uri.AbsoluteUri.TrimEnd('/') + "/"), apiKey, duration);
     }
 
     private static int ValidateLimit(int limit)
@@ -113,6 +123,7 @@ public sealed partial class BasalClient : IDisposable
         foreach (var type in accept) request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue(type));
         request.Headers.AcceptEncoding.Clear();
         request.Headers.AcceptEncoding.Add(new StringWithQualityHeaderValue("identity"));
+        if (apiKey is not null) request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(timeout);
         HttpResponseMessage response;

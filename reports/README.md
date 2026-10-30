@@ -1,5 +1,9 @@
 # Raporty
 
+[Użytkownicy i klucze API w bazie](api-keys-2026-10-29/README.md)
+— opcjonalne `auth:` z `basal users`/`basal keys`; HTTP na RTX 4060 z SQLite,
+PostgreSQL, SQL Server i MongoDB z TLS w Dockerze.
+
 [OpenAI Decisions API: `POST /v1/decisions`](openai-decisions-2026-10-29/README.md)
 — oficjalne SDK OpenAI na RTX 4060; odpowiedzi bitowo równe `/v1/systemone`,
 koperty błędów OpenAI.

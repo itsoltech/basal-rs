@@ -57,6 +57,7 @@ use basal_core::{Backend, DecideError, DeviceHealth, Engine};
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot, Semaphore};
 
+pub(crate) mod auth;
 pub(crate) mod batches;
 mod decisions;
 mod http;
@@ -97,11 +98,13 @@ pub struct ServeOptions {
     pub access_log: bool,
     /// Collect and expose Prometheus metrics; disabled by default.
     pub metrics: bool,
-    /// The process database (`database:` or the local Batch default); `None` opens no database. Set whenever
-    /// `batches` is.
+    /// The process database (`database:` or the local server database); `None` opens no database. Set whenever
+    /// `batches` or `auth` is.
     pub(crate) database: Option<std::sync::Arc<crate::database::Database>>,
     /// Checked configuration; `None` opens no batch storage and creates no background workers.
     pub(crate) batches: Option<batches::config::BatchSettings>,
+    /// API keys (`auth:` enabled); `None` checks no key. Needs `database`.
+    pub(crate) auth: Option<auth::AuthConfig>,
 }
 
 /// One instance of a served model.
@@ -1535,9 +1538,14 @@ fn serve_inner<B: Backend + Send + 'static>(
             } else {
                 router
             };
-            let router = if opts.access_log { router.layer(axum::middleware::from_fn(access_log)) } else { router };
             // No queue sender survives the router/transport. In particular do not keep App while joining workers.
             drop(app);
+            // The key store connects before any batch component starts, so a refusal leaves nothing to stop.
+            let auth_store = match (&opts.auth, &opts.database) {
+                (Some(_), Some(database)) => Some(auth::connect(database).await?),
+                (Some(_), None) => anyhow::bail!("API keys (auth.enabled) need a database"),
+                (None, _) => None,
+            };
             let batch_service = match opts.batches {
                 Some(settings) => {
                     let database = opts.database.clone().context("the Batch API has no database")?;
@@ -1547,8 +1555,8 @@ fn serve_inner<B: Backend + Send + 'static>(
             };
             // Without an enabled consumer, `auto_migrate` still migrates the configured database once at start
             // (in the background: serving does not wait for it, and shutdown stops it).
-            let database_init = match (&batch_service, opts.database) {
-                (None, Some(database)) if database.settings().auto_migrate => Some(tokio::spawn(async move {
+            let database_init = match (&batch_service, &opts.auth, opts.database.clone()) {
+                (None, None, Some(database)) if database.settings().auto_migrate => Some(tokio::spawn(async move {
                     if let Err(e) = database.prepare().await {
                         crate::warn!("database: {:#}", anyhow::Error::new(e));
                     }
@@ -1556,9 +1564,18 @@ fn serve_inner<B: Backend + Send + 'static>(
                 _ => None,
             };
             let router = match &batch_service {
-                Some(service) => router.merge(service.router()),
+                Some(service) => router.merge(service.router(opts.auth.is_some())),
                 None => router,
             };
+            // API keys wrap every route, the Batch routes included; the access log also records their refusals.
+            let router = match (&opts.auth, &auth_store) {
+                (Some(config), Some(store)) => router.layer(axum::middleware::from_fn_with_state(
+                    auth::Authenticator::start(store.clone(), config),
+                    auth::require_key,
+                )),
+                _ => router,
+            };
+            let router = if opts.access_log { router.layer(axum::middleware::from_fn(access_log)) } else { router };
             let executor = batch_service.as_ref().map(|service| {
                 batches::executor::Executor::start(service.clone(), background_lanes, device_budget, online_reserves)
             });
@@ -1568,6 +1585,9 @@ fn serve_inner<B: Backend + Send + 'static>(
                 crate::started().elapsed().as_secs_f64(),
                 if opts.access_log { "; access log on" } else { "" }
             );
+            if opts.auth.is_some() {
+                crate::note!("API keys required (auth.enabled); manage them with `basal keys`");
+            }
             let http_grace = batch_service
                 .as_ref()
                 .map(|service| std::time::Duration::from_millis(service.settings().leases.shutdown_grace_ms));
@@ -1597,6 +1617,9 @@ fn serve_inner<B: Backend + Send + 'static>(
             };
             if let Some(service) = batch_service {
                 service.shutdown().await;
+            }
+            if let Some(store) = auth_store {
+                store.close().await;
             }
             if let Some(init) = database_init {
                 init.abort();

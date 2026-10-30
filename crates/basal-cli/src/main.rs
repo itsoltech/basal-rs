@@ -28,6 +28,7 @@ mod doctor;
 mod export;
 mod gemm_artifact;
 mod gemm_share;
+mod keys;
 mod large_eval;
 mod mcp;
 mod model_options;
@@ -250,6 +251,10 @@ enum Cmd {
     Batches(batches::Args),
     /// Manage the configured database (`database:`) without loading a model or a GPU.
     Database(database::cli::Args),
+    /// Manage API users (`auth:`) in the configured database without loading a model or a GPU.
+    Users(keys::UsersArgs),
+    /// Manage API keys of the users (`auth:`) without loading a model or a GPU.
+    Keys(keys::KeysArgs),
     /// Use decisions in pipes and scripts: HTTP by default, --local loads a model once
     Client(Box<client::ClientArgs>),
     /// Measure sequential and mixed concurrent HTTP traffic on this hardware
@@ -560,6 +565,10 @@ enum Cmd {
         /// Directory of durable batch data (with --batches or batches.enabled in YAML).
         #[arg(long)]
         batch_data_dir: Option<PathBuf>,
+        /// Require API keys (`basal keys`) on every route except /health (also `auth.enabled` in YAML); needs a
+        /// `database:` section or --batches for the local SQLite default
+        #[arg(long)]
+        auth: bool,
         /// `release_date` reported by GET /v1/models (default: the release date upstream basal v1.5.0 reports)
         #[arg(long, default_value = "2026-10-05")]
         release_date: String,
@@ -996,6 +1005,8 @@ fn run() -> Result<()> {
         Cmd::Mcp(args) => mcp::run(args)?,
         Cmd::Batches(args) => batches::run(args)?,
         Cmd::Database(args) => database::cli::run(args)?,
+        Cmd::Users(args) => keys::run_users(args)?,
+        Cmd::Keys(args) => keys::run_keys(args)?,
         Cmd::Client(args) => {
             let code = match client::run(*args) {
                 Ok(code) => code,
@@ -1216,6 +1227,7 @@ fn run() -> Result<()> {
             metrics,
             batches,
             batch_data_dir,
+            auth,
             release_date,
         } => {
             let access_log = access_log || std::env::var("BASAL_ACCESS_LOG").is_ok_and(|v| !v.is_empty() && v != "0");
@@ -1306,12 +1318,19 @@ fn run() -> Result<()> {
             c.batches.apply_cli(batches, batch_data_dir);
             let batch_settings =
                 c.batches.validate(&serve::batches::config::ValidateContext { default_data_dir: paths::data_dir() })?;
-            // The Batch API uses the root database, or without one its local SQLite default. An enabled root
-            // database without an enabled consumer is only migrated at start (with auto_migrate), never otherwise
-            // connected.
+            // The consumers (Batch API, API keys) use the root database, or without one the local server database. An
+            // enabled root database without an enabled consumer is only migrated at start (with auto_migrate), never
+            // otherwise connected. API keys never fall back to serving without a database.
+            c.auth.enabled |= auth;
             let database = match (&batch_settings, database_section) {
                 (Some(batches), section) => Some(batches.database(&section)?),
                 (None, database::DatabaseSection::Enabled(settings)) => Some(settings),
+                (None, database::DatabaseSection::Absent) if c.auth.enabled => {
+                    Some(database::DatabaseSettings::local_default(&paths::data_dir(), &c.batches.local_data_dir()))
+                }
+                (None, database::DatabaseSection::Disabled) if c.auth.enabled => {
+                    bail!("API keys (auth.enabled or --auth) need a database, but `database.enabled` is false")
+                }
                 (None, database::DatabaseSection::Absent | database::DatabaseSection::Disabled) => None,
             };
             let batch_qualifications = c
@@ -1485,6 +1504,7 @@ fn run() -> Result<()> {
                 metrics: metrics || c.metrics,
                 database: database.map(database::Database::new),
                 batches: batch_settings,
+                auth: c.auth.enabled.then_some(c.auth),
             };
             serve::serve(served, opts)?;
         }

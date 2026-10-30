@@ -83,6 +83,9 @@ pub struct ServeConfig {
     /// Durable Batch/Files API; disabled unless explicitly enabled. Uses `database`.
     #[serde(default)]
     pub(crate) batches: crate::serve::batches::config::BatchConfig,
+    /// API keys stored in `database`; disabled unless explicitly enabled.
+    #[serde(default)]
+    pub(crate) auth: crate::serve::auth::AuthConfig,
     /// Directory of the GEMM tables of `gemm_table: auto`.
     #[serde(default = "default_gemm_cache")]
     pub gemm_cache: PathBuf,

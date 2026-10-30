@@ -282,9 +282,10 @@ impl BatchService {
         Ok(service)
     }
 
-    /// The unauthenticated Batch/Files routes and `GET /health/batches`; merge into the root router.
-    pub(crate) fn router(self: &Arc<Self>) -> axum::Router<()> {
-        super::api::router(Arc::clone(&self.shared))
+    /// The Batch/Files routes and `GET /health/batches`; merge into the root router. With `keyed` the routes take
+    /// their owner from the API key (`serve::auth`, which must wrap them), otherwise from `batches.owner`.
+    pub(crate) fn router(self: &Arc<Self>, keyed: bool) -> axum::Router<()> {
+        super::api::router(Arc::clone(&self.shared), keyed)
     }
 
     /// Close admission, stop the supervisors between operations, wait at most `leases.shutdown_grace_ms` for them,

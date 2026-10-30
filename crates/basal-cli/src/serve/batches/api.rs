@@ -42,18 +42,45 @@ const MULTIPART_OVERHEAD: u64 = 64 * 1024;
 
 type ApiResult<T> = Result<T, ApiError>;
 
-pub(super) fn router(shared: Arc<Shared>) -> Router<()> {
+/// With `keyed` (API keys on) the owner of every request is the extension set by `serve::auth` from the verified
+/// key (a request without it fails) and must have limits in this host's quota policy; otherwise it is the configured
+/// `batches.owner`.
+pub(super) fn router(shared: Arc<Shared>, keyed: bool) -> Router<()> {
     let control = DefaultBodyLimit::max(MAX_CONTROL_BODY_BYTES);
-    Router::new()
+    let routes = Router::new()
         .route("/v1/files", get(list_files).post(upload).layer(DefaultBodyLimit::disable()).fallback(unsupported))
         .route("/v1/files/{file_id}", get(get_file).delete(delete_file).fallback(unsupported))
         .route("/v1/files/{file_id}/content", get(download).fallback(unsupported))
         .route("/v1/batches", get(list_batches).post(create_batch).layer(control).fallback(unsupported))
         .route("/v1/batches/{batch_id}", get(get_batch).fallback(unsupported))
-        .route("/v1/batches/{batch_id}/cancel", post(cancel_batch).layer(control).fallback(unsupported))
-        .route_layer(Extension(shared.settings.owner.clone()))
-        .route("/health/batches", get(health_handler))
-        .with_state(shared)
+        .route("/v1/batches/{batch_id}/cancel", post(cancel_batch).layer(control).fallback(unsupported));
+    let routes = if keyed {
+        routes.route_layer(axum::middleware::from_fn_with_state(Arc::clone(&shared), require_quota))
+    } else {
+        routes.route_layer(Extension(shared.settings.owner.clone()))
+    };
+    routes.route("/health/batches", get(health_handler)).with_state(shared)
+}
+
+/// With API keys every user is its own namespace, so a user without limits in this host's quota policy (the one the
+/// host installs, and health requires installed) is that user's 403, not a server fault. The store would refuse it
+/// later as `OwnerNotProvisioned`, which stays a 503 for the configured `batches.owner`.
+async fn require_quota(
+    State(s): State<Arc<Shared>>,
+    Extension(owner): Extension<OwnerId>,
+    request: Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if !s.policy_spec.owners.iter().any(|(o, _)| *o == owner) {
+        return ApiError::new(
+            StatusCode::FORBIDDEN,
+            "permission_error",
+            "No Batch quota is configured for the API user of this key.",
+        )
+        .with_code("quota_not_configured")
+        .into_response();
+    }
+    next.run(request).await
 }
 
 async fn unsupported() -> ApiError {

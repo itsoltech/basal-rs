@@ -6,8 +6,8 @@ No dependency on the inference engine or GPU libraries. Rust 1.95+; a Tokio runt
 This package is versioned independently. Release tag: `sdk-rust-vX.Y.Z`.
 [Changelog](https://github.com/itsoltech/basal-rs/blob/main/sdk/rust/CHANGELOG.md).
 
-SDK 0.7.0 removes API-key configuration. Remove `api_key`/`apiKey` from client initialization.
-Batch/Files require server 0.1.13+; all callers use its shared storage namespace.
+SDK 0.7.0 removed API-key configuration; local 0.8.0 restores the optional
+`ClientOptions::api_key` for servers with API keys enabled ([API keys](#api-keys)).
 
 Local 0.8.0 adds `DecisionOptions::think: Option<ThinkMode>` (`Off`/`Auto`/`Force`),
 `think_text: Option<bool>` and `early_exit: Option<&str>`. Omitted options stay absent.
@@ -29,6 +29,32 @@ in `Usage`, `ModelMetadata` and `DecisionOptions` can break exhaustive struct li
 existing constructors/call forms remain, but optional fields do not ensure source compatibility.
 Rust has no stable ABI across crate versions. This local change does not publish a
 package or establish runtime parity for the new fields.
+
+## API keys
+
+Optional, SDK 0.8.0+. A server started with `auth.enabled: true` requires a key on every route
+except `/health` and `/health/batches` (and `/metrics` by default). Create the key with
+`basal keys create` and set `ClientOptions::api_key`; the client then sends
+`Authorization: Bearer <key>` (marked as a sensitive header value) on every inference and
+Batch/Files request. The key is an opaque string: the SDK only rejects an empty or multi-line
+value or bytes invalid in an HTTP header. The SDK does not read environment variables; the example
+below reads `BASAL_API_KEY` explicitly. Without `api_key` no header is sent, as before. A server
+without `auth.enabled` ignores the header.
+
+```rust,no_run
+use basal_client::{Client, ClientOptions};
+# fn example() -> Result<(), basal_client::Error> {
+let api_key = std::env::var("BASAL_API_KEY").ok();
+let client = Client::with_options(ClientOptions {
+    base_url: "https://basal.example.com", api_key: api_key.as_deref(), ..Default::default()
+})?;
+# Ok(()) }
+```
+
+A missing, unknown, revoked or expired key returns `Error::Http { status: 401, .. }`
+(`body["error"]["code"] == "invalid_api_key"`); a key without the route's scope gives 403
+(`"insufficient_scope"`). An unreachable key database gives 503. `ClientOptions` and `Client`
+do not implement `Debug`, and `Error` Display/Debug never include the key.
 
 ## Batch and Files API (0.5+)
 
@@ -60,7 +86,7 @@ while let Some(record) = results.next().await? {
 ```
 
 The complete, compile-checked example is [`examples/batches.rs`](examples/batches.rs).
-Optionally configure `BASAL_BASE_URL`, then run
+Optionally configure `BASAL_BASE_URL` and `BASAL_API_KEY`, then run
 `cargo run --example batches -p basal-client` (simplified path), or append `-- input.jsonl` for path A.
 It requires an enabled server and an explicit background execution profile for the selected model.
 
@@ -89,11 +115,12 @@ return recovery context; use the explicit Files path when the application must p
 
 `files().content_with_limit(id, bytes)` overrides only successful download bounds; HTTP errors
 keep the ordinary client-wide byte cap. Resource `list`, `retrieve`, `delete` and `cancel` delegate
-to their flat equivalents and share the same prefix, TLS and timeout policy.
+to their flat equivalents and share the same API key, prefix, TLS and timeout policy.
 
 ### Existing flat methods
 
-Use a server with batches enabled (basal-rs 0.1.13+); API keys are not supported:
+Use a server with batches enabled (basal-rs 0.1.13+). If it has `auth.enabled`, also set
+`ClientOptions::api_key` ([API keys](#api-keys)):
 
 ```rust,no_run
 use basal_client::{Client, CreateBatchRequest, FileUploadOptions};
@@ -164,7 +191,7 @@ Add `serde_json` directly (`cargo add serde_json --features preserve_order`) to 
 with its `json!` macro.
 
 `models()` reads `/v1/models`. Use `Client::with_options(ClientOptions { ... })`
-for a different timeout or response limit. The timeout (default 120 seconds) includes response-body reading.
+for an API key, a different timeout or response limit. The timeout (default 120 seconds) includes response-body reading.
 Dropping the request future cancels client-side I/O. Clone/reuse the client to share its connection pool.
 Use the server root (possibly with a proxy prefix), without `/v1`. HTTPS is required except for loopback
 HTTP, suitable for a local server or SSH tunnel. URL credentials/query/fragment are rejected. DNS names

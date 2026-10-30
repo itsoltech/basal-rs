@@ -23,6 +23,7 @@ struct Migration {
 const MIGRATIONS: &[Migration] = &[
     Migration { version: 1, text: include_str!("../migrations/mongodb/0001_init.json") },
     Migration { version: 2, text: include_str!("../migrations/mongodb/0002_abandonment.json") },
+    Migration { version: 3, text: include_str!("../migrations/mongodb/0003_api_keys.json") },
 ];
 
 #[derive(Deserialize)]

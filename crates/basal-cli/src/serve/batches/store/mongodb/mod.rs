@@ -25,6 +25,7 @@ pub(super) mod driver;
 mod files;
 mod finalize;
 mod ingest;
+mod keys;
 mod lifecycle;
 mod schema;
 
@@ -287,6 +288,65 @@ impl MongoStore {
 
     pub(super) async fn active_quota_policy(&self) -> Result<Option<QuotaPolicy>, StoreError> {
         self.run(|core| async move { admin::active_quota_policy(&core).await }).await
+    }
+
+    // API users and keys
+
+    pub(super) async fn create_api_user(&self, id: &OwnerId, name: &str) -> Result<Option<ApiUserRecord>, StoreError> {
+        let (id, name) = (id.clone(), name.to_owned());
+        self.run(move |core| async move { keys::create_user(&core, &id, &name).await }).await
+    }
+
+    pub(super) async fn list_api_users(
+        &self,
+        include_disabled: bool,
+        limit: u32,
+    ) -> Result<Vec<ApiUserRecord>, StoreError> {
+        self.run(move |core| async move { keys::list_users(&core, include_disabled, limit).await }).await
+    }
+
+    pub(super) async fn set_api_user_disabled(
+        &self,
+        id: &OwnerId,
+        disabled: bool,
+    ) -> Result<ApiUserRecord, StoreError> {
+        let id = id.clone();
+        self.run(move |core| async move { keys::set_user_disabled(&core, &id, disabled).await }).await
+    }
+
+    pub(super) async fn create_api_key(&self, key: &NewApiKey) -> Result<ApiKeyRecord, StoreError> {
+        let key = key.clone();
+        self.run(move |core| async move { keys::create(&core, &key).await }).await
+    }
+
+    pub(super) async fn list_api_keys(
+        &self,
+        user: Option<&OwnerId>,
+        include_revoked: bool,
+        limit: u32,
+    ) -> Result<Vec<ApiKeyRecord>, StoreError> {
+        let user = user.cloned();
+        self.run(move |core| async move { keys::list(&core, user.as_ref(), include_revoked, limit).await }).await
+    }
+
+    pub(super) async fn lookup_api_key(&self, id: &ApiKeyId) -> Result<Option<ApiKeyLookup>, StoreError> {
+        let id = id.clone();
+        self.run(move |core| async move { keys::lookup(&core, &id).await }).await
+    }
+
+    pub(super) async fn revoke_api_key(&self, id: &ApiKeyId) -> Result<ApiKeyRecord, StoreError> {
+        let id = id.clone();
+        self.run(move |core| async move { keys::revoke(&core, &id).await }).await
+    }
+
+    pub(super) async fn expire_api_key(&self, id: &ApiKeyId, within: Duration) -> Result<ApiKeyRecord, StoreError> {
+        let id = id.clone();
+        self.run(move |core| async move { keys::expire_within(&core, &id, within).await }).await
+    }
+
+    pub(super) async fn touch_api_key(&self, id: &ApiKeyId, interval: Duration) -> Result<(), StoreError> {
+        let id = id.clone();
+        self.run(move |core| async move { keys::touch(&core, &id, interval).await }).await
     }
 
     // Files
