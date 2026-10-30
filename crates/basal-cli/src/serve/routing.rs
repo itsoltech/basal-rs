@@ -45,6 +45,12 @@ impl RoutingPolicy {
         })
     }
 
+    /// This policy with the long lane disabled; the requested fields stay as given for the identity.
+    pub(crate) fn without_long_lane(mut self) -> Self {
+        self.threshold = None;
+        self
+    }
+
     pub(crate) fn enabled(self) -> bool {
         self.threshold.is_some()
     }

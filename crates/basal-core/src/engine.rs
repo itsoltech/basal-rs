@@ -254,6 +254,19 @@ pub enum Batching {
     Tree,
 }
 
+/// Whether one engine call may run the work of several requests together.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RequestIsolation {
+    /// Historical behaviour: requests may share forwards and partial admission is available.
+    #[default]
+    Shared,
+    /// At most one request per [`Engine::run_plans`] call, with all its rounds, thinking, evidence and task
+    /// continuation; multi-item [`Engine::run`] only with [`Batching::Single`]. Partial admission
+    /// ([`Engine::begin_request`], [`Engine::run_ready`], [`Engine::advance_request`]) and state marking
+    /// ([`Engine::mark_state`]) are refused before any backend work.
+    Whole,
+}
+
 /// Longest packed row built by [`Batching::Tree`] (the largest upstream bucket).
 /// Longest shared-prefix (tree) row. With attention per tree block the row length changes neither the cost nor the
 /// result of a question, so a request with a long state keeps all its questions over one copy of the state.
@@ -326,6 +339,7 @@ pub struct Engine<B: Backend> {
     thinking: Option<crate::thinking::Thinking<B>>,
     /// Stop token of background work, checked between rounds ([`Engine::set_stop_token`]); `None` online.
     stop: Option<StopToken>,
+    isolation: RequestIsolation,
 }
 
 impl<B: Backend> Engine<B> {
@@ -349,6 +363,7 @@ impl<B: Backend> Engine<B> {
             overflow: crate::overflow::OverflowSettings::default(),
             thinking: None,
             stop: None,
+            isolation: RequestIsolation::Shared,
         })
     }
 
@@ -365,7 +380,45 @@ impl<B: Backend> Engine<B> {
         e.auto_orders = self.auto_orders;
         e.overflow = self.overflow;
         e.thinking = self.thinking.as_ref().map(crate::thinking::Thinking::fork).transpose()?;
+        e.isolation = self.isolation;
         Ok(e)
+    }
+
+    /// Set before [`Engine::fork`] and before any lane uses the engine; forks copy it.
+    pub fn set_request_isolation(&mut self, isolation: RequestIsolation) {
+        self.isolation = isolation;
+    }
+
+    pub fn request_isolation(&self) -> RequestIsolation {
+        self.isolation
+    }
+
+    /// Under [`RequestIsolation::Whole`]: at most one request per call and no state marking. Checked before any
+    /// backend work, so a refused call has done nothing that could be replayed.
+    fn check_requests(&self, requests: usize) -> std::result::Result<(), ExecutionError> {
+        if self.isolation == RequestIsolation::Whole {
+            if self.mark_state {
+                return Err(ExecutionError::InvalidState {
+                    reason: "whole-request isolation runs without state marking".into(),
+                });
+            }
+            if requests > 1 {
+                return Err(ExecutionError::InvalidState {
+                    reason: format!("whole-request isolation runs one request per call, got {requests}"),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Partial admission interleaves requests; refused under [`RequestIsolation::Whole`].
+    fn check_partial_admission(&self) -> std::result::Result<(), ExecutionError> {
+        if self.isolation == RequestIsolation::Whole {
+            return Err(ExecutionError::InvalidState {
+                reason: "whole-request isolation has no partial admission; use run_plans".into(),
+            });
+        }
+        Ok(())
     }
 
     /// Enable a separately loaded full thinking checkpoint; ordinary constructors remain off.
@@ -468,7 +521,9 @@ impl<B: Backend> Engine<B> {
     }
 
     /// Run independent items with the backend default. Active exits group each item with all its option orders.
+    /// Under [`RequestIsolation::Whole`] several items need [`Batching::Single`] (one item per forward).
     pub fn run(&mut self, prepared: &[Prepared], batching: Batching) -> Result<Vec<ItemResult>> {
+        self.check_requests(if batching == Batching::Single { 1 } else { prepared.len() })?;
         let policy = self.backend.early_exit_caps().map(|c| c.default_policy().to_owned());
         if let Some(policy) = policy.as_deref().filter(|p| *p != "off") {
             let mut results = Vec::with_capacity(prepared.len());
@@ -854,6 +909,7 @@ impl<B: Backend> Engine<B> {
         media: Option<&crate::media::ProcessedMedia>,
         batching: Batching,
     ) -> Result<Vec<ItemResult>> {
+        self.check_requests(1)?;
         let Some(media) = media else {
             // One request: an active backend default gates all its questions together, unlike `run`.
             let policy = self.backend.early_exit_caps().map(|c| c.default_policy().to_owned());
@@ -877,7 +933,9 @@ impl<B: Backend> Engine<B> {
 
     /// Run the plans of several requests together: the questions of all plans share the forwards of each round
     /// (first round, then the final round of grouped large choices), as a server batches waiting requests.
+    /// Under [`RequestIsolation::Whole`] at most one plan per call.
     pub fn run_plans(&mut self, plans: &[&RequestPlan]) -> Result<Vec<PlanOutput>> {
+        self.check_requests(plans.len())?;
         self.check_stop()?;
         let mut outputs = self.run_decision_plans(plans)?;
         self.apply_thinking(plans, &mut outputs)?;

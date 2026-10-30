@@ -109,6 +109,10 @@ impl ModelProfile {
         numeric["early_exit"] =
             engine.backend.early_exit_caps().map(basal_core::early_exit::profile).unwrap_or(Value::Null);
         mask_device_ordinals(&mut numeric["thinking"]);
+        // Only under whole-request isolation; the default fingerprint stays byte-for-byte unchanged.
+        if engine.request_isolation() == basal_core::engine::RequestIsolation::Whole {
+            numeric["request_isolation"] = "whole".into();
+        }
         // Alias-specific routing and result bounds must not share work with the source-name deployment. Keep
         // the old fingerprint byte-for-byte when the served name is unchanged; source provenance stays intact.
         if served_name != name {

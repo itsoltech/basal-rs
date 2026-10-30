@@ -895,7 +895,9 @@ fn plan_job<B: Backend>(
                 && lane.batching == basal_core::Batching::Budget
                 && !plan.prepared.is_empty()
                 && plan.media.is_none()
-                && plan.early_exit.as_deref().is_none_or(|p| p == "off");
+                && plan.early_exit.as_deref().is_none_or(|p| p == "off")
+                // whole-request isolation runs every request atomically through run_plans (request-local Budget)
+                && engine.request_isolation() == basal_core::engine::RequestIsolation::Shared;
             let work = if split {
                 match engine.begin_request(plan) {
                     Ok(request) => WaitingWork::Primitive(Box::new(request)),

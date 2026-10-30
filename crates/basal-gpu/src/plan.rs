@@ -312,6 +312,95 @@ impl DiagnosticOverrides {
     }
 }
 
+/// The opt-in strict deterministic profile `llama-candle-f32.1` of a frozen plan: single-device CUDA Llama, Candle
+/// F32 kernels and readout, the cuBLAS handle of the stage configured before publication, one request per engine
+/// call. Absent keeps every plan identity byte unchanged. The profile fixes these controls only; whether cuBLAS
+/// and the GPU then repeat results bit for bit is not established by this crate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeterministicProfile {
+    /// `CUBLAS_WORKSPACE_CONFIG` as the operator set it, captured when attaching the profile to the plan and
+    /// compared again when the instance's strict handle is configured; never written by this process. Earlier
+    /// preflight probes may already have created their own devices.
+    workspace_config: String,
+}
+
+impl DeterministicProfile {
+    pub const ID: &'static str = "llama-candle-f32.1";
+
+    /// Read-only process checks before any device: a CUDA Llama build, `CUBLAS_WORKSPACE_CONFIG` present as
+    /// `(:<KiB>:<count>)+` of positive decimal integers (no sign, no whitespace), no arithmetic `BASAL_*`
+    /// override (allowed: `BASAL_CUDA_SYNC`, `BASAL_HOST_TIMING`, `BASAL_PHASE_TIMING`, `BASAL_CUDA_PROFILE`,
+    /// `BASAL_GEMM_EQUIV`) and Candle's F32 reduced-precision GEMM flag off. The syntax check validates the
+    /// configuration only; it says nothing about how cuBLAS uses the value.
+    pub fn from_process() -> Result<Self, PlanError> {
+        let refuse = |what: String| PlanError::Option(format!("deterministic profile {}: {what}", Self::ID));
+        if BackendKind::llama() != BackendKind::Cuda {
+            return Err(refuse(format!(
+                "needs a CUDA build, this build runs Llama on {}",
+                BackendKind::llama().as_str()
+            )));
+        }
+        let workspace_config = match std::env::var("CUBLAS_WORKSPACE_CONFIG") {
+            Ok(v) if valid_workspace_config(&v) => v,
+            Ok(v) => {
+                return Err(refuse(format!(
+                    "CUBLAS_WORKSPACE_CONFIG={v:?} is not (:<KiB>:<count>)+ with positive decimal integers"
+                )))
+            }
+            Err(std::env::VarError::NotPresent) => return Err(refuse(
+                "set CUBLAS_WORKSPACE_CONFIG (for example :4096:8) before starting basal; the process never sets it"
+                    .into(),
+            )),
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(refuse("CUBLAS_WORKSPACE_CONFIG is not UTF-8".into()))
+            }
+        };
+        if let Some(name) = arithmetic_override(DiagnosticOverrides::process()) {
+            return Err(refuse(format!("the diagnostic override {name} changes kernels or arithmetic; unset it")));
+        }
+        if candle_core::cuda::gemm_reduced_precision_f32() {
+            return Err(refuse("Candle's F32 reduced-precision GEMM is enabled".into()));
+        }
+        Ok(Self { workspace_config })
+    }
+
+    /// `CUBLAS_WORKSPACE_CONFIG` frozen by [`DeterministicProfile::from_process`].
+    pub fn workspace_config(&self) -> &str {
+        &self.workspace_config
+    }
+
+    /// The cuBLAS handle settings the profile applies or checks (plan identity and backend description).
+    pub(crate) fn cublas_identity(&self) -> Value {
+        json!({"workspace_config": self.workspace_config, "atomics": "not_allowed", "math_mode": "default",
+            "f32_compute": "CUBLAS_COMPUTE_32F"})
+    }
+}
+
+/// `(:<KiB>:<count>)+` with positive decimal integers.
+fn valid_workspace_config(v: &str) -> bool {
+    let Some(rest) = v.strip_prefix(':') else { return false };
+    let parts: Vec<&str> = rest.split(':').collect();
+    parts.len().is_multiple_of(2)
+        && parts.iter().all(|p| p.bytes().all(|b| b.is_ascii_digit()) && p.parse::<u64>().is_ok_and(|n| n > 0))
+}
+
+/// The first set `BASAL_*` override that selects kernels or changes arithmetic.
+fn arithmetic_override(o: &DiagnosticOverrides) -> Option<&'static str> {
+    [
+        ("BASAL_ATT", o.att_present),
+        ("BASAL_ATT_SG", o.att_sg.is_some()),
+        ("BASAL_GEMM", o.gemm.is_some()),
+        ("BASAL_THINK_GEMM", o.think_gemm.is_some()),
+        ("BASAL_WGP_LOAD", o.wgp_load.is_some()),
+        ("BASAL_SILU_BLOCK", o.silu_block.is_some()),
+        ("BASAL_NORM", o.norm.is_some()),
+        ("BASAL_QWEN_F32_RESIDENT", o.qwen_f32_resident),
+        ("BASAL_QWEN_PACKED_RECURRENCE", o.qwen_packed_recurrence),
+    ]
+    .into_iter()
+    .find_map(|(name, set)| set.then_some(name))
+}
+
 /// The GPU backend of this build that runs a model family.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BackendKind {
@@ -876,6 +965,8 @@ pub struct ResolvedExecutionPlan {
     prune_readout: bool,
     /// Some only for a plan frozen by [`ResolvedExecutionPlan::freeze_cpu`].
     cpu: Option<CpuPlan>,
+    /// Some only after [`ResolvedExecutionPlan::with_deterministic`].
+    deterministic: Option<DeterministicProfile>,
 }
 
 /// The decision inputs of a CPU instance: the per-forward host working-set ceiling (it selects the sub-batch
@@ -1013,6 +1104,7 @@ impl ResolvedExecutionPlan {
             ple,
             prune_readout,
             cpu: None,
+            deterministic: None,
         })
     }
 
@@ -1061,7 +1153,59 @@ impl ResolvedExecutionPlan {
             ple,
             prune_readout,
             cpu: Some(CpuPlan { work_bytes, gemm_threads: candle_core::utils::get_num_threads() }),
+            deterministic: None,
         })
+    }
+
+    /// Attach the strict profile to a frozen GPU plan. Refuses every plan outside it: a CPU plan, another family
+    /// or backend, more than one stage, a kernel set other than `basal-kernels.1`, a precision, readout or kernels
+    /// other than F32/F32/Candle, quantization, balanced mode, host PLE, a GEMM table or a GEMM fallback.
+    /// Library callers must also set `basal_core::engine::RequestIsolation::Whole` on their engine; attaching
+    /// this GPU plan does not set the engine's request isolation. The CLI adapter sets it separately.
+    pub fn with_deterministic(mut self, profile: DeterministicProfile) -> Result<Self, PlanError> {
+        let refuse = |what: &str| {
+            Err(PlanError::Option(format!("deterministic profile {} requires {what}", DeterministicProfile::ID)))
+        };
+        if self.cpu.is_some() {
+            return refuse("a GPU instance; the CPU backend has no strict profile");
+        }
+        if !matches!(&self.policy, ExecutionPolicy::Llama { backend: BackendKind::Cuda, default_kernels, .. }
+            if default_kernels.len() == 1)
+        {
+            return refuse("single-device CUDA Llama");
+        }
+        if self.kernel_set != KernelSet::V1 {
+            return refuse("kernel set basal-kernels.1");
+        }
+        let o = &self.options;
+        if o.precision != Precision::F32 {
+            return refuse("dtype f32");
+        }
+        if o.readout != Readout::F32 {
+            return refuse("readout f32");
+        }
+        if o.kernels != Kernels::Candle {
+            return refuse("kernels candle");
+        }
+        if o.quantization != Quantization::None {
+            return refuse("quantization none");
+        }
+        if o.mode == InferenceMode::Balanced {
+            return refuse("inference_mode auto or accurate");
+        }
+        if o.ple != PleMode::Device || self.ple != crate::PlePlacement::Device {
+            return refuse("ple_placement device");
+        }
+        if self.gemm.table.is_some() || self.gemm.fallback != GemmFallback::NotApplicable {
+            return refuse("no GEMM table and no timed GEMM (f32)");
+        }
+        self.deterministic = Some(profile);
+        Ok(self)
+    }
+
+    /// The strict profile; None for every default plan.
+    pub fn deterministic(&self) -> Option<&DeterministicProfile> {
+        self.deterministic.as_ref()
     }
 
     /// The per-forward host working-set ceiling of a CPU plan; None for a GPU plan.
@@ -1158,6 +1302,10 @@ impl ResolvedExecutionPlan {
         if let Some(cpu) = self.cpu {
             identity["cpu"] = json!({"schema":"basal-cpu-execution.1", "work_bytes":cpu.work_bytes.get(),
                 "gemm_threads":cpu.gemm_threads});
+        }
+        if let Some(d) = &self.deterministic {
+            identity["deterministic"] = json!({"schema":"basal-deterministic.1", "profile":DeterministicProfile::ID,
+                "request_isolation":"whole_request", "cublas":d.cublas_identity(), "cublaslt":"unused_for_f32"});
         }
         identity
     }

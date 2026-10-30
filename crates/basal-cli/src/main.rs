@@ -24,6 +24,7 @@ mod compare;
 mod config;
 mod config_support;
 mod database;
+mod deterministic;
 mod doctor;
 mod export;
 mod gemm_artifact;
@@ -321,6 +322,28 @@ impl GpuArgs {
             self.kernels(),
             cfg!(feature = "cuda"),
         )
+    }
+
+    /// The options of one instance of `model` as the strict profile checks them ([`deterministic::profile`]).
+    fn deterministic_request<'a>(&'a self, model: &'a str) -> deterministic::Requested<'a> {
+        deterministic::Requested {
+            model,
+            options: &self.model_options,
+            backend: self.backend.unwrap_or_default(),
+            dtype: &self.dtype,
+            kernels: self.kernels(),
+            readout: &self.readout,
+            readout_layer: self.readout_layer.unwrap_or_default(),
+            quantization: self.quantization.as_deref().unwrap_or(Quantization::None.as_str()),
+            ple: self.ple_placement.unwrap_or_default(),
+            inference_mode: &self.inference_mode,
+            instances: 1,
+            split: self.layer_split.is_some(),
+            media: self.media,
+            state_cache_mb: self.state_cache_mb,
+            gemm_table: self.gemm_table.as_ref().map_or("auto".into(), |t| t.to_string_lossy()),
+            background: false,
+        }
     }
 
     /// `--readout` (f32, bf16).
@@ -773,6 +796,8 @@ fn read_request(src: &str) -> Result<Value> {
 }
 
 fn gpu_engine(m: &ModelArgs, g: &GpuArgs) -> Result<Engine<GpuBackend>> {
+    // the strict profile's refusals precede every other check, the download and any device
+    deterministic::profile(&g.deterministic_request(&m.model))?;
     // an unsupported CPU option, weight format or layer split fails before the model is downloaded
     g.check_cpu(&m.model)?;
     g.quantization(&m.model)?;
@@ -789,6 +814,11 @@ fn planning_engine(
     orders: Option<&str>,
     options: &model_options::ModelOptions,
 ) -> Result<Engine<NoBackend>> {
+    anyhow::ensure!(
+        !options.deterministic_enabled(),
+        "this prepare-only command has no backend; the deterministic profile {} applies to loaded engines",
+        basal_gpu::DeterministicProfile::ID
+    );
     anyhow::ensure!(
         !options.exits_enabled(),
         "this prepare-only command has no trained-head backend; use the loaded engine for early_exit planning"
@@ -936,6 +966,12 @@ fn planned_engine_from_manifest(
     mut thinking: Option<model_options::LoadedThinking>,
     g: &GpuArgs,
 ) -> Result<PlannedEngine> {
+    // before the CPU early return, thinking admission and any device: also for direct callers of this function
+    let strict = deterministic::profile(&g.deterministic_request(&manifest.name))?;
+    if strict.is_some() {
+        deterministic::check_manifest(&manifest)?;
+        anyhow::ensure!(thinking.is_none(), "model {}: the deterministic profile has no thinking", manifest.name);
+    }
     check_custom_thinking_options(g)?;
     if g.backend == Some(basal_gpu::ExecutionBackend::Cpu) {
         return cpu_engine_from_manifest(manifest, thinking, g);
@@ -1050,6 +1086,12 @@ fn planned_engine_from_manifest(
         readout_layer,
     )
     .with_context(|| format!("model {} (profile {})", manifest.name, profile.id))?;
+    let plan = match strict {
+        Some(p) => {
+            plan.with_deterministic(p).with_context(|| format!("model {} (profile {})", manifest.name, profile.id))?
+        }
+        None => plan,
+    };
     crate::note!("{}: execution plan {}", manifest.name, plan_summary(&plan));
     let placement = match &g.layer_split {
         None => basal_gpu::PlannedPlacement::Single(g.device()),
@@ -1203,7 +1245,18 @@ fn planned_engine_from_manifest(
     engine.set_context_overflow(g.model_options.overflow()?);
     engine.mark_state = g.state_cache_mb > 0;
     engine.tree_max_tokens = g.tree_max_tokens;
-    if !g.no_prefix_cache && engine.backend.supports_prefix_cache() {
+    // before any fork or lane exists
+    if let Some(p) = plan.deterministic() {
+        engine.set_request_isolation(basal_core::engine::RequestIsolation::Whole);
+        crate::note!(
+            "{}: deterministic profile {}: one whole request per engine call, cuBLAS atomics not allowed, math mode \
+             default, CUBLAS_WORKSPACE_CONFIG={} (not a repeatability guarantee)",
+            engine.manifest.name,
+            basal_gpu::DeterministicProfile::ID,
+            p.workspace_config()
+        );
+    }
+    if !g.no_prefix_cache && engine.backend.supports_prefix_cache() && plan.deterministic().is_none() {
         let lens = engine.warm_static_prefixes()?;
         crate::note!("template prefixes precomputed ({lens:?} tokens)");
     }
@@ -1393,6 +1446,11 @@ fn run() -> Result<()> {
         }
         Cmd::Export { m, g, inputs, out, batching, upstream } => {
             let batching = parse_batching(&batching)?;
+            anyhow::ensure!(
+                !g.model_options.deterministic_enabled() || batching == basal_core::Batching::Single,
+                "export --deterministic {}: bench items run one per forward; use --batching single",
+                basal_gpu::DeterministicProfile::ID
+            );
             let mut engine = gpu_engine(&m, &g)?;
             let load_s = engine.backend.load_s();
             let mut run = json!({"dtype": g.dtype, "inference_mode": g.inference_mode, "quantization": g.quantization(&m.model)?.as_str(), "readout": g.readout, "kernels": g.kernels(), "prefix_cache": !g.no_prefix_cache, "load_s": load_s});
@@ -1431,6 +1489,11 @@ fn run() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&s["sizes"])?);
         }
         Cmd::Profile { m, g, reference, n, batch, residual_max } => {
+            anyhow::ensure!(
+                !g.model_options.deterministic_enabled(),
+                "profile batches independent items; the deterministic profile {} is unavailable here",
+                basal_gpu::DeterministicProfile::ID
+            );
             let mut engine = gpu_engine(&m, &g)?;
             let recs = reference::read_jsonl(&reference.join("bench.jsonl"))?;
             let prep: Vec<_> =
@@ -1583,6 +1646,9 @@ fn run() -> Result<()> {
                 model.long_lane = long_lane.or(model.long_lane);
                 model.long_token_basis = long_token_basis.or(model.long_token_basis);
                 model.scheduler = scheduler.or(model.scheduler);
+                if model.model_options.deterministic_enabled() {
+                    crate::note!("{}", deterministic::apply_serving(model)?);
+                }
                 model.collection_policy()?;
                 let origin = |cli: bool, supplied: bool| {
                     if cli {
@@ -1678,6 +1744,32 @@ fn run() -> Result<()> {
                 c.long_slice_ms = long_slice_ms;
                 c.release_date = release_date;
             }
+            // The strict profile against every model's final fields, before any placement, GPU query or download.
+            for m in c.models.iter().filter(|m| m.model_options.deterministic_enabled()) {
+                let model = config::describe(m);
+                let background = matches!(
+                    m.batch_qualification()?,
+                    serve::batches::config::BackgroundQualification::Qualified { .. }
+                );
+                deterministic::profile(&deterministic::Requested {
+                    model: &model,
+                    options: &m.model_options,
+                    backend: m.backend,
+                    dtype: &m.dtype,
+                    kernels: g.kernels(),
+                    readout: &g.readout,
+                    readout_layer: m.readout_layer,
+                    quantization: &m.quantization,
+                    ple: m.ple_placement,
+                    inference_mode: &m.inference_mode,
+                    instances: m.replica_devices.as_ref().map_or(1, Vec::len),
+                    split: m.layer_split.is_some(),
+                    media: m.media || g.media,
+                    state_cache_mb: m.state_cache_mb,
+                    gemm_table: m.gemm_table.as_str().into(),
+                    background,
+                })?;
+            }
             for model in &c.models {
                 let routing = model.routing_policy()?;
                 crate::note!("routing {}: {}", config::describe(model), routing.identity());
@@ -1768,6 +1860,11 @@ fn run() -> Result<()> {
                 .zip(&c.models)
                 .map(|(d, m)| m.model_options.load_manifest(d, m.orders.as_deref(), &m.source_name()))
                 .collect::<Result<_>>()?;
+            for (m, manifest) in c.models.iter().zip(&manifests) {
+                if m.model_options.deterministic_enabled() {
+                    deterministic::check_manifest(manifest)?;
+                }
+            }
             let served_names = c.model_names(&manifests)?;
             // Validate every second checkpoint and calibration before any model's GEMM search or GPU load.
             let mut thinking: Vec<_> = c
@@ -2095,6 +2192,11 @@ fn run() -> Result<()> {
             eprintln!("facts: {n} states -> {}", out.display());
         }
         Cmd::Bench { m, g, reference, out, lat_n, batching } => {
+            anyhow::ensure!(
+                !g.model_options.deterministic_enabled(),
+                "bench batches independent items; the deterministic profile {} is unavailable here",
+                basal_gpu::DeterministicProfile::ID
+            );
             anyhow::ensure!(
                 g.backend != Some(basal_gpu::ExecutionBackend::Cpu) && g.cpu_work_mb.is_none(),
                 "bench measures GPU resources; the CPU backend has no benchmark telemetry in this release"

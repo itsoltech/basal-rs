@@ -18,7 +18,7 @@ use clap::{Args, ValueEnum};
 use serde_json::{json, Value};
 use tokio::sync::oneshot;
 
-use crate::serve::{Replica, Schedule, ServeOptions, ServedModel};
+use crate::serve::{backlog::SchedulerPolicy, routing::RoutingPolicy, Replica, Schedule, ServeOptions, ServedModel};
 use crate::{GpuArgs, ModelArgs};
 use resources::{host_memory, Guard, Monitor};
 
@@ -154,6 +154,7 @@ impl Server {
         devices: Vec<usize>,
         scheduling: crate::models::SchedulingPolicy,
         options: &Options,
+        strict_policies: Option<(SchedulerPolicy, RoutingPolicy)>,
     ) -> Result<Self> {
         let listener =
             std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).context("binding benchmark listener")?;
@@ -174,13 +175,21 @@ impl Server {
             database: None,
             batches: None,
         };
+        // A strict engine: one whole request per call, no long lane and the native schedule (`auto` would enable
+        // the short-first backlog once the lane is off).
+        let (collection, scheduler, routing) = match strict_policies {
+            Some((scheduler, routing)) => {
+                (crate::serve::collection::CollectionPolicy::whole_request(), scheduler, routing)
+            }
+            None => (Default::default(), options.scheduler_policy()?, options.routing_policy()?),
+        };
         let model = ServedModel {
             name: engine.manifest.name.clone(),
             replicas: vec![Replica { engine, devices: crate::config::InstanceDevices::Gpu(devices), scheduling }],
             max_batch_tokens: options.max_batch_tokens,
-            collection: Default::default(),
-            scheduler: options.scheduler_policy()?,
-            routing: options.routing_policy()?,
+            collection,
+            scheduler,
+            routing,
             batch_profile: None,
             batch_qualification: crate::serve::batches::config::BackgroundQualification::not_configured(),
         };
@@ -273,6 +282,18 @@ pub(crate) fn run(model: &ModelArgs, gpu_options: &GpuArgs, options: &Options) -
         "benchmark measures GPU resources; the CPU backend has no benchmark telemetry in this release"
     );
     options.validate()?;
+    // The strict profile's options, environment and serving conflicts before any download, GPU or report.
+    let strict = crate::deterministic::profile(&gpu_options.deterministic_request(&model.model))?.is_some();
+    if strict {
+        use crate::serve::{backlog::Scheduler, routing::LongLane};
+        ensure!(
+            !matches!(options.long_lane, Some(LongLane::On)) && !matches!(options.scheduler, Some(Scheduler::On)),
+            "model {}: deterministic profile {} has no long lane and the native schedule: --long-lane on and \
+             --scheduler on are refused",
+            model.model,
+            basal_gpu::DeterministicProfile::ID
+        );
+    }
     // an unsupported weight format or layer split fails before any GPU check or download
     let quantization = gpu_options.quantization(&model.model)?;
     gpu_options.check_ple_source(&model.model)?;
@@ -310,14 +331,36 @@ pub(crate) fn run(model: &ModelArgs, gpu_options: &GpuArgs, options: &Options) -
     if let Some(share) = options.long_share {
         report["long_share"] = json!(share);
     }
-    if options.long_lane.is_some() || options.long_token_basis.is_some() {
-        // Record before execute so resource/model/startup failures retain the comparable policy identity.
-        report["routing"] = options.routing_policy()?.identity();
-    }
-    if let Some(identity) = options.scheduler_policy()?.identity() {
-        report["scheduler"] = identity;
-    }
-    let result = execute(model, gpu_options, quantization, options, raw, &mut report);
+    // Resolve the strict policies once for the server and both report locations. Explicit scheduler off uses
+    // the same native schedule as absence; retain the operator's actual request in the report identity.
+    let strict_policies = if strict {
+        let routing = options.routing_policy()?.without_long_lane();
+        let scheduler = SchedulerPolicy::new(
+            Some(crate::serve::backlog::Scheduler::Off),
+            options.schedule,
+            routing,
+            options.long_tokens,
+        )?;
+        report["routing"] = routing.identity();
+        if let Some(mut identity) = scheduler.identity() {
+            identity["requested"] = json!(options.scheduler);
+            report["scheduler"] = identity;
+        }
+        report["deterministic"] = json!({"requested": basal_gpu::DeterministicProfile::ID,
+            "effective": {"request_isolation": "whole_request", "max_batch": 1, "wait_ms": 0, "batch_window_ms": 0,
+                "long_lane": "off", "scheduler": "native", "template_prefix_warmup": false}});
+        Some((scheduler, routing))
+    } else {
+        if options.long_lane.is_some() || options.long_token_basis.is_some() {
+            // Record before execute so resource/model/startup failures retain the comparable policy identity.
+            report["routing"] = options.routing_policy()?.identity();
+        }
+        if let Some(identity) = options.scheduler_policy()?.identity() {
+            report["scheduler"] = identity;
+        }
+        None
+    };
+    let result = execute(model, gpu_options, quantization, options, raw, &mut report, strict_policies);
     if let Err(e) = &result {
         report["reason"] = json!(format!("{e:#}"));
     }
@@ -356,6 +399,7 @@ fn execute(
     options: &Options,
     raw: workload::RawWorkload,
     report: &mut Value,
+    strict_policies: Option<(SchedulerPolicy, RoutingPolicy)>,
 ) -> Result<()> {
     // The guards' host baseline (host counters only, no device) precedes the model files, so swap growth during a
     // download still counts; the later checks sample the host again.
@@ -380,6 +424,11 @@ fn execute(
         let artifacts = g.model_options.load_exits(&files.2)?.context("trained exit artifacts")?;
         report["model"]["exit_head_resident_bytes"] =
             GpuBackend::early_exit_resident_bytes(&artifacts, &files.2.config)?.into();
+        Some(files)
+    } else if g.model_options.deterministic_enabled() {
+        // the strict profile's architecture (Llama) before the first device query below
+        let files = model_files(model, g, report)?;
+        crate::deterministic::check_manifest(&files.2)?;
         Some(files)
     } else {
         g.layer_split
@@ -658,13 +707,17 @@ fn execute(
     if let Some(share) = options.long_share {
         report["settings"]["long_share"] = json!(share);
     }
-    if options.long_lane.is_some() || options.long_token_basis.is_some() {
+    if strict_policies.is_some() {
+        report["settings"]["routing"] = report["routing"].clone();
+    } else if options.long_lane.is_some() || options.long_token_basis.is_some() {
         report["settings"]["routing"] = options.routing_policy()?.identity();
     }
     if let Some(split) = &g.layer_split {
         report["settings"]["layer_split"] = json!(split.stages());
     }
-    if let Some(identity) = options.scheduler_policy()?.identity() {
+    if strict_policies.is_some() {
+        report["settings"]["scheduler"] = report["scheduler"].clone();
+    } else if let Some(identity) = options.scheduler_policy()?.identity() {
         report["settings"]["scheduler"] = identity;
     }
     crate::model_options::record_effective_settings(
@@ -719,7 +772,7 @@ fn execute(
     for (name, work, _) in &workloads {
         ensure!(!work.is_empty(), "benchmark workload {name}: no requests within the model context limit");
     }
-    let server = Server::start(engine, devices.clone(), scheduling, options)?;
+    let server = Server::start(engine, devices.clone(), scheduling, options, strict_policies)?;
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let mut phases = Vec::new();
     report["status"] = json!("running");

@@ -47,7 +47,9 @@ impl<B: Backend> Engine<B> {
     /// Start partial admission of a text/off request. This operation does no backend work. The caller owns one
     /// request reservation throughout, calls [`Engine::run_ready`] then [`Engine::advance_request`], and drops the
     /// state only after admitted synchronous work has drained. Empty plans may be advanced without a readout.
+    /// Refused under [`RequestIsolation::Whole`].
     pub fn begin_request(&self, plan: RequestPlan) -> Result<RequestExecution> {
+        self.check_partial_admission()?;
         ensure!(plan.media.is_none(), "media requests require atomic execution");
         ensure!(plan.early_exit.as_deref().is_none_or(|p| p == "off"), "active early-exit requires atomic execution");
         let decision = DecisionRounds::new(&[&plan]);
@@ -59,11 +61,13 @@ impl<B: Backend> Engine<B> {
     /// rejected before backend work; no phase advances until all of its primitive slots are complete.
     /// Requests in one call must share the same resolved early-exit policy. Plan them with this engine so omitted
     /// fields inherit its default policy; `None` and explicit `"off"` are distinct policy identities here.
+    /// Refused under [`RequestIsolation::Whole`], also for requests begun by another engine.
     pub fn run_ready(
         &mut self,
         requests: &mut [&mut RequestExecution],
         selected: &[(usize, ReadyBranch)],
     ) -> Result<()> {
+        self.check_partial_admission()?;
         self.check_stop()?;
         let mut prepared = Vec::with_capacity(selected.len());
         let mut seen = std::collections::HashSet::with_capacity(selected.len());
@@ -93,7 +97,9 @@ impl<B: Backend> Engine<B> {
     /// Advance completed dependency rounds, preserving whole-request context refusal and task assembly. Thinking
     /// generation and evidence run synchronously only after P1 completes, using their existing isolated paths.
     /// Returns the final output once; an unfinished round returns `None` without executing missing branches.
+    /// Refused under [`RequestIsolation::Whole`].
     pub fn advance_request(&mut self, request: &mut RequestExecution) -> Result<Option<PlanOutput>> {
+        self.check_partial_admission()?;
         ensure!(!request.completed, "request already completed");
         loop {
             let plan = request.continuation.as_ref().map_or(&request.plan, |(c, _)| &c.plan);

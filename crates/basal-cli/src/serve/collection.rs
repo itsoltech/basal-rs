@@ -33,6 +33,12 @@ impl CollectionPolicy {
         Ok(Self { max_batch, timing })
     }
 
+    /// One whole request per call without waits, the strict deterministic profile's collection: the same as
+    /// `new(Some(1), Some(0.0), Some(0.0))`.
+    pub(crate) fn whole_request() -> Self {
+        Self { max_batch: Some(1), timing: Some((Duration::ZERO, Duration::ZERO)) }
+    }
+
     pub(crate) fn max_batch(self) -> Option<usize> {
         self.max_batch
     }

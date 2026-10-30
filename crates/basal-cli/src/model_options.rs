@@ -108,6 +108,11 @@ pub(crate) struct ModelOptions {
     #[arg(long)]
     #[serde(default)]
     pub truncate_head: Option<f64>,
+    /// Strict deterministic profile: off (default) or llama-candle-f32 (see docs/ARCHITECTURE.md; not a
+    /// repeatability guarantee)
+    #[arg(long, value_enum)]
+    #[serde(default)]
+    pub deterministic: Option<crate::deterministic::Deterministic>,
 }
 
 impl ModelOptions {
@@ -131,6 +136,7 @@ impl ModelOptions {
             || self.auto_band.is_some()
             || self.context_overflow.is_some()
             || self.truncate_head.is_some()
+            || self.deterministic.is_some()
     }
     /// Explicit shared CLI values override per-model YAML; one calibration source replaces the other.
     pub(crate) fn apply_cli(&mut self, cli: &Self) {
@@ -186,6 +192,14 @@ impl ModelOptions {
         if cli.truncate_head.is_some() {
             self.truncate_head = cli.truncate_head;
         }
+        if cli.deterministic.is_some() {
+            self.deterministic = cli.deterministic;
+        }
+    }
+
+    /// Whether the strict deterministic profile is requested (`off` and absent are the default).
+    pub(crate) fn deterministic_enabled(&self) -> bool {
+        self.deterministic.is_some_and(|d| d != crate::deterministic::Deterministic::Off)
     }
 
     pub(crate) fn request_batching(&self) -> basal_core::Batching {
@@ -211,6 +225,7 @@ impl ModelOptions {
     }
 
     pub(crate) fn validate(&self) -> Result<()> {
+        crate::deterministic::check_options(self)?;
         ensure!(
             !self.exits_enabled() || !self.thinking_enabled()?,
             "trained exits cannot be combined with the distinct thinking checkpoint"
