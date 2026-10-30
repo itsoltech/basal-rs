@@ -235,7 +235,8 @@ struct IdFile<'a> {
 
 /// Named source estimates of custom thinking memory, tied to the loader's allocation sites and computed with checked
 /// arithmetic from the bounded configuration and the inventory. They exclude Vec growth beyond the stated factors,
-/// allocator and driver overhead, the base model, K/V and generation work: not allocator, RSS or OOM bounds.
+/// header-parser amplification before admission, allocator and driver overhead, the base model, K/V and generation
+/// work: not allocator, RSS or OOM bounds.
 pub(crate) struct Resources {
     /// largest host transient while one tensor is assembled: 3S for a multi-part tensor (Vec growth while appending,
     /// then an f16 or realigned copy), 2S for a single part, lm_head 2S
@@ -246,7 +247,8 @@ pub(crate) struct Resources {
     retained: u64,
     /// parsed inventory metadata (headers plus 128 bytes per tensor), released with the handles
     metadata: u64,
-    /// largest safetensors header read at once
+    /// largest raw safetensors header read at once; parsed entries can transiently use several times these bytes
+    /// before name/rank/count validation, during Inventory::open and before admission
     header: u64,
     /// device bytes: one decoder layer, the embedding (first stage), one norm, lm_head (last stage) and the cuBLASLt
     /// workspace of a stage
@@ -547,6 +549,7 @@ pub(crate) fn load_custom_thinking(
         CalibrationEntry::Off => None,
         CalibrationEntry::File { file, source_model_id } => {
             ensure!(is_plain_file_name(&file), "think_integrity: {file} is not a plain file name");
+            ensure!(is_sha256(&source_model_id), "think_integrity: source_model_id must be 64 lowercase hex digits");
             ensure!(
                 !STRUCTURAL.contains(&file.as_str())
                     && ![TOKENIZER, GENERATION, SINGLE, INDEX].contains(&file.as_str()),

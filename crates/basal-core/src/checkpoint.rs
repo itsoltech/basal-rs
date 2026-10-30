@@ -200,6 +200,8 @@ struct RawEntry {
 }
 
 /// The top-level entries of a safetensors header in file order, repeated keys kept; `None` is `__metadata__`.
+/// Entries are materialized before name/rank/count validation, so parsing can use several times the raw header
+/// bytes before admission. The raw header size limit is not a bound on this parser transient.
 struct RawHeader(Vec<(String, Option<RawEntry>)>);
 
 impl<'de> Deserialize<'de> for RawHeader {

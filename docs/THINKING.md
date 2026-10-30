@@ -203,6 +203,14 @@ thinking), K/V ani pracy generacji. Nie są to granice allocatora, RSS ani
 ochrona przed OOM. Benchmark dolicza dla własnego checkpointu jego szacunek
 etapów zamiast drugiej kopii modelu bazowego.
 
+Znana luka: nagłówki są parsowane w `Inventory::open`, przed admission.
+Parser tworzy wszystkie wpisy przed kontrolą długości nazw, rangi kształtu
+i liczby tensorów. Może wtedy zużyć kilka razy więcej pamięci niż surowy
+nagłówek; spreparowany nagłówek o limicie 100 MB może wymagać około 0,9 GB
+przed odmową. To przykład wywiedziony z kodu, nie pomiar ani górna granica.
+Ten koszt parsowania nie jest objęty powyższym szacunkiem. Kontrola limitów
+podczas parsowania pozostaje otwarta.
+
 ### Ograniczenia
 
 Ta ścieżka nie została uruchomiona: brak pomiaru generacji, P2, odmów na
