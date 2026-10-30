@@ -39,6 +39,17 @@ jednego konta administracyjnego w obu rolach.
   tylko ostrzeżenie PostgreSQL o braku uprawnienia do polityki quota.
 - PASS, serwer z GPU na każdej z tych baz: 401 bez klucza, 200 z kluczem,
   401 po wyłączeniu użytkownika, 200 po włączeniu, zapisany `last_used_at`.
+- PASS, izolacja danych Batch na każdej z tych baz: profil `production`,
+  artefakty w S3 (SeaweedFS w Dockerze, TLS z tym samym CA), `processing: false`.
+  Na PostgreSQL konto runtime miało tylko DML na tabelach schematu.
+  - Plik i batch utworzone kluczem 1 użytkownika `acme` są widoczne kluczem 2
+    tego użytkownika: pobranie, treść, lista, anulowanie.
+  - Użytkownik `beta` dostaje 404 przy odczycie, pobraniu treści, usunięciu
+    i anulowaniu zasobów `acme`, a także przy tworzeniu batcha z pliku `acme`.
+    Jego listy plików i batchy są puste.
+  - `acme` nie widzi pliku `beta`.
+  - Użytkownik `gamma` bez limitów quota dostaje 403 `quota_not_configured`.
+  - Wyniki są identyczne na trzech silnikach.
 
 - PASS, CLI na SQLite: tworzenie, lista, rotacja z `--expire-old-in` i odwołanie
   kluczy; idempotentne odwołanie i błędy dla złego zakresu, czasu, id i użytkownika.
@@ -71,9 +82,8 @@ jednego konta administracyjnego w obu rolach.
 
 ## Ograniczenia (GAP)
 
-- Na PostgreSQL, SQL Server i MongoDB nie sprawdzono przez HTTP izolacji danych
-  Batch między użytkownikami. Profil produkcyjny batchy wymaga S3; izolację
-  sprawdzono na SQLite, a zapytania Batch są wspólne dla silników SQL.
+- Test izolacji nie wykonywał batchy na GPU (`processing: false`). Wykonanie
+  i wyniki batchy nie zmieniały się w tej pracy. S3 to SeaweedFS, nie AWS.
 - SQL Server i MongoDB nie były sprawdzane na koncie runtime z minimalnymi
   uprawnieniami. MongoDB działał bez uwierzytelniania (tylko loopback i TLS).
 - Clippy i rustdoc uruchomiono w profilu debug dla `basal-cli`, nie dla całego
