@@ -44,8 +44,17 @@ jest to [lokalna baza serwera](DATABASE.md#lokalna-baza-bez-sekcji-database)
    ```
 
    SQLite z `auto_migrate: true` (domyślnie) tworzy schemat automatycznie.
-   Konto runtime potrzebuje uprawnień `SELECT`, `INSERT` i `UPDATE` do `api_users`
-   i `api_keys`.
+   Konto runtime potrzebuje `SELECT` do `batch_schema` (kontrola wersji schematu)
+   oraz `SELECT`, `INSERT` i `UPDATE` do `api_users` i `api_keys`. Przykład dla
+   PostgreSQL, gdy baza służy tylko kluczom:
+
+   ```sql
+   GRANT SELECT ON batch_schema TO basal_runtime;
+   GRANT SELECT, INSERT, UPDATE ON api_users, api_keys TO basal_runtime;
+   ```
+
+   Bez `SELECT` do `batch_quota_policy` i `batch_quota_limits` polecenie
+   `basal users create` nie sprawdzi limitów quota i tylko o tym ostrzeże.
 
 2. Utwórz użytkownika i dodaj mu limity Batch API, jeśli ma korzystać z batchy:
 

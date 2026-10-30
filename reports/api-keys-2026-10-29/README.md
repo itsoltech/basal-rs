@@ -17,13 +17,28 @@ nie przywraca. Schemat bazy ma teraz wersję 3. Starsze binarki odrzucają go ja
 
 ## Środowisko i metoda
 
-Linux x86_64, RTX 4060, build release z CUDA (`--features cuda`, cap 89),
+Linux x86_64, RTX 4060, Docker, build release z CUDA (`--features cuda`, cap 89),
 model `Remek/basal-2.0-mini` z lokalnego cache HF. Serwer na loopback,
 `batches.profile: local`, SQLite. Ręczne żądania `curl` i polecenia CLI;
 bez testów automatycznych (zgodnie z AGENTS.md). Nie zmieniono obliczeń
 modelu, więc nie wykonano porównania numerycznego ani pomiaru wydajności.
 
 ## Wyniki
+
+PostgreSQL 17, SQL Server 2022 i MongoDB 7.0 (replica set z jednym węzłem)
+uruchomiono lokalnie w Dockerze. Wszystkie z TLS i prywatnym CA, certyfikat z SAN
+`localhost`, połączenia z `tls.mode: verify_full`. PostgreSQL używał osobnego
+konta runtime z uprawnieniami opisanymi w docs/AUTH.md; SQL Server i MongoDB
+jednego konta administracyjnego w obu rolach.
+
+- PASS, CLI na PostgreSQL, SQL Server i MongoDB: ten sam scenariusz
+  23 poleceń. Migracja dwukrotnie, użytkownicy (tworzenie, duplikat, wyłączenie,
+  ponowne wyłączenie, włączenie) i klucze (brak użytkownika, wyłączony
+  użytkownik, `--json`, `--user`, rotacja z `--expire-old-in`, podwójne
+  odwołanie, nieznane id). Wyniki są identyczne na trzech silnikach; różni je
+  tylko ostrzeżenie PostgreSQL o braku uprawnienia do polityki quota.
+- PASS, serwer z GPU na każdej z tych baz: 401 bez klucza, 200 z kluczem,
+  401 po wyłączeniu użytkownika, 200 po włączeniu, zapisany `last_used_at`.
 
 - PASS, CLI na SQLite: tworzenie, lista, rotacja z `--expire-old-in` i odwołanie
   kluczy; idempotentne odwołanie i błędy dla złego zakresu, czasu, id i użytkownika.
@@ -56,9 +71,11 @@ modelu, więc nie wykonano porównania numerycznego ani pomiaru wydajności.
 
 ## Ograniczenia (GAP)
 
-- PostgreSQL, SQL Server i MongoDB: tylko kompilacja i przegląd kodu. Lokalnie
-  nie było tych baz ani dostępu do Dockera. Migracje i zapytania tych silników
-  wymagają sprawdzenia na prawdziwych instancjach przed wdrożeniem.
+- Na PostgreSQL, SQL Server i MongoDB nie sprawdzono przez HTTP izolacji danych
+  Batch między użytkownikami. Profil produkcyjny batchy wymaga S3; izolację
+  sprawdzono na SQLite, a zapytania Batch są wspólne dla silników SQL.
+- SQL Server i MongoDB nie były sprawdzane na koncie runtime z minimalnymi
+  uprawnieniami. MongoDB działał bez uwierzytelniania (tylko loopback i TLS).
 - Clippy i rustdoc uruchomiono w profilu debug dla `basal-cli`, nie dla całego
   workspace w release ani z funkcjami CUDA/Intel. Pełny zakres zapewnia CI.
 - SDK nie sprawdzono na serwerze z kluczami. C# zbudowano lokalnym .NET 10.0.300
