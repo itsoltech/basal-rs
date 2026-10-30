@@ -970,12 +970,9 @@ fn planned_engine_from_manifest(
     if let Some(artifacts) = &exits {
         GpuBackend::early_exit_resident_bytes(artifacts, &manifest.config)?;
     }
-    // A custom thinking source (validated by load_thinking): its readout-layer rule, split coverage and admission,
-    // before the host-PLE device query, the precision rule and any GEMM table.
+    // A custom thinking source (validated by load_thinking, always Llama, so the readout-layer rule above holds for it
+    // too): its split coverage and admission, before the host-PLE device query, the precision rule and any GEMM table.
     if let Some(t) = &thinking {
-        if t.custom.is_some() {
-            readout_layer.resolve(&t.manifest.config, kernels)?;
-        }
         admit_custom_thinking(t, g.layer_split.as_ref(), g.device(), &format!("model {}", manifest.name))?;
     }
     if ple == basal_gpu::PleMode::Host {
