@@ -158,6 +158,11 @@ impl RuntimeBackend {
         artifacts: &basal_core::early_exit::ExitArtifacts,
     ) -> Result<(Self, Option<usize>)> {
         anyhow::ensure!(!matches!(placement, PlannedPlacement::Cpu), "the CPU backend has no trained exits");
+        anyhow::ensure!(
+            plan.deterministic().is_none(),
+            "deterministic profile {} has no trained exits",
+            crate::DeterministicProfile::ID
+        );
         Self::check_early_exit(
             plan.kernels(),
             plan.quantization(),
@@ -203,6 +208,14 @@ impl RuntimeBackend {
             plan.cpu_work_bytes().is_some() == matches!(placement, PlannedPlacement::Cpu),
             "the execution plan and placement disagree on the CPU backend"
         );
+        anyhow::ensure!(
+            plan.deterministic().is_none()
+                || (matches!(cfg, Architecture::Llama(_))
+                    && matches!(placement, PlannedPlacement::Single(_))
+                    && !media),
+            "deterministic profile {} loads text-only Llama on one GPU",
+            crate::DeterministicProfile::ID
+        );
         let requested = if matches!(plan.ple_placement(), crate::PlePlacement::Host { .. }) {
             crate::PleMode::Host
         } else {
@@ -229,7 +242,18 @@ impl RuntimeBackend {
                         plan.ple_placement(),
                     )?))
                 } else {
-                    Self::load(dir, cfg, precision, readout, kernels, quantization, device, media, plan.kernel_set())?
+                    Self::load(
+                        dir,
+                        cfg,
+                        precision,
+                        readout,
+                        kernels,
+                        quantization,
+                        device,
+                        media,
+                        plan.kernel_set(),
+                        plan.deterministic(),
+                    )?
                 }
             }
             PlannedPlacement::Split(split) => {
@@ -253,13 +277,19 @@ impl RuntimeBackend {
 
     /// Load a custom thinking checkpoint from its operator-verified `inventory` like [`RuntimeBackend::load_planned`]:
     /// dense Llama on the CUDA or Metal Llama backend, one GPU or a layer split, text only, no evidence head. A CPU
-    /// placement or plan, the Intel backend, host PLE or quantization is refused before any device is touched.
+    /// placement or plan, the Intel backend, host PLE or quantization is refused before any device is touched, and
+    /// so is a plan of the strict deterministic profile (no custom thinking contract).
     pub fn load_planned_verified(
         inventory: &basal_core::checkpoint::Inventory,
         cfg: &Architecture,
         plan: &ResolvedExecutionPlan,
         placement: PlannedPlacement<'_>,
     ) -> Result<(Self, Option<usize>)> {
+        anyhow::ensure!(
+            plan.deterministic().is_none(),
+            "deterministic profile {} has no custom thinking checkpoint",
+            crate::DeterministicProfile::ID
+        );
         let Architecture::Llama(c) = cfg else { anyhow::bail!("custom thinking checkpoints load as Llama only") };
         anyhow::ensure!(
             !crate::INTEL_BACKEND && !matches!(placement, PlannedPlacement::Cpu) && plan.cpu_work_bytes().is_none(),
@@ -319,6 +349,9 @@ impl RuntimeBackend {
 
     /// Apply the execution policy of `plan`; refused once K/V or an execution lane exists.
     fn apply_plan(&mut self, plan: &ResolvedExecutionPlan) -> Result<(), InferenceConfigError> {
+        if plan.deterministic().is_some() && !matches!(self, Self::Llama(_)) {
+            return Err(InferenceConfigError::PlanMismatch("deterministic cuBLAS handle"));
+        }
         match self {
             Self::Qwen35(b) => b.apply_plan(plan),
             Self::Llama(b) | Self::CpuLlama(b) => b.apply_plan(plan),
@@ -341,7 +374,8 @@ impl RuntimeBackend {
 
     /// Load a model onto GPU `device`, without its execution policy: only for [`RuntimeBackend::load_planned`], which
     /// applies the plan's policy next. Projection quantization exists for Llama only: an Omni (Gemma) model is refused
-    /// any format other than `none` before its weights are read.
+    /// any format other than `none` before its weights are read. `deterministic` is the strict profile of a CUDA
+    /// Llama plan; any other family refuses it before loading.
     #[expect(clippy::too_many_arguments, reason = "the load options of every architecture, validated together")]
     fn load(
         dir: &Path,
@@ -353,7 +387,13 @@ impl RuntimeBackend {
         device: usize,
         media: bool,
         kernel_set: crate::KernelSet,
+        deterministic: Option<&crate::DeterministicProfile>,
     ) -> Result<Self> {
+        anyhow::ensure!(
+            deterministic.is_none() || matches!(cfg, Architecture::Llama(_)),
+            "deterministic profile {} runs Llama only",
+            crate::DeterministicProfile::ID
+        );
         match cfg {
             Architecture::Qwen35(c) => {
                 anyhow::ensure!(
@@ -374,6 +414,12 @@ impl RuntimeBackend {
             Architecture::Llama(c) => {
                 anyhow::ensure!(!media, "media requires a Gemma omni model");
                 #[cfg(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos")))]
+                anyhow::ensure!(
+                    deterministic.is_none(),
+                    "deterministic profile {} needs the CUDA Llama backend",
+                    crate::DeterministicProfile::ID
+                );
+                #[cfg(all(feature = "intel", not(feature = "cuda"), not(target_os = "macos")))]
                 return Ok(Self::Intel(Box::new(crate::intel::IntelBackend::load(
                     dir,
                     c,
@@ -392,6 +438,7 @@ impl RuntimeBackend {
                     kernels,
                     quantization,
                     device,
+                    deterministic,
                 )?)))
             }
         }

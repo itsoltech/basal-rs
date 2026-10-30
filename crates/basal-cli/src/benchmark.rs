@@ -174,13 +174,24 @@ impl Server {
             database: None,
             batches: None,
         };
+        // A strict engine: one whole request per call, no long lane and the native schedule (`auto` would enable
+        // the short-first backlog once the lane is off).
+        let (collection, scheduler, routing) =
+            if engine.request_isolation() == basal_core::engine::RequestIsolation::Whole {
+                let routing = options.routing_policy()?.without_long_lane();
+                let scheduler =
+                    crate::serve::backlog::SchedulerPolicy::new(None, options.schedule, routing, options.long_tokens)?;
+                (crate::serve::collection::CollectionPolicy::whole_request(), scheduler, routing)
+            } else {
+                (Default::default(), options.scheduler_policy()?, options.routing_policy()?)
+            };
         let model = ServedModel {
             name: engine.manifest.name.clone(),
             replicas: vec![Replica { engine, devices: crate::config::InstanceDevices::Gpu(devices), scheduling }],
             max_batch_tokens: options.max_batch_tokens,
-            collection: Default::default(),
-            scheduler: options.scheduler_policy()?,
-            routing: options.routing_policy()?,
+            collection,
+            scheduler,
+            routing,
             batch_profile: None,
             batch_qualification: crate::serve::batches::config::BackgroundQualification::not_configured(),
         };
@@ -273,6 +284,18 @@ pub(crate) fn run(model: &ModelArgs, gpu_options: &GpuArgs, options: &Options) -
         "benchmark measures GPU resources; the CPU backend has no benchmark telemetry in this release"
     );
     options.validate()?;
+    // The strict profile's options, environment and serving conflicts before any download, GPU or report.
+    let strict = crate::deterministic::profile(&gpu_options.deterministic_request(&model.model))?.is_some();
+    if strict {
+        use crate::serve::{backlog::Scheduler, routing::LongLane};
+        ensure!(
+            !matches!(options.long_lane, Some(LongLane::On)) && !matches!(options.scheduler, Some(Scheduler::On)),
+            "model {}: deterministic profile {} has no long lane and the native schedule: --long-lane on and \
+             --scheduler on are refused",
+            model.model,
+            basal_gpu::DeterministicProfile::ID
+        );
+    }
     // an unsupported weight format or layer split fails before any GPU check or download
     let quantization = gpu_options.quantization(&model.model)?;
     gpu_options.check_ple_source(&model.model)?;
@@ -316,6 +339,11 @@ pub(crate) fn run(model: &ModelArgs, gpu_options: &GpuArgs, options: &Options) -
     }
     if let Some(identity) = options.scheduler_policy()?.identity() {
         report["scheduler"] = identity;
+    }
+    if strict {
+        report["deterministic"] = json!({"requested": basal_gpu::DeterministicProfile::ID,
+            "effective": {"request_isolation": "whole_request", "max_batch": 1, "wait_ms": 0, "batch_window_ms": 0,
+                "long_lane": "off", "scheduler": "native", "template_prefix_warmup": false}});
     }
     let result = execute(model, gpu_options, quantization, options, raw, &mut report);
     if let Err(e) = &result {
@@ -380,6 +408,11 @@ fn execute(
         let artifacts = g.model_options.load_exits(&files.2)?.context("trained exit artifacts")?;
         report["model"]["exit_head_resident_bytes"] =
             GpuBackend::early_exit_resident_bytes(&artifacts, &files.2.config)?.into();
+        Some(files)
+    } else if g.model_options.deterministic_enabled() {
+        // the strict profile's architecture (Llama) before the first device query below
+        let files = model_files(model, g, report)?;
+        crate::deterministic::check_manifest(&files.2)?;
         Some(files)
     } else {
         g.layer_split

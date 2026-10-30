@@ -67,6 +67,9 @@ impl GpuBackend {
         {
             return Err(InferenceConfigError::PlanMismatch("precision, readout, kernels or quantization"));
         }
+        if plan.deterministic() != self.deterministic.as_ref() {
+            return Err(InferenceConfigError::PlanMismatch("deterministic cuBLAS handle"));
+        }
         let ExecutionPolicy::Llama { attention, default_kernels, .. } = plan.policy() else {
             return Err(InferenceConfigError::PlanMismatch("a Gemma policy for a Llama backend"));
         };

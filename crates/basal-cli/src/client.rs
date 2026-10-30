@@ -263,6 +263,12 @@ fn answer_value(response: &Value) -> Result<&Value, Failure> {
 pub(super) fn run(args: ClientArgs) -> Result<u8> {
     args.model_options.validate()?;
     ensure!(args.local || !args.model_options.is_set(), "model execution/prompt/calibration options require --local");
+    ensure!(
+        !args.model_options.deterministic_enabled(),
+        "--local runs fused kernels; the deterministic profile {} is available in serve, benchmark, decide, export, \
+         bench-requests and eval commands",
+        basal_gpu::DeterministicProfile::ID
+    );
     let format = args.input.unwrap_or(if args.request.is_some() { InputFormat::Json } else { InputFormat::Text });
     ensure!((1..=256).contains(&args.jobs), "--jobs must be between 1 and 256");
     ensure!(args.timeout > 0 && args.timeout <= 86400, "--timeout must be between 1 and 86400 seconds");

@@ -53,9 +53,9 @@ pub use inference::{InferenceConfigError, InferenceMode};
 mod memory;
 pub mod plan;
 pub use plan::{
-    AttentionProducts, DeviceDefaultRule, DiagnosticOverrides, DispatchRule, ExecutionBackend, ExecutionPolicy,
-    GemmArtifact, GemmFallback, GemmPolicy, GemmProvenance, KernelSet, PlanError, PlanOptions, PleMode, ReadoutLayer,
-    Reproducibility, ResolvedExecutionPlan,
+    AttentionProducts, DeterministicProfile, DeviceDefaultRule, DiagnosticOverrides, DispatchRule, ExecutionBackend,
+    ExecutionPolicy, GemmArtifact, GemmFallback, GemmPolicy, GemmProvenance, KernelSet, PlanError, PlanOptions,
+    PleMode, ReadoutLayer, Reproducibility, ResolvedExecutionPlan,
 };
 mod quant;
 mod qwen35;
@@ -458,6 +458,13 @@ fn set_cuda_sync(device: usize) -> Result<()> {
 /// the Metal device (macOS), which is only device 0. Every call creates a new candle device (its own handles and
 /// kernel caches) on the GPU's primary context.
 pub fn gpu_device(device: usize) -> Result<Device> {
+    gpu_device_with(device, None)
+}
+
+/// [`gpu_device`]; with `deterministic` (CUDA only) the new device's cuBLAS handle is configured for the strict
+/// profile before the device is returned, so before any Basal or Candle tensor exists on it and before any other
+/// owner of the handle can exist (`configure_cublas`, CUDA builds).
+pub(crate) fn gpu_device_with(device: usize, deterministic: Option<&DeterministicProfile>) -> Result<Device> {
     #[cfg(feature = "cuda")]
     {
         use candle_core::cuda_backend::cudarc::driver::CudaContext;
@@ -512,16 +519,78 @@ pub fn gpu_device(device: usize) -> Result<Device> {
                 env!("BASAL_CUDA_COMPUTE_CAPS"),
                 ctx.name()?
             );
+            if let Some(p) = deterministic {
+                configure_cublas(d, p).with_context(|| {
+                    format!("deterministic profile {}: CUDA device {device}", DeterministicProfile::ID)
+                })?;
+            }
         }
         Ok(dev)
     }
     #[cfg(all(not(feature = "cuda"), target_os = "macos"))]
     {
+        ensure!(deterministic.is_none(), "deterministic profile {} needs CUDA", DeterministicProfile::ID);
         ensure!(device == 0, "device {device}: the Metal backend runs on device 0 (the system GPU) only");
         Device::new_metal(0).context("Metal device")
     }
     #[cfg(all(not(feature = "cuda"), not(target_os = "macos")))]
-    bail!("no GPU backend in this build for device {device} (macOS: Metal; Linux: build with --features cuda)")
+    {
+        ensure!(deterministic.is_none(), "deterministic profile {} needs CUDA", DeterministicProfile::ID);
+        bail!("no GPU backend in this build for device {device} (macOS: Metal; Linux: build with --features cuda)")
+    }
+}
+
+/// Configure the cuBLAS handle of a CUDA device that [`gpu_device_with`] has just created and not yet returned:
+/// atomics `CUBLAS_ATOMICS_NOT_ALLOWED` (set, then read back), math mode checked to be `CUBLAS_DEFAULT_MATH` (never
+/// set), `CUBLAS_WORKSPACE_CONFIG` compared with the value frozen in `p` and Candle's F32 reduced-precision flag
+/// checked off. No workspace is attached and the environment is not written. The handle is unpublished: the only
+/// owners of its `Arc` are `d` (created in this call, not cloned, no tensor allocated on it) and the local clone,
+/// which the strong count asserts in addition.
+#[cfg(feature = "cuda")]
+fn configure_cublas(d: &candle_core::CudaDevice, p: &DeterministicProfile) -> Result<()> {
+    use candle_core::cuda_backend::cudarc::cublas::sys;
+    use std::mem::MaybeUninit;
+    ensure!(
+        std::env::var("CUBLAS_WORKSPACE_CONFIG").ok().as_deref() == Some(p.workspace_config()),
+        "CUBLAS_WORKSPACE_CONFIG changed after it was frozen as {:?}",
+        p.workspace_config()
+    );
+    ensure!(!candle_core::cuda::gemm_reduced_precision_f32(), "Candle's F32 reduced-precision GEMM is enabled");
+    let blas = d.cublas_handle();
+    ensure!(Arc::strong_count(&blas) == 2, "the cuBLAS handle is already shared");
+    d.cuda_stream().context().bind_to_thread().context("binding the CUDA context")?;
+    let handle = *blas.handle();
+    // SAFETY: `handle` is the live handle owned by `blas` (it outlives this function's uses) and was created by
+    // this call's `Device::new_cuda`; its only other owner is `d`, which has not been cloned or returned, so no
+    // other thread or tensor can issue work on it concurrently; the device's context is bound on this thread. Only
+    // host-side handle state is written.
+    unsafe { sys::cublasSetAtomicsMode(handle, sys::cublasAtomicsMode_t::CUBLAS_ATOMICS_NOT_ALLOWED) }
+        .result()
+        .context("cublasSetAtomicsMode")?;
+    // Both modes are read as their `repr(u32)` integers: cuBLAS may report a value (such as an OR of math flags)
+    // that is no variant of the Rust enum, which must therefore never be materialized.
+    let mut atomics = MaybeUninit::<u32>::uninit();
+    // SAFETY: as above for `handle`; the out-pointer is a live, aligned local of the size of the `repr(u32)` enum,
+    // written by cuBLAS and read only on success.
+    unsafe { sys::cublasGetAtomicsMode(handle, atomics.as_mut_ptr().cast()) }
+        .result()
+        .context("cublasGetAtomicsMode")?;
+    // SAFETY: `cublasGetAtomicsMode` returned success, so it initialized `atomics`.
+    let atomics = unsafe { atomics.assume_init() };
+    ensure!(
+        atomics == sys::cublasAtomicsMode_t::CUBLAS_ATOMICS_NOT_ALLOWED as u32,
+        "cuBLAS atomics mode reads back {atomics}, not CUBLAS_ATOMICS_NOT_ALLOWED"
+    );
+    let mut math = MaybeUninit::<u32>::uninit();
+    // SAFETY: as for `atomics`.
+    unsafe { sys::cublasGetMathMode(handle, math.as_mut_ptr().cast()) }.result().context("cublasGetMathMode")?;
+    // SAFETY: `cublasGetMathMode` returned success, so it initialized `math`.
+    let math = unsafe { math.assume_init() };
+    ensure!(
+        math == sys::cublasMath_t::CUBLAS_DEFAULT_MATH as u32,
+        "cuBLAS math mode is {math}, not CUBLAS_DEFAULT_MATH"
+    );
+    Ok(())
 }
 
 /// Fixed pointwise arithmetic, selected before any cache or lane exists.
@@ -589,6 +658,9 @@ pub struct GpuBackend {
     /// Some exactly when the single stage is [`StageDevice::Cpu`]: the frozen per-forward ceiling and GEMM threads of
     /// the host CPU instance, copied to forks.
     cpu: Option<cpu::CpuWork>,
+    /// Some exactly when the single stage's cuBLAS handle was configured for the strict profile at load; copied to
+    /// forks, which share that handle.
+    deterministic: Option<DeterministicProfile>,
 }
 
 /// Where a stage runs: a GPU ordinal ([`gpu_device`]) or the host CPU (`Device::Cpu`, the only stage).
@@ -1791,6 +1863,17 @@ impl Bytes<'_> {
 }
 
 impl GpuBackend {
+    /// Strict profile: refuse a forward once Candle's process-global F32 reduced-precision GEMM flag is on (the
+    /// profile froze it off; nothing in Basal sets it). A no-op without the profile.
+    fn check_deterministic(&self) -> Result<()> {
+        ensure!(
+            self.deterministic.is_none() || !candle_core::cuda::gemm_reduced_precision_f32(),
+            "deterministic profile {}: Candle's F32 reduced-precision GEMM was enabled after start-up",
+            DeterministicProfile::ID
+        );
+        Ok(())
+    }
+
     /// Only called by the validated planned loader, before prefixes, gates or execution lanes exist.
     fn enable_early_exit(&mut self, artifacts: &basal_core::early_exit::ExitArtifacts) -> Result<()> {
         ensure!(
@@ -1870,11 +1953,13 @@ impl GpuBackend {
     }
 
     /// [`GpuBackend::load`] without an attention policy, for [`RuntimeBackend::load_planned`], which applies the
-    /// plan's policy before any K/V or lane exists. Not usable for a forward before that.
+    /// plan's policy before any K/V or lane exists. Not usable for a forward before that. `deterministic` configures
+    /// the stage's cuBLAS handle for the strict profile ([`gpu_device_with`]).
     #[cfg_attr(
         all(feature = "intel", not(feature = "cuda"), not(target_os = "macos")),
         expect(dead_code, reason = "an Intel-only build loads Llama through IntelBackend")
     )]
+    #[expect(clippy::too_many_arguments, reason = "the loader inputs and the optional strict profile")]
     pub(crate) fn load_unplanned(
         model_dir: &Path,
         cfg: &LlamaConfig,
@@ -1883,16 +1968,18 @@ impl GpuBackend {
         kernels: Kernels,
         quantization: Quantization,
         device: usize,
+        deterministic: Option<&DeterministicProfile>,
     ) -> Result<Self> {
         quantization.check(precision, kernels, cfg!(feature = "cuda"))?;
-        Self::load_stages(
-            model_dir,
+        Self::load_stages_source(
+            CheckpointSource::Dir(model_dir),
             cfg,
             precision,
             readout,
             kernels,
             quantization,
             &[(StageDevice::Gpu(device), 0..cfg.num_layers)],
+            deterministic,
         )
     }
 
@@ -1938,6 +2025,7 @@ impl GpuBackend {
             kernels,
             quantization,
             &[(StageDevice::Gpu(device), 0..cfg.num_layers)],
+            None,
         )
     }
 
@@ -1964,6 +2052,7 @@ impl GpuBackend {
             kernels,
             quantization,
             &Self::gpu_stages(stages),
+            None,
         )
     }
 
@@ -1999,12 +2088,23 @@ impl GpuBackend {
         quantization: Quantization,
         plan: &[(StageDevice, Range<usize>)],
     ) -> Result<Self> {
-        Self::load_stages_source(CheckpointSource::Dir(model_dir), cfg, precision, readout, kernels, quantization, plan)
+        Self::load_stages_source(
+            CheckpointSource::Dir(model_dir),
+            cfg,
+            precision,
+            readout,
+            kernels,
+            quantization,
+            plan,
+            None,
+        )
     }
 
     /// [`GpuBackend::load_stages`] from `source`. A directory's `model.safetensors` is mapped for names and shapes
     /// and read with [`TensorReader`], with its optional `evidence_head.pt`; a verified inventory serves both through
-    /// its retained handles and has no evidence head.
+    /// its retained handles and has no evidence head. `deterministic` requires one GPU stage, refused before any
+    /// device is opened, and configures its cuBLAS handle ([`gpu_device_with`]).
+    #[expect(clippy::too_many_arguments, reason = "the loader inputs and the optional strict profile")]
     fn load_stages_source(
         source: CheckpointSource<'_>,
         cfg: &LlamaConfig,
@@ -2013,17 +2113,23 @@ impl GpuBackend {
         kernels: Kernels,
         quantization: Quantization,
         plan: &[(StageDevice, Range<usize>)],
+        deterministic: Option<&DeterministicProfile>,
     ) -> Result<Self> {
         let t0 = Instant::now();
         ensure!(!plan.is_empty(), "a model needs at least one stage");
         ensure!(plan.len() == 1 || plan.iter().all(|(d, _)| *d != StageDevice::Cpu), "the host CPU runs one stage");
+        ensure!(
+            deterministic.is_none() || matches!(plan, [(StageDevice::Gpu(_), _)]),
+            "deterministic profile {} runs one GPU stage (no CPU stage, no layer split)",
+            DeterministicProfile::ID
+        );
         let split = plan.len() > 1;
         let devs = plan
             .iter()
             .enumerate()
             .map(|(s, (device, _))| {
                 let StageDevice::Gpu(device) = *device else { return Ok(Device::Cpu) };
-                let dev = gpu_device(device);
+                let dev = gpu_device_with(device, deterministic);
                 if split {
                     dev.with_context(|| format!("stage {s} (CUDA device {device})"))
                 } else {
@@ -2377,6 +2483,7 @@ impl GpuBackend {
             residual_max: None,
             last_timing: (0.0, 0.0),
             stop: None,
+            deterministic: deterministic.cloned(),
         })
     }
 
@@ -3607,6 +3714,7 @@ impl GpuBackend {
         rows: &[&Packed],
         letters: &[&[Vec<u32>]],
     ) -> Result<Vec<Vec<Vec<f32>>>> {
+        self.check_deterministic()?;
         gates.switch_to(0)?;
         let t0 = Instant::now();
         let b = rows.len();
@@ -3771,6 +3879,7 @@ impl GpuBackend {
         t0: usize,
         t1: usize,
     ) -> Result<(Vec<f32>, Vec<f32>)> {
+        self.check_deterministic()?;
         gates.switch_to(0)?;
         let n = ids.len();
         ensure!(t0 < t1 && t1 <= n, "evidence: token range {t0}..{t1} outside {n} tokens");
@@ -4218,6 +4327,7 @@ impl Backend for GpuBackend {
             last_timing: (0.0, 0.0),
             stop: None,
             cpu: self.cpu,
+            deterministic: self.deterministic.clone(),
         })
     }
 
@@ -4440,6 +4550,12 @@ impl Backend for GpuBackend {
                     .collect(),
             );
             d["stage_transfer"] = json!(STAGE_TRANSFER);
+        }
+        // absent keeps the description above unchanged
+        if let Some(p) = &self.deterministic {
+            d["deterministic"] = json!({"profile": DeterministicProfile::ID, "cublas": p.cublas_identity(),
+                "request_shapes": "one request per engine call",
+                "evidence": "fused ragged f32 forward (Candle cuBLAS GEMMs), guarded like the letter readout"});
         }
         d
     }

@@ -564,6 +564,110 @@ pojedynczo, w partii i w drzewie
 ([pomiar](../reports/metal-m2-max-tree/README.md)); z cache stanu tego nie
 mierzono.
 
+### Ścisły profil deterministyczny `llama-candle-f32` (opt-in)
+
+**Profil ustala kontrole, nie gwarantuje powtarzalności.** Nazwa opcji nie
+oznacza zmierzonej ani udowodnionej deterministyczności. Nie mierzono bitowej
+równości powtórzonego żądania (osobno i z równoczesnym ruchem sąsiadów),
+powtarzalności po restarcie procesu, zgodności z FP32 upstream, braku regresji
+bitowej ścieżki domyślnej, kosztu wydajności ani zużycia pamięci. Te kontrole
+nie są też kwalifikowane względem dokumentacji NVIDIA (luki F1–F4 niżej).
+
+`deterministic: off|llama-candle-f32` (YAML modelu) / `--deterministic`
+jest typowanym polem wspólnych `ModelOptions`; jawny CLI nadpisuje YAML. Brak
+lub `off` nie zmienia żadnego zachowania, komunikatu, kolejności błędów,
+tożsamości planu, opisu backendu, numerycznego odcisku Batch ani raportu.
+Włączony wybiera jeden profil `llama-candle-f32.1`. Walidacja dotyczy
+końcowych, scalonych pól każdego modelu i poprzedza odkrywanie GPU, pobieranie
+modelu, tabelę GEMM, ładowanie i rozgrzewkę; w `serve` sprawdza wszystkie
+modele przed pierwszym zapytaniem o GPU, a architekturę (tylko Llama) zaraz po
+odczycie manifestów, przed precyzją, GEMM i thinking.
+
+| Ustawienie | Akceptowane | Efektywnie | Odrzucane |
+|---|---|---|---|
+| build / architektura | CUDA, Llama | `ExecutionPolicy::Llama` na CUDA | Metal, Intel, bez GPU; Gemma/Omni, Qwen3.5 |
+| `backend` | `gpu` | jedno GPU | `cpu` (przed wczesnym powrotem CPU) |
+| `dtype`, `--kernels`, `--readout` | `f32`, `candle`, `f32` | F32 (wagi BF16 rozszerzane), operacje Candle | `auto` (Llama f16), f16, bf16; `fused`; `bf16` |
+| `readout_layer`, `quantization`, `ple_placement` | `auto`, `none`, `device` | jak obok | pozostałe |
+| `inference_mode` | `auto`, `accurate` | `LlamaAttention` planu (tylko forward evidence) | `balanced` |
+| `gemm_table` | `auto`, `none`, `pinned`, `sha256:` | brak tabeli, `GemmFallback::NotApplicable` | ścieżka pliku |
+| rozmieszczenie | jedno `device` | jeden etap | kilka `replica_devices`, `layer_split` |
+| `media`, thinking, wyjścia | wyłączone | — | `media`, `think: auto`, `think_numerics`, `think_source`, `think_integrity`, `think_gemm_table`, `early_exit`, `exit_heads` |
+| `state_cache_mb` | 0 | `mark_state = false` | > 0 |
+| `soam` | `on`, `off` | Tree lub Budget wewnątrz jednego żądania | — |
+| `max_batch` | brak, 1 | 1 całe żądanie | inne |
+| `wait_ms`, `batch_window_ms` | brak, 0 | 0, 0 | > 0 |
+| `long_lane` | brak, `legacy`, `off` | `off` | `on` |
+| `scheduler` | brak, `auto`, `off` | natywny harmonogram | `on` |
+| `batch_profile` | bez kwalifikacji | bez toru tła | `background` kwalifikowane |
+| rozgrzewka szablonu | — | pominięta | — |
+| `CUBLAS_WORKSPACE_CONFIG` | `(:<KiB>:<liczba>)+`, dodatnie liczby dziesiętne | zapisany dosłownie w tożsamości | brak, nie UTF-8, inna składnia |
+| diagnostyczne `BASAL_*` | `CUDA_SYNC`, `HOST_TIMING`, `PHASE_TIMING`, `CUDA_PROFILE`, `GEMM_EQUIV` | w tożsamości planu | pozostałe nadpisania jąder/arytmetyki |
+
+Jawne sprzeczne wartości są błędem; pominięte (oraz `legacy`/`auto`) `serve`
+przepisuje po scaleniu CLI/YAML, przed polityką kolekcji, i wypisuje jedną
+notatkę „requested → effective”. `scheduler: auto` przechodzi w natywny
+harmonogram, bo bez długiego toru włączyłby backlog short-first. Benchmark
+odrzuca `--long-lane on` i `--scheduler on`, a jego serwer używa kolekcji
+jednego żądania, natywnego harmonogramu i bez długiego toru; raport dostaje
+klucz `deterministic`. Polecenia `prepare`, `check-prompts` (bez backendu),
+`bench`, `profile` (z założenia łączą niezależne elementy) i `client --local`
+(jądra fused) odmawiają profilu; `export` wymaga `--batching single`.
+Dostępne są `serve` (z MCP), `benchmark`, `decide`, `export`,
+`bench-requests` oraz `eval-*`.
+
+Izolacja żądań jest w rdzeniu: `RequestIsolation::Whole` (domyślnie `Shared`,
+kopiowane przez `Engine::fork`) przed jakąkolwiek pracą backendu odrzuca
+`run_plans` z więcej niż jednym planem, `run` z kilkoma elementami poza
+`Batching::Single`, każde wywołanie przy `mark_state` (także `run_prepared`)
+oraz zawsze częściowe admission `begin_request`/`run_ready`/`advance_request`,
+także dla `RequestExecution` z innego silnika. Główny tor `serve` dla SOAM-off
+nie rozbija wtedy żądania na prymitywy: całe żądanie jest wpisem atomowym
+`run_plans(&[plan])` z Budget tylko w obrębie tego żądania, ze wszystkimi
+rundami zależności, evidence i drugą rundą zadań. Upstream w trybie
+deterministycznym z SOAM-off wykonuje jeden wpis kolejki (możliwie jeden
+prymityw) na forward; ta różnica granulacji to udokumentowany brak zgodności.
+Numeryczny odcisk Batch dostaje `request_isolation: whole` tylko w tym trybie.
+
+Uchwyt cuBLAS konfigurujemy wyłącznie dla nowego, nieopublikowanego urządzenia
+etapu w `gpu_device_with`, po wyłączeniu śledzenia zdarzeń i sprawdzeniu
+architektury, przed pierwszym tensorem Basal/Candle i przed jakimkolwiek
+klonem urządzenia (`Device::new_cuda` tworzy już sam uchwyt i jego nieprzezroczysty
+stan natywny). Dowodem wyłączności jest lokalne utworzenie bez aliasów;
+`Arc::strong_count == 2` to dodatkowa asercja. Ustawiamy
+`CUBLAS_ATOMICS_NOT_ALLOWED` i odczytujemy go z powrotem, sprawdzamy (nigdy nie
+ustawiamy) `CUBLAS_DEFAULT_MATH`, porównujemy `CUBLAS_WORKSPACE_CONFIG` z wartością
+zamrożoną przed pierwszym urządzeniem i sprawdzamy, że globalna flaga Candle
+F32 reduced-precision jest wyłączona; tę flagę sprawdza też każdy ścisły forward
+liter i evidence. Proces nigdy nie zapisuje środowiska, nie podłącza własnego
+workspace (`cublasSetWorkspace`) i nie zmienia opublikowanego uchwytu; zmianę
+stanu procesu przez kod zewnętrzny wykrywamy tylko w tych punktach. Plan i
+backend muszą mieć ten sam profil (`apply_plan`); `load_planned_verified`
+(własny checkpoint thinking) i ładowanie z wyjściami odmawiają planu ścisłego
+przed urządzeniem. Tożsamość planu ma klucz `deterministic`, a `describe`
+backendu opis uchwytu, wyłącznie gdy profil jest włączony.
+
+Obliczenia profilu: forward liter `forward_padded` Candle (macierze F32 przez
+`gemm_strided_batched_f32`, `CUBLAS_COMPUTE_32F`, `CUBLAS_GEMM_DEFAULT_TENSOR_OP`,
+wiersze dopełnione do najdłuższego wiersza wywołania), bez cuBLASLt i bez
+mierzonych GEMM. Evidence pozostaje forwardem fused ragged F32 (GEMM Candle
+cuBLAS, jądro attention zamrożone w planie, przycinanie ostatniej warstwy S5a
+`auto`) — nie są to „operacje referencyjne Candle”. Kształt obliczeń zależy od
+własnych wierszy żądania, `soam`, `tree_max_tokens`, `max_batch_tokens` i stałych
+chunków Budget.
+
+Otwarte fakty źródłowe: **F1** dokumentacja NVIDIA cuBLAS 12.9.1 o
+powtarzalności wyników i semantyce/czasie odczytu `CUBLAS_WORKSPACE_CONFIG`
+(walidacja składni nie dowodzi zachowania biblioteki); **F2** domyślny tryb
+atomics nowego uchwytu i to, od czego poza kształtem, ustawieniami uchwytu, GPU
+i biblioteką zależy wybór algorytmu `cublasGemmStridedBatchedEx`; **F3**
+powtarzalność uchwytu utworzonego w wątku ładującym i używanego z per-thread
+stream innego wątku; **F4** faktycznie załadowana biblioteka może różnić się od
+nagłówków 12.9.1, a tożsamość zapisuje GPU, nie wersję biblioteki. REQ-006
+pozostaje częściowy: profile F16/BF16 Candle, fused z przypiętymi tabelami bez
+fallbacku, Gemma, Qwen, Metal, Intel, repliki, tło solo, thinking i
+`client --local` pozostają otwarte.
+
 ### Intel Vulkan
 
 Opcjonalny `basal-gpu::intel::IntelBackend` implementuje ten sam trait `Backend`.
@@ -1277,6 +1381,11 @@ zgodności ani wydajności na sprzęcie. Wyniki niżej dotyczą basal-1.5.
   sesji, bez kryterium szybkości i ustalonej przyczyny. Pulę mini zmierzono w
   jednym przebiegu, bez szybkości żądań. Czas kwantyzacji na hoście, model max
   i inne karty nie zostały zmierzone.
+- Profil `deterministic: llama-candle-f32` obejmuje tylko jedno GPU CUDA,
+  Llama F32 z jądrami Candle i jedno całe żądanie na wywołanie silnika. Jego
+  kontrole cuBLAS nie są kwalifikowane, a powtarzalność, zgodność z FP32
+  upstream i koszt nie zostały zmierzone
+  ([opis i luki F1–F4](#ścisły-profil-deterministyczny-llama-candle-f32-opt-in)).
 - Repliki wymagają kart jednego typu i wspólnej tabeli GEMM niezależnej od
   partii; mieszane grupy wymagają osobnej decyzji numerycznej. Zgodność
   konfiguracji nie zastępuje pomiaru równości wyników na obu kartach.
