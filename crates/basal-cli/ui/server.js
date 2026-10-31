@@ -438,9 +438,8 @@ function requests(state) {
 // View
 
 export async function renderServer(root, ctx) {
-  const state = { snap: null, points: [], config: null, health: null, version: ctx.config.version, resetAt: null };
+  const state = { snap: null, points: [], config: null, health: null, version: ctx.config.version };
   let current = null;
-  let timer = null;
   let paused = false;
   let disposed = false;
   let busy = false;
@@ -465,18 +464,18 @@ export async function renderServer(root, ctx) {
     if (busy || disposed || paused) return;
     busy = true;
     try {
-      const since = state.snap ? state.snap.seq : 0;
+      const prev = state.snap;
+      const since = prev ? prev.seq : 0;
       const [snap, health] = await Promise.all([
         api(`/ui/api/admin/stats${since ? `?since=${since}` : ''}`),
         send('/health').then((r) => r.data).catch(() => null),
       ]);
       if (disposed) return;
-      if (since && snap.reset_at !== state.resetAt) {
+      if (since && snap.reset_at !== prev.reset_at) {
         // reset elsewhere: the next poll starts over with the whole history
         state.snap = null;
         return;
       }
-      state.resetAt = snap.reset_at;
       if (snap.config) state.config = snap.config;
       state.points = since ? state.points.concat(snap.series).slice(-300) : snap.series;
       state.snap = snap;
@@ -521,7 +520,7 @@ export async function renderServer(root, ctx) {
   root.append(pageHeader('Server', 'Live statistics of this server process: processing, engine lanes, caches, hardware and recent requests.',
     status, updated, pause, reset), content);
   await poll();
-  timer = setInterval(() => !document.hidden && poll(), POLL_MS);
+  const timer = setInterval(() => !document.hidden && poll(), POLL_MS);
   return () => {
     disposed = true;
     clearInterval(timer);

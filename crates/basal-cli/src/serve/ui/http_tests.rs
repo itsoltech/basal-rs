@@ -46,7 +46,7 @@ impl Server {
         }
         let settings =
             UiSettings { session_ttl: Duration::from_secs(3600), cookie_secure: false, capture_requests: false };
-        let info = UiInfo { batches: false, metrics: false, mcp: false, stats: false };
+        let info = UiInfo { batches: false, metrics: false, mcp: false };
         let app = Router::new()
             .route("/v1/models", get(|| async { axum::Json(json!({"models": []})) }))
             .merge(router(settings, &info, Some(store.clone()), None))

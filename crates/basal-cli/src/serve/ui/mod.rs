@@ -108,8 +108,6 @@ pub(crate) struct UiInfo {
     pub(crate) batches: bool,
     pub(crate) metrics: bool,
     pub(crate) mcp: bool,
-    /// The admin server view (with accounts).
-    pub(crate) stats: bool,
 }
 
 /// One embedded page file: name under `/ui/`, content type, content.
@@ -157,7 +155,7 @@ pub(super) fn router(
         "batches": info.batches,
         "metrics": info.metrics,
         "mcp": info.mcp,
-        "stats": info.stats,
+        "stats": stats.is_some(),
         "version": crate::version(),
     });
     if accounts {

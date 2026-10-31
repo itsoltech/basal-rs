@@ -1632,12 +1632,8 @@ fn serve_inner<B: Backend + Send + 'static>(
             };
             let router = match opts.ui {
                 Some(settings) => {
-                    let info = ui::UiInfo {
-                        batches: batch_service.is_some(),
-                        metrics: opts.metrics,
-                        mcp: mcp_stop.is_some(),
-                        stats: stats.is_some(),
-                    };
+                    let info =
+                        ui::UiInfo { batches: batch_service.is_some(), metrics: opts.metrics, mcp: mcp_stop.is_some() };
                     router.merge(ui::router(settings, &info, auth_store.clone(), stats))
                 }
                 None => router,
