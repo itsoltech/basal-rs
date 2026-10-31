@@ -716,7 +716,7 @@ ma osobną, opcjonalną sekcję `database:` i polecenie `basal database migrate`
 [Baza danych](docs/DATABASE.md). Opcjonalni użytkownicy i ich klucze API w tej bazie (`auth:`, `basal users`, `basal keys`)
 z zakresami, wygasaniem i wspólnymi danymi Batch API użytkownika: [Klucze API](docs/AUTH.md).
 Opcjonalny interfejs w przeglądarce (`basal serve --ui`, `/ui/`): Playground, panel użytkownika
-(klucze, batche i pliki) i panel administratora: [Interfejs w przeglądarce](docs/UI.md). Zgodność numeryczna i obciążenie mieszane batch/online
+(klucze, batche i pliki) i panel administratora ze statystykami serwera na żywo: [Interfejs w przeglądarce](docs/UI.md). Zgodność numeryczna i obciążenie mieszane batch/online
 pozostają do potwierdzenia na GPU; sama dostępność endpointu ich nie potwierdza.
 
 ```sh

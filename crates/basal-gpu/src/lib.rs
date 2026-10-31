@@ -57,7 +57,7 @@ mod quant;
 mod qwen35;
 mod runtime;
 mod split;
-pub use memory::{gpu_memory, pool_probe, GpuMemory, GpuMemoryProbe, PoolProbe, PoolUsage};
+pub use memory::{gpu_memory, pci_bus_id, pool_probe, GpuMemory, GpuMemoryProbe, PoolProbe, PoolUsage};
 pub use quant::{estimated_stage_weight_bytes, estimated_weight_bytes, ParseQuantizationError, Quantization};
 use quant::{ProjWeight, Projection};
 pub use runtime::{PlannedPlacement, RuntimeBackend};
@@ -547,6 +547,11 @@ pub struct GpuBackend {
     /// Forwards that used a cached state prefix / that inserted one.
     pub state_cache_hits: u64,
     pub state_cache_inserts: u64,
+    /// Rows without a cached state while the state cache is enabled; states dropped for the budget; rows that
+    /// started from a template prefix. Counted only for [`Backend::cache_stats`].
+    state_cache_misses: u64,
+    state_cache_evictions: u64,
+    template_hits: u64,
     cfg: LlamaConfig,
     precision: Precision,
     readout: Readout,
@@ -2145,6 +2150,9 @@ impl GpuBackend {
             clock: 0,
             state_cache_hits: 0,
             state_cache_inserts: 0,
+            state_cache_misses: 0,
+            state_cache_evictions: 0,
+            template_hits: 0,
             cfg: cfg.clone(),
             precision,
             readout,
@@ -3076,6 +3084,7 @@ impl GpuBackend {
             match lru {
                 Some(i) => {
                     self.prefixes.remove(i);
+                    self.state_cache_evictions += 1;
                 }
                 None => break,
             }
@@ -3430,10 +3439,18 @@ impl GpuBackend {
                 // cache.
                 self.clock += 1;
                 let mut past: Vec<Option<usize>> = rows.iter().map(|r| self.best_prefix(r)).collect();
-                for &i in past.iter().flatten() {
-                    self.prefixes[i].last_use = self.clock;
-                    if !self.prefixes[i].pinned {
-                        self.state_cache_hits += 1;
+                for &p in &past {
+                    let state = p.is_some_and(|i| !self.prefixes[i].pinned);
+                    if let Some(i) = p {
+                        self.prefixes[i].last_use = self.clock;
+                        if state {
+                            self.state_cache_hits += 1;
+                        } else {
+                            self.template_hits += 1;
+                        }
+                    }
+                    if !state && self.state_cache_bytes > 0 {
+                        self.state_cache_misses += 1;
                     }
                 }
                 if b == 1 && past[0].is_none_or(|i| self.prefixes[i].pinned) {
@@ -3979,6 +3996,9 @@ impl Backend for GpuBackend {
             clock: 0,
             state_cache_hits: 0,
             state_cache_inserts: 0,
+            state_cache_misses: 0,
+            state_cache_evictions: 0,
+            template_hits: 0,
             cfg: self.cfg.clone(),
             precision: self.precision,
             readout: self.readout,
@@ -4096,6 +4116,27 @@ impl Backend for GpuBackend {
     /// failed synchronisations or context binds); not a hardware check.
     fn device_health(&self) -> Option<DeviceHealth> {
         self.is_cuda().then(|| self.lineage.health.clone())
+    }
+
+    fn cache_stats(&self) -> Option<basal_core::CacheStats> {
+        let (mut stats, cfg) = (basal_core::CacheStats::default(), &self.cfg);
+        for p in &self.prefixes {
+            let bytes = p.bytes(cfg) as u64;
+            if p.pinned {
+                stats.template_entries += 1;
+                stats.template_bytes += bytes;
+            } else {
+                stats.state_entries += 1;
+                stats.state_bytes += bytes;
+            }
+        }
+        stats.state_budget_bytes = self.state_cache_bytes as u64;
+        stats.state_hits = self.state_cache_hits;
+        stats.state_misses = self.state_cache_misses;
+        stats.state_inserts = self.state_cache_inserts;
+        stats.state_evictions = self.state_cache_evictions;
+        stats.template_hits = self.template_hits;
+        Some(stats)
     }
 
     fn release_work(&mut self) -> std::result::Result<(), ExecutionError> {

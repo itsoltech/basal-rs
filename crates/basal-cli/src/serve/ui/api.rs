@@ -28,6 +28,7 @@ use crate::serve::batches::store::{
     check_api_name, ApiKeyId, ApiKeyRecord, ApiRole, ApiScopes, ApiUserRecord, NewApiKey, NewApiSession, OwnerId,
     PasswordHash, QuotaUsage, Sha256Digest, Store, StoreError, UnixMillis,
 };
+use crate::serve::stats::Stats;
 
 /// Most users and keys a list answers.
 const MAX_LIST: u32 = 1000;
@@ -51,13 +52,15 @@ pub(super) struct UiState {
     pub(super) info: Value,
     /// The key store; `None` without `auth` (no accounts: only `config` is routed).
     pub(super) store: Option<Store>,
+    /// Statistics of the admin server view; set with accounts.
+    stats: Option<Arc<Stats>>,
     throttle: LoginThrottle,
     hashing: Semaphore,
 }
 
 impl UiState {
-    pub(super) fn new(settings: UiSettings, info: Value, store: Option<Store>) -> Self {
-        Self { settings, info, store, throttle: LoginThrottle::default(), hashing: Semaphore::new(MAX_HASHING) }
+    pub(super) fn new(settings: UiSettings, info: Value, store: Option<Store>, stats: Option<Arc<Stats>>) -> Self {
+        Self { settings, info, store, stats, throttle: LoginThrottle::default(), hashing: Semaphore::new(MAX_HASHING) }
     }
 
     fn store(&self) -> &Store {
@@ -597,6 +600,59 @@ pub(super) async fn revoke_key(
 ) -> ApiResult<Json<Value>> {
     admin(&session)?;
     revoke(&state, &parse_key_id(&id)?).await
+}
+
+/// The statistics of an admin's request (404 on a server without them).
+fn stats<'a>(state: &'a UiState, session: &UiSession) -> ApiResult<&'a Stats> {
+    admin(session)?;
+    state.stats.as_deref().ok_or_else(|| not_found("statistics"))
+}
+
+/// `GET /ui/api/admin/stats[?since=SEQ]`: the server view's snapshot, with the history after point `SEQ` (0: all
+/// of it and the configuration).
+pub(super) async fn stats_snapshot(
+    State(state): State<Arc<UiState>>,
+    Extension(session): Extension<UiSession>,
+    uri: Uri,
+) -> ApiResult<Json<Value>> {
+    let stats = stats(&state, &session)?;
+    let mut since = 0;
+    for pair in uri.query().unwrap_or("").split('&').filter(|p| !p.is_empty()) {
+        match pair.split_once('=') {
+            Some(("since", value)) => {
+                since = value.parse().map_err(|_| ApiError::invalid_request("Invalid since.").with_param("since"))?;
+            }
+            _ => return Err(ApiError::invalid_request("Unknown query parameter.")),
+        }
+    }
+    Ok(Json(stats.snapshot(since)))
+}
+
+/// `POST /ui/api/admin/stats/reset`: zero the counters, the history and the recent requests of this process.
+pub(super) async fn reset_stats(
+    State(state): State<Arc<UiState>>,
+    Extension(session): Extension<UiSession>,
+) -> ApiResult<StatusCode> {
+    stats(&state, &session)?.reset();
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /ui/api/admin/requests`: the most recent inference requests, newest first.
+pub(super) async fn recent_requests(
+    State(state): State<Arc<UiState>>,
+    Extension(session): Extension<UiSession>,
+) -> ApiResult<Json<Value>> {
+    Ok(Json(stats(&state, &session)?.recent()))
+}
+
+/// `GET /ui/api/admin/requests/{id}`: one recent request, with its bodies when they are captured.
+pub(super) async fn recent_request(
+    State(state): State<Arc<UiState>>,
+    Extension(session): Extension<UiSession>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let stats = stats(&state, &session)?;
+    id.parse().ok().and_then(|id| stats.request(id)).map(Json).ok_or_else(|| not_found("request"))
 }
 
 #[cfg(test)]

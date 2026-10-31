@@ -6,6 +6,7 @@
 //!   enabled: true         # default false: no /ui route exists
 //!   session_ttl: 12h      # lifetime of a login session (5m to 30d)
 //!   cookie_secure: true   # false only for plain-HTTP access other than localhost
+//!   capture_requests: false  # keep the bodies of the last 200 inference requests for admins; needs auth
 //! ```
 //!
 //! The pages (`crates/basal-cli/ui/`) are compiled into the binary: plain HTML, CSS and JavaScript modules, without a
@@ -52,11 +53,19 @@ pub(crate) struct UiConfig {
     session_ttl: String,
     #[serde(default = "default_cookie_secure")]
     cookie_secure: bool,
+    /// Also `basal serve --ui-capture-requests`.
+    #[serde(default)]
+    pub(crate) capture_requests: bool,
 }
 
 impl Default for UiConfig {
     fn default() -> Self {
-        Self { enabled: false, session_ttl: default_session_ttl(), cookie_secure: default_cookie_secure() }
+        Self {
+            enabled: false,
+            session_ttl: default_session_ttl(),
+            cookie_secure: default_cookie_secure(),
+            capture_requests: false,
+        }
     }
 }
 
@@ -73,17 +82,24 @@ fn default_cookie_secure() -> bool {
 pub(crate) struct UiSettings {
     pub(crate) session_ttl: Duration,
     pub(crate) cookie_secure: bool,
+    /// Keep the bodies of recent inference requests for the server view (only with accounts).
+    pub(crate) capture_requests: bool,
 }
 
 impl UiConfig {
-    pub(crate) fn validate(&self) -> anyhow::Result<UiSettings> {
+    /// Checked settings; `auth`: accounts are enabled.
+    pub(crate) fn validate(&self, auth: bool) -> anyhow::Result<UiSettings> {
         let session_ttl =
             crate::keys::parse_duration(&self.session_ttl).map_err(|e| anyhow::anyhow!("ui.session_ttl: {e}"))?;
         anyhow::ensure!(
             (MIN_SESSION_TTL..=MAX_SESSION_TTL).contains(&session_ttl),
             "ui.session_ttl must be between 5m and 30d"
         );
-        Ok(UiSettings { session_ttl, cookie_secure: self.cookie_secure })
+        anyhow::ensure!(
+            !self.capture_requests || auth,
+            "ui.capture_requests needs auth (auth.enabled or --auth): request contents are shown to administrators only"
+        );
+        Ok(UiSettings { session_ttl, cookie_secure: self.cookie_secure, capture_requests: self.capture_requests })
     }
 }
 
@@ -92,6 +108,8 @@ pub(crate) struct UiInfo {
     pub(crate) batches: bool,
     pub(crate) metrics: bool,
     pub(crate) mcp: bool,
+    /// The admin server view (with accounts).
+    pub(crate) stats: bool,
 }
 
 /// One embedded page file: name under `/ui/`, content type, content.
@@ -121,22 +139,31 @@ const ASSETS: &[Asset] = assets![
     ("admin.js", JS),
     ("account.js", JS),
     ("batches.js", JS),
+    ("server.js", JS),
+    ("charts.js", JS),
 ];
 
-/// Routes of the UI. `store` is the key store with `auth` (accounts), else `None` (only the pages and `config`).
-pub(crate) fn router(settings: UiSettings, info: &UiInfo, store: Option<Store>) -> Router<()> {
+/// Routes of the UI. `store` is the key store with `auth` (accounts), else `None` (only the pages and `config`);
+/// `stats` the statistics of the admin server view (with accounts).
+pub(super) fn router(
+    settings: UiSettings,
+    info: &UiInfo,
+    store: Option<Store>,
+    stats: Option<Arc<crate::serve::stats::Stats>>,
+) -> Router<()> {
     let accounts = store.is_some();
     let config = serde_json::json!({
         "auth": accounts,
         "batches": info.batches,
         "metrics": info.metrics,
         "mcp": info.mcp,
+        "stats": info.stats,
         "version": crate::version(),
     });
     if accounts {
         tokio::task::spawn_blocking(session::warm_up);
     }
-    let state = Arc::new(api::UiState::new(settings, config, store));
+    let state = Arc::new(api::UiState::new(settings, config, store, stats));
     let routes = Router::new().route("/ui/api/config", get(api::config));
     let routes = if accounts {
         routes
@@ -153,6 +180,10 @@ pub(crate) fn router(settings: UiSettings, info: &UiInfo, store: Option<Store>) 
             .route("/ui/api/admin/users/{id}/password", post(api::set_password))
             .route("/ui/api/admin/keys", get(api::keys).post(api::create_user_key))
             .route("/ui/api/admin/keys/{id}/revoke", post(api::revoke_key))
+            .route("/ui/api/admin/stats", get(api::stats_snapshot))
+            .route("/ui/api/admin/stats/reset", post(api::reset_stats))
+            .route("/ui/api/admin/requests", get(api::recent_requests))
+            .route("/ui/api/admin/requests/{id}", get(api::recent_request))
     } else {
         routes
     };
@@ -195,13 +226,13 @@ mod tests {
 
     #[test]
     fn config_defaults_and_limits() {
-        let settings = UiConfig::default().validate().unwrap();
+        let settings = UiConfig::default().validate(false).unwrap();
         assert_eq!(settings.session_ttl, Duration::from_secs(12 * 3600));
         assert!(settings.cookie_secure);
         let config = |ttl: &str| UiConfig { session_ttl: ttl.into(), ..UiConfig::default() };
-        assert!(config("1m").validate().is_err());
-        assert!(config("31d").validate().is_err());
-        assert!(config("30d").validate().is_ok());
+        assert!(config("1m").validate(false).is_err());
+        assert!(config("31d").validate(false).is_err());
+        assert!(config("30d").validate(false).is_ok());
     }
 
     #[test]

@@ -192,6 +192,35 @@ pub trait Backend {
         let _ = shape;
         crate::planner::DeviceWorkBound::Unknown("this backend has no source-derived device work bound".into())
     }
+    /// Counters and occupancy of this backend's precomputed prefixes and state cache, cheap to read between calls.
+    /// Default: none (the backend keeps no such cache).
+    fn cache_stats(&self) -> Option<CacheStats> {
+        None
+    }
+}
+
+/// Precomputed K/V prefixes of a backend ([`Backend::cache_stats`]): permanent template prefixes and the bounded
+/// cross-request state cache. Counters grow from the backend's creation; a fork starts its own from zero.
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+pub struct CacheStats {
+    /// Byte budget of the state cache (0: disabled).
+    pub state_budget_bytes: u64,
+    /// K/V bytes of the cached states.
+    pub state_bytes: u64,
+    /// Cached states.
+    pub state_entries: u64,
+    /// Rows that started from a cached state.
+    pub state_hits: u64,
+    /// Rows that found no cached state while the state cache was enabled.
+    pub state_misses: u64,
+    /// States added / dropped to stay within the budget (least recently used first).
+    pub state_inserts: u64,
+    pub state_evictions: u64,
+    /// Permanent template prefixes and their K/V bytes.
+    pub template_entries: u64,
+    pub template_bytes: u64,
+    /// Rows that started from a template prefix.
+    pub template_hits: u64,
 }
 
 /// Readiness flag shared by a backend and its observers. Once marked lost, the device cannot run requests until

@@ -63,7 +63,9 @@ mod decisions;
 mod http;
 mod metrics;
 mod openai;
+mod stats;
 mod systemone;
+mod telemetry;
 pub(crate) mod ui;
 use metrics::{LaneMetrics, Metrics, ReplicaMetrics, RequestModel};
 
@@ -108,6 +110,8 @@ pub struct ServeOptions {
     pub(crate) auth: Option<auth::AuthConfig>,
     /// Browser UI (`ui:` enabled); `None` serves no `/ui` route. Accounts need `auth`.
     pub(crate) ui: Option<ui::UiSettings>,
+    /// Memory probes of the served GPUs, by device ordinal, for the UI's server view (with `ui` and `auth`).
+    pub(crate) gpu_probes: Vec<(usize, basal_gpu::GpuMemoryProbe)>,
 }
 
 /// One instance of a served model.
@@ -392,6 +396,8 @@ struct Lane {
     /// Actual execution lane, reported only when this replica has an active long lane.
     usage_lane: Option<&'static str>,
     metrics: Option<LaneMetrics>,
+    /// The UI's server view (with `ui` and `auth`).
+    stats: Option<Arc<stats::LaneStats>>,
     schedule: Schedule,
     max_batch_tokens: usize,
     rate: f64,
@@ -399,8 +405,13 @@ struct Lane {
 }
 
 impl Lane {
-    fn new(schedule: Schedule, max_batch_tokens: usize, metrics: Option<LaneMetrics>) -> Self {
-        Self { usage_lane: None, metrics, schedule, max_batch_tokens, rate: 3000.0, waiting: Vec::new() }
+    fn new(
+        schedule: Schedule,
+        max_batch_tokens: usize,
+        metrics: Option<LaneMetrics>,
+        stats: Option<Arc<stats::LaneStats>>,
+    ) -> Self {
+        Self { usage_lane: None, metrics, stats, schedule, max_batch_tokens, rate: 3000.0, waiting: Vec::new() }
     }
 
     /// Take the next batch: the first waiting request in schedule order always, then every other one that still fits
@@ -410,6 +421,9 @@ impl Lane {
         let (batch, tokens) = self.take(start);
         if let Some(metrics) = &self.metrics {
             metrics.waiting(self.waiting.len());
+        }
+        if let Some(stats) = &self.stats {
+            stats.waiting(self.waiting.len());
         }
         (batch, tokens)
     }
@@ -456,6 +470,13 @@ impl Lane {
             self.rate = 0.8 * self.rate + 0.2 * (tokens as f64 / (compute_ms / 1e3));
         }
         let n = batch.len();
+        let queued: std::time::Duration = if self.stats.is_some() {
+            batch.iter().map(|(job, _)| start - job.arrived).sum()
+        } else {
+            Default::default()
+        };
+        let ok = result.is_ok();
+        let mut usage = (0, 0);
         match result {
             Ok(outs) => {
                 for ((job, plan), out) in batch.into_iter().zip(outs) {
@@ -465,6 +486,10 @@ impl Lane {
                     }
                     if let (Some(metrics), Ok(v)) = (&self.metrics, &resp) {
                         metrics.usage(v);
+                    }
+                    if let (Some(_), Ok(v)) = (&self.stats, &resp) {
+                        usage.0 += v["usage"]["input_tokens"].as_u64().unwrap_or(0);
+                        usage.1 += v["usage"]["questions"].as_u64().unwrap_or(0);
                     }
                     let queue_ms = (start - job.arrived).as_secs_f64() * 1e3;
                     job.answer((resp, Some(Timing { queue_ms, compute_ms, batch: n })));
@@ -477,6 +502,9 @@ impl Lane {
                     job.answer((Err(DecideError::Internal(anyhow::anyhow!(msg.clone()))), None));
                 }
             }
+        }
+        if let Some(stats) = &self.stats {
+            stats.batch(compute_ms / 1e3, ok, n, queued, usage, engine.backend.cache_stats());
         }
     }
 }
@@ -1287,7 +1315,7 @@ fn background_limits<B: Backend>(
 
 fn serve_inner<B: Backend + Send + 'static>(
     models: Vec<ServedModel<B>>,
-    opts: ServeOptions,
+    mut opts: ServeOptions,
     owned: Option<(std::net::TcpListener, oneshot::Receiver<()>)>,
 ) -> Result<()> {
     anyhow::ensure!(!models.is_empty(), "no models to serve");
@@ -1321,6 +1349,11 @@ fn serve_inner<B: Backend + Send + 'static>(
         .then(|| Metrics::new(&layout, opts.max_inflight))
         .transpose()
         .context("initializing Prometheus metrics")?;
+    // The UI's server view: an admin page, so only with accounts.
+    let stats = match (&opts.ui, &opts.auth) {
+        (Some(ui), Some(_)) => Some(Arc::new(stats::Stats::new(ui.capture_requests, stats_config(&models, &opts)))),
+        _ => None,
+    };
     // Per GPU: with several engines (models or replicas of different models, a layer-split instance counting on each
     // of its GPUs) or a long lane on it, every engine on that GPU takes turns through its gate (short batches of any of
     // them before long requests, which yield between layers). GPUs do not wait for each other; a layer-split instance
@@ -1347,6 +1380,7 @@ fn serve_inner<B: Backend + Send + 'static>(
         }
     }
     let mut threads = Vec::new();
+    let mut sampler = None;
     let batches_enabled = opts.batches.is_some();
     let (device_budget, online_reserves) = background_limits(&models, batches_enabled)?;
     // Synchronous startup, before any readiness message or HTTP runtime. Every subsequent exit joins it below.
@@ -1374,8 +1408,14 @@ fn serve_inner<B: Backend + Send + 'static>(
                     devices.iter().filter_map(|&d| gates.get(&d).map(|g| (d, g))).collect();
                 let mut health: Vec<DeviceHealth> = engine.work_health();
                 let (tx, rx) = mpsc::unbounded_channel();
-                let lane =
-                    |kind| Lane::new(schedule, max_batch_tokens, metrics.as_ref().map(|m| m.lane(&name, kind, index)));
+                let lane = |kind| {
+                    Lane::new(
+                        schedule,
+                        max_batch_tokens,
+                        metrics.as_ref().map(|m| m.lane(&name, kind, index)),
+                        stats.as_ref().map(|s| s.lane(&name, index, kind, &devices)),
+                    )
+                };
                 if batches_enabled {
                     if let batches::config::BackgroundQualification::Qualified { composition, max_requests, .. } =
                         &batch_qualification
@@ -1418,6 +1458,9 @@ fn serve_inner<B: Backend + Send + 'static>(
                     let (ltx, lrx) = std::sync::mpsc::channel();
                     let mut l = lane("long");
                     l.usage_lane = Some("long");
+                    if let Some(stats) = &l.stats {
+                        stats.set_cache(le.backend.cache_stats());
+                    }
                     threads.push(
                         std::thread::Builder::new()
                             .name(format!("{label}-long"))
@@ -1433,6 +1476,9 @@ fn serve_inner<B: Backend + Send + 'static>(
                 }
                 let mut main_lane = lane("main");
                 main_lane.usage_lane = long.as_ref().map(|_| "main");
+                if let Some(stats) = &main_lane.stats {
+                    stats.set_cache(engine.backend.cache_stats());
+                }
                 threads.push(
                     std::thread::Builder::new()
                         .name(label)
@@ -1485,6 +1531,15 @@ fn serve_inner<B: Backend + Send + 'static>(
             max_inflight: opts.max_inflight,
             release_date: opts.release_date.clone(),
         });
+        // Dropped with this closure, which stops the sampler.
+        let (_stop_sampler, stop) = std::sync::mpsc::channel();
+        if let Some(stats) = &stats {
+            let probes = std::mem::take(&mut opts.gpu_probes);
+            sampler = Some(
+                telemetry::start(stats.clone(), app.load.clone(), probes, stop)
+                    .context("starting the UI stats thread")?,
+            );
+        }
         let typesafe = post(systemone)
             .layer(axum::extract::DefaultBodyLimit::max(basal_core::systemone::MAX_BODY_BYTES))
             .layer(axum::middleware::from_fn_with_state(app.clone(), large_body_admission));
@@ -1504,6 +1559,11 @@ fn serve_inner<B: Backend + Send + 'static>(
             .layer(axum::middleware::from_fn_with_state(app.clone(), large_body_admission));
         let router =
             Router::new().route("/v1/systemone", systemone).route("/v1/basal", basal).route("/v1/decisions", decisions);
+        // inside the Prometheus middleware (added below), so both see the same model label
+        let router = match &stats {
+            Some(stats) => router.route_layer(axum::middleware::from_fn_with_state(stats.clone(), stats::observe)),
+            None => router,
+        };
         let router = if opts.metrics {
             router
                 .route_layer(axum::middleware::from_fn_with_state(app.clone(), metrics::observe))
@@ -1572,9 +1632,13 @@ fn serve_inner<B: Backend + Send + 'static>(
             };
             let router = match opts.ui {
                 Some(settings) => {
-                    let info =
-                        ui::UiInfo { batches: batch_service.is_some(), metrics: opts.metrics, mcp: mcp_stop.is_some() };
-                    router.merge(ui::router(settings, &info, auth_store.clone()))
+                    let info = ui::UiInfo {
+                        batches: batch_service.is_some(),
+                        metrics: opts.metrics,
+                        mcp: mcp_stop.is_some(),
+                        stats: stats.is_some(),
+                    };
+                    router.merge(ui::router(settings, &info, auth_store.clone(), stats))
                 }
                 None => router,
             };
@@ -1656,11 +1720,46 @@ fn serve_inner<B: Backend + Send + 'static>(
     for thread in threads {
         panicked |= thread.join().is_err();
     }
+    if sampler.is_some_and(|s: std::thread::JoinHandle<()>| s.join().is_err()) {
+        crate::warn!("the UI stats thread panicked");
+    }
     let decisions_result = decisions.map(decisions::DecisionWriter::finish).transpose();
     result?;
     decisions_result?;
     anyhow::ensure!(!panicked, "GPU worker panicked");
     Ok(())
+}
+
+/// Static description of the server for the UI's server view: its limits and features, and per model its instances,
+/// admission settings and the engine's own description (`Backend::describe`, as in reports).
+fn stats_config<B: Backend>(models: &[ServedModel<B>], opts: &ServeOptions) -> Value {
+    let models: Vec<Value> = models
+        .iter()
+        .map(|m| {
+            json!({
+                "name": m.replicas[0].engine.manifest.name,
+                "instances": m.replicas.iter().map(|r| &r.devices).collect::<Vec<_>>(),
+                "max_batch_tokens": m.max_batch_tokens,
+                "schedule": format!("{:?}", m.schedule).to_lowercase(),
+                "long_tokens": m.long_tokens,
+                "engine": m.replicas[0].engine.backend.describe(),
+            })
+        })
+        .collect();
+    json!({
+        "version": crate::version(),
+        "max_inflight": opts.max_inflight,
+        "max_large_inflight": opts.max_large_inflight,
+        "long_slice_ms": opts.long_slice_ms,
+        "systemone_dialect": format!("{:?}", opts.systemone_dialect).to_lowercase(),
+        "metrics": opts.metrics,
+        "batches": opts.batches.is_some(),
+        "mcp": matches!(opts.mcp, crate::mcp::Switch::On),
+        "access_log": opts.access_log,
+        "log_decisions": opts.log_decisions.is_some(),
+        "capture_requests": opts.ui.is_some_and(|ui| ui.capture_requests),
+        "models": models,
+    })
 }
 
 /// `[POST] 200 /v1/systemone 31 ms (queue 2 ms, compute 28 ms, batch 3)` per request (`--access-log`).
