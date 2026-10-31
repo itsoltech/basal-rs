@@ -440,6 +440,12 @@ impl Backend for RuntimeBackend {
             _ => None,
         }
     }
+    fn cache_stats(&self) -> Option<basal_core::CacheStats> {
+        match self {
+            Self::Llama(b) => b.cache_stats(),
+            _ => None,
+        }
+    }
     fn letter_logits_with_policy(
         &mut self,
         rows: &[&Packed],

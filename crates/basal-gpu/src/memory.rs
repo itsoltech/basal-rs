@@ -135,6 +135,29 @@ pub fn pool_probe(device: usize) -> Result<Option<PoolProbe>> {
     }
 }
 
+/// PCI address `domain:bus:device.0` of CUDA device `device` ([`crate::gpu_device`] numbering), the form NVML takes
+/// to find the same GPU (NVML numbers GPUs on its own, without `CUDA_VISIBLE_DEVICES`); `None` without CUDA.
+pub fn pci_bus_id(device: usize) -> Result<Option<String>> {
+    #[cfg(feature = "cuda")]
+    {
+        // device attributes need no context, so the primary context and its flags stay untouched
+        use candle_core::cuda_backend::cudarc::driver::{result, sys::CUdevice_attribute as A};
+        result::init()?;
+        let dev = result::device::get(i32::try_from(device)?)?;
+        // SAFETY: `dev` was returned by cuDeviceGet (above), as cuDeviceGetAttribute requires.
+        let attribute = |a: A| unsafe { result::device::get_attribute(dev, a) };
+        let domain = attribute(A::CU_DEVICE_ATTRIBUTE_PCI_DOMAIN_ID)?;
+        let bus = attribute(A::CU_DEVICE_ATTRIBUTE_PCI_BUS_ID)?;
+        let slot = attribute(A::CU_DEVICE_ATTRIBUTE_PCI_DEVICE_ID)?;
+        Ok(Some(format!("{domain:08x}:{bus:02x}:{slot:02x}.0")))
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        let _ = device;
+        Ok(None)
+    }
+}
+
 #[cfg(feature = "cuda")]
 impl PoolProbe {
     fn pool(&self) -> Result<candle_core::cuda_backend::cudarc::driver::sys::CUmemoryPool> {

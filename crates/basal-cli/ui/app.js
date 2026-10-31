@@ -7,6 +7,7 @@ import { renderPlayground } from './playground.js';
 import { renderBatches } from './batches.js';
 import { renderMyKeys, renderAccount } from './account.js';
 import { renderUsers, renderAllKeys, renderHealth } from './admin.js';
+import { renderServer } from './server.js';
 
 const root = document.getElementById('root');
 
@@ -33,6 +34,7 @@ const VIEWS = [
   { id: 'account', label: 'Account', group: 'Account', render: renderAccount, visible: () => ctx.auth },
   { id: 'users', label: 'Users', group: 'Admin', render: renderUsers, visible: () => ctx.isAdmin },
   { id: 'api-keys', label: 'API keys', group: 'Admin', render: renderAllKeys, visible: () => ctx.isAdmin },
+  { id: 'server', label: 'Server', group: 'Admin', render: renderServer, visible: () => ctx.isAdmin && ctx.config.stats },
   { id: 'health', label: 'System health', group: 'Admin', render: renderHealth, visible: () => !ctx.auth || ctx.isAdmin },
 ];
 

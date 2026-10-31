@@ -320,6 +320,60 @@ summary { cursor: pointer; color: var(--muted); font-weight: 600; font-size: 12.
 .health-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; align-items: start; }
 .card-wide { grid-column: 1 / -1; }
 
+/* ---- Server view --------------------------------------------------------------------------------------------- */
+
+.server-view { display: flex; flex-direction: column; gap: 16px; }
+.server-strip { display: flex; flex-wrap: wrap; gap: 10px 32px; align-items: flex-start; }
+.strip-item { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.strip-value { font-weight: 600; overflow-wrap: anywhere; }
+.stat-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+.stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); padding: 12px 14px; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.stat-big { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.stat-sub { color: var(--muted); font-size: 12.5px; }
+.spark { width: 100%; height: 28px; margin-top: 6px; }
+.block { display: block; }
+.server-view .table code { white-space: nowrap; }
+.chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 16px; }
+.chart { margin: 0; display: flex; flex-direction: column; gap: 6px; }
+.card .chart + .chart, .kv + .chart { margin-top: 14px; }
+.chart-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.chart-title { font-weight: 600; font-size: 13px; }
+.chart-legend { display: flex; gap: 12px; list-style: none; margin: 0; padding: 0; font-size: 12px; color: var(--muted); }
+.chart-legend li { display: inline-flex; align-items: center; gap: 5px; }
+.chart-key { display: inline-block; width: 12px; height: 0; border-top: 2px solid; }
+.chart-key.is-dashed { border-top-style: dashed; }
+.chart-area { position: relative; padding-left: 52px; }
+.chart-svg { display: block; width: 100%; height: 140px; overflow: visible; }
+.chart-y { position: absolute; left: 0; width: 48px; text-align: right; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; line-height: 1; }
+.chart-y-max { top: 0; }
+.chart-y-zero { bottom: 0; }
+.chart-x { display: flex; justify-content: space-between; padding-left: 52px; font-size: 11px; }
+.chart-empty { position: absolute; inset: 0 0 0 52px; display: grid; place-items: center; margin: 0; }
+.chart-rule { stroke: var(--border); stroke-width: 1; }
+.chart-base { stroke: var(--border-strong); stroke-width: 1; }
+.chart-cross { stroke: var(--muted); stroke-width: 1; }
+.chart-line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.chart-line.is-dashed { stroke-dasharray: 5 4; }
+.chart-bar { stroke: none; }
+.series-1 { --series: #2a78d6; }
+.series-2 { --series: #eb6834; }
+.series-3 { --series: #1baf7a; }
+.chart-line.series-1, .chart-line.series-2, .chart-line.series-3 { stroke: var(--series); }
+.chart-bar.series-1 { fill: var(--series); }
+.chart-key.series-1, .chart-key.series-2, .chart-key.series-3 { border-top-color: var(--series); }
+.chart-tip { position: absolute; top: 4px; z-index: 5; transform: translateX(12px); pointer-events: none; background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18); padding: 6px 9px; font-size: 12px; white-space: nowrap; }
+.chart-tip.is-left { transform: translateX(calc(-100% - 12px)); }
+.chart-tip-time { color: var(--muted); margin-bottom: 2px; }
+.chart-tip-row { display: flex; align-items: center; gap: 5px; font-variant-numeric: tabular-nums; }
+.dialog.dialog-drawer { margin: 0 0 0 auto; height: 100vh; max-height: 100vh; border-radius: 0; width: min(760px, 100vw); }
+.dialog-drawer .code-block { max-height: none; }
+
+@media (prefers-color-scheme: dark) {
+  .series-1 { --series: #3987e5; }
+  .series-2 { --series: #d95926; }
+  .series-3 { --series: #199e70; }
+}
+
 /* ---- Responsive --------------------------------------------------------------------------------------------- */
 
 @media (max-width: 1180px) {

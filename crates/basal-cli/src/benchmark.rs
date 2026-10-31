@@ -144,6 +144,7 @@ impl Server {
             batches: None,
             auth: None,
             ui: None,
+            gpu_probes: Vec::new(),
         };
         let model = ServedModel {
             replicas: vec![Replica { engine, devices, scheduling }],

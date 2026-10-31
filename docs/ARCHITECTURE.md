@@ -139,6 +139,9 @@ wkompilowane strony z `basal-cli/ui/` (HTML, CSS i moduły JavaScript bez kroku 
 oraz API kont `/ui/api`. Sesje (`api_sessions`) i hasła argon2id użytkowników sprawdza ta sama
 warstwa `auth.rs`; sesja daje zakresy `inference` i `batches`, więc strony korzystają
 z istniejących tras `/v1/…` w przestrzeni danych zalogowanego użytkownika.
+Z kontami UI ma też widok Server dla administratorów: `serve/stats.rs` liczy żądania
+w middleware tras inferencji i partie w wątkach modeli, a wątek `ui-stats`
+(`serve/telemetry.rs`) co sekundę odczytuje NVML, sondy pamięci GPU i host.
 Opcjonalna usługa batchy w `basal-cli/src/serve/batches/` ma osobne planowanie CPU,
 trwały magazyn metadanych (w bazie z `database:` albo lokalnej bazie serwera SQLite)
 oraz artefakty FS/S3. `store::Store` udostępnia typowane

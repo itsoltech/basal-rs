@@ -13,11 +13,12 @@ i moduły JavaScript, bez kroku budowania, zależności npm i zasobów z innych 
 | Batches & files | każdy (z `auth`: zalogowany), gdy działa Batch API | własne batche i pliki: lista, szczegóły, anulowanie, usuwanie, pobieranie, upload JSONL i utworzenie batcha |
 | My keys, Account | zalogowany | własne klucze API (tworzenie, zakresy, wygasanie, odwołanie), zmiana hasła |
 | Users, API keys | administrator | użytkownicy (tworzenie, hasło, blokada, usunięcie, zużycie quota Batch) i klucze wszystkich użytkowników |
+| Server | administrator; tylko z `auth` | statystyki procesu na żywo: przetwarzanie, tory silnika, cache prefiksów, GPU i host, konfiguracja, ostatnie żądania ([niżej](#widok-server)) |
 | System health | administrator; bez `auth` każdy | `/health`, `/health/batches`, `/v1/models` i wybrane metryki `/metrics` (z `--metrics`), odświeżane co 5 s |
 
 ![Playground](assets/ui/05-playground.png)
 
-Pozostałe widoki: [logowanie](assets/ui/01-login.png), [użytkownicy](assets/ui/02-admin-users.png),
+Pozostałe widoki: [serwer](assets/ui/11-server-overview.png), [logowanie](assets/ui/01-login.png), [użytkownicy](assets/ui/02-admin-users.png),
 [klucze API](assets/ui/03-admin-api-keys.png), [stan systemu](assets/ui/04-admin-health.png),
 [kreator pytań](assets/ui/06-playground-question-builder.png),
 [batche i pliki](assets/ui/07-user-batches-files.png), [własne klucze](assets/ui/08-user-my-keys.png),
@@ -33,6 +34,7 @@ ui:
   enabled: true        # domyślnie false; także basal serve --ui
   session_ttl: 12h     # czas życia sesji logowania, od 5m do 30d
   cookie_secure: true  # false tylko dla dostępu przez HTTP inny niż localhost
+  capture_requests: false  # treść ostatnich 200 żądań dla administratorów; wymaga auth
 ```
 
 Z `auth` strony wymagają logowania kontem z `basal users`. Bez `auth` nie ma kont:
@@ -98,6 +100,76 @@ Administrator w UI może też tworzyć użytkowników i ustawiać im hasła.
   ciasteczka `Secure` dla zwykłego HTTP poza `localhost`. Wystawiaj serwer za
   proxy z TLS; `cookie_secure: false` służy tylko testom w zaufanej sieci.
 
+## Widok Server
+
+Widok dla administratorów, przeznaczony także do udostępnienia poza maszynę.
+Istnieje tylko z `auth`: bez kont serwer nie zbiera tych statystyk i nie ma ich tras.
+Strona odpytuje serwer co sekundę. Przycisk Pause wstrzymuje odświeżanie, a Reset
+state zeruje statystyki procesu (bez wpływu na `/metrics`).
+
+| Zakładka | Zawartość |
+|---|---|
+| Overview | model, status (Ready, Serving albo status `/health`), wersja, czas działania; żądania i błędy, żądania/s z ostatnich 10 s i średnia od startu, p90 opóźnienia, żądania w toku, GPU; wykresy przepustowości i opóźnień (p90, p99, średnia z 10 s); tabela endpointów; state cache; GPU; host |
+| Profile | tory silnika (`main`, `long`) każdej repliki: partie, żądania, średnia wielkość i czas partii, średni czas w kolejce, tokeny wejściowe, pytania, oczekujące, nieudane partie; wykres żądań w toku |
+| Telemetry | każdy GPU: wykorzystanie, obciążenie szyny pamięci, pamięć całkowita, zajęta i zajęta przez ten proces, moc i limit, temperatura, zegar SM, wykresy; host: CPU, RAM, load 1/5/15, RSS, CPU i wątki procesu |
+| Configuration | czas startu, urządzenia, limity i funkcje serwera; dla modeli instancje, `max_batch_tokens`, `schedule`, `long_tokens` i opis silnika (`Backend::describe`, jak w raportach) |
+| Requests | ostatnie 200 żądań: czas, endpoint, model, status, opóźnienie, pytania, tokeny wejściowe, wielkość partii; po kliknięciu panel z zakładkami JSON i Metrics |
+
+### Źródła danych
+
+- **Żądania.** Middleware na trasach `/v1/systemone`, `/v1/basal` i `/v1/decisions`
+  liczy każde żądanie z kodem HTTP i czasem od wejścia do zbudowania odpowiedzi,
+  tak jak `basal_http_*`. Porzucony handler ma status `cancelled` i nie trafia do
+  percentyli. Błąd to status od 400 albo `cancelled`. Percentyle od startu pochodzą
+  z histogramu logarytmicznego (8 przedziałów na podwojenie, błąd względny poniżej
+  5 %). Percentyle sekundowe na wykresach są dokładne. `/mcp` nie jest liczone.
+- **Kolejka, partie, tokeny.** Wątek modelu po każdej partii dopisuje jej czas,
+  wielkość, czasy kolejki oraz `usage.input_tokens` i `usage.questions` odpowiedzi.
+  Żądania w toku to `running` i `queued` z `/health`. Pytania i tokeny pojedynczego
+  żądania pochodzą z `usage` odpowiedzi 200 do 64 KiB, a czasy kolejki i partii
+  z nagłówków `x-basal-*`.
+- **Cache.** Silnik Llama (Basal 1.5, 2.0 i 2.5 mini/4.5B/max) ma stałe prefiksy
+  szablonu i opcjonalny state cache (`state_cache_mb`, LRU w bajtach). Widok pokazuje
+  budżet, zajęte bajty, wpisy, trafienia, chybienia (wiersze bez stanu z cache przy
+  włączonym cache), wstawienia, usunięcia oraz trafienia prefiksów szablonu. Liczniki
+  są osobne dla każdego toru, a widok je sumuje. Gemma (Omni) i Qwen3.5 nie mają
+  tych cache'y; widok pokazuje wtedy brak danych. Tabela GEMM jest wybierana przy
+  starcie i nie ma liczników w trakcie pracy.
+- **GPU.** Na CUDA z NVML (`libnvidia-ml.so.1` ze sterownika, ładowana w trakcie
+  działania): wykorzystanie, szyna pamięci, pamięć, moc i limit, temperatura, zegar
+  SM oraz pamięć tego procesu. Urządzenie jest wyszukiwane po adresie PCI, więc
+  numeracja zgadza się z `device` także przy `CUDA_VISIBLE_DEVICES`. Bez NVML pozostaje
+  pamięć z CUDA. Na Metal: rekomendowany working set i alokacje procesu; wykorzystania,
+  mocy i temperatury nie ma. Na Vulkan (Intel): budżet i użycie sterty sterownika.
+- **Host.** Linux: `/proc/stat`, `/proc/meminfo`, `/proc/self/status`; wszędzie
+  `getloadavg` i `getrusage`. macOS: tylko CPU i load procesu, liczba rdzeni i RAM całkowity.
+
+GPU i host są odczytywane raz na sekundę w osobnym wątku `ui-stats`, poza ścieżką
+żądania. Ścieżka żądania dokłada jedną blokadę na żądanie i jedną na partię oraz
+odczyt `usage` odpowiedzi 200 do 64 KiB.
+Wpływ na przepustowość opisuje
+[raport](../reports/basal-ui-server-view-2026-10-31/README.md).
+
+### Treść żądań (`capture_requests`)
+
+Domyślnie widok Requests pokazuje tylko wynik i czasy. `ui.capture_requests: true`
+(albo `basal serve --ui-capture-requests`) zachowuje także treść żądania i odpowiedzi
+ostatnich 200 żądań, wyłącznie w pamięci procesu. Opcja wymaga `auth`, a treść widzą
+tylko administratorzy. Zachowywane są ciała z nagłówkiem `Content-Length` do 64 KiB,
+bez kompresji. Większe, strumieniowane i skompresowane są tylko oznaczane. Gdy ciało
+żądania nie dotrze w całości, serwer z tą opcją odpowiada zwykłym tekstem 400 zamiast
+błędu w formacie trasy. Bufor zajmuje więc najwyżej około 25 MiB. Treść
+może zawierać dane wrażliwe klientów; restart i Reset state ją usuwają.
+
+### API widoku
+
+| Trasa | Działanie |
+|---|---|
+| `GET /ui/api/admin/stats[?since=N]` | migawka: liczniki od resetu, endpointy, tory, telemetria, historia sekundowa po punkcie `N` (5 min); bez `since` także `config` |
+| `POST /ui/api/admin/stats/reset` | zeruje liczniki, historię i ostatnie żądania procesu (204) |
+| `GET /ui/api/admin/requests` | ostatnie żądania, od najnowszego |
+| `GET /ui/api/admin/requests/{id}` | jedno żądanie; z `capture_requests` także `request` i `response` |
+
 ## API kont (`/ui/api`)
 
 Wszystkie trasy poza `config`, `login` i `logout` wymagają sesji. `logout` usuwa
@@ -107,7 +179,7 @@ sesji; `login` i `logout` wymagają nagłówka `X-Basal-UI: 1`. Błędy mają po
 
 | Trasa | Działanie |
 |---|---|
-| `GET /ui/api/config` | publiczne: `auth`, `batches`, `metrics`, `mcp`, `version` |
+| `GET /ui/api/config` | publiczne: `auth`, `batches`, `metrics`, `mcp`, `stats`, `version` |
 | `POST /ui/api/login` | `{"user","password"}` → konto i ciasteczko; 401 `invalid_credentials`, 429 `too_many_attempts` |
 | `POST /ui/api/logout` | usuwa sesję i ciasteczko (204) |
 | `GET /ui/api/me` | `{"user": {...}, "scopes": [...]}` |
@@ -139,3 +211,5 @@ administratora dostaje na trasach `admin` 403 `admin_required`.
 - Strony nie wspierają dialektu `upstream` na `/v1/systemone`. Playground wysyła
   wtedy żądania przez `/v1/basal`.
 - Panel zdrowia pokazuje stan jednego procesu, który obsłużył żądanie.
+- Widok Server też: statystyki są w pamięci procesu, osobno na każdej replice
+  serwera, i znikają po restarcie. Historia obejmuje 5 minut.

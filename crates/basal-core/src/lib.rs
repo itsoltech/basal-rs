@@ -28,7 +28,7 @@ pub mod thinking;
 pub mod tokenize;
 pub mod tools;
 
-pub use engine::{Backend, Batching, DeviceHealth, Engine, ItemResult, Prepared};
+pub use engine::{Backend, Batching, CacheStats, DeviceHealth, Engine, ItemResult, Prepared};
 pub use execution::{BackgroundSupport, ExecutionError, Interrupted, StopReason, StopToken, WorkClass};
 pub use manifest::ModelManifest;
 pub use planner::{PlanBudget, PlanCaps, PlanContext, PlanError, PlanOptions, RequestPlanner};

@@ -40,6 +40,7 @@ gemm_cache: .cache/gemm            # tables of `gemm_table: auto`
 #   enabled: true
 #   session_ttl: 12h               # login session lifetime, 5m to 30d
 #   cookie_secure: true            # false only for plain-HTTP access other than localhost
+#   capture_requests: false        # keep the last 200 request bodies in memory for admins (needs auth)
 #
 # Durable Batch/Files API is off by default. Local: `basal serve --batches` (without `database:` it uses the local
 # server database <data dir>/db/basal.sqlite3, docs/DATABASE.md); production quota, tokens and procedures: docs/BATCHES.md. GPU background

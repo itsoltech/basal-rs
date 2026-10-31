@@ -1,5 +1,9 @@
 # Raporty
 
+[Widok Server w basal-ui](basal-ui-server-view-2026-10-31/README.md)
+— statystyki serwera na żywo dla administratora: przetwarzanie, cache, GPU (NVML),
+host, ostatnie żądania; odpowiedzi bitowo równe 548b697 na RTX 4060, narzut w szumie.
+
 [Konta basal-ui na PostgreSQL, SQL Server i MongoDB](basal-ui-backends-2026-10-30/README.md)
 — migracja 3→4 i API kont na trzech bazach z TLS w Dockerze; bez błędów kodu.
 

@@ -44,11 +44,12 @@ impl Server {
             let hash = session::hash_password(&format!("{id} password 123")).unwrap();
             store.create_api_user(&OwnerId::parse(id).unwrap(), id, role, Some(&hash)).await.unwrap().unwrap();
         }
-        let settings = UiSettings { session_ttl: Duration::from_secs(3600), cookie_secure: false };
+        let settings =
+            UiSettings { session_ttl: Duration::from_secs(3600), cookie_secure: false, capture_requests: false };
         let info = UiInfo { batches: false, metrics: false, mcp: false };
         let app = Router::new()
             .route("/v1/models", get(|| async { axum::Json(json!({"models": []})) }))
-            .merge(router(settings, &info, Some(store.clone())))
+            .merge(router(settings, &info, Some(store.clone()), None))
             .layer(axum::middleware::from_fn_with_state(
                 Authenticator::start(store.clone(), &AuthConfig::default(), true),
                 require_key,

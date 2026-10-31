@@ -573,6 +573,10 @@ enum Cmd {
         /// `basal users` accounts with their keys, files and batches, and admin pages
         #[arg(long)]
         ui: bool,
+        /// Keep the bodies of the last 200 inference requests in memory for the admin server view of the UI (also
+        /// `ui.capture_requests` in YAML); needs --ui and --auth
+        #[arg(long)]
+        ui_capture_requests: bool,
         /// `release_date` reported by GET /v1/models (default: the release date upstream basal v1.5.0 reports)
         #[arg(long, default_value = "2026-10-05")]
         release_date: String,
@@ -1233,6 +1237,7 @@ fn run() -> Result<()> {
             batch_data_dir,
             auth,
             ui,
+            ui_capture_requests,
             release_date,
         } => {
             let access_log = access_log || std::env::var("BASAL_ACCESS_LOG").is_ok_and(|v| !v.is_empty() && v != "0");
@@ -1328,7 +1333,12 @@ fn run() -> Result<()> {
             // otherwise connected. API keys never fall back to serving without a database.
             c.auth.enabled |= auth;
             c.ui.enabled |= ui;
-            let ui_settings = if c.ui.enabled { Some(c.ui.validate()?) } else { None };
+            c.ui.capture_requests |= ui_capture_requests;
+            anyhow::ensure!(
+                c.ui.enabled || !c.ui.capture_requests,
+                "ui.capture_requests (--ui-capture-requests) needs the UI (ui.enabled or --ui)"
+            );
+            let ui_settings = if c.ui.enabled { Some(c.ui.validate(c.auth.enabled)?) } else { None };
             let database = match (&batch_settings, database_section) {
                 (Some(batches), section) => Some(batches.database(&section)?),
                 (None, database::DatabaseSection::Enabled(settings)) => Some(settings),
@@ -1497,6 +1507,16 @@ fn run() -> Result<()> {
                     batch_qualification,
                 });
             }
+            // the UI's server view (with accounts) reads the memory of the served GPUs
+            let gpu_probes = if ui_settings.is_some() && c.auth.enabled {
+                served
+                    .iter()
+                    .flat_map(|m: &serve::ServedModel<_>| &m.replicas)
+                    .flat_map(|r| r.engine.backend.memory_probes())
+                    .collect()
+            } else {
+                Vec::new()
+            };
             let opts = serve::ServeOptions {
                 mcp: mcp.unwrap_or(c.mcp),
                 systemone_dialect: c.systemone_dialect,
@@ -1513,6 +1533,7 @@ fn run() -> Result<()> {
                 batches: batch_settings,
                 auth: c.auth.enabled.then_some(c.auth),
                 ui: ui_settings,
+                gpu_probes,
             };
             serve::serve(served, opts)?;
         }
