@@ -109,7 +109,7 @@ export function timeChart({ title, series, kind = 'line', format = String, max, 
     const px = geom.xs[best];
     plot.append(svg('line', { class: 'chart-cross', x1: px, x2: px, y1: 0, y2: height, 'vector-effect': 'non-scaling-stroke' }));
     tip.replaceChildren(h('div', { class: 'chart-tip-time' }, new Date(geom.shown[best].at).toLocaleTimeString()),
-      series.map((s, i) => h('div', { class: 'chart-tip-row' }, seriesKey(s),
+      ...series.map((s, i) => h('div', { class: 'chart-tip-row' }, seriesKey(s),
         h('strong', null, finite(geom.values[i][best]) ? format(geom.values[i][best]) : '—'), ` ${s.label}`)));
     tip.hidden = false;
     const frac = px / W;
