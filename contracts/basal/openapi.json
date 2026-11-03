@@ -57,7 +57,7 @@
             }
           },
           "422": {
-            "description": "Malformed JSON, validation/usage error, unknown model or unsupported capability.",
+            "description": "Malformed JSON, validation/usage error, unknown model or unsupported capability. Unknown question types (for example nuol) are rejected with code INVALID_REQUEST, as in upstream 2.5.2; they never fall back to choice.",
             "content": {
               "application/json": {
                 "schema": {
@@ -134,7 +134,7 @@
         "properties": {
           "type": {
             "type": "string",
-            "description": "Native types: choice, noul, score, multi, act, tool. Capabilities and option limits depend on the served model; the server validates them. Experimental tasks: classify, verify, compress, extract."
+            "description": "Native types: choice, noul, score, multi, act, tool. Omitted type defaults to choice; unknown types return HTTP 422 with code INVALID_REQUEST (upstream 2.5.2). Capabilities and option limits depend on the served model; the server validates them. Experimental tasks classify, verify, compress and extract are expanded before primitive validation. Unlike upstream, type rank is not supported and returns 422."
           },
           "instructions": {},
           "criteria": {
@@ -520,6 +520,14 @@
             "additionalProperties": {
               "type": "number"
             }
+          },
+          "temperature_per_bucket": {
+            "type": "object",
+            "description": "Effective temperatures by primitive and inclusive option-count range (for example choice / 2-10). Empty when no bucket temperatures are applied. Takes precedence over temperature_per_prim.",
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": { "type": "number" }
+            }
           }
         },
         "required": [
@@ -547,6 +555,10 @@
         "properties": {
           "error": {
             "type": "string"
+          },
+          "code": {
+            "type": "string",
+            "description": "INVALID_REQUEST for HTTP 422 request errors."
           },
           "detail": {}
         },

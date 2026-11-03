@@ -74,7 +74,23 @@ narzędzia ani serwera MCP. Przykład:
 
 `/v1/basal` odtwarza konwencje upstream. `/v1/systemone` zachowuje confidence i
 legendę TypeSafe dla pierwotnych typów; nowe rozszerzenia odpowiadają jak upstream.
-Metadane modeli podają format promptu, kolejności, temperatury i włączone media.
+Zgodnie z upstream 2.5.2 nieznany `type` pytania (np. `"nuol"`) daje HTTP 422
+z `code: "INVALID_REQUEST"`, zamiast odpowiedzi choice. Brak pola `type` nadal
+oznacza `choice`. Obsługiwane typy prymitywne to `choice`, `noul`, `score`, `act`,
+`multi` i `tool`. Obsługiwane zadania `classify`, `verify`, `compress` i `extract`
+są rozwijane przed walidacją prymitywów. Upstream rozwija wcześniej także `rank`;
+basal-rs nie obsługuje jeszcze `type: "rank"` i zwraca dla niego 422.
+Metadane `/v1/models` podają format promptu, kolejności, temperatury typu
+(`temperature_per_prim`), temperatury bucketowe (`temperature_per_bucket`, puste
+`{}` przy ich braku) i włączone media. Loader sprawdza layout także po wybraniu
+pliku `CALIBRATION.oN.json`.
+
+Pozostaje różnica względem startu upstream 2.5.2: basal-rs ładuje modele przed
+otwarciem portu HTTP. W trakcie ładowania nie zwraca więc 503 z `Retry-After: 5`
+dla żadnej metody; nie implementuje jeszcze tymczasowego serwera
+`{"status":"starting"}`. Błędy braku pamięci po uruchomieniu dają 503,
+a przeciążenie 529 z `Retry-After: 1` — to osobne sytuacje.
+
 Nowe odpowiedzi rozliczają również najdłuższy wykonany prompt. Przed powieleniem
 stanu runtime sprawdza budżet 4096 gałęzi i 32 MiB materiału promptów dla dwóch
 potencjalnych kolejności. Żądania rozszerzające ponad 128 KiB współdzielą limit
