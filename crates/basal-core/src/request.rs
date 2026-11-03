@@ -209,7 +209,7 @@ pub struct Item {
     /// `"evidence"` requested (truthy): return the supporting spans of the state.
     #[serde(skip)]
     pub evidence: bool,
-    /// Upstream dialect: the question type has no calibration temperature (an unknown type read as choice).
+    /// Bypass temperature calibration for this item.
     #[serde(skip)]
     pub uncalibrated: bool,
     #[serde(skip)]
@@ -622,10 +622,10 @@ fn question(
 type Parts = (Vec<String>, Vec<String>, Vec<Value>);
 type Built = Result<Parts, Vec<FieldError>>;
 
-/// Upstream `to_items` for one question: type defaults to choice (an unknown type is read as choice without
-/// calibration), `instructions` is any JSON (null renders as "null"), falsy noul descriptions fall back to Tak/Nie,
+/// Upstream 2.5.2 `to_items` for one question: an omitted type defaults to choice; unknown types are rejected.
+/// `instructions` is any JSON (null renders as "null"), falsy noul descriptions fall back to Tak/Nie,
 /// criteria values may be any JSON, a score legend holds the shown option texts, and every type but multi needs
-/// 2..10 options.
+/// 2..max_opts options.
 fn question_upstream(
     name: &str,
     q: &Value,
@@ -636,10 +636,11 @@ fn question_upstream(
     let Some(q) = q.as_object() else {
         return Err(vec![qerr(name, &[], "question must be an object", "model_type")]);
     };
-    let t = q.get("type").and_then(Value::as_str).unwrap_or("choice");
-    let (kind, uncalibrated) = match QType::parse(t) {
-        Some(k) => (k, false),
-        None => (QType::Choice, true),
+    let kind = match q.get("type") {
+        None => QType::Choice,
+        Some(t) => t.as_str().and_then(QType::parse).ok_or_else(|| {
+            vec![qerr(name, &["type"], format!("question {name:?}: unknown type {t}"), "value_error")]
+        })?,
     };
     let instructions = q.get("instructions").map(text).unwrap_or_default();
     let lang = force_lang.unwrap_or_else(|| lang_of(&format!("{state}{instructions}")));
@@ -739,7 +740,7 @@ fn question_upstream(
         lang,
         ext,
         evidence: truthy(q.get("evidence")),
-        uncalibrated,
+        uncalibrated: false,
         prompt_format: PromptFormat::One,
     })
 }
