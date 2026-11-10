@@ -33,7 +33,7 @@ auth:
 ui:
   enabled: true        # domyślnie false; także basal serve --ui
   session_ttl: 12h     # czas życia sesji logowania, od 5m do 30d
-  cookie_secure: true  # false tylko dla dostępu przez HTTP inny niż localhost
+  cookie_secure: auto  # domyślnie: Secure, gdy strona jest otwarta przez HTTPS; true/false wymusza
   capture_requests: false  # treść ostatnich 200 żądań dla administratorów; wymaga auth
 ```
 
@@ -97,8 +97,11 @@ Administrator w UI może też tworzyć użytkowników i ustawiać im hasła.
   (`frame-ancestors 'none'`). Dochodzą `X-Content-Type-Options: nosniff`,
   `Referrer-Policy: no-referrer`, a w API `Cache-Control: no-store`.
 - Bez TLS hasło i ciasteczko są widoczne w sieci. Przeglądarki nie zapisują
-  ciasteczka `Secure` dla zwykłego HTTP poza `localhost`. Wystawiaj serwer za
-  proxy z TLS; `cookie_secure: false` służy tylko testom w zaufanej sieci.
+  ciasteczka `Secure` dla zwykłego HTTP poza `localhost`, dlatego domyślne
+  `cookie_secure: auto` dodaje `Secure` tylko wtedy, gdy przeglądarka otworzyła
+  stronę przez HTTPS (nagłówek `Origin` żądania logowania). Wystawiaj serwer za
+  proxy z TLS; logowanie przez zwykłe HTTP nadaje się tylko do zaufanej sieci.
+  `cookie_secure: true` wymusza `Secure` zawsze, `false` nigdy.
 
 ## Widok Server
 

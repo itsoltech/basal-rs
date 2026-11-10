@@ -275,7 +275,11 @@ pub(super) async fn login(State(state): State<Arc<UiState>>, headers: HeaderMap,
         StoreError::NotFound | StoreError::UserDisabled => invalid(),
         e => store_error(e),
     })?;
-    let cookie = session::set_cookie(&new.token, state.settings.session_ttl, state.settings.cookie_secure);
+    let cookie = session::set_cookie(
+        &new.token,
+        state.settings.session_ttl,
+        session::cookie_secure(state.settings.cookie_secure, &headers),
+    );
     Ok(([(SET_COOKIE, cookie)], Json(me_json(&created.user))).into_response())
 }
 
@@ -297,7 +301,11 @@ pub(super) async fn logout(State(state): State<Arc<UiState>>, headers: HeaderMap
     if let Some(id) = session::cookie_session(&headers) {
         state.store().delete_api_session(&id).await.map_err(store_error)?;
     }
-    Ok((StatusCode::NO_CONTENT, [(SET_COOKIE, session::clear_cookie(state.settings.cookie_secure))]).into_response())
+    Ok((
+        StatusCode::NO_CONTENT,
+        [(SET_COOKIE, session::clear_cookie(session::cookie_secure(state.settings.cookie_secure, &headers)))],
+    )
+        .into_response())
 }
 
 pub(super) async fn me(Extension(session): Extension<UiSession>) -> Json<Value> {

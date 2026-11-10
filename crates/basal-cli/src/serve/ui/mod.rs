@@ -5,7 +5,7 @@
 //! ui:
 //!   enabled: true         # default false: no /ui route exists
 //!   session_ttl: 12h      # lifetime of a login session (5m to 30d)
-//!   cookie_secure: true   # false only for plain-HTTP access other than localhost
+//!   cookie_secure: auto   # default: Secure when the page is opened over https; true/false force it
 //!   capture_requests: false  # keep the bodies of the last 200 inference requests for admins; needs auth
 //! ```
 //!
@@ -51,8 +51,9 @@ pub(crate) struct UiConfig {
     pub(crate) enabled: bool,
     #[serde(default = "default_session_ttl")]
     session_ttl: String,
-    #[serde(default = "default_cookie_secure")]
-    cookie_secure: bool,
+    /// `None` (absent or `auto`): `Secure` when the page is opened over HTTPS (`session::cookie_secure`).
+    #[serde(default, deserialize_with = "cookie_secure")]
+    cookie_secure: Option<bool>,
     /// Also `basal serve --ui-capture-requests`.
     #[serde(default)]
     pub(crate) capture_requests: bool,
@@ -60,12 +61,7 @@ pub(crate) struct UiConfig {
 
 impl Default for UiConfig {
     fn default() -> Self {
-        Self {
-            enabled: false,
-            session_ttl: default_session_ttl(),
-            cookie_secure: default_cookie_secure(),
-            capture_requests: false,
-        }
+        Self { enabled: false, session_ttl: default_session_ttl(), cookie_secure: None, capture_requests: false }
     }
 }
 
@@ -73,15 +69,28 @@ fn default_session_ttl() -> String {
     "12h".into()
 }
 
-fn default_cookie_secure() -> bool {
-    true
+/// `ui.cookie_secure`: `true`, `false` or `auto` (also `null`).
+fn cookie_secure<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<bool>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Value {
+        Bool(bool),
+        Text(String),
+    }
+    match Option::<Value>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(Value::Bool(b)) => Ok(Some(b)),
+        Some(Value::Text(t)) if t == "auto" => Ok(None),
+        Some(Value::Text(_)) => Err(serde::de::Error::custom("ui.cookie_secure must be true, false or auto")),
+    }
 }
 
 /// Checked `ui:` settings.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct UiSettings {
     pub(crate) session_ttl: Duration,
-    pub(crate) cookie_secure: bool,
+    /// `Secure` session cookie: forced, or `None` for the scheme of the page (`session::cookie_secure`).
+    pub(crate) cookie_secure: Option<bool>,
     /// Keep the bodies of recent inference requests for the server view (only with accounts).
     pub(crate) capture_requests: bool,
 }
@@ -226,7 +235,7 @@ mod tests {
     fn config_defaults_and_limits() {
         let settings = UiConfig::default().validate(false).unwrap();
         assert_eq!(settings.session_ttl, Duration::from_secs(12 * 3600));
-        assert!(settings.cookie_secure);
+        assert_eq!(settings.cookie_secure, None);
         let config = |ttl: &str| UiConfig { session_ttl: ttl.into(), ..UiConfig::default() };
         assert!(config("1m").validate(false).is_err());
         assert!(config("31d").validate(false).is_err());

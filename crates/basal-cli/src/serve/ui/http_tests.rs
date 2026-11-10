@@ -45,7 +45,7 @@ impl Server {
             store.create_api_user(&OwnerId::parse(id).unwrap(), id, role, Some(&hash)).await.unwrap().unwrap();
         }
         let settings =
-            UiSettings { session_ttl: Duration::from_secs(3600), cookie_secure: false, capture_requests: false };
+            UiSettings { session_ttl: Duration::from_secs(3600), cookie_secure: Some(false), capture_requests: false };
         let info = UiInfo { batches: false, metrics: false, mcp: false };
         let app = Router::new()
             .route("/v1/models", get(|| async { axum::Json(json!({"models": []})) }))

@@ -1,7 +1,7 @@
 //! Accounts of the browser UI: argon2id passwords, session tokens and their cookie, and the login throttle.
 //!
 //! A session token `bss_<43 base64url>` (256 random bits) lives only in the `basal_session` cookie (HttpOnly,
-//! SameSite=Strict, Secure unless `ui.cookie_secure: false`); the database keeps its SHA-256 as the session id.
+//! SameSite=Strict, Secure for pages opened over HTTPS or with `ui.cookie_secure: true`); the database keeps its SHA-256 as the session id.
 //! Every request authenticated by the cookie must also carry `X-Basal-UI: 1`: browsers send that header cross-origin
 //! only after a CORS preflight, which this server never approves, so another site cannot make requests with it.
 
@@ -10,7 +10,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use argon2::{Argon2, PasswordHasher as _, PasswordVerifier as _};
-use axum::http::header::COOKIE;
+use axum::http::header::{COOKIE, ORIGIN};
 use axum::http::{HeaderMap, HeaderValue};
 use base64::Engine as _;
 use sha2::{Digest, Sha256};
@@ -129,6 +129,16 @@ pub(crate) fn cookie_session(headers: &HeaderMap) -> Option<Sha256Digest> {
 /// Whether the request carries `X-Basal-UI: 1`.
 pub(crate) fn has_ui_header(headers: &HeaderMap) -> bool {
     headers.get(UI_HEADER).is_some_and(|v| v.as_bytes() == b"1")
+}
+
+/// Whether the session cookie gets `Secure`: the configured value, else whether the browser opened the page over
+/// HTTPS (its `Origin`, sent with every login and logout POST). Browsers drop a `Secure` cookie set for a plain-HTTP
+/// page other than localhost, so a fixed `Secure` would make login impossible there. A request without a readable
+/// `Origin` (not a browser page) gets `Secure`.
+pub(crate) fn cookie_secure(configured: Option<bool>, headers: &HeaderMap) -> bool {
+    configured.unwrap_or_else(|| {
+        headers.get(ORIGIN).and_then(|v| v.to_str().ok()).is_none_or(|origin| !origin.starts_with("http://"))
+    })
 }
 
 /// `Set-Cookie` of a new session.
