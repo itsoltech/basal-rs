@@ -670,9 +670,10 @@ async fn basal(
         Ok(Ok(v)) if v.is_object() => {
             decide(app, v, Dialect::Upstream, arrived, label.map(|Extension(l)| l), large).await
         }
-        Ok(Ok(_)) => {
-            error_response(StatusCode::UNPROCESSABLE_ENTITY, json!({"error": "request body must be a JSON object"}))
-        }
+        Ok(Ok(_)) => error_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            json!({"error": "request body must be a JSON object", "code": "INVALID_REQUEST"}),
+        ),
         Ok(Err(e)) => error_response(StatusCode::UNPROCESSABLE_ENTITY, e),
         Err(e) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -692,7 +693,7 @@ async fn decode_body(
         let _permit = permit;
         serde_json::from_slice::<Value>(&body).map_err(|e| match dialect {
             Dialect::TypeSafe => json_invalid(&body, &e),
-            Dialect::Upstream => json!({"error":e.to_string()}),
+            Dialect::Upstream => json!({"error":e.to_string(), "code": "INVALID_REQUEST"}),
         })
     };
     if large {
@@ -1035,7 +1036,11 @@ fn error_parts(dialect: Dialect, e: DecideError) -> (StatusCode, Value) {
                 StatusCode::UNPROCESSABLE_ENTITY
             }
         };
-        return (status, e.to_upstream_json());
+        let mut body = e.to_upstream_json();
+        if status == StatusCode::UNPROCESSABLE_ENTITY {
+            body["code"] = "INVALID_REQUEST".into();
+        }
+        return (status, body);
     }
     match e {
         e @ DecideError::Usage(_) => (StatusCode::BAD_REQUEST, e.to_json()),
@@ -1219,6 +1224,18 @@ fn metadata_for_model<B: Backend>(engine: &Engine<B>) -> Value {
     let manifest = &engine.manifest;
     let temperatures: serde_json::Map<String, Value> =
         manifest.temperatures.iter().map(|(k, v)| (k.as_str().into(), json!(v))).collect();
+    let buckets: serde_json::Map<String, Value> = manifest
+        .temperature_buckets
+        .iter()
+        .map(|(kind, buckets)| {
+            let mut ranges = serde_json::Map::new();
+            for bucket in buckets {
+                // Match temperature_for's first-match rule if source keys normalize to the same range.
+                ranges.entry(format!("{}-{}", bucket.lo, bucket.hi)).or_insert_with(|| json!(bucket.temperature));
+            }
+            (kind.as_str().into(), Value::Object(ranges))
+        })
+        .collect();
     let mut metadata = json!({
         "name": manifest.name,
         "description": "basal typed-decision model (choice / noul / score / act / multi / tool), Polish and English",
@@ -1226,7 +1243,8 @@ fn metadata_for_model<B: Backend>(engine: &Engine<B>) -> Value {
         "early_exit": [],
         "prompt_format": manifest.prompt_format,
         "orders": manifest.orders.metadata(),
-        "temperature_per_prim": temperatures
+        "temperature_per_prim": temperatures,
+        "temperature_per_bucket": buckets
     });
     if manifest.layout != basal_core::prompt::PromptLayout::Canonical {
         metadata["layout"] = manifest.layout.as_str().into();
