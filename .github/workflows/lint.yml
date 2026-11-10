@@ -59,7 +59,7 @@ jobs:
             runner: ubuntu-24.04
             features: "--features basal-cli/intel"
           - backend: Metal
-            runner: macos-14
+            runner: macos-15
             features: ""
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45

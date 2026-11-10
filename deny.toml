@@ -12,6 +12,9 @@ unused-ignored-advisory = "deny"
 [[advisories.ignore]]
 id = "RUSTSEC-2024-0436"
 reason = "User-approved maintenance exception for paste 1.0.15, a compile-time proc macro required by the pinned tokenizers/gemm/pulp dependencies. This advisory reports no vulnerability and has no patched release. Review by 2027-01-08; remove when upstream no longer needs paste."
+[[advisories.ignore]]
+id = "RUSTSEC-2026-0459"
+reason = "User-approved temporary exception: bundled SQLite < 3.54 in libsqlite3-sys 0.37; sqlx-sqlite 0.9.0 (latest) requires libsqlite3-sys < 0.38, the fix is in 0.39. Exposure needs a database file and its -wal written by a less trusted local party. Review by 2026-12-10; remove when sqlx allows libsqlite3-sys >= 0.39."
 # The pinned cargo-deny version supports only id/reason for advisory exceptions.
 # CI enforces the exact dependents and the deadline in tools/ci/check-paste-exception.sh.
 
