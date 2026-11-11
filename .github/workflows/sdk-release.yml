@@ -127,7 +127,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73
         with:
           dotnet-version: "10.0.401"
       - name: Restore only mapped sources, then build and pack
@@ -159,7 +159,7 @@ jobs:
         with:
           toolchain: "1.95.0"
           components: rustfmt, clippy
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39
         with:
           tool: cargo-deny@0.19.8
       - name: Compile, verify and audit without publishing permissions
@@ -280,7 +280,7 @@ jobs:
           merge-multiple: true
       - name: Verify downloaded artifact
         run: python3 tools/sdk/verify-artifact.py sdk-artifact
-      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73
         with:
           dotnet-version: "10.0.401"
       - uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841
@@ -335,7 +335,7 @@ jobs:
           else
             echo "present=false" >> "$GITHUB_OUTPUT"
           fi
-      - uses: rust-lang/crates-io-auth-action@d6b091a10d7f9b30e4c05478289e94fb309882c5
+      - uses: rust-lang/crates-io-auth-action@dc10531605597d48d51c6d1005a2b3861698940b
         if: steps.bootstrap.outputs.present == 'false'
         id: auth
       - name: Publish without executing dependency code
